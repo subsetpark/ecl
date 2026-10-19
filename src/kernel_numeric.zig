@@ -442,7 +442,7 @@ pub const PervadeCursor = struct {
                 node.operation,
                 node.left,
                 node.right,
-                self.rootCandidate(node),
+                .{ .left = self.rootCandidate(node) },
                 .{},
             )) |typed| return self.runTyped(evaluator, typed);
             const left_count: usize = if (node.left == .list) @intCast(node.left.list.length()) else 0;
@@ -2539,37 +2539,6 @@ fn buildNestedTypedCharBinary(
     return try plan.prepare(evaluator, left_item, right_item, length, report);
 }
 
-fn startTypedCharBinary(
-    evaluator: *Machine,
-    operation: BinaryOp,
-    left: *heap.OwnedValue,
-    right: *heap.OwnedValue,
-    report: FaultReport,
-) MachineError!bool {
-    var typed = (try buildNestedTypedCharBinary(
-        evaluator,
-        operation,
-        left.borrow(),
-        right.borrow(),
-        report,
-    )) orelse return false;
-    switch (typed) {
-        .fixed_char => |payload| try evaluator.runDriver(FixedCharDriver{
-            .state = .init(payload.state),
-            .step = payload.step,
-        }),
-        .dynamic_char => |payload| try evaluator.runDriver(DynamicCharDriver{
-            .state = .init(payload.state),
-            .step = payload.step,
-        }),
-        .numeric => unreachable,
-    }
-    // SAFETY: startDriver consumed the selected payload's owned state; poison
-    // the tagged source so no later edit can accidentally reuse that owner.
-    typed = undefined;
-    return true;
-}
-
 fn firstFlatElement(item: Value) ?Value {
     if (item != .list or item.list.length() == 0) return null;
     return switch (item.list.kind()) {
@@ -2630,7 +2599,7 @@ fn buildNestedTypedNumericBinary(
     operation: BinaryOp,
     left_item: Value,
     right_item: Value,
-    reuse_candidate: ?*heap.OwnedValue,
+    owners: OperandOwners,
     report: FaultReport,
 ) MachineError!?NestedTyped {
     const left_leaf = leafNumber(left_item);
@@ -2650,7 +2619,7 @@ fn buildNestedTypedNumericBinary(
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
-    return try plan.prepare(evaluator, left_item, right_item, .{ .left = reuse_candidate }, length, report);
+    return try plan.prepare(evaluator, left_item, right_item, owners, length, report);
 }
 
 /// `reuse_candidate` must own `left`, and reaches only the numeric builder:
@@ -2660,13 +2629,13 @@ fn buildNestedTypedBinary(
     operation: BinaryOp,
     left: Value,
     right: Value,
-    reuse_candidate: ?*heap.OwnedValue,
+    owners: OperandOwners,
     report: FaultReport,
 ) MachineError!?NestedTyped {
     // The builders are disjoint: numeric needs both operands numeric, and
     // character needs one character operand. The common numeric row is tried
     // first so it does not pay the character classification.
-    if (try buildNestedTypedNumericBinary(evaluator, operation, left, right, reuse_candidate, report)) |typed| return typed;
+    if (try buildNestedTypedNumericBinary(evaluator, operation, left, right, owners, report)) |typed| return typed;
     if (try buildNestedTypedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;
@@ -2752,36 +2721,23 @@ fn startTypedBinary(
     right: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
-    if (try startTypedCharBinary(evaluator, operation, left, right, report)) return true;
-    const left_item = left.borrow();
-    const right_item = right.borrow();
-    const left_leaf = leafNumber(left_item);
-    const right_leaf = leafNumber(right_item);
-    const left_scalar = scalarNumber(left_item);
-    const right_scalar = scalarNumber(right_item);
-
-    const shape: Shape = if (left_leaf != null and right_leaf != null)
-        .leaf_leaf
-    else if (left_leaf != null and right_scalar != null)
-        .leaf_scalar
-    else if (left_scalar != null and right_leaf != null)
-        .scalar_leaf
-    else
-        return rejectUnsupportedFlatBinary(evaluator, operation, left_item, right_item, report);
-
-    const length = try conformingLength(evaluator, shape, left_item, right_item);
-    // An empty result's representation is the generic route's to choose; there
-    // is no typed work to do and no reason to fork that decision.
-    if (length == 0) return false;
-
-    const left_class = left_leaf orelse left_scalar.?;
-    const right_class = right_leaf orelse right_scalar.?;
-
-    // Mixed min/max stays on the generic route without acquiring storage.
-    const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return false;
-    const typed = try plan.prepare(evaluator, left_item, right_item, .{ .left = left, .right = right }, length, report);
-    // startDriver consumes the payload on both success and failure.
-    return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
+    // An empty result's representation is the generic route's to choose, and
+    // so is a pair no plan admits; the builder declines both.
+    const typed = (try buildNestedTypedBinary(
+        evaluator,
+        operation,
+        left.borrow(),
+        right.borrow(),
+        .{ .left = left, .right = right },
+        report,
+    )) orelse return false;
+    // runDriver consumes the payload on both success and failure.
+    try switch (typed) {
+        .numeric => |payload| evaluator.runDriver(TypedDriver{ .state = .init(payload.state), .step = payload.step }),
+        .fixed_char => |payload| evaluator.runDriver(FixedCharDriver{ .state = .init(payload.state), .step = payload.step }),
+        .dynamic_char => |payload| evaluator.runDriver(DynamicCharDriver{ .state = .init(payload.state), .step = payload.step }),
+    };
+    return true;
 }
 
 fn startTypedUnary(
