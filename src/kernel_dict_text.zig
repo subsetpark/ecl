@@ -626,9 +626,8 @@ const DictPutDriver = struct {
                 }
             }
             if (self.index != pairs.len) return .stepped;
-            self.work.borrowMut().* = .{
-                .materializing = try .initBorrowedPairs(evaluator.allocator(), pairs, false),
-            };
+            const materializer: dict.Materializer = try .initBorrowedPairs(evaluator.allocator(), pairs, false);
+            self.work.borrowMut().* = .{ .materializing = materializer };
         }
         if (work.exhausted()) return .stepped;
         return switch (try self.work.borrowMut().materializing.advance(work)) {
@@ -931,11 +930,8 @@ const DictDelDriver = struct {
                 _ = work.spend();
             }
             if (self.source_index != count or work.exhausted()) return .stepped;
-            self.work.borrowMut().* = .{ .materializing = try .init(
-                evaluator.allocator(),
-                self.pairs.?.borrow(),
-                false,
-            ) };
+            const materializer: dict.Materializer = try .init(evaluator.allocator(), self.pairs.?.borrow(), false);
+            self.work.borrowMut().* = .{ .materializing = materializer };
         }
         return switch (try self.work.borrowMut().materializing.advance(work)) {
             .pending => .stepped,
@@ -1004,11 +1000,8 @@ const MergeDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(self.right.borrow().dict.length());
                 if (self.index == count) {
-                    self.work.borrowMut().* = .{ .materializing = try dict.Materializer.init(
-                        evaluator.allocator(),
-                        self.pairs.borrow()[0..self.pair_count],
-                        false,
-                    ) };
+                    const materializer: dict.Materializer = try .init(evaluator.allocator(), self.pairs.borrow()[0..self.pair_count], false);
+                    self.work.borrowMut().* = .{ .materializing = materializer };
                     self.phase = .materialize;
                     continue;
                 }

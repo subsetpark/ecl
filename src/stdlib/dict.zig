@@ -799,11 +799,8 @@ const MergeWithWorkDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(state.right.borrow().dict.length());
                 if (state.index == count) {
-                    state.work.borrowMut().* = .{ .materializing = try .init(
-                        evaluator.allocator(),
-                        state.pairs.borrow()[0..state.pair_count],
-                        false,
-                    ) };
+                    const materializer: dict_storage.Materializer = try .init(evaluator.allocator(), state.pairs.borrow()[0..state.pair_count], false);
+                    state.work.borrowMut().* = .{ .materializing = materializer };
                     state.phase = .materialize;
                     continue;
                 }
