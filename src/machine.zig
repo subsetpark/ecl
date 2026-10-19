@@ -1586,9 +1586,11 @@ pub const ExecutionSite = struct {
     /// A nested activation continuing the same logical execution in `scope`:
     /// a dynamic `call`, an `@attempt` child, or a resumed qualified load.
     /// A quotation resolves where its invoker runs, so both scopes are the one
-    /// it was handed; it does not inherit embedded registration trust.
+    /// it was handed. An applied quotation may have come from any caller, so
+    /// it does not inherit embedded registration trust; a resumed load sets
+    /// the provenance it registers under itself.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return resumed(scope, invoker.home(), invoker.site.registration_provenance);
+        return resumed(scope, invoker.home(), invoker.site.registration_provenance.applied());
     }
 
     /// An application resuming in `scope` under its launch home. The only
@@ -3260,7 +3262,9 @@ pub const Machine = struct {
         return .{
             .parent_scope = current.scope(),
             .home = current.home(),
-            .registration_provenance = current.site.registration_provenance,
+            // A combinator applies a quotation value, which may have come from
+            // any caller, so embedded trust stays with the embedded code.
+            .registration_provenance = current.site.registration_provenance.applied(),
         };
     }
     fn installDriver(self: *Machine, context: anytype) void {
