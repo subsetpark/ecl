@@ -2962,6 +2962,35 @@ fn reduceStep(
             };
         }
 
+        /// Float `+`, `-`, and `*` cannot leave a non-finite value: NaN is
+        /// sticky, and an infinity stays infinite or becomes NaN. A block whose
+        /// unchecked result is finite therefore had no faulting step, so it
+        /// pays one test instead of one per element. Anything else, including a
+        /// legitimate infinity, replays the block through the checked scalar.
+        const unchecked = accumulator_class == .real and
+            (operation == .add or operation == .sub or operation == .mul);
+
+        fn uncheckedBlock(state: *TypedReduceState, elements: []const element_class.Element(), piece: flat.Chunk, block: *Staging) bool {
+            var accumulator = accumulated(state);
+            for (piece.start..piece.end) |index| {
+                const element: f64 = switch (element_class) {
+                    .byte, .integer => @floatFromInt(elements[index]),
+                    .real => elements[index],
+                };
+                accumulator = switch (operation) {
+                    .add => accumulator + element,
+                    .sub => accumulator - element,
+                    .mul => accumulator * element,
+                    else => unreachable,
+                };
+                if (scan) block.items[index - piece.start] = accumulator;
+            }
+            if (!std.math.isFinite(accumulator)) return false;
+            store(state, accumulator);
+            if (scan) block.len = piece.len();
+            return true;
+        }
+
         fn step(state: *TypedReduceState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             const elements = state.input.slice(element_class);
@@ -2970,6 +2999,11 @@ fn reduceStep(
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
                 block.reset();
+                if (unchecked and uncheckedBlock(state, elements, piece, &block)) {
+                    if (scan) state.output.?.store(accumulator_class, piece.start, block.written());
+                    offset += piece.len();
+                    continue;
+                }
                 for (piece.start..piece.end) |index| {
                     // Both operand tags are comptime-known here, so inlining
                     // the scalar authority lets its type dispatch fold away and

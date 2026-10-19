@@ -701,6 +701,31 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Float reductions test each block once — 2026-10-18
+
+A typed `fold`, `fold1`, or `scan` with a float accumulator ran the checked
+scalar step on every element: an add, then a NaN test and an overflow test. For
+`+`, `-`, and `*` a non-finite value cannot become finite again: NaN is sticky,
+and an infinity stays infinite or becomes NaN. A block now runs unchecked and
+tests its final accumulator once. A finite result proves that no step faulted.
+A non-finite one, whether a fault or a legitimate infinity carried from an
+input, replays that block through the checked scalar, which reports exactly
+what it did before.
+
+Callgrind, row dots (`a u (* (+) fold1) partial each`) over a 1,000 × 1,000
+float matrix, net of setup, Zig 0.16.0 ReleaseFast `-Dcpu=native`, x86_64
+Linux (Intel Core Ultra 5 125U), control `723314c`: the reduction falls from
+16.4 to 4.4 instructions per element, and row dots overall from 36.0 to 24.0.
+
+Wall time moves less than the instruction count. An ordered float sum waits on
+each add's latency, and the removed tests mostly ran in its shadow. Native
+medians, pinned to one P-core, nine interleaved runs, at N=2,000:
+
+| Case | Control | Treatment |
+|---|---:|---:|
+| 20 × row dots, net of setup, ms | 224 | 198 |
+| Classic `2000 spectralnorm`, whole process, ms | 466 | 440 |
+
 ## Trusted idioms are recognized at the freeze edge — 2026-10-18
 
 A prelude or standard-library definition that matched an idiom used to be
