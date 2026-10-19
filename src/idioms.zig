@@ -6,6 +6,7 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const resolution_core = @import("resolution_core.zig");
 const equal = @import("equal.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
@@ -314,6 +315,38 @@ pub const registry = blk: {
     break :blk entries;
 };
 
+const max_pattern_len = blk: {
+    var longest: usize = 0;
+    for (registry) |entry| longest = @max(longest, entry.pattern.len);
+    break :blk longest;
+};
+
+/// Registry indices grouped by context and pattern length, in registry order,
+/// so an offered phrase visits only the entries it could match.
+const entries_by_shape = blk: {
+    @setEvalBranchQuota(100_000);
+    var table: [std.meta.fields(Context).len][max_pattern_len + 1][]const u16 = undefined;
+    for (std.meta.tags(Context)) |context| {
+        for (0..max_pattern_len + 1) |length| {
+            var found: [registry.len]u16 = undefined;
+            var count: usize = 0;
+            for (registry, 0..) |entry, index| {
+                if (entry.context != context or entry.pattern.len != length) continue;
+                found[count] = index;
+                count += 1;
+            }
+            const shaped = found[0..count].*;
+            table[@intFromEnum(context)][length] = &shaped;
+        }
+    }
+    break :blk table;
+};
+
+fn entriesShaped(context: Context, length: usize) []const u16 {
+    if (length > max_pattern_len) return &.{};
+    return entries_by_shape[@intFromEnum(context)][length];
+}
+
 /// Every trusted definition a direct entry can recognize, by name.
 const direct_names = blk: {
     var names: [registry.len][]const u8 = undefined;
@@ -437,10 +470,9 @@ pub fn tryApply(
         .each, .zip_with, .fold, .fold1, .scan => {},
     }
     const candidate = requestCandidate(evaluator, request) orelse return runFallback(evaluator, fallback);
-    try evaluator.startDriver(IdiomDriver{
-        .candidate = candidate,
-        .fallback = .init(fallback),
-    });
+    const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
+    if (entries.len == 0) return runFallback(evaluator, fallback);
+    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, fallback);
 }
 
 fn runFallback(evaluator: *Machine, fallback: machine.IdiomFallback) MachineError!void {
@@ -528,197 +560,222 @@ fn settle(
     if (direct_parent) |word| evaluator.setWorkDriverTraceParent(word);
 }
 
-const IdiomDriver = struct {
-    /// Started once per trusted source-word application: embedded prelude or
-    /// the nominal embedded standard-library generation.
-    pub const inline_driver = true;
-
+/// Matches an offered phrase against the registry entries of its context and
+/// length. The work is bounded by the registry's shape, so it runs where the
+/// combinator applies; a pattern word whose resolution the call-site cache
+/// cannot answer is handed out to be resolved across turns.
+const Matcher = struct {
     candidate: Candidate,
-    fallback: heap.Owned(machine.IdiomFallback),
+    entries: []const u16,
     entry_index: usize = 0,
     atom_index: usize = 0,
     capture: Capture = .{},
-    resolution: ?heap.Owned(machine.ResolutionCursor) = null,
     expected: ?env.PrimitiveImpl = null,
     expected_binding: BindingKind = .builtin,
 
-    fn rejectEntry(self: *IdiomDriver) void {
+    /// A pattern word to resolve; `cache` is where its answer is recorded.
+    const Pending = struct {
+        word: u32,
+        start: ?*env.Scope,
+        guard: ?resolution_core.GuardContext,
+        cache: ?machine.ErrorSite,
+    };
+    const Step = union(enum) { progressed, done: ?RegistryEntry, resolve: Pending };
+
+    fn phraseSite(self: *const Matcher) machine.ErrorSite {
+        return .{ .code = self.candidate.phrase.list, .index = @intCast(self.atom_index) };
+    }
+    fn rejectEntry(self: *Matcher) void {
         self.entry_index += 1;
         self.atom_index = 0;
         self.capture = .{};
         self.expected = null;
         self.expected_binding = .builtin;
     }
-    fn beginWordResolution(
-        self: *IdiomDriver,
+    /// Whether the resolved word is the trusted binding the atom expects.
+    fn accept(self: *Matcher, resolved: *const machine.Resolution) void {
+        const binding_matches = switch (self.expected_binding) {
+            .builtin => resolved.lease.binding == .builtin and
+                (self.expected == null or resolved.lease.binding.builtin == self.expected.?),
+            .source => resolved.lease.binding == .word,
+        };
+        const origin_matches = resolved.origin == .core or resolved.origin == .standard_library;
+        if (!origin_matches or !binding_matches) return self.rejectEntry();
+        self.atom_index += 1;
+        self.expected = null;
+        self.expected_binding = .builtin;
+    }
+    /// Resolves a pattern word where the phrase runs, through the call-site
+    /// cache `executeWord` uses when the word's stamp allows it.
+    fn resolve(self: *Matcher, evaluator: *Machine, site: machine.ErrorSite, word: value.WordRef) Step {
+        const lookup = evaluator.probePlain(site, word) orelse return .{ .resolve = .{
+            .word = word.name,
+            .start = evaluator.unit.current.?.resolutionScope(),
+            .guard = null,
+            .cache = null,
+        } };
+        switch (lookup) {
+            .hit => |resolution| {
+                var resolved = resolution;
+                defer resolved.deinit(evaluator.allocator());
+                self.accept(&resolved);
+                return .progressed;
+            },
+            .miss => |miss| return .{ .resolve = .{
+                .word = word.name,
+                .start = miss.start,
+                .guard = miss.guard,
+                .cache = site,
+            } },
+        }
+    }
+    fn expectWord(
+        self: *Matcher,
         evaluator: *Machine,
+        site: machine.ErrorSite,
         word: value.WordRef,
         expected_word: ExpectedWord,
-    ) bool {
+    ) Step {
         std.debug.assert(expected_word.origin == .trusted);
         if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling) or
             !stampOnRunningChain(evaluator, word.scope))
         {
-            return false;
+            self.rejectEntry();
+            return .progressed;
         }
         self.expected_binding = expected_word.binding;
         self.expected = null;
-        self.resolution = .init(.init(
-            evaluator,
-            word.name,
-            evaluator.unit.current.?.resolutionScope(),
-            null,
-            null,
-            null,
-        ));
-        return true;
+        return self.resolve(evaluator, site, word);
     }
-    fn finish(
-        self: *IdiomDriver,
-        evaluator: *Machine,
-        entry: ?RegistryEntry,
-    ) MachineError!machine.WorkProgress {
-        const fallback = self.fallback.take();
-        const candidate = self.candidate;
-        const capture = self.capture;
-        if (self.resolution) |*cursor| cursor.deinit(
-            evaluator.releaseDomain(),
-            evaluator.allocator(),
-        );
-        self.resolution = null;
-        evaluator.retireDriver(self);
-        try settle(evaluator, candidate.phrase, entry, capture, fallback);
-        return .detached;
+    fn step(self: *Matcher, evaluator: *Machine) Step {
+        if (self.entry_index == self.entries.len) return .{ .done = null };
+        const entry = registry[self.entries[self.entry_index]];
+        if (self.atom_index == entry.pattern.len)
+            return .{ .done = if (canApplyEntry(evaluator, entry)) entry else null };
+        const actual = list.atUnchecked(self.candidate.phrase, self.atom_index);
+        switch (entry.pattern[self.atom_index]) {
+            .constant => {
+                if (self.capture.constant != null or actual == .word) {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                self.capture.constant = actual;
+                self.atom_index += 1;
+            },
+            .capture => {
+                if (self.capture.constant != null or
+                    actual != .list or
+                    actual.list.length() != 1)
+                {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                self.capture.constant = list.atUnchecked(actual, 0);
+                self.atom_index += 1;
+            },
+            .literal => {
+                if (actual == .word) {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                self.atom_index += 1;
+            },
+            .quotation_word => |expected_word| {
+                if (actual != .list or actual.list.length() != 1) {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                const quoted = list.atUnchecked(actual, 0);
+                if (quoted != .word) {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                return self.expectWord(evaluator, .{ .code = actual.list, .index = 0 }, quoted.word, expected_word);
+            },
+            .operation => {
+                if (actual != .word or
+                    !std.mem.eql(u8, intern.get(actual.word.name), entry.operation.spelling()) or
+                    !stampOnRunningChain(evaluator, actual.word.scope))
+                {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                self.capture.active_word = actual.word.name;
+                self.capture.active_index = @intCast(self.atom_index);
+                self.expected_binding = operationBinding(entry.operation);
+                self.expected = if (self.expected_binding == .builtin)
+                    operationPrimitive(entry.operation)
+                else
+                    null;
+                return self.resolve(evaluator, self.phraseSite(), actual.word);
+            },
+            .word => |expected_word| {
+                if (actual != .word) {
+                    self.rejectEntry();
+                    return .progressed;
+                }
+                // Recorded before resolving: a cached answer advances the
+                // atom at once.
+                if (std.mem.eql(u8, expected_word.spelling, "grade")) {
+                    self.capture.active_word = actual.word.name;
+                    self.capture.active_index = @intCast(self.atom_index);
+                }
+                return self.expectWord(evaluator, self.phraseSite(), actual.word, expected_word);
+            },
+        }
+        return .progressed;
     }
+};
+
+/// Matches as far as the call-site cache allows, settling at once when it
+/// answers every pattern word; otherwise a driver resolves the missing word
+/// and carries the match on from there.
+fn matchOffered(evaluator: *Machine, matcher: Matcher, fallback: machine.IdiomFallback) MachineError!void {
+    var matching = matcher;
+    while (true) switch (matching.step(evaluator)) {
+        .progressed => {},
+        .done => |entry| return settle(evaluator, matching.candidate.phrase, entry, matching.capture, fallback),
+        .resolve => |pending| return evaluator.startDriver(IdiomDriver{
+            .matcher = matching,
+            .fallback = .init(fallback),
+            .cache = pending.cache,
+            .word = pending.word,
+            .resolution = .init(.init(evaluator, pending.word, pending.start, null, null, pending.guard)),
+        }),
+    };
+}
+
+/// Resolves one pattern word the call-site cache could not answer, then lets
+/// the matcher continue.
+const IdiomDriver = struct {
+    pub const inline_driver = true;
+
+    matcher: Matcher,
+    fallback: heap.Owned(machine.IdiomFallback),
+    resolution: heap.Owned(machine.ResolutionCursor),
+    cache: ?machine.ErrorSite,
+    word: u32,
+
     pub fn advance(evaluator: *Machine, self: *IdiomDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
-        while (work.spend()) {
-            if (self.resolution) |*cursor| switch (cursor.borrowMut().advance()) {
-                .pending => continue,
-                .complete => |outcome| {
-                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.resolution = null;
-                    var resolved = outcome.binding() orelse {
-                        self.rejectEntry();
-                        continue;
-                    };
+        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
+            .pending => {},
+            .complete => |outcome| {
+                self.resolution.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                if (outcome.binding()) |resolution| {
+                    var resolved = resolution;
                     defer resolved.deinit(evaluator.allocator());
-                    const binding_matches = switch (self.expected_binding) {
-                        .builtin => resolved.lease.binding == .builtin and
-                            (self.expected == null or resolved.lease.binding.builtin == self.expected.?),
-                        .source => resolved.lease.binding == .word,
-                    };
-                    const origin_matches = resolved.origin == .core or resolved.origin == .standard_library;
-                    if (!origin_matches or !binding_matches) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    self.atom_index += 1;
-                    self.expected = null;
-                    self.expected_binding = .builtin;
-                    continue;
-                },
-            };
-            if (self.entry_index == registry.len) return self.finish(evaluator, null);
-            const entry = registry[self.entry_index];
-            if (entry.context != self.candidate.context or
-                self.candidate.phrase.list.length() != entry.pattern.len)
-            {
-                self.rejectEntry();
-                continue;
-            }
-            if (self.atom_index == entry.pattern.len) {
-                return self.finish(evaluator, if (canApplyEntry(evaluator, entry)) entry else null);
-            }
-            const actual = list.atUnchecked(self.candidate.phrase, self.atom_index);
-            switch (entry.pattern[self.atom_index]) {
-                .constant => {
-                    if (self.capture.constant != null or actual == .word) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    self.capture.constant = actual;
-                    self.atom_index += 1;
-                },
-                .capture => {
-                    if (self.capture.constant != null or
-                        actual != .list or
-                        actual.list.length() != 1)
-                    {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    self.capture.constant = list.atUnchecked(actual, 0);
-                    self.atom_index += 1;
-                },
-                .literal => {
-                    if (actual == .word) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    self.atom_index += 1;
-                },
-                .quotation_word => |expected_word| {
-                    if (actual != .list or actual.list.length() != 1) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    const quoted = list.atUnchecked(actual, 0);
-                    const word = if (quoted == .word) quoted.word else {
-                        self.rejectEntry();
-                        continue;
-                    };
-                    if (!self.beginWordResolution(evaluator, word, expected_word)) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                },
-                .operation => {
-                    const word = if (actual == .word) actual.word else {
-                        self.rejectEntry();
-                        continue;
-                    };
-                    if (!std.mem.eql(u8, intern.get(word.name), entry.operation.spelling())) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    if (!stampOnRunningChain(evaluator, word.scope)) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    self.capture.active_word = word.name;
-                    self.capture.active_index = @intCast(self.atom_index);
-                    self.expected_binding = operationBinding(entry.operation);
-                    self.expected = if (self.expected_binding == .builtin)
-                        operationPrimitive(entry.operation)
-                    else
-                        null;
-                    self.resolution = .init(.init(
-                        evaluator,
-                        word.name,
-                        evaluator.unit.current.?.resolutionScope(),
-                        null,
-                        null,
-                        null,
-                    ));
-                },
-                .word => |expected_word| {
-                    const word = if (actual == .word) actual.word else {
-                        self.rejectEntry();
-                        continue;
-                    };
-                    if (!self.beginWordResolution(evaluator, word, expected_word)) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    if (std.mem.eql(u8, expected_word.spelling, "grade")) {
-                        self.capture.active_word = word.name;
-                        self.capture.active_index = @intCast(self.atom_index);
-                    }
-                },
-            }
-        }
+                    if (self.cache) |site| evaluator.cacheResolution(site, self.word, &resolved);
+                    self.matcher.accept(&resolved);
+                } else self.matcher.rejectEntry();
+                const matcher = self.matcher;
+                const fallback = self.fallback.take();
+                evaluator.retireDriver(self);
+                try matchOffered(evaluator, matcher, fallback);
+                return .detached;
+            },
+        };
         return .stepped;
     }
     pub const ownership: heap.DriverOwnership = .fields;

@@ -62,7 +62,7 @@ pub const ErrorKind = enum {
         };
     }
 };
-const ErrorSite = struct {
+pub const ErrorSite = struct {
     code: *Header,
     index: u32,
 };
@@ -6147,6 +6147,64 @@ pub const Machine = struct {
         return modules.anchorHandle(home, self.unit.module_access);
     }
 
+    pub const PlainLookup = union(enum) {
+        hit: Resolution,
+        /// The guard context the miss's resolution records, so that a later
+        /// lookup at this site can hit.
+        miss: struct { guard: resolution_core.GuardContext, start: ?*env.Scope },
+    };
+
+    /// Where a cacheable plain word resolves from: the running scope or an
+    /// ancestor reached through scopes that bound nothing, or core, which is
+    /// frozen before any unit runs and so never invalidates what it answered.
+    const CacheScope = struct { id: env.ScopeId, start: ?*env.Scope };
+
+    fn cacheScope(self: *Machine, stamp: u32) ?CacheScope {
+        const core = self.unit.environment.coreScopeId();
+        if (stamp == @intFromEnum(core)) return .{ .id = core, .start = null };
+        const site = self.unit.current.?.site;
+        const scope = stampedResolutionScope(site, stamp) orelse return null;
+        return .{ .id = scope.cellId(), .start = site.resolution_scope };
+    }
+
+    /// The plain-word call-site cache for a word resolving from `cache`.
+    fn lookupPlain(self: *Machine, cached_site: ?usize, word: u32, cache: CacheScope) PlainLookup {
+        const scope_id = cache.id;
+        const lookup = self.unit.module_call_sites.lookupPlain(
+            cached_site,
+            word,
+            scope_id,
+            cache.start,
+            self.unit.environment.coreView(),
+        );
+        if (comptime root_execution_metrics_enabled) switch (lookup) {
+            .hit => self.unit.root_execution_metrics.plain_cache_hits += 1,
+            else => self.unit.root_execution_metrics.plain_cache_misses += 1,
+        };
+        return switch (lookup) {
+            .absent => .{ .miss = .{ .guard = .{ .scope_id = scope_id, .pool = null }, .start = cache.start } },
+            .warming, .stale => .{ .miss = .{ .guard = .{ .scope_id = scope_id, .pool = &self.unit.module_call_sites.guards }, .start = cache.start } },
+            .hit => |resolution| .{ .hit = resolution },
+        };
+    }
+
+    /// The same cache for a word found somewhere other than the running code,
+    /// such as inside a quotation offered to a combinator: `site` names that
+    /// quotation and the word's position in it. Null when the word's stamp is
+    /// not on the running chain in the cacheable way; it then resolves
+    /// uncached.
+    pub fn probePlain(self: *Machine, site: ErrorSite, word: value.WordRef) ?PlainLookup {
+        const cache = self.cacheScope(word.scope) orelse return null;
+        return self.lookupPlain(self.unit.module_call_sites.find(site, word.name), word.name, cache);
+    }
+
+    /// Records what a resolution at `site` found, for the next lookup there.
+    pub fn cacheResolution(self: *Machine, site: ErrorSite, word: u32, resolved: *Resolution) void {
+        var candidate = resolved.takeCallSiteCache() orelse return;
+        if (self.unit.inherited.module_snapshot != null) return candidate.deinit();
+        self.unit.module_call_sites.install(self.releaseDomain(), site, word, candidate);
+    }
+
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
         const qualified_call_site = ErrorSite{
             .code = self.unit.current.?.code,
@@ -6198,33 +6256,17 @@ pub const Machine = struct {
         // skipped rather than merely cheapened.
         const running_site = self.unit.current.?.site;
         const stamped_scope = stampedResolutionScope(running_site, word.scope);
-        const plain_cache_scope: ?env.ScopeId = if (stamped_scope) |scope| scope.cellId() else null;
-        var observe_plain = false;
-        if (plain_cache_scope) |scope_id| {
-            switch (self.unit.module_call_sites.lookupPlain(
-                cached_site,
-                word.name,
-                scope_id,
-                running_site.resolution_scope,
-                self.unit.environment.coreView(),
-            )) {
-                .absent => if (comptime root_execution_metrics_enabled) {
-                    self.unit.root_execution_metrics.plain_cache_misses += 1;
-                },
-                .warming, .stale => {
-                    observe_plain = true;
-                    if (comptime root_execution_metrics_enabled) self.unit.root_execution_metrics.plain_cache_misses += 1;
-                },
-                .hit => |resolution| {
-                    if (comptime root_execution_metrics_enabled)
-                        self.unit.root_execution_metrics.plain_cache_hits += 1;
-                    var resolved = resolution;
-                    defer resolved.deinit(self.unit.allocator);
-                    try executeResolved(self, &resolved);
-                    return;
-                },
-            }
-        }
+        const cache_scope = self.cacheScope(word.scope);
+        var local_cache_scope: ?resolution_core.GuardContext = null;
+        if (cache_scope) |cache| switch (self.lookupPlain(cached_site, word.name, cache)) {
+            .miss => |miss| local_cache_scope = miss.guard,
+            .hit => |resolution| {
+                var resolved = resolution;
+                defer resolved.deinit(self.unit.allocator);
+                try executeResolved(self, &resolved);
+                return;
+            },
+        };
         const local_context = LocalCacheContext.init(running_site, stamped_scope, self.unit.module_access);
         if (local_context) |context| {
             switch (self.unit.module_call_sites.lookupLocal(
@@ -6246,8 +6288,7 @@ pub const Machine = struct {
                 },
             }
         }
-        const local_cache_scope: ?resolution_core.GuardContext = if (plain_cache_scope) |scope_id| .{ .scope_id = scope_id, .pool = if (observe_plain) &self.unit.module_call_sites.guards else null } else null;
-        if (stamped_scope != null) {
+        if (cache_scope) |cache| {
             self.unit.active_word = .plain(word.name);
             try self.startDriver(DispatchDriver{
                 .word = word.name,
@@ -6255,10 +6296,11 @@ pub const Machine = struct {
                 .resolution = .init(.init(
                     self,
                     word.name,
-                    running_site.resolution_scope,
+                    cache.start,
                     null,
-                    // The activation already holds this chain, so the fast path
-                    // acquires nothing -- that is the point of it.
+                    // The activation already holds this chain, and core
+                    // outlives every unit, so the fast path acquires nothing
+                    // -- that is the point of it.
                     null,
                     local_cache_scope,
                 )),
@@ -7379,19 +7421,7 @@ const DispatchDriver = struct {
                                 self_machine.unit.root_execution_metrics.qualified_cache_misses += 1;
                             }
                         }
-                        if (resolved.takeCallSiteCache()) |candidate_value| {
-                            var candidate = candidate_value;
-                            if (call_site) |site| {
-                                if (self_machine.unit.inherited.module_snapshot == null) {
-                                    self_machine.unit.module_call_sites.install(
-                                        self_machine.releaseDomain(),
-                                        site,
-                                        word,
-                                        candidate,
-                                    );
-                                } else candidate.deinit();
-                            } else candidate.deinit();
-                        }
+                        if (call_site) |site| self_machine.cacheResolution(site, word, &resolved);
                         try executeResolved(self_machine, &resolved);
                         return .detached;
                     },

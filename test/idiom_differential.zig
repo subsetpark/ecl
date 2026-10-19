@@ -539,11 +539,10 @@ test "idioms: capture shapes preserve generic behavior" {
         "[1 2 3] ((3 4) first +) each",
         "[1 2 3] ((1) first pop 7 +) each",
         "[1 2 3] ((dup) first +) each",
-        // The `first` guard is load-bearing: the pattern
-        // demands the core source binding, so a session definition of `first`
-        // must send an otherwise perfectly capture-shaped phrase down the
-        // generic path — where the shadow actually runs. Recognizing through
-        // the shadow would silently compute the unshadowed answer.
+        // The pattern demands the core source binding of `first`. A session
+        // definition of `first` does not reach the `first` that `partial`
+        // writes, which is sealed to core, so both modes compute the
+        // unshadowed answer.
         "(pop 99) 'first def [1 2 3] 3 (+) partial each",
         "(pop 99) 'first def [1 2 3] 3 (swap -) partial each",
     };
@@ -562,18 +561,13 @@ test "idioms: capture shapes preserve generic behavior" {
     try expectHits("[1 2 3] 3 (+) partial each", 1);
     try expectHits("[1 2 3] 3 (swap -) partial each", 1);
     try expectHits("[1 2 3] ((3 4) first +) each", 3);
-    // Shadowing `first` takes the *capture* entry out of play -- which is why
-    // this is three direct hits and not one fused hit -- but the three hits are
-    // core `first`; the shadow receives no hits. `partial` is `(swap literal swap compose)`
-    // and `literal` is `(wrap (first) cons)`, so the `(first)` token lives in
-    // prelude source and seals to core; `each` runs that captured quotation once
-    // per element, and each execution earns its own direct recognition.
-    //
-    // This expectation was 0 before scope-on-the-word, and the 0 was measuring
-    // the leak the sealing rule exists to remove: a session `def` reaching into
-    // prelude internals. What proves the shadow no longer runs there is the
-    // captured value. A count there—such as `(pop 99)`—would destroy the
-    // capture, yet the result is byte-identical to the unshadowed baseline:
+    // Shadowing `first` leaves the capture entry in play. `partial` is
+    // `(swap literal swap compose)` and `literal` is `(wrap (first) cons)`, so
+    // the `first` in the captured phrase was written in the prelude and seals
+    // to core: executing it runs core `first`, and recognition resolves it
+    // where it was written too, so it fuses exactly as without the shadow.
+    // What proves the shadow does not run there is the captured value, which
+    // `(pop 99)` would destroy, yet the result is byte-identical:
     //
     //   (pop 99) 'first def [1 2 3] 3 (+) partial each   =>  [4 5 6]
     //   [1 2 3] 3 (+) partial each                       =>  [4 5 6]
@@ -581,8 +575,10 @@ test "idioms: capture shapes preserve generic behavior" {
     //
     // The third line is the control: the shadow is live, just sealed out of
     // prelude internals, exactly as `table.where` does not become the `where`
-    // that `filter` is written against.
-    try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 3);
+    // that `filter` is written against. Recognition once resolved the token
+    // from the running scope instead, saw the shadow, and declined to three
+    // per-element hits of the core `first` that then ran anyway.
+    try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 1);
 }
 
 test "idioms: an ordinary module with stdlib's shape cannot inherit its recognition" {

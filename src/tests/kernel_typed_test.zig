@@ -60,6 +60,33 @@ test "typed kernels: transitioning reduction seeds use bounded typed passes" {
     try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, &.{ std.math.inf(f64), -std.math.inf(f64) }), "0 (+) scan");
 }
 
+test "typed kernels: block-checked float reductions report the scalar route's fault" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const inf = std.math.inf(f64);
+    // Each placement lands a fault or a legitimate infinity in a different
+    // block: the first, a middle one, and the last element.
+    const Plant = struct { values: []const f64 };
+    const plants = [_]Plant{
+        .{ .values = &.{ 1.0e308, 1.0e308 } },
+        .{ .values = &.{inf} },
+        .{ .values = &.{ inf, -inf } },
+        .{ .values = &.{std.math.nan(f64)} },
+        .{ .values = &.{ 0.0, inf } },
+        .{ .values = &.{ 1.0e200, 1.0e200 } },
+    };
+    const length = 1500;
+    var numbers: [length]f64 = undefined;
+    for (plants) |plant| for ([_]usize{ 0, 700, length - plant.values.len }) |at| {
+        for (&numbers, 0..) |*number, index| number.* = 0.25 + @as(f64, @floatFromInt(index % 7));
+        @memcpy(numbers[at..][0..plant.values.len], plant.values);
+        for ([_][]const u8{ "0.0 (+) fold", "(+) fold1", "0.0 (-) fold", "1.0 (*) fold", "0.0 (+) scan", "0.0 (-) scan" }) |source|
+            try expectParity(&runtime, .{ .floats = &numbers }, source);
+    };
+}
+
 /// Renders one case's whole observable outcome: the stack as printed, or the
 /// error dict as printed. Comparing these strings compares values,
 /// representations, brackets, string forms, float bits, error kinds, messages,
