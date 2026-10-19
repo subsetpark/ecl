@@ -701,6 +701,36 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Offered phrases match from the call-site cache — 2026-10-18
+
+Each application of a combinator to a user quotation, such as `(+) fold1` once
+per matrix row, checked the quotation against the idiom registry from scratch:
+
+- **Linear registry scan.** A driver visited every entry, one budget step each,
+  to find the few of the right context and length. Entries are now indexed by
+  context and pattern length when the registry is built.
+- **Fresh resolution.** Each pattern word was resolved by walking the scope
+  chain. It now goes through the plain call-site cache `executeWord` uses,
+  keyed by the quotation and the word's position.
+- **Prelude words never cached.** A word written in core was never
+  plain-cached, so `partial` cost one full resolution per row. Core is frozen
+  before any unit runs, so a core-stamped word now caches as well, from no
+  starting scope.
+- **A 728-byte driver.** It carried a resolution cursor inline and was zeroed
+  and copied on every application. Matching is bounded by the registry's
+  shape, so it now runs where the combinator applies; a driver starts only
+  when a pattern word misses the cache.
+
+Callgrind, row dots (`a u (* (+) fold1) partial each`) over a 1,000 × 1,000
+float matrix, net of setup, Zig 0.16.0 ReleaseFast `-Dcpu=native`, x86_64
+Linux (Intel Core Ultra 5 125U), control `723314c`: 35,964 → 25,904
+instructions per row. Native medians of classic `spectralnorm`, whole process,
+pinned to one P-core, nine interleaved runs:
+
+| Case | Control | Treatment |
+|---|---:|---:|
+| `1000 spectralnorm`, ms | 134.9 | 117.5 |
+| `2000 spectralnorm`, ms | 451.7 | 412.8 |
 ## Float reductions test each block once — 2026-10-18
 
 A typed `fold`, `fold1`, or `scan` with a float accumulator ran the checked
@@ -725,6 +755,7 @@ medians, pinned to one P-core, nine interleaved runs, at N=2,000:
 |---|---:|---:|
 | 20 × row dots, net of setup, ms | 224 | 198 |
 | Classic `2000 spectralnorm`, whole process, ms | 466 | 440 |
+||||||| parent of dbc65c1 (Match offered phrases from the call-site cache)
 
 ## Trusted idioms are recognized at the freeze edge — 2026-10-18
 

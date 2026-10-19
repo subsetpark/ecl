@@ -1044,3 +1044,21 @@ test "idioms: a rebound name keeps recognition off" {
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());
 }
+
+test "idioms: an offered phrase answered from the call-site cache sees a redefinition" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // One `(+)`, offered three times in one unit: the later checks are cache
+    // hits. Redefining `+` must still reach the next application, while the
+    // prelude's `sum`, written in core, keeps core `+`.
+    try expectStack(
+        &runtime,
+        "((+) fold1) 'f def [1 2] f [3 4] f [5 6] f [1 2 3] sum " ++
+            "(pop pop 42) '+ def [7 8] f [1 2 3] sum",
+        "3 7 11 6 42 6",
+    );
+}
