@@ -1284,7 +1284,7 @@ fn expectTranscript(expected: []const u8, actual: []const u8) !void {
     const line_start = if (std.mem.lastIndexOfScalar(u8, actual[0..offset], '\n')) |newline| newline + 1 else 0;
     const line_end = std.mem.indexOfScalarPos(u8, actual, offset, '\n') orelse actual.len;
     const expected_line_end = std.mem.indexOfScalar(u8, expected_rest, '\n') orelse expected_rest.len;
-    std.debug.print("transcript differs at byte {d}\nactual line:   {s}\nexpected from: {s}\n", .{
+    std.log.err("transcript differs at byte {d}\nactual line:   {s}\nexpected from: {s}", .{
         offset,
         actual[line_start..line_end],
         expected_rest[0..expected_line_end],

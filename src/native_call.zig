@@ -474,8 +474,7 @@ const Transaction = struct {
     host_table: abi.HostTable,
     candidates: std.ArrayList(CandidateEntry) = .empty,
     outputs: std.ArrayList(Value) = .empty,
-    builders: [abi.max_builder_slots]?*AggregateBuilder =
-        @as([abi.max_builder_slots]?*AggregateBuilder, @splat(null)),
+    builders: [abi.max_builder_slots]?*AggregateBuilder = @splat(null),
     next_builder_serial: u32 = 1,
     candidate_generation: u32 = 0,
     terminal: Terminal = .idle,

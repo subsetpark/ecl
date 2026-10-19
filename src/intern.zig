@@ -227,13 +227,10 @@ const AtomicBucket = std.atomic.Value(u32);
 pub const Table = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
-    buckets: [bucket_count]AtomicBucket =
-        @as([bucket_count]AtomicBucket, @splat(AtomicBucket.init(no_entry))),
+    buckets: [bucket_count]AtomicBucket = @splat(AtomicBucket.init(no_entry)),
     count: std.atomic.Value(u32) = .init(0),
-    entry_segments: [max_segments]AtomicEntrySegment =
-        @as([max_segments]AtomicEntrySegment, @splat(AtomicEntrySegment.init(null))),
-    byte_segments: [max_segments]AtomicByteSegment =
-        @as([max_segments]AtomicByteSegment, @splat(AtomicByteSegment.init(null))),
+    entry_segments: [max_segments]AtomicEntrySegment = @splat(AtomicEntrySegment.init(null)),
+    byte_segments: [max_segments]AtomicByteSegment = @splat(AtomicByteSegment.init(null)),
     byte_segment_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Table {
