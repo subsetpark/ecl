@@ -731,6 +731,7 @@ pinned to one P-core, nine interleaved runs:
 |---|---:|---:|
 | `1000 spectralnorm`, ms | 134.9 | 117.5 |
 | `2000 spectralnorm`, ms | 451.7 | 412.8 |
+
 ## Float reductions test each block once — 2026-10-18
 
 A typed `fold`, `fold1`, or `scan` with a float accumulator ran the checked
@@ -755,7 +756,6 @@ medians, pinned to one P-core, nine interleaved runs, at N=2,000:
 |---|---:|---:|
 | 20 × row dots, net of setup, ms | 224 | 198 |
 | Classic `2000 spectralnorm`, whole process, ms | 466 | 440 |
-||||||| parent of dbc65c1 (Match offered phrases from the call-site cache)
 
 ## Trusted idioms are recognized at the freeze edge — 2026-10-18
 
