@@ -1275,8 +1275,8 @@ test "e2e: optional module annotation acceptance" {
             "\"Subtract three.\"\n" ++
             "11\n20\n7\n3\n59\n" ++
             "1\n" ++
-            "(: \"The answer.\") ([42] first)\n" ++
-            "([42] first)\n" ++
+            "(: \"The answer.\") [42]\n" ++
+            "[42]\n" ++
             "'contract\n'domain\n'domain\n" ++
             "(dup)\n(a b)\n",
         .stderr = "",

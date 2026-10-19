@@ -61,11 +61,10 @@ pub const ExpectedWord = struct {
     origin: ExpectedOrigin = .trusted,
 };
 pub const PatternAtom = union(enum) {
+    /// A non-word value, which becomes the operation's constant operand.
+    /// `literal` leaves every non-word as itself, so this is also what
+    /// `partial` prefixes onto its quotation.
     constant,
-    /// A literal capture wrapper: a one-element list whose single element
-    /// becomes the operation's constant operand. `literal` builds this shape
-    /// as `((value) first)`, so `partial` prefixes it onto its quotation.
-    capture,
     literal,
     quotation_word: ExpectedWord,
     operation,
@@ -83,17 +82,6 @@ const operation_pattern = [_]PatternAtom{.operation};
 const constant_operation_pattern = [_]PatternAtom{ .constant, .operation };
 const constant_swap_operation_pattern = [_]PatternAtom{
     .constant,
-    .{ .word = .{ .spelling = "swap" } },
-    .operation,
-};
-const capture_operation_pattern = [_]PatternAtom{
-    .capture,
-    .{ .word = .{ .spelling = "first", .binding = .source } },
-    .operation,
-};
-const capture_swap_operation_pattern = [_]PatternAtom{
-    .capture,
-    .{ .word = .{ .spelling = "first", .binding = .source } },
     .{ .word = .{ .spelling = "swap" } },
     .operation,
 };
@@ -197,7 +185,7 @@ const fold1_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 5 + 18 + 16]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 16]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
@@ -226,24 +214,11 @@ pub const registry = blk: {
             .pattern = &operation_pattern,
             .operation = .{ .binary = operation },
         };
-        entries[index + 3] = .{
-            .context = .each,
-            .pattern = &capture_operation_pattern,
-            .operation = .{ .binary = operation },
-        };
-        entries[index + 4] = .{
-            .context = .each,
-            .pattern = &capture_swap_operation_pattern,
-            .operation = .{ .binary = operation },
-            .constant_left = true,
-        };
-        index += 5;
+        index += 3;
     }
     for ([_]struct { pattern: []const PatternAtom, constant_left: bool }{
         .{ .pattern = &constant_operation_pattern, .constant_left = false },
         .{ .pattern = &constant_swap_operation_pattern, .constant_left = true },
-        .{ .pattern = &capture_operation_pattern, .constant_left = false },
-        .{ .pattern = &capture_swap_operation_pattern, .constant_left = true },
     }) |match_each| {
         entries[index] = .{
             .context = .each,
@@ -396,10 +371,6 @@ fn matchFrozen(lookup: env.FrozenLookup, phrase: Value, entry: RegistryEntry) ?C
             .constant => {
                 if (capture.constant != null or actual == .word) return null;
                 capture.constant = actual;
-            },
-            .capture => {
-                if (capture.constant != null or actual != .list or actual.list.length() != 1) return null;
-                capture.constant = list.atUnchecked(actual, 0);
             },
             .literal => if (actual == .word) return null,
             .quotation_word => |expected| {
@@ -659,17 +630,6 @@ const Matcher = struct {
                     return .progressed;
                 }
                 self.capture.constant = actual;
-                self.atom_index += 1;
-            },
-            .capture => {
-                if (self.capture.constant != null or
-                    actual != .list or
-                    actual.list.length() != 1)
-                {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.capture.constant = list.atUnchecked(actual, 0);
                 self.atom_index += 1;
             },
             .literal => {

@@ -11,8 +11,12 @@
 (() cons) 'wrap def
 
 ### def literal
-(value -- quotation : "Return a quotation that pushes the exact value as inert data when called.")
-(wrap (first) cons) 'literal def
+(value -- quotation :
+ "Return a quotation that pushes the exact value as inert data when called.
+
+  Every value but a word already pushes itself when run, so it is wrapped as itself. A word would
+  execute, so it is quoted as ((word) first).")
+(dup type 'word match? (wrap (first) cons) (wrap) if) 'literal def
 
 ### def dip
 (: "Run a quotation beneath a protected top stack value.")

@@ -846,7 +846,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 3 'x set 'x see
         \\exit: 0
         \\stdout:
-        \\([3] first)
+        \\[3]
         \\stderr:
         \\<empty>
         \\=== see set ===

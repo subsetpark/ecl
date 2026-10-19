@@ -636,8 +636,8 @@ representations but expose the same binding model.
   plain data is legal and yields a multi-value constant word.
 - `annotation? value 'name set` binds a constant. It is sugar, defined in ecl
   as `swap literal swap def`: the value is captured with `literal`, so the
-  published body is `((value) first)`. Reference applies that body and
-  pushes exactly the captured value, quotations included — the capture is
+  published body is `(value)`, or `((value) first)` when the value is a word.
+  Reference applies that body and pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
   observationally `v literal 'name def`: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for

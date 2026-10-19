@@ -177,8 +177,8 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
     try std.testing.expectEqualStrings(
-        "([42] first)\n" ++
-            "([42] first)\n" ++
+        "[42]\n" ++
+            "[42]\n" ++
             "answer -> answer def public\n",
         output.written(),
     );
@@ -189,7 +189,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
     try expectOk(&runtime, "'m.x see");
-    try std.testing.expectEqualStrings("([7] first)\n", output.written());
+    try std.testing.expectEqualStrings("[7]\n", output.written());
 }
 
 test "modules: a nonempty construction stack becomes the durable initial stack once per slot" {

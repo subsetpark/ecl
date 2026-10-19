@@ -458,9 +458,10 @@ test "long annotation traversal and reflection observe cancellation" {
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
 // The merge makes `v 'name set` observationally `v literal 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
-// a "value" is a word whose body is the literal capture `((v) first)`. Since
-// M11 made source annotations optional everywhere, the sugar synthesizes no
-// metadata at all and the equivalence is exact.
+// a "value" is a word whose body is the literal capture: `(v)`, or
+// `((v) first)` for a word `v`. Since M11 made source annotations optional
+// everywhere, the sugar synthesizes no metadata at all and the equivalence is
+// exact.
 
 test "definitions: set publishes a literal-capture word with no synthesized metadata" {
     // A constant is a word whose body is the literal capture, so referencing
@@ -488,7 +489,7 @@ test "definitions: which reports a def while see prints the set capture body" {
     try expectOk(&runtime, "3 'x set 'x which 'x see");
     try std.testing.expectEqualStrings(
         "x -> x def public\n" ++
-            "([3] first)\n",
+            "[3]\n",
         output.written(),
     );
 }
@@ -592,7 +593,7 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
     defer runtime.deinit();
     try expectOk(&runtime, "3 'x set 'x see (dup *) 'sq def 'sq see");
     try std.testing.expectEqualStrings(
-        "([3] first)\n" ++
+        "[3]\n" ++
             "(dup *)\n",
         output.written(),
     );

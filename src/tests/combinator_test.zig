@@ -851,11 +851,10 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try expectStack(&generic, "pop [] [2] find", "0");
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
-    // The literal-capture shape `((v) first)` that `partial` builds reaches
-    // the same constant-operand kernels a bare constant does, in both operand
-    // orders. A wrapper that is not a one-element list is not a capture: it
-    // falls through to the generic path, where `first` is instead recognized
-    // once per element.
+    // `partial` prefixes a non-word constant as itself, so it reaches the same
+    // constant-operand kernels a bare constant does, in both operand orders.
+    // A wrapper spelled by hand is not a constant: it falls through to the
+    // generic path, where `first` is instead recognized once per element.
     try expectStack(&automatic, "pop [1 2 3] 3 (+) partial each", "[4 5 6]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 

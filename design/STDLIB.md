@@ -794,9 +794,11 @@ that returns −1, 0, or 1. Stop at the first nonzero result; when the shared
 prefix is equal, compare sequence lengths. Defined in ecl.
 
 ### literal
-`( value -- quotation )` — Return the plain quotation `((x) first)`:
-calling it pushes the exact captured value as inert data, without
-executing or resolving it. Equivalent to `wrap (first) cons`.
+`( value -- quotation )` — Return a plain quotation that pushes the exact
+captured value as inert data when called, without executing or resolving it.
+A value other than a word already pushes itself, so the result is `(x)`; a word
+would execute, so it is quoted as `((x) first)`. Equivalent to
+`dup type 'word match? (wrap (first) cons) (wrap) if`.
 
 ### linrec
 `( predicate base pre post -- ... )` — *Inline.* Explicit linear recursion.
@@ -905,7 +907,8 @@ so this is a load-class word for trusted source, not a conversion: use `int`,
 `( value quotation -- quotation )` — Safe partial application: the result
 pushes the captured value inertly, then runs the quotation. Even a
 captured word remains data. Equivalent to `swap literal swap compose`;
-`3 (+) partial` is `((3) first +)`.
+`3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as
+`((w) first)`.
 
 #### Examples
 
