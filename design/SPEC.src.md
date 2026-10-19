@@ -609,6 +609,13 @@ Only public core bindings resolve this way; a missing or private name is
 word. `import`, `alias`, and `unmodule` observe registrations only and do not
 accept `core`.
 
+Standard-library module names are reserved too. Only the standard library
+registers them, so a qualified name under one means the embedded module in
+every scope, whether or not it has loaded; an implementation may load it on
+first use. `register`, `@defm`, and `unmodule` with a standard-library module
+name are `'domain`, as is `alias` with one as either the alias or its target. A
+dotted name below one, such as `dict.extra`, is an ordinary module name.
+
 Resolution scope and module home are independent parts of an activation.
 Resolution scope determines where a word's spelling is looked up. Module home
 determines privacy and registration-owned authority. Homeless helpers preserve

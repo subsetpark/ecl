@@ -137,6 +137,7 @@ const UnmoduleDriver = struct {
                         .domain,
                         "unmodule requires a valid module name",
                     );
+                    try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
                     const registry = evaluator.publicationRegistry(name, evaluator.unit.current.?.site.registration_provenance);
                     self.cursor = .init(registry.removalCursor(
                         name,
@@ -479,8 +480,16 @@ const AliasDriver = struct {
                     continue;
                 },
             };
-            const registry = evaluator.publicationRegistry(self.target.?, evaluator.unit.current.?.site.registration_provenance);
-            if (self.cursor == null) self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
+            if (self.cursor == null) {
+                // An alias of an embedded module could remove it, and an
+                // alias under an embedded name would claim one.
+                const provenance = evaluator.unit.current.?.site.registration_provenance;
+                try evaluator.refuseReservedModule(self.target.?, provenance);
+                if (intern.moduleName(intern.bindingId(self.short.?)) catch null) |short|
+                    try evaluator.refuseReservedModule(short, provenance);
+                const registry = evaluator.publicationRegistry(self.target.?, evaluator.unit.current.?.site.registration_provenance);
+                self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
+            }
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.NameConflict => return evaluator.fail(.domain, "alias collides with a module name"),

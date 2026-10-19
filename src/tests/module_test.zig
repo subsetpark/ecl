@@ -11,6 +11,7 @@
 //! apart is what stops a tracing allocator from being charged to assertions
 //! that never read a stack trace.
 const runtime_fixture = @import("runtime_fixture.zig");
+const test_heap = @import("test_heap.zig");
 const std = @import("std");
 const value = @import("../value.zig");
 const dict = @import("../dict.zig");
@@ -1302,3 +1303,32 @@ test "environment and registry APIs propagate every allocation failure" {
 }
 
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
+
+test "stdlib: embedded module names are reserved whether or not they have loaded" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    const reserved = "module name `dict` is reserved for the standard library";
+    // `dict` has not loaded yet: the refusal cannot depend on that.
+    try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm", &.{reserved});
+    try expectErrorContains(&runtime, "[] () @module 'dict register", &.{reserved});
+    try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
+    try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
+    try expectOk(&runtime, "{'a 1} 'a dict.has? {'kind 'user 'msg \"dict did not load\"} assert");
+    // Loaded, it is refused the same way, and an alias cannot claim the name.
+    try expectErrorContains(&runtime, "[] () 'dict @defm", &.{reserved});
+    try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
+    try expectErrorContains(&runtime, "[] () 'm @defm 'dict 'm alias", &.{reserved});
+    try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
+    try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") 'new def) 'error @defm", &.{"module name `error` is reserved"});
+    // So the prelude and the other embedded modules keep their meaning.
+    try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+    try expectOk(&runtime, "[] (\"abc\" \"z\" str.index-of) @attempt 'err at 'kind at 'domain match? " ++
+        "{'kind 'user 'msg \"str lost error\"} assert");
+    // A dotted name under a stdlib prefix is an ordinary module.
+    try expectOk(&runtime, "[] ((1) 'one def) 'dict.extra @defm dict.extra.one 1 = {'kind 'user} assert");
+}

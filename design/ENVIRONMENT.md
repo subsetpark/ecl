@@ -18,13 +18,14 @@ application is not a supported interface.
 
 Every module listed in `STDLIB.md` ships inside the `ecl` binary. Embedded
 modules load lazily at the first qualified reference or import. Loading needs
-no filesystem access and works with no `ECL_PATH`.
+no filesystem access and works with no `ECL_PATH`, and it is not observable: an
+embedded module means the same thing before and after it loads.
 
 Embedded modules use ECL source, linked native descriptors, builtin word
 tables, or registered built-in capabilities. The transport is an implementation
 property. Each publishes
-ordinary module images and participates in registration, aliases, imports,
-reflection, and shadowing through the same language operations.
+ordinary module images, reached by qualified names, imports, and reflection
+through the same language operations as any module.
 
 The bundled `net.core` and `proc.core` modules expose ordinary native factories
 and selectors. Their public `net` and `proc` APIs are ECL compositions over
@@ -36,8 +37,10 @@ The `fs` and `archive` modules use direct runtime primitives with the shared
 scope-owned port lifecycle, bounded work, and joined cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
-cannot replace an embedded module during automatic loading. A program may
-replace a registration explicitly with `register` or `@defm`.
+cannot replace an embedded module during automatic loading, and the names are
+reserved: `register`, `@defm`, `alias`, and `unmodule` refuse them with
+`'domain` (see `SPEC.md`). No program can change what an embedded module, or a
+library word that calls one, means.
 
 ### Filesystem module search
 

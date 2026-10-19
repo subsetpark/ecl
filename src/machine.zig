@@ -3523,6 +3523,20 @@ pub const Machine = struct {
         return current.site.registration_provenance.sourceScope();
     }
 
+    /// Standard-library names are reserved, like `core`: only embedded loading
+    /// registers them, so a stdlib name means the same module in every scope,
+    /// whether or not it has loaded. User registration, aliasing, and removal
+    /// under one are `'domain`.
+    pub fn refuseReservedModule(self: *Machine, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
+        if (provenance == .standard_library) return;
+        if (self.unit.inherited.libraries().find(name) == null) return;
+        return self.failFmt(
+            .domain,
+            "module name `{s}` is reserved for the standard library",
+            .{intern.get(intern.moduleId(name))},
+        );
+    }
+
     pub fn publicationRegistry(self: *const Machine, name: intern.ModuleName, provenance: modules.RegistrationProvenance) *modules.Registry {
         if (provenance == .source and !provenance.source.exports(name)) return provenance.source.registry();
         return self.unit.inherited.registry;
@@ -5955,6 +5969,10 @@ pub const Machine = struct {
             return self.typeError("a module");
         };
         const provenance = self.unit.current.?.site.registration_provenance;
+        self.refuseReservedModule(name, provenance) catch |err| {
+            self.releaseDomain().releaseValue(module);
+            return err;
+        };
         const registry = self.publicationRegistry(name, provenance);
         return self.startDriver(ModuleRegisterDriver{
             .module = .init(module),
@@ -9741,6 +9759,7 @@ const ModuleCompletionDriver = struct {
                         "@defm requires a valid module name",
                     );
                     const provenance = validate.provenance;
+                    try evaluator.refuseReservedModule(name, provenance);
                     const registration = evaluator.publicationRegistry(name, provenance).registrationCursor(
                         validate.sealed.borrow().ref(),
                         name,
