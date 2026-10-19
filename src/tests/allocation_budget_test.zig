@@ -23,6 +23,13 @@ const session = @import("../session.zig");
 
 /// Counts what the run asks for. Only the count matters here — bytes and
 /// timing are machine-dependent, the count is not.
+///
+/// Growth through `remap` is never counted, because whether the backing
+/// allocator can grow a block in place depends on its layout history, not on
+/// the run. Zig 0.17's testing allocator on x86_64 Linux declines an in-place
+/// grow of the frame stack after a larger unrelated allocation, and the
+/// caller's alloc-and-copy fallback then read as a marginal allocation. `remap`
+/// may relocate, so it moves the block itself instead of failing.
 const CountingAllocator = struct {
     backing: std.mem.Allocator,
     allocations: usize = 0,
@@ -65,7 +72,11 @@ const CountingAllocator = struct {
         ret_addr: usize,
     ) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(context));
-        return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+        if (self.backing.rawRemap(memory, alignment, new_len, ret_addr)) |moved| return moved;
+        const moved = self.backing.rawAlloc(new_len, alignment, ret_addr) orelse return null;
+        @memcpy(moved[0..@min(memory.len, new_len)], memory[0..@min(memory.len, new_len)]);
+        self.backing.rawFree(memory, alignment, ret_addr);
+        return moved;
     }
 
     fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
