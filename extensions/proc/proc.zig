@@ -413,8 +413,15 @@ fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
 }
 // Pipe writes must not depend on an embedding host's process-wide SIGPIPE
-// disposition. Mask only the activity thread and consume only newly pending
-// SIGPIPE before restoring the original mask.
+// disposition. Where the descriptor can opt out (Darwin, FreeBSD), no SIGPIPE
+// is generated at all: there a broken-pipe signal may be delivered to any
+// thread, so a per-thread mask cannot contain it. Elsewhere the signal is
+// thread-directed, so mask only the activity thread and consume only newly
+// pending SIGPIPE before restoring the original mask.
+fn suppressPipeSignal(file: std.Io.File) error{Failed}!void {
+    if (!@hasDecl(std.c.F, "SETNOSIGPIPE")) return;
+    if (std.c.fcntl(file.handle, std.c.F.SETNOSIGPIPE, @as(c_int, 1)) == -1) return error.Failed;
+}
 const PipeSignals = struct {
     previous: std.posix.sigset_t,
     pending_before: bool,
@@ -666,6 +673,11 @@ const Process = ecl.Port(.{
             defer finishStream(state, "stdin");
             defer file.close(io());
             const stream = try context.endpoint(Process, .stdin);
+            suppressPipeSignal(file) catch {
+                state.failed();
+                context.failStreams(.io, "process pipe operation failed");
+                return;
+            };
             // SAFETY: only the initialized prefix returned by read is consumed.
             var buffer: [4096]u8 = undefined;
             while (try stream.read(&buffer)) |count| {
