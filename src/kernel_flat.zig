@@ -394,6 +394,22 @@ pub fn VectorFamily(
             dest[offset..][0..lanes].* = values;
         }
 
+        /// Vectors a loop handles per iteration. Spelling a group out lets the
+        /// target pair its loads and stores and pay loop control once per
+        /// group; one vector per iteration ran at about half the bandwidth.
+        const unroll = 4;
+
+        /// Calls `step.visit` with the offset of each of `vectors` whole
+        /// vectors, in order, `unroll` at a time and then the rest.
+        inline fn forEachVector(vectors: usize, step: anytype) void {
+            const grouped = vectors / unroll * unroll;
+            var vector: usize = 0;
+            while (vector != grouped) : (vector += unroll) {
+                inline for (0..unroll) |member| step.visit((vector + member) * lanes);
+            }
+            while (vector != vectors) : (vector += 1) step.visit(vector * lanes);
+        }
+
         const LeafLeaf = struct {
             left: []const Left,
             right: []const Right,
@@ -444,11 +460,16 @@ pub fn VectorFamily(
         ) void {
             std.debug.assert(dest.len == range.len());
             const vector_end = range.start + range.len() / lanes * lanes;
-            for (0..range.len() / lanes) |vector| {
-                const offset = vector * lanes;
-                const a, const b = source.vectors(range.start + offset);
-                storeVector(dest, offset, vector_body(a, b));
-            }
+            const Step = struct {
+                source: @TypeOf(source),
+                start: usize,
+                dest: []Out,
+                inline fn visit(self: @This(), offset: usize) void {
+                    const a, const b = self.source.vectors(self.start + offset);
+                    storeVector(self.dest, offset, vector_body(a, b));
+                }
+            };
+            forEachVector(range.len() / lanes, Step{ .source = source, .start = range.start, .dest = dest });
             for (vector_end..range.end) |index| {
                 const a, const b = source.scalars(index);
                 dest[index - range.start] = scalar_body(a, b);
@@ -476,13 +497,19 @@ pub fn VectorFamily(
             const vectors = range.len() / lanes;
             const vector_end = range.start + vectors * lanes;
             var suspect: LaneMask = @splat(0);
-            for (0..vectors) |vector| {
-                const offset = vector * lanes;
-                const a, const b = source.vectors(range.start + offset);
-                const result = body.vector(a, b);
-                suspect |= result.faults;
-                storeVector(dest, offset, result.values);
-            }
+            const Step = struct {
+                source: @TypeOf(source),
+                start: usize,
+                dest: []Out,
+                suspect: *LaneMask,
+                inline fn visit(self: @This(), offset: usize) void {
+                    const a, const b = self.source.vectors(self.start + offset);
+                    const result = body.vector(a, b);
+                    self.suspect.* |= result.faults;
+                    storeVector(self.dest, offset, result.values);
+                }
+            };
+            forEachVector(vectors, Step{ .source = source, .start = range.start, .dest = dest, .suspect = &suspect });
             for (vector_end..range.end) |index| {
                 const a, const b = source.scalars(index);
                 dest[index - range.start] = body.scalar(a, b) catch return .{ .faulted = range.start };
@@ -634,11 +661,16 @@ pub fn VectorFamily(
             std.debug.assert(dest.len == range.len());
             std.debug.assert(range.end <= operand.len);
             const vector_end = range.start + range.len() / lanes * lanes;
-            for (0..range.len() / lanes) |vector| {
-                const offset = vector * lanes;
-                const a: LeftVector = operand[range.start + offset ..][0..lanes].*;
-                storeVector(dest, offset, vector_body(a));
-            }
+            const Step = struct {
+                operand: []const Left,
+                start: usize,
+                dest: []Out,
+                inline fn visit(self: @This(), offset: usize) void {
+                    const a: LeftVector = self.operand[self.start + offset ..][0..lanes].*;
+                    storeVector(self.dest, offset, vector_body(a));
+                }
+            };
+            forEachVector(range.len() / lanes, Step{ .operand = operand, .start = range.start, .dest = dest });
             for (vector_end..range.end) |index| {
                 dest[index - range.start] = scalar_body(operand[index]);
             }
