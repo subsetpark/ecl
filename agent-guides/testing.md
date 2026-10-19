@@ -27,10 +27,11 @@ Read this guide for every source or test change. The short rules in
   coordinates. `test/reference_snapshots.zig` records errors raised inside
   `src/prelude.ecl`, whose `'data` reports a prelude line number; pinning that
   number makes every unrelated prelude edit fail the snapshot while proving
-  nothing about the edit. Those positions use `ohsnap`'s embedded-regex form
-  (`'line <^\d+$>`)—the anchors are required and the snapshot still fails if
-  the field goes missing or non-numeric. Keep the kind, message, word, trace,
-  and source file literal; regex only the coordinate.
+  nothing about the edit. Those positions use the transcript's one placeholder,
+  `<^\d+$>`, which stands for one or more digits (`'line <^\d+$>`); the
+  snapshot still fails if the field goes missing or non-numeric. Keep the kind,
+  message, word, trace, and source file literal; use the placeholder only for
+  the coordinate.
 
 ## Running commands safely
 
@@ -128,7 +129,7 @@ reason before selecting the matrix.
   `zig build` output runs the DebugAllocator, whose per-allocation machinery can
   be hundreds of times slower on allocation-heavy paths and can fabricate a
   convincing per-operation “defect” with clean-looking scaling curves. Rebuild
-  with `-Doptimize=ReleaseSafe` before timing anything.
+  with `-Doptimize=safe` before timing anything.
 
 ## Allocators, OOM, and ownership in tests
 
@@ -227,8 +228,8 @@ reason before selecting the matrix.
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
       apt-get install -y --no-install-recommends ca-certificates curl libc6-dev python3 xz-utils
-      curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
-      echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
+      curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
+      echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
       tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
       # Copy sources only; a host .zig-cache can be hundreds of GB and fills the VM disk.

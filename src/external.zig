@@ -29,7 +29,7 @@ pub fn WaitList(comptime Cell: type) type {
             pub fn cancelReadiness(self: *Wait) void {
                 const cell = self.cell;
                 if (self.linked.load(.acquire)) {
-                    std.Io.Threaded.mutexLock(&cell.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                     if (self.linked.load(.monotonic)) cell.waits.unlinkLocked(self);
                     std.Io.Threaded.mutexUnlock(&cell.mutex);
                 }
@@ -54,7 +54,7 @@ pub fn WaitList(comptime Cell: type) type {
             pub fn register(self: *Prepared) RegisterResult {
                 const wait = self.state();
                 const cell = wait.cell;
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 if (cell.readyLocked(wait.key)) {
                     const reason = cell.wakeReasonLocked(wait.key);
                     std.Io.Threaded.mutexUnlock(&cell.mutex);

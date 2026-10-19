@@ -107,7 +107,7 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 fn lock(mutex: *std.Io.Mutex) void {
-    std.Io.Threaded.mutexLock(mutex);
+    std.Io.Threaded.mutexLockUncancelable(mutex);
 }
 fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
@@ -288,7 +288,7 @@ pub const Access = opaque {
 
 pub const Cell = @import("port_service.zig").Resource;
 const ResourceLoans = struct {
-    slots: [16]?*Cell.Lease = .{null} ** 16,
+    slots: [16]?*Cell.Lease = @splat(null),
     fn acquire(self: *ResourceLoans, target: *Cell) error{ Closed, Overflow }!*ResourceBackend {
         for (self.slots) |loan| if (loan) |held| {
             if (held.adapter() == &target.adapter) return held.adapter();
@@ -317,7 +317,7 @@ pub const ResourceBackend = struct {
     initialization_context: ?*ControllerContext = null,
     input_loans: ResourceLoans = .{},
     message_budget: *message_transport.Budget,
-    resource_pipes: [64]?Protocol.Transport = .{null} ** 64,
+    resource_pipes: [64]?Protocol.Transport = @splat(null),
     pub fn allocator(self: *const ResourceBackend) std.mem.Allocator {
         return self.owner.host.allocator();
     }
@@ -449,7 +449,7 @@ pub const ResourceBackend = struct {
 
 const Protocol = struct {
     parameters: Value,
-    pipes: [64]?Transport = .{null} ** 64,
+    pipes: [64]?Transport = @splat(null),
 
     const Transport = union(enum) {
         bytes: byte_transport.Pair,
@@ -638,7 +638,7 @@ pub const OperationBackend = struct {
         const item = try self.startChild(operation, kind, configuration, dependency, .controller);
         errdefer heap.hostDomain(self.cell.adapter.owner.host).releaseValue(item);
         const cell = resource_api.Resource.project(Cell, item).?;
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         while (cell.phase == .reserved or cell.phase == .initializing) cell.changed.waitUncancelable(io(), &cell.mutex);
         // The caller owns the initialized or failed child while observing its
@@ -670,7 +670,7 @@ pub const OperationBackend = struct {
             cell.releasePort();
             return err;
         };
-        std.Io.Threaded.mutexLock(&owner.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owner.mutex);
         const identity = owner.identity;
         owner.identity +%= 1;
         std.Io.Threaded.mutexUnlock(&owner.mutex);

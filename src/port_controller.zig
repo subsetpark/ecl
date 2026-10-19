@@ -64,7 +64,7 @@ const State = struct {
     last: ?*Job = null,
 
     fn enqueue(self: *State, job: *Job) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (self.last) |last| last.next = job else self.first = job;
         self.last = job;
@@ -72,7 +72,7 @@ const State = struct {
     }
     fn reap(self: *State) void {
         while (true) {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             while (self.first == null and !(self.phase == .closing and self.live == 0))
                 self.changed.waitUncancelable(io(), &self.mutex);
             const job = self.first orelse {
@@ -86,7 +86,7 @@ const State = struct {
             // holds up retirement of another resource or its child executors.
             job.work.active.thread.join();
             job.work.active.retire(job);
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             job.work = .idle;
             job.next = self.available;
             self.available = job;
@@ -111,7 +111,7 @@ pub const Owner = opaque {
     /// Joins every accepted job and its retirement callback before destruction.
     pub fn deinit(self: *Owner) void {
         const state_value = self.state();
-        std.Io.Threaded.mutexLock(&state_value.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state_value.mutex);
         state_value.phase = .closing;
         state_value.changed.broadcast(io());
         std.Io.Threaded.mutexUnlock(&state_value.mutex);
@@ -133,7 +133,7 @@ pub const Executor = opaque {
     /// submission (including cancellation escalation) never uses the allocator.
     pub fn prepare(self: *Executor) error{ OutOfMemory, Closed }!void {
         const state_value = self.state();
-        std.Io.Threaded.mutexLock(&state_value.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state_value.mutex);
         defer std.Io.Threaded.mutexUnlock(&state_value.mutex);
         if (state_value.phase == .closing) return error.Closed;
         if (state_value.jobs.len != 0) return;
@@ -169,7 +169,7 @@ pub const Executor = opaque {
         }
         try self.prepare();
         const state_value = self.state();
-        std.Io.Threaded.mutexLock(&state_value.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state_value.mutex);
         defer std.Io.Threaded.mutexUnlock(&state_value.mutex);
         if (state_value.phase == .closing) return error.Closed;
         const fresh = state_value.available == null;
@@ -271,7 +271,7 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
         pub fn start(self: *Self, args: anytype, comptime prepare: anytype, comptime run: anytype, comptime rollback: fn (*Cell) void) (@typeInfo(@typeInfo(@TypeOf(prepare)).@"fn".return_type.?).error_union.error_set || error{ OutOfMemory, Io, Closed })!void {
             const state = self.data();
             lifetime.retain(state.cell);
-            std.Io.Threaded.mutexLock(&state.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&state.mutex);
             switch (state.phase) {
                 .provisional => state.phase = .{ .open = 1 },
                 .open, .draining, .retired => @panic("controller group already started"),
@@ -301,7 +301,7 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
         }
         fn acquire(self: *Self) bool {
             const state = self.data();
-            std.Io.Threaded.mutexLock(&state.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&state.mutex);
             defer std.Io.Threaded.mutexUnlock(&state.mutex);
             switch (state.phase) {
                 .open => |*count| count.* += 1,
@@ -311,7 +311,7 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
         }
         fn dropRoot(self: *Self, outcome: Terminal) void {
             const state = self.data();
-            std.Io.Threaded.mutexLock(&state.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&state.mutex);
             const outstanding = state.phase.open;
             state.phase = .{ .draining = .{ .count = outstanding, .outcome = outcome } };
             std.Io.Threaded.mutexUnlock(&state.mutex);
@@ -319,7 +319,7 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
         }
         fn release(self: *Self) void {
             const state = self.data();
-            std.Io.Threaded.mutexLock(&state.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&state.mutex);
             const outcome: ?Terminal = switch (state.phase) {
                 .open => |*count| blk: {
                     count.* -= 1;
@@ -335,7 +335,7 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
             std.Io.Threaded.mutexUnlock(&state.mutex);
             if (outcome) |terminal| {
                 const cell = state.cell;
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 lifetime.retireLocked(cell, terminal);
                 var detached = lifetime.ownership(cell).release();
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
@@ -393,7 +393,7 @@ pub const Execution = opaque {
             }
             fn retire(args: struct { Context, usize, *@This() }, _: void) void {
                 const group = args[2];
-                std.Io.Threaded.mutexLock(&group.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&group.mutex);
                 group.live -= 1;
                 group.changed.broadcast(io());
                 std.Io.Threaded.mutexUnlock(&group.mutex);
@@ -402,7 +402,7 @@ pub const Execution = opaque {
         var children: Children = .{};
         const executor: *Executor = @ptrCast(self);
         for (1..count) |lane| {
-            std.Io.Threaded.mutexLock(&children.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&children.mutex);
             children.live += 1;
             executor.spawn(Children.start, .{ context, lane, &children }, Children.retire) catch {
                 children.live -= 1;
@@ -414,7 +414,7 @@ pub const Execution = opaque {
         }
         ready(context);
         run(context, 0);
-        std.Io.Threaded.mutexLock(&children.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&children.mutex);
         while (children.live != 0) children.changed.waitUncancelable(io(), &children.mutex);
         std.Io.Threaded.mutexUnlock(&children.mutex);
     }
@@ -487,9 +487,9 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             fn commitErased(raw: *anyopaque) bool {
                 const self: *Node = @ptrCast(@alignCast(raw));
                 const cell = self.owner();
-                std.Io.Threaded.mutexLock(self.lane.mutex);
+                std.Io.Threaded.mutexLockUncancelable(self.lane.mutex);
                 defer std.Io.Threaded.mutexUnlock(self.lane.mutex);
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 defer std.Io.Threaded.mutexUnlock(&cell.mutex);
                 if (!owns_cell or self.execution != .active or self.invocation != .active or self.invocation.active.progress != .running) return false;
                 self.invocation.active.commitment = .committed;
@@ -538,7 +538,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             fn cancelledErased(raw: *anyopaque) bool {
                 const self: *Node = @ptrCast(@alignCast(raw));
                 const cell = self.owner();
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 defer std.Io.Threaded.mutexUnlock(&cell.mutex);
                 return switch (self.execution) {
                     .cancelling, .reusable, .cancelled => true,
@@ -601,8 +601,8 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 const node = self.entry();
                 const cell = node.owner();
                 const mutex = node.lane.mutex;
-                std.Io.Threaded.mutexLock(mutex);
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 const policy: CallbackCancellation = callbacks.cancelPolicy(cell);
                 const action = node.lane.cancelNode(node, switch (policy) {
                     .acknowledge => .acknowledge,
@@ -633,7 +633,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             pub fn write(self: *Writer, bytes: []const u8) @typeInfo(@TypeOf(callbacks.write)).@"fn".return_type.? {
                 const node = self.entry();
                 const cell = node.owner();
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 defer std.Io.Threaded.mutexUnlock(&cell.mutex);
                 return callbacks.write(cell, node.begin(), bytes);
             }
@@ -649,7 +649,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
             fn end(self: *Writer, cancelled: bool) void {
                 const node = self.entry();
                 const cell = node.owner();
-                std.Io.Threaded.mutexLock(&cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 if (cancelled) {
                     _ = node.lane.cancelNode(node, .release);
                 } else {
@@ -680,7 +680,7 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
         pub fn dispatchable(self: *const Self) bool {
             const node = self.first orelse return false;
             const cell = node.owner();
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             defer std.Io.Threaded.mutexUnlock(&cell.mutex);
             return node.execution != .preparing;
         }
@@ -770,13 +770,13 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
         /// Cancellation of suspended work resumes that work to join its unwind.
         pub fn advanceNext(self: *Self, comptime advance: *const fn (*Cell, *Running) Progress) Dispatch {
             const mutex = self.mutex;
-            std.Io.Threaded.mutexLock(mutex);
+            std.Io.Threaded.mutexLockUncancelable(mutex);
             const node = self.first orelse {
                 std.Io.Threaded.mutexUnlock(mutex);
                 return .idle;
             };
             const cell = node.owner();
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             if (node.execution == .preparing) {
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 std.Io.Threaded.mutexUnlock(mutex);
@@ -795,14 +795,14 @@ pub fn Lane(comptime Cell: type, comptime mode: enum { operation, writer }, comp
                 var execution: Running.Invocation = .{ .context = node, .acknowledge = Node.acknowledgeErased, .cancelled = Node.cancelledErased, .commit = Node.commitErased };
                 break :blk advance(cell, @as(*Running, @ptrCast(&execution)));
             } else @as(Progress, .completed);
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             if (node.invocation == .active) node.invocation.active.progress = switch (progress) {
                 .yielded, .waiting, .parked => .suspended,
                 .completed => .returned,
             };
             std.Io.Threaded.mutexUnlock(&cell.mutex);
-            std.Io.Threaded.mutexLock(mutex);
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             switch (progress) {
                 .yielded, .waiting, .parked => {
                     std.Io.Threaded.mutexUnlock(&cell.mutex);
@@ -894,7 +894,7 @@ test "native: shared lane owns admission and writer retirement" {
     const Queue = Lane(Probe, .writer, .{ .retain = Probe.retain, .release = Probe.release, .write = Probe.write, .notify = Probe.notify, .source = Probe.source });
     var probe: Probe = .{};
     var lane = Queue.init(&probe.mutex);
-    var owned: [3]?*Queue.Writer = .{null} ** 3;
+    var owned: [3]?*Queue.Writer = @splat(null);
     defer for (owned) |entry| {
         if (entry) |writer| writer.cancel();
     };
@@ -961,7 +961,7 @@ test "native: lane ownership outlives released operation observers" {
     }.retire });
     var probe: Probe = .{};
     var lane = Queue.init(&probe.mutex);
-    var observers: [2]?*Queue.Ticket = .{null} ** 2;
+    var observers: [2]?*Queue.Ticket = @splat(null);
     defer {
         for (observers) |observer| if (observer) |ticket| {
             ticket.cancel();

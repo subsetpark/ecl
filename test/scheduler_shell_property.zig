@@ -9,15 +9,15 @@ const scenario_timeout_seconds: u64 = switch (build_options.optimize) {
     // The installed Debug binary uses the tracing DebugAllocator. Its
     // allocator-heavy task-tree teardown can exceed the release liveness
     // deadline without being stuck, especially after many subprocess cases.
-    .Debug => 30,
-    .ReleaseSafe, .ReleaseFast, .ReleaseSmall => 5,
+    .debug => 30,
+    .safe, .fast, .small => 5,
 };
 const cancel_tree_width: usize = switch (build_options.optimize) {
     // At eight workers the tracing DebugAllocator serializes every child
     // allocation and release on one mutex. Sixty-four children still exercise
     // the real cancellation tree while the release gates retain the full load.
-    .Debug => 64,
-    .ReleaseSafe, .ReleaseFast, .ReleaseSmall => 300,
+    .debug => 64,
+    .safe, .fast, .small => 300,
 };
 
 const Operation = enum(u5) {
@@ -47,7 +47,7 @@ const Scenario = struct {
     workers: []const u8,
 
     fn decode(encoded: u16) Scenario {
-        const operation_count = @typeInfo(Operation).@"enum".fields.len;
+        const operation_count = @typeInfo(Operation).@"enum".field_names.len;
         const operation: Operation = @enumFromInt(encoded % operation_count);
         const width = 1 + (encoded / operation_count) % 12;
         const worker_index = (encoded / (operation_count * 12)) % 4;
@@ -289,7 +289,7 @@ test "scheduler shell property: cancellation progresses while children replenish
     // Repeated public CLI runs retain the tracing DebugAllocator coverage.
     // The root must reach task.cancel while allocating child loops keep the
     // reclamation queue nonempty, then join the entire tree before exit.
-    const operation_count: u16 = @typeInfo(Operation).@"enum".fields.len;
+    const operation_count: u16 = @typeInfo(Operation).@"enum".field_names.len;
     for (0..4) |_| {
         for ([_]u16{ 0, 3 }) |worker_index| {
             try runShellScenario(@intFromEnum(Operation.cancel_tree) + worker_index * operation_count * 12);

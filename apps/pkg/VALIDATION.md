@@ -52,8 +52,8 @@ compressed archive sizes. Optional SDK installation and test binaries are
 outside both default-install measurements.
 
 ```sh
-zig build -Doptimize=ReleaseSafe -Dapps=false --prefix /tmp/ecl-distribution-core
-zig build -Doptimize=ReleaseSafe --prefix /tmp/ecl-distribution-complete
+zig build -Doptimize=safe -Dapps=false --prefix /tmp/ecl-distribution-core
+zig build -Doptimize=safe --prefix /tmp/ecl-distribution-complete
 cmp /tmp/ecl-distribution-core/bin/ecl /tmp/ecl-distribution-complete/bin/ecl
 ```
 

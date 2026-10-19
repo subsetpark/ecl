@@ -66,7 +66,7 @@ pub const GuardPool = struct {
         phase: enum { building, validated } = .building,
         value: LexicalGuard = .{},
     };
-    slots: [capacity]Slot = .{Slot{}} ** capacity,
+    slots: [capacity]Slot = @splat(Slot{}),
     serial: u64 = 0,
 
     fn reserve(self: *GuardPool, scope_id: env.ScopeId) ConstructionId {

@@ -10,7 +10,7 @@ The illustrative HTTPS URL is never fetched; every synchronization below is
 offline.
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=safe
 export ECL_CACHE="$PWD/.zig-cache/pkg-example-cache"
 ./zig-out/bin/ecl --module-map apps/pkg/ecl.modules examples/pkg-smoke/seed-cache.ecl
 cd examples/pkg-smoke

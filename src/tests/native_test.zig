@@ -23,7 +23,7 @@ fn instanceConstructionWithCutoff(allocator: std.mem.Allocator, cutoff: ?usize) 
     defer host.cleanup().drain();
     const owner = try native_module.Owner.initConfigured(host.cleanup(), .{}, &.{.{
         .name = "instanceprobe",
-        .bytes = if (cutoff == null) "copied" else "x" ** 2048,
+        .bytes = if (cutoff == null) "copied" else &@as([2048]u8, @splat('x')),
         .port_limits = .{ .max_live_ports = 1 },
     }});
     defer owner.closeCalls().settle().deinit();
@@ -2676,7 +2676,7 @@ test "native: large host configuration initializes in bounded slices" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{
-        .native_instances = &.{.{ .name = "instanceprobe", .bytes = "x" ** 65537, .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
+        .native_instances = &.{.{ .name = "instanceprobe", .bytes = &@as([65537]u8, @splat('x')), .registration = .{ .deferred = @import("native-instance").Extension.descriptor() } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
     try expectOk(&runtime, "instanceprobe.next 7864440 = {'kind 'user 'msg \"complete host configuration\"} assert");

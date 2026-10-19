@@ -23,7 +23,7 @@ fn fixtureIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 fn awaitGate(cancelled: *std.atomic.Value(bool)) void {
-    std.Io.Threaded.mutexLock(&gate_mutex);
+    std.Io.Threaded.mutexLockUncancelable(&gate_mutex);
     defer std.Io.Threaded.mutexUnlock(&gate_mutex);
     _ = entered.fetchAdd(1, .release);
     while (permits == 0 and !cancelled.load(.acquire)) gate_changed.waitUncancelable(fixtureIo(), &gate_mutex);
@@ -56,7 +56,7 @@ fn Spec(comptime label: []const u8) type {
                 return;
             }
             if (mode == .long_failure) {
-                controller.fail(.io, ("x" ** 4095) ++ "€");
+                controller.fail(.io, (&@as([4095]u8, @splat('x'))) ++ "€");
                 return;
             }
             if (mode == .failure) {
@@ -80,7 +80,7 @@ fn Spec(comptime label: []const u8) type {
             if (mode == .checksum or mode == .blocked) try (try controller.endpoint(P, .output)).write(&.{state.total});
         }
         pub fn cancel(state: *State) void {
-            std.Io.Threaded.mutexLock(&gate_mutex);
+            std.Io.Threaded.mutexLockUncancelable(&gate_mutex);
             state.cancelled.store(true, .release);
             gate_changed.broadcast(fixtureIo());
             std.Io.Threaded.mutexUnlock(&gate_mutex);
@@ -152,7 +152,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
         pub const Lane = enum(u64) { receive, send };
         pub const cancellation: ecl.PortCancellation = .acknowledge;
         pub const State = struct {
-            lanes: [2]Base.State = .{Base.State{}} ** 2,
+            lanes: [2]Base.State = @splat(Base.State{}),
             watcher_mode: std.atomic.Value(u32) = .init(0),
         };
         pub fn init() State {
@@ -364,7 +364,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                 }
                 if (mode == .oversize_event) {
                     {
-                        try builder.symbol("x" ** (64 * 1024));
+                        try builder.symbol(&@as([(64 * 1024)]u8, @splat('x')));
                     }
                     if (builder.int(1)) |_| {
                         return controller.fail(.contract, "oversize construction unexpectedly succeeded");
@@ -734,10 +734,10 @@ fn shutdownCount(call: *ecl.Call("-- n")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(shutdowns.load(.acquire))});
 }
 fn failLong(call: *ecl.Call("--")) ecl.CallbackResult {
-    return call.fail(.io, ("x" ** 4095) ++ "€");
+    return call.fail(.io, (&@as([4095]u8, @splat('x'))) ++ "€");
 }
 fn unblock(call: *ecl.Call("--")) ecl.CallbackResult {
-    std.Io.Threaded.mutexLock(&gate_mutex);
+    std.Io.Threaded.mutexLockUncancelable(&gate_mutex);
     permits += 1;
     gate_changed.broadcast(fixtureIo());
     std.Io.Threaded.mutexUnlock(&gate_mutex);
@@ -750,7 +750,7 @@ fn reset(call: *ecl.Call("--")) ecl.CallbackResult {
     waiting.store(0, .release);
     fail_open.store(false, .release);
     block_open.store(false, .release);
-    std.Io.Threaded.mutexLock(&gate_mutex);
+    std.Io.Threaded.mutexLockUncancelable(&gate_mutex);
     permits = 0;
     std.Io.Threaded.mutexUnlock(&gate_mutex);
     return call.complete(.{});
@@ -1049,7 +1049,7 @@ const BrokerSpec = struct {
     pub fn open(_: *State, _: *ecl.Controller) void {}
     pub fn run(comptime P: type, state: *State, comptime mode: BrokerMode, comptime _: P.LaneType, controller: *ecl.Controller) ecl.ControllerError!void {
         const builder = controller.builder();
-        std.Io.Threaded.mutexLock(&state.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state.mutex);
         if (mode == .broker_status) {
             const phase = state.phase;
             const active = state.active;
@@ -1098,7 +1098,7 @@ const BrokerSpec = struct {
     }
     pub fn cancel(_: *State) void {}
     pub fn deinit(state: *State) void {
-        std.Io.Threaded.mutexLock(&state.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state.mutex);
         if (state.active != 0) @panic("broker cleanup preceded dependent delivery destruction");
         std.Io.Threaded.mutexUnlock(&state.mutex);
         _ = cleaned.fetchAdd(1, .release);
@@ -1142,7 +1142,7 @@ const DeliveryBackend = struct {
     pub fn open(state: *State, controller: *ecl.Controller) void {
         const parent = controller.parent(Broker) orelse return controller.fail(.domain, "delivery requires a broker parent");
         const attempt = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected delivery attempt");
-        std.Io.Threaded.mutexLock(&parent.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&parent.mutex);
         defer std.Io.Threaded.mutexUnlock(&parent.mutex);
         if (parent.phase != .pending or parent.phase.pending != attempt)
             return controller.fail(.contract, "delivery attempt is no longer pending");
@@ -1161,7 +1161,7 @@ const DeliveryBackend = struct {
             return;
         }
         const parent = state.parent.?;
-        std.Io.Threaded.mutexLock(&parent.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&parent.mutex);
         const accepted = mode == .acknowledge and parent.phase == .pending and parent.phase.pending == state.attempt;
         if (accepted) parent.phase = .{ .acknowledged = state.attempt };
         std.Io.Threaded.mutexUnlock(&parent.mutex);
@@ -1172,7 +1172,7 @@ const DeliveryBackend = struct {
     pub fn cancel(_: *State) void {}
     pub fn deinit(state: *State) void {
         if (state.parent) |parent| {
-            std.Io.Threaded.mutexLock(&parent.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&parent.mutex);
             parent.active -= 1;
             std.Io.Threaded.mutexUnlock(&parent.mutex);
         }
@@ -1268,7 +1268,7 @@ const BufferSpec = struct {
         parent: ?*Device.StateType = null,
         mutex: std.Io.Mutex = .init,
         changed: std.Io.Condition = .init,
-        bytes: [8]u8 = .{0} ** 8,
+        bytes: [8]u8 = @splat(0),
         ready: bool = false,
         stopped: bool = false,
         working: bool = false,
@@ -1282,11 +1282,11 @@ const BufferSpec = struct {
         const byte = (controller.input(&.{}) orelse return).int() orelse return controller.fail(.type, "expected buffer byte");
         if (byte < 0 or byte > 255) return controller.fail(.domain, "buffer byte must be in 0...255");
         state.parent = parent;
-        state.bytes = .{@as(u8, @intCast(byte))} ** 8;
+        state.bytes = @splat(@as(u8, @intCast(byte)));
         _ = parent.buffers.fetchAdd(1, .release);
     }
     fn work(state: *State) void {
-        std.Io.Threaded.mutexLock(&state.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state.mutex);
         defer std.Io.Threaded.mutexUnlock(&state.mutex);
         state.working = true;
         _ = state.parent.?.working.fetchAdd(1, .release);
@@ -1308,7 +1308,7 @@ const BufferSpec = struct {
             const worker = std.Thread.spawn(.{}, work, .{state}) catch return controller.fail(.io, "cannot start device work");
             worker.join();
             if (controller.cancelled()) {
-                std.Io.Threaded.mutexLock(&state.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&state.mutex);
                 state.stopped = false;
                 std.Io.Threaded.mutexUnlock(&state.mutex);
                 _ = controller.acknowledgeCancellation();
@@ -1324,7 +1324,7 @@ const BufferSpec = struct {
         switch (mode) {
             .compute => unreachable,
             .complete_work => {
-                std.Io.Threaded.mutexLock(&state.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&state.mutex);
                 state.ready = true;
                 state.changed.broadcast(fixtureIo());
                 std.Io.Threaded.mutexUnlock(&state.mutex);
@@ -1333,7 +1333,7 @@ const BufferSpec = struct {
                 const index = (controller.input(&.{0}) orelse return).int() orelse return controller.fail(.type, "expected buffer index");
                 const byte = (controller.input(&.{1}) orelse return).int() orelse return controller.fail(.type, "expected buffer byte");
                 if (index < 0 or index >= 8 or byte < 0 or byte > 255) return controller.fail(.domain, "invalid positioned buffer update");
-                std.Io.Threaded.mutexLock(&state.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&state.mutex);
                 state.bytes[@intCast(index)] = @intCast(byte);
                 std.Io.Threaded.mutexUnlock(&state.mutex);
             },
@@ -1343,7 +1343,7 @@ const BufferSpec = struct {
         if (selected == .compute) cancel(state);
     }
     pub fn cancel(state: *State) void {
-        std.Io.Threaded.mutexLock(&state.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&state.mutex);
         state.stopped = true;
         state.changed.broadcast(fixtureIo());
         std.Io.Threaded.mutexUnlock(&state.mutex);

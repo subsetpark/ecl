@@ -191,3 +191,15 @@ fn stringBytes(item: value.Value) ![]u8 {
     }
     return result.toOwnedSlice(allocator);
 }
+
+/// `text` repeated `count` times, at compile time: the array-repetition
+/// operator's job for literals of more than one byte.
+pub inline fn repeated(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
+    comptime {
+        @setEvalBranchQuota(count * 2 + 1000);
+        var result: [text.len * count]u8 = undefined;
+        for (0..count) |index| @memcpy(result[index * text.len ..][0..text.len], text);
+        const final = result;
+        return &final;
+    }
+}

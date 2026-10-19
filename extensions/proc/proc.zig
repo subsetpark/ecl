@@ -407,7 +407,7 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 fn lock(mutex: *std.Io.Mutex) void {
-    std.Io.Threaded.mutexLock(mutex);
+    std.Io.Threaded.mutexLockUncancelable(mutex);
 }
 fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);

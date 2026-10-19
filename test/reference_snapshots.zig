@@ -1,6 +1,5 @@
 const std = @import("std");
 const cli = @import("cli_test_support.zig");
-const ohsnap = @import("ohsnap");
 const build_options = @import("reference_options");
 
 const allocator = std.testing.allocator;
@@ -199,7 +198,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         );
     }
 
-    try ohsnap.default.snap(@src(),
+    try expectTranscript(
         \\=== str ===
         \\source: ['a 1] str
         \\exit: 0
@@ -1251,5 +1250,44 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'domain 'msg "malformed definition annotation" 'word 'def 'trace ['def] 'data {'source "<command>" 'line 1 'col 23}}
         \\
-    ).diff(transcript.written(), true);
+    , transcript.written());
+}
+
+/// The one placeholder a golden transcript may hold: a source coordinate that
+/// unrelated prelude edits move, which must still be present and numeric.
+const any_digits = "<^\\d+$>";
+
+/// Compares a transcript with its golden text, where each `any_digits` in the
+/// golden text stands for one or more decimal digits and everything else is
+/// literal. On a mismatch, reports the first differing line of each.
+fn expectTranscript(expected: []const u8, actual: []const u8) !void {
+    var expected_rest = expected;
+    var actual_rest = actual;
+    while (true) {
+        const literal_end = std.mem.indexOf(u8, expected_rest, any_digits) orelse expected_rest.len;
+        const literal = expected_rest[0..literal_end];
+        if (!std.mem.startsWith(u8, actual_rest, literal)) break;
+        actual_rest = actual_rest[literal.len..];
+        expected_rest = expected_rest[literal_end..];
+        if (expected_rest.len == 0) {
+            if (actual_rest.len == 0) return;
+            break;
+        }
+        expected_rest = expected_rest[any_digits.len..];
+        const digits = for (actual_rest, 0..) |byte, index| {
+            if (!std.ascii.isDigit(byte)) break index;
+        } else actual_rest.len;
+        if (digits == 0) break;
+        actual_rest = actual_rest[digits..];
+    }
+    const offset = actual.len - actual_rest.len;
+    const line_start = if (std.mem.lastIndexOfScalar(u8, actual[0..offset], '\n')) |newline| newline + 1 else 0;
+    const line_end = std.mem.indexOfScalarPos(u8, actual, offset, '\n') orelse actual.len;
+    const expected_line_end = std.mem.indexOfScalar(u8, expected_rest, '\n') orelse expected_rest.len;
+    std.debug.print("transcript differs at byte {d}\nactual line:   {s}\nexpected from: {s}\n", .{
+        offset,
+        actual[line_start..line_end],
+        expected_rest[0..expected_line_end],
+    });
+    return error.TestExpectedEqual;
 }

@@ -183,7 +183,7 @@ pub const Console = struct {
 
     pub fn writeOutput(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
         const writer = self.output;
-        std.Io.Threaded.mutexLock(&self.output_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeAll(bytes) catch return error.WriteFailed;
         if (newline) writer.writeByte('\n') catch return error.WriteFailed;
@@ -192,7 +192,7 @@ pub const Console = struct {
 
     pub fn writeDiagnostics(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
         const writer = self.diagnostics;
-        std.Io.Threaded.mutexLock(&self.diagnostics_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.diagnostics_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.diagnostics_mutex);
         writer.writeAll(bytes) catch return error.WriteFailed;
         if (newline) writer.writeByte('\n') catch return error.WriteFailed;
@@ -227,7 +227,7 @@ pub const Console = struct {
         const before = window.before;
         const after = window.after;
         const writer = self.output;
-        std.Io.Threaded.mutexLock(&self.output_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeByte('\r') catch return error.WriteFailed;
         writer.writeAll(prompt.text()) catch return error.WriteFailed;
@@ -242,7 +242,7 @@ pub const Console = struct {
 
     pub fn writeCandidates(self: *Console, candidates: []const []const u8) error{WriteFailed}!void {
         const writer = self.output;
-        std.Io.Threaded.mutexLock(&self.output_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeAll("\r\n") catch return error.WriteFailed;
         for (candidates, 0..) |candidate, index| {

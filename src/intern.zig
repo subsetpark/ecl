@@ -228,12 +228,12 @@ pub const Table = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     buckets: [bucket_count]AtomicBucket =
-        [_]AtomicBucket{AtomicBucket.init(no_entry)} ** bucket_count,
+        @as([bucket_count]AtomicBucket, @splat(AtomicBucket.init(no_entry))),
     count: std.atomic.Value(u32) = .init(0),
     entry_segments: [max_segments]AtomicEntrySegment =
-        [_]AtomicEntrySegment{AtomicEntrySegment.init(null)} ** max_segments,
+        @as([max_segments]AtomicEntrySegment, @splat(AtomicEntrySegment.init(null))),
     byte_segments: [max_segments]AtomicByteSegment =
-        [_]AtomicByteSegment{AtomicByteSegment.init(null)} ** max_segments,
+        @as([max_segments]AtomicByteSegment, @splat(AtomicByteSegment.init(null))),
     byte_segment_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Table {
@@ -343,7 +343,7 @@ pub const Table = struct {
                 },
                 .reserve => result: {
                     if (self.bytes.len > std.math.maxInt(u32)) return error.OutOfMemory;
-                    std.Io.Threaded.mutexLock(&self.table.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&self.table.mutex);
                     defer std.Io.Threaded.mutexUnlock(&self.table.mutex);
                     const reservation = try self.table.reserveSpace(self.bytes.len);
                     reservation.segment.used += self.bytes.len;
@@ -364,7 +364,7 @@ pub const Table = struct {
                     break :result .pending;
                 },
                 .commit => result: {
-                    std.Io.Threaded.mutexLock(&self.table.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&self.table.mutex);
                     defer std.Io.Threaded.mutexUnlock(&self.table.mutex);
                     const hash = self.lookup.hash.?;
                     const bucket = bucketIndex(hash);

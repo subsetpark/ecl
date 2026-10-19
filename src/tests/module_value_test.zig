@@ -321,7 +321,7 @@ test "module registration: a diagnostic spells the same word its failure reports
     // registered under several names, the unqualified atom alone would not say
     // which registration failed. A name long enough to exhaust the scratch is
     // the case that used to substitute it.
-    const long = "m" ** 330;
+    const long = &@as([330]u8, @splat('m'));
     const source = "[] (( -- n ) (1 2) 'two def) '" ++ long ++ " @defm " ++ long ++ ".two";
     const failure = switch (try runtime.runUnit("module-value-test.ecl", source)) {
         .err => |item| item,

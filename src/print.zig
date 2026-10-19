@@ -258,7 +258,7 @@ pub const RenderCursor = struct {
             },
             .display_scan => |scan| try self.scanDisplaySequence(scan, writer),
             .spaces => |remaining| {
-                const padding = [_]u8{' '} ** 256;
+                const padding: [256]u8 = @splat(' ');
                 const count = @min(remaining, padding.len);
                 try self.writeAll(writer, padding[0..count]);
                 if (count != remaining) try self.actions.push(.{ .spaces = remaining - count });
@@ -623,7 +623,7 @@ pub const StackLayoutCursor = struct {
                         self.finishRow(block, scan_end, false) catch return error.OutOfMemory;
                 },
                 .spaces => {
-                    const padding = [_]u8{' '} ** 256;
+                    const padding: [256]u8 = @splat(' ');
                     const count = @min(self.pending_spaces, padding.len);
                     try writer.writeAll(padding[0..count]);
                     self.pending_spaces -= count;
@@ -904,11 +904,11 @@ test "canonical printer renders the public value syntax" {
 test "float rendering covers decimal extremes and round-trips finite bits" {
     const allocator = std.testing.allocator;
     const cases = .{
-        .{ @as(f64, 1e127), "1" ++ "0" ** 127 ++ ".0" },
-        .{ @as(f64, 1e128), "1" ++ "0" ** 128 ++ ".0" },
-        .{ @as(f64, -1e308), "-1" ++ "0" ** 308 ++ ".0" },
-        .{ std.math.floatTrueMin(f64), "0." ++ "0" ** 323 ++ "5" },
-        .{ -std.math.floatTrueMin(f64), "-0." ++ "0" ** 323 ++ "5" },
+        .{ @as(f64, 1e127), "1" ++ &@as([127]u8, @splat('0')) ++ ".0" },
+        .{ @as(f64, 1e128), "1" ++ &@as([128]u8, @splat('0')) ++ ".0" },
+        .{ @as(f64, -1e308), "-1" ++ &@as([308]u8, @splat('0')) ++ ".0" },
+        .{ std.math.floatTrueMin(f64), "0." ++ &@as([323]u8, @splat('0')) ++ "5" },
+        .{ -std.math.floatTrueMin(f64), "-0." ++ &@as([323]u8, @splat('0')) ++ "5" },
     };
     inline for (cases) |case| {
         const scalar = Value{ .float = case[0] };

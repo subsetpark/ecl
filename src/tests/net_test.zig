@@ -135,7 +135,7 @@ const Probe = enum { accepted, refused };
 
 /// Connect to the loopback port from outside the Session. A bound listener
 /// completes the handshake into its backlog; a closed one refuses. Loopback
-/// answers synchronously either way. No deadline is set because Zig 0.16's
+/// answers synchronously either way. No deadline is set because Zig 0.17's
 /// threaded backend panics on `ConnectOptions.timeout` (`TODO implement
 /// netConnectIpPosix with timeout`); revisit when std implements it.
 fn probe(port: u16) !Probe {

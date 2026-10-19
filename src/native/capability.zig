@@ -556,11 +556,11 @@ fn validateContinuationState(comptime State: type) void {
         .void, .bool, .int, .float, .@"enum" => {},
         .array => |array| validateContinuationState(array.child),
         .optional => |optional| validateContinuationState(optional.child),
-        .@"struct" => |record| inline for (record.fields) |field|
-            validateContinuationState(field.type),
+        .@"struct" => |record| inline for (record.field_types) |field_type|
+            validateContinuationState(field_type),
         .@"union" => |tagged| {
             if (tagged.tag_type == null) @compileError("ecl-native: Reschedule unions must be tagged");
-            inline for (tagged.fields) |field| validateContinuationState(field.type);
+            inline for (tagged.field_types) |field_type| validateContinuationState(field_type);
         },
         else => @compileError(
             "ecl-native: Reschedule State must contain only owned scalar value fields",

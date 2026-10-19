@@ -177,7 +177,7 @@ const Cell = struct {
         self.releaseReadiness();
     }
     pub fn cancelExternalMember(self: *Cell, scope: *external.ScopeIdentity) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (self.ownership.authorizesCancellation(scope)) self.cancelLocked();
     }
@@ -217,7 +217,7 @@ const Cell = struct {
         // This controller alone owns the Future. Cancellation only signals us;
         // it never operates on that Future from a scheduler worker.
         var future = std.Io.concurrent(self.service.io, Cell.exchangeTask, .{self}) catch |err| return .{ .io = err };
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         while (!self.io_finished and !self.cancelled.load(.acquire))
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         const cancel = self.cancelled.load(.acquire);
@@ -226,7 +226,7 @@ const Cell = struct {
     }
     fn exchangeTask(self: *Cell) ?Fault {
         defer {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             self.io_finished = true;
             self.changed.broadcast(blockingIo());
             std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -370,7 +370,7 @@ pub const Request = opaque {
     }
     pub fn result(self: *Request) union(enum) { pending, complete, failed: Failure } {
         const cell = self.state();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         return switch (cell.phase) {
             .preparing, .active => .pending,
@@ -381,7 +381,7 @@ pub const Request = opaque {
     /// Completion synchronizes every response write and transfers its storage.
     pub fn take(self: *Request) Response {
         const cell = self.state();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         std.debug.assert(cell.phase == .joined);
         const response = cell.phase.joined.response;
@@ -390,7 +390,7 @@ pub const Request = opaque {
     }
     pub fn cancel(self: *Request) void {
         const cell = self.state();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         cell.cancelLocked();
     }
@@ -399,7 +399,7 @@ pub const Request = opaque {
     pub fn retire(self: *Request) bool {
         const cell = self.state();
         self.cancel();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         const active = cell.phase == .active;
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         if (active) return false;

@@ -35,8 +35,8 @@ pub const Fixture = struct {
             .filesystem = .{ .roots = &self.roots },
             .clock = .{ .wall = .{ .fixed = 0 } },
         };
-        inline for (std.meta.fields(Options)) |field| {
-            if (@field(overrides, field.name)) |value| @field(result, field.name) = value;
+        inline for (@typeInfo(Options).@"struct".field_names) |field_name| {
+            if (@field(overrides, field_name)) |value| @field(result, field_name) = value;
         }
         return result;
     }

@@ -87,7 +87,7 @@ pub const PortDefinition = struct {
     capacity_failure: ?CapacityFailureDefinition = null,
     execution: union(enum) {
         controller: struct {
-            activities: [@import("port-declarations").max_activities]?struct { endpoints: u64, execute: abi.PortControllerFn } = .{null} ** @import("port-declarations").max_activities,
+            activities: [@import("port-declarations").max_activities]?struct { endpoints: u64, execute: abi.PortControllerFn } = @splat(null),
             pub fn activityCount(self: @This()) u32 {
                 var count: u32 = 0;
                 for (self.activities) |entry| if (entry != null) {
@@ -489,8 +489,8 @@ pub const ValidateCursor = struct {
         definitions: []ValidatedDefinition,
         endpoints: []EndpointSlot,
         definition_index: usize = 0,
-        endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
-        resource_endpoint_masks: [abi.max_port_definitions]u64 = .{0} ** abi.max_port_definitions,
+        endpoint_masks: [abi.max_port_definitions]u64 = @splat(0),
+        resource_endpoint_masks: [abi.max_port_definitions]u64 = @splat(0),
         binding_index: usize = 0,
         activity_index: usize = 0,
     };
@@ -669,7 +669,7 @@ pub const ValidateCursor = struct {
             return error.MissingInvoke;
         if (descriptor.port_count > abi.max_port_definitions) return error.CountOverflow;
         try validateRecordSize(descriptor.port_record_size, @sizeOf(abi.PortDefinition));
-        var ports: PortDefinitions = .{null} ** abi.max_port_definitions;
+        var ports: PortDefinitions = @splat(null);
         if (descriptor.port_count != 0) {
             const records = try RecordArray(abi.PortDefinition).init(
                 descriptor.ports_ptr orelse return error.InvalidPortDefinition,
@@ -1109,9 +1109,10 @@ pub fn mapErrorKind(kind: abi.ErrorKindWire) ?machine.ErrorKind {
 }
 
 comptime {
-    for (@typeInfo(abi.ErrorKindWire).@"enum".fields) |field| {
-        const wire: abi.ErrorKindWire = @enumFromInt(field.value);
-        if (!std.mem.eql(u8, @tagName(mapErrorKind(wire).?), field.name))
+    const info = @typeInfo(abi.ErrorKindWire).@"enum";
+    for (info.field_names, info.field_values) |field_name, field_value| {
+        const wire: abi.ErrorKindWire = @enumFromInt(field_value);
+        if (!std.mem.eql(u8, @tagName(mapErrorKind(wire).?), field_name))
             @compileError("native error-kind mapping no longer matches machine.ErrorKind");
     }
 }

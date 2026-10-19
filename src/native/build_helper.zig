@@ -6,7 +6,7 @@ pub const ExtensionOptions = struct {
     name: []const u8,
     root_source_file: std.Build.LazyPath,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     ecl_native: *std.Build.Module,
 };
 

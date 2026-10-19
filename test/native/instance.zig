@@ -839,8 +839,8 @@ fn workOperationRetired(call: *ecl.Call("-- count")) ecl.CallbackResult {
 fn packedStarted(call: *ecl.Call("-- count")) ecl.CallbackResult {
     return call.complete(.{ecl.Scalar.int(call.instance(Instance).?.packed_started.load(.acquire))});
 }
-const packed_bytes = [_]u8{165} ** (65536 + 1);
-const packed_symbol = "λ" ** 300;
+const packed_bytes: [65536 + 1]u8 = @splat(165);
+const packed_symbol: *const [600]u8 = @ptrCast(&@as([300][2]u8, @splat("λ".*)));
 const PackedConstruction = struct {
     mode: i64 = 0,
     phase: enum { header, bytes, symbol, chunks, symbol_end, list, dictionary, finish, done } = .header,

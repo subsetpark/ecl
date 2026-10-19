@@ -512,7 +512,7 @@ pub const BindingCell = struct {
         self.releases.retire(self, &self.retirement);
     }
     fn lockRetired(self: *BindingCell) void {
-        std.Io.Threaded.mutexLock(&self.retire_lock);
+        std.Io.Threaded.mutexLockUncancelable(&self.retire_lock);
     }
     fn detachRetired(self: *BindingCell) ?*BindingSnapshot {
         if (!self.publisher.quiescent()) return null;
@@ -888,7 +888,7 @@ pub const Environment = struct {
         };
     }
     fn lockBlocking(self: *Environment) void {
-        std.Io.Threaded.mutexLock(&self.writer);
+        std.Io.Threaded.mutexLockUncancelable(&self.writer);
     }
     fn unlock(self: *Environment) void {
         std.Io.Threaded.mutexUnlock(&self.writer);
@@ -1539,7 +1539,7 @@ pub const Scope = struct {
             .module_root => |target| target,
             .isolated => blk: {
                 if (self.isolated_environment.load(.acquire)) |target| break :blk target;
-                std.Io.Threaded.mutexLock(&self.publication_lock);
+                std.Io.Threaded.mutexLockUncancelable(&self.publication_lock);
                 defer std.Io.Threaded.mutexUnlock(&self.publication_lock);
                 if (self.isolated_environment.load(.acquire)) |target| break :blk target;
                 const created = try self.allocator.create(Environment);
@@ -1963,7 +1963,7 @@ const ScopeIndex = struct {
             if (leaf_candidate) |unused| allocator.destroy(unused);
         }
 
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         const raw = self.next.load(.monotonic);
         if (raw > max_id) return error.OutOfMemory;
@@ -2172,7 +2172,7 @@ pub const Env = enum(usize) {
         // there is no safe earlier point to free one. Taking ownership before
         // registering leaves the failure path with nothing to undo.
         {
-            std.Io.Threaded.mutexLock(&backing.cells_mutex);
+            std.Io.Threaded.mutexLockUncancelable(&backing.cells_mutex);
             defer std.Io.Threaded.mutexUnlock(&backing.cells_mutex);
             backing.cells.append(allocator, cell) catch |err| {
                 allocator.destroy(cell);

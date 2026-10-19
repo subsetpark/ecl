@@ -85,7 +85,7 @@ pub const LowerCursor = struct {
             index: usize = 0,
             work: BodyWork = .top,
         },
-        word_start: struct { words: Words = .{0} ** 3, index: usize = 0 },
+        word_start: struct { words: Words = @splat(0), index: usize = 0 },
         word_intern: struct {
             words: Words,
             index: usize,

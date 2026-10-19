@@ -475,7 +475,7 @@ const Transaction = struct {
     candidates: std.ArrayList(CandidateEntry) = .empty,
     outputs: std.ArrayList(Value) = .empty,
     builders: [abi.max_builder_slots]?*AggregateBuilder =
-        [_]?*AggregateBuilder{null} ** abi.max_builder_slots,
+        @as([abi.max_builder_slots]?*AggregateBuilder, @splat(null)),
     next_builder_serial: u32 = 1,
     candidate_generation: u32 = 0,
     terminal: Terminal = .idle,
@@ -569,7 +569,7 @@ const Transaction = struct {
         if (self.terminal != .idle) return .invalid;
         var failure: Terminal = .{ .fail = .{
             .kind = .type,
-            .message = [_]u8{0} ** abi.max_error_message_bytes,
+            .message = @as([abi.max_error_message_bytes]u8, @splat(0)),
             .message_len = message.len,
         } };
         @memcpy(failure.fail.message[0..message.len], message);
@@ -1279,7 +1279,7 @@ fn hostFail(
     const kind_value = descriptor_api.mapErrorKind(kind) orelse return .invalid;
     var failure: Terminal = .{ .fail = .{
         .kind = kind_value,
-        .message = [_]u8{0} ** abi.max_error_message_bytes,
+        .message = @as([abi.max_error_message_bytes]u8, @splat(0)),
         .message_len = message.len,
     } };
     @memcpy(failure.fail.message[0..message.len], message);

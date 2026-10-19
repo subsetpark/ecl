@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
         const dir = std.Io.Dir.cwd();
         try dir.createDirPath(init.io, "repository/objects/nested");
         try dir.writeFile(init.io, .{ .sub_path = "repository/objects/nested/object", .data = "object" });
-        try dir.writeFile(init.io, .{ .sub_path = "commit", .data = "a" ** 40 });
+        try dir.writeFile(init.io, .{ .sub_path = "commit", .data = &@as([40]u8, @splat('a')) });
         try dir.writeFile(init.io, .{ .sub_path = "manifest", .data = "{}" });
         try dir.writeFile(init.io, .{ .sub_path = "artifact.tgz", .data = "ab" });
         return;
@@ -97,8 +97,8 @@ fn large(init: std.process.Init, arguments: []const []const u8) !void {
     var error_output = stderrWriter(init.io, &error_buffer);
     var remaining_stdout = stdout_bytes;
     var remaining_stderr = stderr_bytes;
-    const stdout_chunk = "o" ** 4096;
-    const stderr_chunk = "e" ** 4096;
+    const stdout_chunk = &@as([4096]u8, @splat('o'));
+    const stderr_chunk = &@as([4096]u8, @splat('e'));
     while (remaining_stdout != 0 or remaining_stderr != 0) {
         if (remaining_stdout != 0) {
             const amount = @min(remaining_stdout, stdout_chunk.len);
@@ -121,9 +121,9 @@ fn flood(init: std.process.Init) !void {
     var error_buffer: [4096]u8 = undefined;
     var error_output = stderrWriter(init.io, &error_buffer);
     while (true) {
-        try output.interface.writeAll("o" ** 4096);
+        try output.interface.writeAll(&@as([4096]u8, @splat('o')));
         try output.interface.flush();
-        try error_output.interface.writeAll("e" ** 4096);
+        try error_output.interface.writeAll(&@as([4096]u8, @splat('e')));
         try error_output.interface.flush();
     }
 }

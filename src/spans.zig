@@ -221,7 +221,7 @@ const SpanArchiveState = struct {
 
         fn deinit(self: *IdentityTransaction) void {
             if (self.held) |unused| {
-                std.Io.Threaded.mutexLock(&self.state.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&self.state.mutex);
                 defer std.Io.Threaded.mutexUnlock(&self.state.mutex);
                 self.state.index.unclaim(unused);
             }
@@ -239,12 +239,12 @@ const SpanArchiveState = struct {
         allocator: std.mem.Allocator,
     ) error{OutOfMemory}!?IdentityTransaction {
         const wanted = wanted: {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             defer std.Io.Threaded.mutexUnlock(&self.mutex);
             break :wanted try self.index.candidate();
         };
         try self.ensureIndexSlot(allocator, wanted);
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (!self.index.claim(wanted)) return null;
         return .{ .state = self, .held = wanted };
@@ -261,7 +261,7 @@ const SpanArchiveState = struct {
         const branch_index, const leaf_index, _ = HeaderIndex.coordinates(identity);
         var need_branch = false;
         var need_leaf = false;
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         if (self.index.branches[branch_index]) |branch| {
             need_leaf = branch.leaves[leaf_index] == null;
         } else {
@@ -284,7 +284,7 @@ const SpanArchiveState = struct {
         leaf_candidate.?.* = .{ .entries = undefined };
         defer if (leaf_candidate) |candidate| allocator.destroy(candidate);
 
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         if (self.index.branches[branch_index] == null) {
             self.index.branches[branch_index] = branch_candidate.?;
             branch_candidate = null;
@@ -298,7 +298,7 @@ const SpanArchiveState = struct {
     }
 
     fn publish(self: *SpanArchiveState, entry: *Entry) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         entry.previous = self.last;
         if (self.last) |last| last.next = entry else self.first = entry;
@@ -315,13 +315,13 @@ const SpanArchiveState = struct {
         header: *value.ListHandle,
     ) void {
         if (namespace != self.identity_issuer.constructionNamespace()) return;
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         self.index.release(identity, header);
     }
 
     fn indexed(self: *SpanArchiveState, header: *value.ListHandle) ?IndexedSpan {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         const identity = heap.codeIdentity(self.identity_issuer, header) orelse return null;
         return self.index.get(identity, header);
@@ -338,7 +338,7 @@ const SpanArchiveState = struct {
         rewritten: *value.ListHandle,
         existing: IndexedSpan,
     ) bool {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (heap.assignCodeIdentity(self.identity_issuer, rewritten, identity) != .assigned)
             return false;
@@ -353,7 +353,7 @@ const SpanArchiveState = struct {
         self: *SpanArchiveState,
         header: *value.ListHandle,
     ) bool {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return switch (heap.inspectCodeIdentity(self.identity_issuer, header)) {
             .unassigned => true,
@@ -371,7 +371,7 @@ const SpanArchiveState = struct {
         archive_entry: *const Entry,
         span_entry: *const reader.SpanTable.Entry,
     ) bool {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         switch (heap.inspectCodeIdentity(self.identity_issuer, span_entry.header)) {
             .foreign_namespace => @panic("validated provenance namespace changed before commit"),
@@ -472,7 +472,7 @@ pub const SpanArchiveOwner = enum(usize) {
         // retires from here on keeps its slot, which is about to be freed with
         // the rest of the pages.
         backing.host_owner.detachCodeRetirement(&backing.code_retirement);
-        std.Io.Threaded.mutexLock(&runtime.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&runtime.mutex);
         var current = runtime.first;
         runtime.first = null;
         runtime.last = null;

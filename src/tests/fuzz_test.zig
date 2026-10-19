@@ -1,4 +1,5 @@
 const runtime_fixture = @import("runtime_fixture.zig");
+const support = @import("kernel_test_support.zig");
 const std = @import("std");
 const poll = @import("../poll.zig");
 const formatter = @import("../formatter.zig");
@@ -129,12 +130,13 @@ fn isSizeField(comptime name: []const u8) bool {
 fn varyWireSizes(smith: *std.testing.Smith, record: anytype) void {
     const Pointer = @TypeOf(record);
     const T = @typeInfo(Pointer).pointer.child;
-    inline for (@typeInfo(T).@"struct".fields) |field| switch (@typeInfo(field.type)) {
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| switch (@typeInfo(field_type)) {
         .int => {
-            if (isSizeField(field.name) and smith.value(bool))
-                @field(record, field.name) = smith.value(field.type);
+            if (isSizeField(field_name) and smith.value(bool))
+                @field(record, field_name) = smith.value(field_type);
         },
-        .@"struct" => varyWireSizes(smith, &@field(record, field.name)),
+        .@"struct" => varyWireSizes(smith, &@field(record, field_name)),
         else => {},
     };
 }
@@ -608,8 +610,8 @@ test "fuzz: editor action traces preserve scalar boundaries and ownership" {
         "\x00\xff\x7f",
         "\x1b[2J\x1b]0;title\x07",
         "\xe0\xa0\x80\xc5\xb7\xc2",
-        "界" ** 64,
-        "e\u{0301}\u{200b}" ** 64,
+        support.repeated("界", 64),
+        support.repeated("e\u{0301}\u{200b}", 64),
     } });
 }
 

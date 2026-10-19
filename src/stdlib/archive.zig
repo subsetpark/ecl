@@ -439,7 +439,7 @@ const UnpackDriver = struct {
             inputs: EncodedInputs,
             tar: heap.Owned([]u8),
             index: usize = 0,
-            crc: std.hash.crc.Crc32 = .init(),
+            crc: std.hash.Crc32 = .init(),
         },
         allocate_slots: struct { inputs: EncodedInputs, tar: heap.Owned([]u8) },
         initialize_slots: struct {

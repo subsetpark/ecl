@@ -15,7 +15,7 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 fn lock(mutex: *std.Io.Mutex) void {
-    std.Io.Threaded.mutexLock(mutex);
+    std.Io.Threaded.mutexLockUncancelable(mutex);
 }
 fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
@@ -91,7 +91,7 @@ pub const Resource = struct {
         if (lane_count == 0 or lane_count > max_lanes or capacity < lane_count or capacity > 256) return error.InvalidLimits;
     }
     fn initializeReserved(self: *Cell, adapter: ResourceBackend, worker: *const scheduler.WorkerScheduler, lane_count: u32, capacity: u32, graceful: bool, group: *Group) void {
-        self.* = .{ .adapter = adapter, .allocator = adapter.allocator(), .scheduler = worker, .controllers = group, .lane_count = lane_count, .operation_capacity = capacity, .graceful = graceful, .lanes = .{Operations.init(&self.mutex)} ** max_lanes };
+        self.* = .{ .adapter = adapter, .allocator = adapter.allocator(), .scheduler = worker, .controllers = group, .lane_count = lane_count, .operation_capacity = capacity, .graceful = graceful, .lanes = @splat(Operations.init(&self.mutex)) };
     }
     fn advanceCooperative(self: *Cell) scheduler.Cooperative.Progress {
         lock(&self.mutex);
@@ -558,7 +558,7 @@ pub const Resource = struct {
             cell: *Cell,
             parent: ?Parent,
             pub fn lock(item: *@This()) void {
-                std.Io.Threaded.mutexLock(&item.cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&item.cell.mutex);
             }
             pub fn unlock(item: *@This()) void {
                 std.Io.Threaded.mutexUnlock(&item.cell.mutex);
@@ -577,12 +577,12 @@ pub const Resource = struct {
             }
         };
         var publication: Publication = .{ .cell = self, .parent = null };
-        var incoming: [16]?external.ScopeMember = .{null} ** 16;
+        var incoming: [16]?external.ScopeMember = @splat(null);
         incoming[0] = external.scopeMember(Cell, self);
         if (!try provisional.publish(incoming, &publication)) return error.ScopeClosing;
         if (dependent) |parent| {
             publication.parent = parent;
-            incoming = .{null} ** 16;
+            incoming = @splat(null);
             incoming[0] = external.scopeMember(Cell, self);
             if (!try parent.group.publish(incoming, &publication)) return error.ScopeClosing;
             if (parent.lifetime == .inherited) if (parent.lifetime.inherited) |group| {
@@ -590,7 +590,7 @@ pub const Resource = struct {
                     cell: *Cell,
                     group: *scheduler.ExternalGroup,
                     pub fn lock(item: *@This()) void {
-                        std.Io.Threaded.mutexLock(&item.cell.mutex);
+                        std.Io.Threaded.mutexLockUncancelable(&item.cell.mutex);
                     }
                     pub fn unlock(item: *@This()) void {
                         std.Io.Threaded.mutexUnlock(&item.cell.mutex);
@@ -604,7 +604,7 @@ pub const Resource = struct {
                     }
                 };
                 var inheritance: Inheritance = .{ .cell = self, .group = group };
-                incoming = .{null} ** 16;
+                incoming = @splat(null);
                 incoming[0] = external.scopeMember(Cell, self);
                 if (!try group.publish(incoming, &inheritance)) return error.ScopeClosing;
             };

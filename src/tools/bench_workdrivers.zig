@@ -514,7 +514,7 @@ fn runModuleLocalCallSite(
 }
 
 pub fn main(init: std.process.Init) !void {
-    if (builtin.mode == .Debug) return error.ReleaseBuildRequired;
+    if (builtin.mode == .debug) return error.ReleaseBuildRequired;
     var args = std.process.Args.Iterator.init(init.minimal.args);
     defer args.deinit();
     _ = args.skip();

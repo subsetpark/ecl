@@ -21,12 +21,10 @@ const ScalarError = error{ Type, Overflow, Domain, ShiftCount };
 const ScalarBinary = *const fn (Value, Value) ScalarError!Value;
 const ScalarUnary = *const fn (Value) ScalarError!Value;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(BinaryOp)) |field| {
-        const operation: BinaryOp = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(BinaryOp)) |operation| {
         if (comptime binaryDefinition(operation)) |word| try core.installBuiltin(word);
     }
-    inline for (std.meta.fields(UnaryOp)) |field| {
-        const operation: UnaryOp = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(UnaryOp)) |operation| {
         if (comptime unaryDefinition(operation)) |word| try core.installBuiltin(word);
     }
 }

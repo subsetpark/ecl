@@ -215,12 +215,12 @@ pub const FilesystemErrorData = struct {
 /// until an unwind materializes the language dict.
 pub const EclErr = struct {
     kind: ErrorKind,
-    message: [512]u8 = [_]u8{0} ** 512,
+    message: [512]u8 = @splat(0),
     message_len: usize = 0,
     word: ?intern.TraceWord = null,
     trace_parent: ?intern.TraceWord = null,
     site: ?FailureSite = null,
-    data: [6]ErrorData = .{empty_error_data} ** 6,
+    data: [6]ErrorData = @splat(empty_error_data),
     data_len: usize = 0,
     raised: ?Value = null,
     pub fn init(kind: ErrorKind, message: []const u8) EclErr {
@@ -388,10 +388,10 @@ const OrdinaryErrorCursor = struct {
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
-    names: [9]u32 = .{0} ** 9,
+    names: [9]u32 = @splat(0),
     // Every recorded datum plus the three location fields.
-    data_pairs: [9]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 9,
-    outer_pairs: [5]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 5,
+    data_pairs: [9]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
+    outer_pairs: [5]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
     state: State = .{ .names = 0 },
 
     fn init(
@@ -737,10 +737,10 @@ const RaisedErrorCursor = struct {
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
-    names: [8]u32 = .{0} ** 8,
-    fields: [5]?Value = .{null} ** 5,
-    message_bytes: [512]u8 = .{0} ** 512,
-    data_fields: [3]?Value = .{null} ** 3,
+    names: [8]u32 = @splat(0),
+    fields: [5]?Value = @splat(null),
+    message_bytes: [512]u8 = @splat(0),
+    data_fields: [3]?Value = @splat(null),
     built: BuiltValues = .{},
     state: State = .{ .names = 0 },
 
@@ -7960,8 +7960,8 @@ const ModuleCallSiteCache = struct {
         if (capacity != resolution_core.GuardPool.capacity) @compileError("cache and guard storage must have the same bound");
     }
     guards: resolution_core.GuardPool = .{},
-    entries: [capacity]?Entry = .{null} ** capacity,
-    victims: [set_count]u1 = .{0} ** set_count,
+    entries: [capacity]?Entry = @splat(null),
+    victims: [set_count]u1 = @splat(0),
 
     fn set(site: ErrorSite) usize {
         return (@intFromPtr(site.code) >> 4 ^ site.index) % set_count;

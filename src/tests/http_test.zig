@@ -714,8 +714,7 @@ const StageIo = struct {
         var table = threaded.io().vtable.*;
         table.netLookup = lookup;
         table.netConnectIp = connect;
-        table.netRead = read;
-        table.netWrite = write;
+        table.operate = operate;
         table.netClose = close;
         return .{ .threaded = threaded, .table = table, .stage = stage };
     }
@@ -740,24 +739,28 @@ const StageIo = struct {
         if (self.stage == .connection) try self.block();
         return .{ .handle = 0, .address = address.* };
     }
-    fn read(raw: ?*anyopaque, _: std.Io.net.Socket.Handle, _: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+    fn operate(raw: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
         const self = from(raw);
-        if (self.stage != .tls) return error.Unexpected;
-        try self.block();
-        return 0;
-    }
-    fn write(raw: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, buffers: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-        const self = from(raw);
-        var count = header.len;
-        var has_payload = std.mem.indexOf(u8, header, "PING") != null;
-        for (buffers, 0..) |buffer, index| {
-            count += buffer.len * (if (index + 1 == buffers.len) splat else 1);
-            has_payload = has_payload or std.mem.indexOf(u8, buffer, "PING") != null;
+        switch (operation) {
+            .net_read => {
+                if (self.stage != .tls) return .{ .net_read = error.Unexpected };
+                try self.block();
+                return .{ .net_read = .{ .data_len = 0 } };
+            },
+            .net_write => |write| {
+                var count = write.header.len;
+                var has_payload = std.mem.indexOf(u8, write.header, "PING") != null;
+                for (write.data, 0..) |buffer, index| {
+                    count += buffer.len * (if (index + 1 == write.data.len) write.splat else 1);
+                    has_payload = has_payload or std.mem.indexOf(u8, buffer, "PING") != null;
+                }
+                if (self.stage == .upload and has_payload) try self.block();
+                return .{ .net_write = count };
+            },
+            else => return self.threaded.io().vtable.operate(raw, operation),
         }
-        if (self.stage == .upload and has_payload) try self.block();
-        return count;
     }
-    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket.Handle) void {}
+    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket) void {}
 };
 
 test "http: cancellation reaches resolution connection TLS and upload I/O tasks" {

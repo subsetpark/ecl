@@ -21,8 +21,7 @@ const MachineError = support.MachineError;
 const Op = support.TextOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(Op)) |field| {
-        const operation: Op = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Op)) |operation| {
         if (comptime definition(operation)) |word| try core.installBuiltin(word);
     }
 }

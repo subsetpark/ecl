@@ -484,7 +484,7 @@ const RequestDriver = struct {
             },
             .body_allocate => |*exchange_data| {
                 const bytes = try self.allocator.alloc(u8, self.chunks.len);
-                exchange_data.body = .{ .items = bytes, .capacity = bytes.len };
+                exchange_data.body = .fromOwnedSlice(bytes);
                 const exchange = exchange_data.*;
                 self.state = .{ .body_flatten = .{ .exchange = exchange } };
             },

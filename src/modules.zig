@@ -873,7 +873,7 @@ const Arbiter = struct {
 /// unlinked. A retired slot's queue drains on its own: admission is closed,
 /// so each waiter that is granted discovers a superseded home and releases.
 fn arbiterQuiescent(owning: *ModuleSlot) bool {
-    std.Io.Threaded.mutexLock(&owning.arbiter.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&owning.arbiter.mutex);
     defer std.Io.Threaded.mutexUnlock(&owning.arbiter.mutex);
     return owning.arbiter.head == null and !owning.arbiter.active;
 }
@@ -881,7 +881,7 @@ fn arbiterQuiescent(owning: *ModuleSlot) bool {
 /// Closes admission from inside the arbiter lock, so no turn can be queued
 /// after the owner decides to remove the slot.
 fn closeArbiter(owning: *ModuleSlot) void {
-    std.Io.Threaded.mutexLock(&owning.arbiter.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&owning.arbiter.mutex);
     defer std.Io.Threaded.mutexUnlock(&owning.arbiter.mutex);
     owning.phase.store(.closing, .release);
 }
@@ -980,7 +980,7 @@ pub const StateTurn = struct {
         if (authority.* == .spent) return error.StateApplicationActive;
         const owning = self.lease.slot();
         const arbiter = &owning.arbiter;
-        std.Io.Threaded.mutexLock(&arbiter.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
         defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
         if (owning.phase.load(.acquire) != .live) return error.ModuleRemoved;
         self.previous = arbiter.tail;
@@ -1012,7 +1012,7 @@ pub const StateTurn = struct {
         if (self.holding) return true;
         std.debug.assert(self.linked);
         const arbiter = &self.lease.slot().arbiter;
-        std.Io.Threaded.mutexLock(&arbiter.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
         defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
         if (arbiter.active) {
             self.holding = arbiter.head == self;
@@ -1033,7 +1033,7 @@ pub const StateTurn = struct {
         }
         const arbiter = &self.lease.slot().arbiter;
         {
-            std.Io.Threaded.mutexLock(&arbiter.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
             defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
             if (self.previous) |before| before.next = self.next else arbiter.head = self.next;
             if (self.next) |after| after.previous = self.previous else arbiter.tail = self.previous;
@@ -2242,7 +2242,7 @@ pub const Registry = enum(usize) {
     }
 
     fn lockBlocking(self: *Registry) void {
-        std.Io.Threaded.mutexLock(&self.privateState().writer);
+        std.Io.Threaded.mutexLockUncancelable(&self.privateState().writer);
     }
 
     fn unlock(self: *Registry) void {
