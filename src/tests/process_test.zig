@@ -169,7 +169,7 @@ test "process: common endpoints stream concurrently through one-byte buffers" {
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
             "p proc.core.stdin port.endpoint 's set p proc.core.stdout port.endpoint 'r set " ++
-            "p proc.core.stderr port.endpoint 'd set s wrap ('w set w [0 1 255] 30 take port.write w port.finish) @spawn 'writer set " ++
+            "p proc.core.stderr port.endpoint 'd set s wrap (|w| w [0 1 255] 30 take port.write w port.finish) @spawn 'writer set " ++
             "[] (dup len 30 <) (r 8 port.read cat) while [0 1 255] 30 take match? " ++
             "writer task.await 'ok at len s port.finish r 8 port.read len r 8 port.read len d 8 port.read len " ++
             "p proc.wait 'code at p port.close s wrap ([] port.write) @attempt 'err at 'kind at",
@@ -188,8 +188,8 @@ test "process: common selectors borrow process resources and separate output fro
     defer allocator.free(fixture_path);
     const program = try source(
         "{{'executable \"{s}\" 'args (\"split\" \"abcd\" \"wxyz\")}} proc.spawn 'p set " ++
-            "p proc.core.stdout port.endpoint wrap ('r set [] (dup len 4 <) (r 8 port.read cat) while chars) @spawn 'out set " ++
-            "p proc.core.stderr port.endpoint wrap ('r set [] (dup len 4 <) (r 8 port.read cat) while chars) @spawn 'err set " ++
+            "p proc.core.stdout port.endpoint wrap (|r| [] (dup len 4 <) r (8 port.read cat) partial while chars) @spawn 'out set " ++
+            "p proc.core.stderr port.endpoint wrap (|r| [] (dup len 4 <) r (8 port.read cat) partial while chars) @spawn 'err set " ++
             "out task.await 'ok at first err task.await 'ok at first p proc.wait 'code at p port.close",
         .{fixture_path},
     );
@@ -209,7 +209,7 @@ test "process: common and domain readers share exclusion and cancellation restor
             "[] (r 1 port.read) @spawn 'a set [] (p 1 proc.read-stdout) @spawn 'b set " ++
             "a b pair task.await-any 'err at 'kind at swap pop a task.cancel b task.cancel " ++
             "a task.await pop b task.await pop s [9] port.write r wrap (1 port.read) @spawn 'readback set " ++
-            "p wrap [] ('q set s port.finish readback task.await 'ok at first q proc.wait pop q port.close) @give task.await 'ok at first " ++
+            "p wrap [] (|q| s port.finish readback task.await 'ok at first q proc.wait pop q port.close) @give task.await 'ok at first " ++
             "r wrap ([] port.write) @attempt 'err at 'kind at s wrap (1 port.read) @attempt 'err at 'kind at " ++
             "r wrap (port.finish) @attempt 'err at 'kind at " ++
             "r wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at " ++

@@ -185,6 +185,7 @@ fn withoutWord(evaluator: *Machine) MachineError!void {
 
 fn importWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
+    _ = try evaluator.definitionScope();
     var requested = try evaluator.popList();
     errdefer requested.deinit();
     const module_id = try evaluator.popSymbol();

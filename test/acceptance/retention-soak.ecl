@@ -1,7 +1,5 @@
 # Consume a count and exercise both definition snapshots and module generations.
-range
-(pop
-
+(
  ### def hot-binding
  (1) 'hot-binding def
  []
@@ -10,4 +8,4 @@ range
   (1) 'value def)
  'hot-module
  @defm)
-for
+times

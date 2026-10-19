@@ -3229,6 +3229,16 @@ pub const Machine = struct {
     pub fn currentScope(self: *const Machine) *env.Scope {
         return self.unit.current.?.scope();
     }
+    /// The root a definition, removal, or import writes. Refused inside a
+    /// combinator application, an `@attempt`, or a task, which are not roots.
+    pub fn definitionScope(self: *Machine) MachineError!*env.Scope {
+        const scope = self.currentScope();
+        if (!scope.isRoot()) return self.fail(
+            .domain,
+            "definitions are legal only at root level, not inside a combinator application, @attempt, or task",
+        );
+        return scope;
+    }
     pub fn sourceCursor(self: *const Machine, header: *Header) spans.SpanArchive.SourceCursor {
         return self.unit.archive.sourceCursor(header);
     }

@@ -56,7 +56,7 @@ const Annotation = struct {
 fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     try evaluator.require(2);
     const private = mode == .defp;
-    const scope = evaluator.currentScope();
+    const scope = try evaluator.definitionScope();
     if (private and scope.publisher() != .module)
         return evaluator.fail(.domain, "defp/setp are legal only in a module root");
     const name = try evaluator.popSymbol();
@@ -87,9 +87,11 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
 }
 
 fn unbind(evaluator: *Machine) MachineError!void {
+    try evaluator.require(1);
+    const scope = try evaluator.definitionScope();
     const name = try evaluator.popSymbol();
     try evaluator.startDriver(UnbindDriver{
-        .scope = evaluator.currentScope(),
+        .scope = scope,
         .state = .init(.{ .validate_name = .init(name) }),
     });
 }

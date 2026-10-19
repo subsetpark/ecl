@@ -1297,6 +1297,13 @@ pub const Scope = struct {
         return self.storage == .module_root;
     }
 
+    /// Whether definitions may land here: the session, core while it is being
+    /// built, or a module image. Combinator applications, `@attempt` bodies,
+    /// and tasks run in isolated scopes, where definitions are refused.
+    pub fn isRoot(self: *const Scope) bool {
+        return self.storage != .isolated;
+    }
+
     pub const RetireCursor = struct {
         scope: *Scope,
         state: State,

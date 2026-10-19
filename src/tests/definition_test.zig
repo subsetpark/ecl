@@ -45,30 +45,12 @@ test "plain call sites observe rebinding removal and core shadowing" {
     );
 }
 
-test "plain call sites preserve child shadowing and deep lexical fallback" {
-    try support.expectStack(
-        "1 'outside set (outside) 'read set " ++
-            "[] (read call read call read call 2 'outside set read call) @attempt 'ok at",
-        "[1 1 1 2]",
-    );
-    try support.expectStack(
-        "1 'outside set [] ((outside) 'read def read read " ++
-            "2 'outside set read 'outside unset read) @attempt 'ok at",
-        "[1 1 2 1]",
-    );
-    try support.expectStack(
-        "7 'outside set " ++ support.repeated("[] (", 10) ++ "outside" ++ support.repeated(") @attempt 'ok at first", 10),
-        "7",
-    );
-}
-
 test "plain call sites remain correct after observation pool and cache churn" {
     try support.expectStack(
         "1 'outside set (outside) 'probe def probe probe probe " ++
             "3 (" ++ support.repeated("outside pop ", 32) ++ ") times " ++
-            "2 'outside set probe " ++
-            "(outside) 'escaped set [] (3 'outside set escaped call) @attempt 'ok at first",
-        "1 1 1 2 3",
+            "2 'outside set probe",
+        "1 1 1 2",
     );
 }
 
@@ -529,10 +511,9 @@ test "definitions: top-level setp fails through defp's module-root check" {
             .message = "defp/setp are legal only in a module root",
         },
         .{
-            // An isolated child scope is not a module root either, even
-            // inside a module body — the check is against the unit's current
-            // current scope independently of the enclosing registration.
-            .name = "setp inside an isolated child",
+            // An application is not a root even inside a module body, so
+            // nothing defines there, privately or otherwise.
+            .name = "setp inside an application",
             .source = "[] ([1] (pop 1 'x setp) each) 'm @defm",
             .kind = "domain",
             .word = "defp",
@@ -540,18 +521,10 @@ test "definitions: top-level setp fails through defp's module-root check" {
     });
 }
 
-test "definitions: data-combinator applications reuse their words' bindings and still see their own definitions" {
-    // Each application runs `f` before and after defining its own `f`. The
-    // first reference resolves outside the application and is kept for the
-    // rest of the call; the second resolves in the application's own scope.
+test "definitions: data-combinator applications resolve their words across elements" {
     try support.expectStacks(&.{
-        .{ .name = "each", .source = "(10) 'f def [1 2] (pop f (20) 'f def f +) each", .expected = "[30 30]" },
-        .{ .name = "zip-with", .source = "(10) 'f def [1 2] [3 4] (pop pop f (20) 'f def f +) zip-with", .expected = "[30 30]" },
-        .{ .name = "fold", .source = "(10) 'f def [1 2] 0 (pop f + (20) 'f def f +) fold", .expected = "60" },
-        .{ .name = "scan", .source = "(10) 'f def [1 2] 0 (pop f + (20) 'f def f +) scan", .expected = "[30 60]" },
-        .{ .name = "fold1", .source = "(10) 'f def [1 2 3] (pop f + (20) 'f def f +) fold1", .expected = "61" },
-        // A kept source word and a kept builtin, across more applications
-        // than it takes the call-site cache to warm.
+        // A source word and a builtin, across more applications than it takes
+        // the call-site cache to warm.
         .{ .name = "source and builtin", .source = "(dup *) 'sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
         // The binding a call keeps is the one in effect when the call began.
         .{ .name = "next call", .source = "(1) 'k def [1 2] (pop k) each (2) 'k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
@@ -586,13 +559,14 @@ test "definitions: def inside a word body writes the caller's scope" {
         .{ .name = "private stays private", .source = "[] (8 'h setp) 'm @defm m.h", .kind = "undefined-word", .word = "m.h" },
     });
 
-    // Inside an isolated child unit it stays in that disposable scope.
+    // The same word called inside an application is refused: an
+    // application is not a root, so there is nowhere for the name to land.
     try support.expectErrors(&.{
         .{
-            .name = "child scope is disposable",
-            .source = "( -- ) ((-- n) (1) 'scoped def) 'h def [] (h) @attempt pop scoped",
-            .kind = "undefined-word",
-            .word = "scoped",
+            .name = "inside an application",
+            .source = "( -- ) ((-- n) (1) 'scoped def) 'h def [1] (pop h) each",
+            .kind = "domain",
+            .word = "def",
         },
     });
 }
