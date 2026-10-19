@@ -1586,7 +1586,7 @@ pub const ExecutionSite = struct {
     /// A nested activation continuing the same logical execution in `scope`:
     /// a dynamic `call`, an `@attempt` child, or a resumed qualified load.
     /// A quotation resolves where its invoker runs, so both scopes are the one
-    /// it was handed.
+    /// it was handed; it does not inherit embedded registration trust.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
         return resumed(scope, invoker.home(), invoker.site.registration_provenance);
     }

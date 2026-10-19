@@ -1332,3 +1332,21 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     // A dotted name under a stdlib prefix is an ordinary module.
     try expectOk(&runtime, "[] ((1) 'one def) 'dict.extra @defm dict.extra.one 1 = {'kind 'user} assert");
 }
+
+test "stdlib: a quotation a stdlib word applies does not inherit its reservation exemption" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    const reserved = "module name `dict` is reserved for the standard library";
+    // `and-then` applies the caller's quotation under `@attempt`, `either`
+    // inline; neither runs it as standard-library code.
+    try expectOk(&runtime, "[] result.ok ('d 'dict alias []) result.and-then 'err at 'kind at 'domain match? " ++
+        "{'kind 'user 'msg \"alias escaped\"} assert");
+    try expectErrorContains(&runtime, "[] result.ok ('dict unmodule) () result.either", &.{reserved});
+    try expectErrorContains(&runtime, "[] result.ok ([] () 'dict @defm) () result.either", &.{reserved});
+    try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+}

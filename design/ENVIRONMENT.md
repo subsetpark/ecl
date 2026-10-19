@@ -38,8 +38,7 @@ scope-owned port lifecycle, bounded work, and joined cleanup.
 
 Embedded names have precedence over filesystem modules. A file on `ECL_PATH`
 cannot replace an embedded module during automatic loading, and the names are
-reserved: `register`, `@defm`, `alias`, and `unmodule` refuse them with
-`'domain` (see `SPEC.md`). No program can change what an embedded module, or a
+reserved against user changes (see `SPEC.md` for the mutation rules). No program can change what an embedded module, or a
 library word that calls one, means.
 
 ### Filesystem module search
