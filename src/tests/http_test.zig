@@ -50,6 +50,8 @@ const invalid_cert_time = std.Io.Timestamp.fromNanoseconds(
 /// Python-backed HTTPS fixture used by both the exact-byte and package
 /// synchronization cases. Its JSON announcement is data from the process,
 /// not an ambient resource, and the child is synchronously reaped by kill.
+/// If this test process dies first, the closed stdin pipe makes the fixture
+/// exit, so it never holds the inherited stderr open for the build runner.
 const HttpsFixture = struct {
     child: std.process.Child,
     port: u16,
@@ -63,7 +65,9 @@ const HttpsFixture = struct {
                 pkg_fixture.server_cert,
                 "--key",
                 pkg_fixture.server_key,
+                "--exit-on-stdin-eof",
             },
+            .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
         });

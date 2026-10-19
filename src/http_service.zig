@@ -252,7 +252,10 @@ const Cell = struct {
         defer client.deinit();
         if (self.service.trust) |trust| {
             client.now = trust.now;
-            try client.ca_bundle.addCertsFromFilePathAbsolute(scratch, self.service.io, trust.now, trust.ca_file);
+            // Relative paths resolve against the working directory. The
+            // absolute-only std entry point asserts on a relative path, which
+            // would abort the process instead of failing the request.
+            try client.ca_bundle.addCertsFromFilePath(scratch, self.service.io, trust.now, std.Io.Dir.cwd(), trust.ca_file);
         }
         const redirect_storage = try scratch.alloc(u8, 8 * 1024);
         defer scratch.free(redirect_storage);

@@ -64,6 +64,7 @@ pub const default_worker_count: usize = session_options.default_worker_count;
 
 /// Deterministic HTTPS verification inputs. `ca_file` is borrowed on input;
 /// the Session copies it and owns the copy for the lifetime of every Unit.
+/// It is absolute or relative to the process working directory.
 pub const TlsTrustOverride = struct {
     ca_file: []const u8,
     now: std.Io.Timestamp,
