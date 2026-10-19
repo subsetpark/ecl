@@ -736,7 +736,7 @@ test "native: SDK port declarations validate state layouts and controller adapte
     definition.cancellation = .acknowledge;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
     definition = P.definition();
-    definition.cancellation = @enumFromInt(999);
+    definition.cancellation = @fromBackingInt(@intCast(999));
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &invalid);
     definition = P.definition();
     definition.identity = null;
@@ -780,7 +780,7 @@ test "native: registered descriptors reject undeclared kinds lanes and endpoints
     definitions[2].binding.endpoint = 64;
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
     definitions = original;
-    definitions[2].binding.transport = @enumFromInt(999);
+    definitions[2].binding.transport = @fromBackingInt(@intCast(999));
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
     definitions = original;
     definitions[2].binding.owner = .resource;
@@ -874,7 +874,7 @@ const Fixture = struct {
             .output_count = self.outputs.?.len,
             .outputs_ptr = &self.outputs.?,
         }};
-        self.capabilities = .{.{ .id = @intFromEnum(abi.CapabilityId.call) }};
+        self.capabilities = .{.{ .id = @backingInt(abi.CapabilityId.call) }};
         return .{
             .module_name_ptr = self.module_name.ptr,
             .module_name_len = self.module_name.len,
@@ -1089,7 +1089,7 @@ test "native: validation copies names effects and documentation into runtime sto
     for ("Increment a number.", 0..) |byte, index|
         try std.testing.expectEqual(@as(u32, byte), list.atUnchecked(.{ .list = document }, index).char);
     try std.testing.expectEqual(@as(usize, 1), validated.requirements().len);
-    try std.testing.expectEqual(@intFromEnum(abi.CapabilityId.call), validated.requirements()[0].id);
+    try std.testing.expectEqual(@backingInt(abi.CapabilityId.call), validated.requirements()[0].id);
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, validationAllocationProbe, .{});
 }
@@ -1124,9 +1124,9 @@ test "native: the SDK generates a descriptor the production validator accepts" {
         try std.testing.expect(env.documentationHeader(definition.doc).length() != 0);
     }
     try std.testing.expectEqual(@as(usize, 3), validated.requirements().len);
-    try std.testing.expectEqual(@intFromEnum(abi.CapabilityId.call), validated.requirements()[0].id);
-    try std.testing.expectEqual(@intFromEnum(abi.CapabilityId.build_values), validated.requirements()[1].id);
-    try std.testing.expectEqual(@intFromEnum(abi.CapabilityId.reschedule), validated.requirements()[2].id);
+    try std.testing.expectEqual(@backingInt(abi.CapabilityId.call), validated.requirements()[0].id);
+    try std.testing.expectEqual(@backingInt(abi.CapabilityId.build_values), validated.requirements()[1].id);
+    try std.testing.expectEqual(@backingInt(abi.CapabilityId.reschedule), validated.requirements()[2].id);
 }
 
 test "native: a discovered artifact publishes its complete table atomically" {
@@ -2224,7 +2224,7 @@ test "native: cooperative descriptors reject mixed and unknown execution contrac
     var definitions = [_]abi.PortDefinition{ extension.ports_ptr.?[0], extension.ports_ptr.?[1], extension.ports_ptr.?[2] };
     raw.ports_ptr = &definitions;
     const requested = try intern.internModuleName("instanceprobe");
-    definitions[1].execution = @enumFromInt(1234);
+    definitions[1].execution = @fromBackingInt(@intCast(1234));
     try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
     definitions[1] = extension.ports_ptr.?[1];
     definitions[1].initialize = definitions[0].initialize;
@@ -2399,7 +2399,7 @@ test "native: finalizer descriptors reject controller and unknown operation mode
         definition.binding.operations_ptr = @ptrCast(&operation);
         operation.mode = .finalizer;
         try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
-        operation.mode = @enumFromInt(1234);
+        operation.mode = @fromBackingInt(@intCast(1234));
         try expectReject(error.InvalidPortDefinition, host.cleanup(), requested, &raw);
         return;
     }

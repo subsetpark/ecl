@@ -48,7 +48,7 @@ const Scenario = struct {
 
     fn decode(encoded: u16) Scenario {
         const operation_count = @typeInfo(Operation).@"enum".field_names.len;
-        const operation: Operation = @enumFromInt(encoded % operation_count);
+        const operation: Operation = @fromBackingInt(@intCast(encoded % operation_count));
         const width = 1 + (encoded / operation_count) % 12;
         const worker_index = (encoded / (operation_count * 12)) % 4;
         return .{
@@ -292,21 +292,21 @@ test "scheduler shell property: cancellation progresses while children replenish
     const operation_count: u16 = @typeInfo(Operation).@"enum".field_names.len;
     for (0..4) |_| {
         for ([_]u16{ 0, 3 }) |worker_index| {
-            try runShellScenario(@intFromEnum(Operation.cancel_tree) + worker_index * operation_count * 12);
+            try runShellScenario(@backingInt(Operation.cancel_tree) + worker_index * operation_count * 12);
         }
     }
 }
 
 test "scheduler shell property: generated public waits always quiesce" {
-    try runShellScenario(@intFromEnum(Operation.kernel_fairness));
-    try runShellScenario(@intFromEnum(Operation.result_fairness));
-    try runShellScenario(@intFromEnum(Operation.raise_fairness));
-    try runShellScenario(@intFromEnum(Operation.attempt_materialization));
-    try runShellScenario(@intFromEnum(Operation.wide_wait_setup));
-    try runShellScenario(@intFromEnum(Operation.tasks_mutation));
-    try runShellScenario(@intFromEnum(Operation.infra_stack_handoff));
-    try runShellScenario(@intFromEnum(Operation.infra_fairness));
-    try runShellScenario(@intFromEnum(Operation.value_owner_handoff));
+    try runShellScenario(@backingInt(Operation.kernel_fairness));
+    try runShellScenario(@backingInt(Operation.result_fairness));
+    try runShellScenario(@backingInt(Operation.raise_fairness));
+    try runShellScenario(@backingInt(Operation.attempt_materialization));
+    try runShellScenario(@backingInt(Operation.wide_wait_setup));
+    try runShellScenario(@backingInt(Operation.tasks_mutation));
+    try runShellScenario(@backingInt(Operation.infra_stack_handoff));
+    try runShellScenario(@backingInt(Operation.infra_fairness));
+    try runShellScenario(@backingInt(Operation.value_owner_handoff));
     try minish.check(allocator, minish.gen.int(u16), runShellScenario, .{
         .num_runs = 42,
         .seed = 0x5e11_c0de,

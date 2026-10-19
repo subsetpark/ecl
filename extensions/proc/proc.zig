@@ -807,8 +807,8 @@ const Process = ecl.Port(.{
             if (failed) return RequestParser.fail(context, .io, "process pipe operation failed");
             const info: struct { kind: []const u8, field: []const u8, number: i64 } = switch (term.?) {
                 .exited => |number| .{ .kind = "exited", .field = "code", .number = number },
-                .signal => |number| .{ .kind = "signaled", .field = "signal", .number = @intFromEnum(number) },
-                .stopped => |number| .{ .kind = "stopped", .field = "signal", .number = @intFromEnum(number) },
+                .signal => |number| .{ .kind = "signaled", .field = "signal", .number = @backingInt(number) },
+                .stopped => |number| .{ .kind = "stopped", .field = "signal", .number = @backingInt(number) },
                 .unknown => |number| .{ .kind = "unknown", .field = "status", .number = number },
             };
             const builder = context.builder();
@@ -855,7 +855,7 @@ fn observeLeader(pid: std.posix.pid_t) error{Io}!bool {
     var info = std.mem.zeroes(std.c.siginfo_t);
     while (true) {
         const result = wait_api.waitid(1, @intCast(pid), &info, options);
-        if (result == 0) return @intFromEnum(info.signo) != 0;
+        if (result == 0) return @backingInt(info.signo) != 0;
         switch (std.posix.errno(result)) {
             .INTR => continue,
             else => return error.Io,

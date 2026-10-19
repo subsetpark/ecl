@@ -24,11 +24,11 @@ pub const OwnedLine = enum(usize) {
     _,
 
     fn init(owned: *OwnedLineBacking) OwnedLine {
-        return @enumFromInt(@intFromPtr(owned));
+        return @fromBackingInt(@intCast(@intFromPtr(owned)));
     }
     fn backing(self: OwnedLine) *OwnedLineBacking {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn bytes(self: OwnedLine) []const u8 {
         return self.backing().bytes;
@@ -59,10 +59,10 @@ pub const EditBuffer = enum(usize) {
     pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!EditBuffer {
         const backing = try allocator.create(EditBufferBacking);
         backing.* = .{ .text = .init(allocator) };
-        return @enumFromInt(@intFromPtr(backing));
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
     fn state(self: EditBuffer) *EditBufferBacking {
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn deinit(self: *EditBuffer) void {
         const owned = self.state();
@@ -693,8 +693,8 @@ const RawModeGuard = if (raw_supported) struct {
         raw.lflag.ICANON = false;
         raw.lflag.IEXTEN = false;
         raw.lflag.ISIG = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+        raw.cc[@backingInt(std.posix.V.TIME)] = 0;
         try std.posix.tcsetattr(handle, .NOW, raw);
         return .{ .saved = saved };
     }

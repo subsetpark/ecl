@@ -59,16 +59,16 @@ pub const Deadline = enum(i96) {
     _,
 
     pub fn reachedBy(self: Deadline, now: std.Io.Timestamp) bool {
-        return now.nanoseconds >= @intFromEnum(self);
+        return now.nanoseconds >= @backingInt(self);
     }
 
     fn before(self: Deadline, other: Deadline) bool {
-        return @intFromEnum(self) < @intFromEnum(other);
+        return @backingInt(self) < @backingInt(other);
     }
 
     /// The same instant as a host wait target; meaningful under `host` only.
     fn hostInstant(self: Deadline) std.Io.Clock.Timestamp {
-        return .{ .raw = .{ .nanoseconds = @intFromEnum(self) }, .clock = .awake };
+        return .{ .raw = .{ .nanoseconds = @backingInt(self) }, .clock = .awake };
     }
 };
 
@@ -143,12 +143,12 @@ const MonotonicClock = union(enum) {
                     return error.Overflow;
                 const instant = std.math.add(i96, current.nanoseconds, step) catch
                     return error.Overflow;
-                return @enumFromInt(instant);
+                return @fromBackingInt(@intCast(instant));
             },
             .manual => |*clock| {
                 const total = std.math.add(i64, clock.reading(), milliseconds) catch
                     return error.Overflow;
-                return @enumFromInt(@as(i96, total) * std.time.ns_per_ms);
+                return @fromBackingInt(@intCast(@as(i96, total) * std.time.ns_per_ms));
             },
         };
     }
@@ -1849,7 +1849,7 @@ pub const WorkerScheduler = enum(usize) {
 
     fn privateState(self: *const WorkerScheduler) *WorkerState {
         std.debug.assert(self.* != .invalid);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
 
     fn allocator(self: *const WorkerScheduler) std.mem.Allocator {
@@ -2880,7 +2880,7 @@ pub const Scheduler = enum(usize) {
 
     fn privateState(self: *const Scheduler) *SchedulerState {
         std.debug.assert(self.* != .consumed);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
 
     pub fn init(
@@ -2904,8 +2904,8 @@ pub const Scheduler = enum(usize) {
                 },
             },
         };
-        backing.worker_facade = @enumFromInt(@intFromPtr(&backing.worker));
-        return @enumFromInt(@intFromPtr(backing));
+        backing.worker_facade = @fromBackingInt(@intCast(@intFromPtr(&backing.worker)));
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
     fn workerMutable(self: *Scheduler) *WorkerScheduler {

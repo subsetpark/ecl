@@ -444,7 +444,7 @@ pub const ModuleInstance = opaque {
 
     pub fn hasCapability(self: *const ModuleInstance, id: abi.CapabilityId) bool {
         for (self.requirements()) |requirement|
-            if (requirement.id == @intFromEnum(id)) return true;
+            if (requirement.id == @backingInt(id)) return true;
         return false;
     }
 
@@ -537,7 +537,7 @@ const OwnerState = struct {
             const middle = start + (end - start) / 2;
             const item = self.configurations[middle];
             if (item.name == name) return item;
-            if (@intFromEnum(item.name) < @intFromEnum(name)) start = middle + 1 else end = middle;
+            if (@backingInt(item.name) < @backingInt(name)) start = middle + 1 else end = middle;
         }
         return null;
     }
@@ -614,7 +614,7 @@ pub const Owner = opaque {
         }
         std.mem.sort(OwnedConfiguration, owned, {}, struct {
             fn less(_: void, left: OwnedConfiguration, right: OwnedConfiguration) bool {
-                return @intFromEnum(left.name) < @intFromEnum(right.name);
+                return @backingInt(left.name) < @backingInt(right.name);
             }
         }.less);
         for (owned, 0..) |configuration, index| {
@@ -861,7 +861,7 @@ fn ownerFromState(state_value: *OwnerState) *Owner {
 }
 
 pub fn capabilityName(id: u32) []const u8 {
-    return switch (@as(abi.CapabilityId, @enumFromInt(id))) {
+    return switch (@as(abi.CapabilityId, @fromBackingInt(@intCast(id)))) {
         .call => "call",
         .build_values => "build-values",
         .reschedule => "reschedule",

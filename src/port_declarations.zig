@@ -37,7 +37,7 @@ pub fn Endpoints(comptime entries: anytype) type {
             return get(name).name orelse @tagName(name);
         }
         pub fn id(name: Name) u6 {
-            return @intCast(@intFromEnum(name));
+            return @intCast(@backingInt(name));
         }
         pub fn mask(comptime names: anytype) u64 {
             var bits: u64 = 0;
@@ -109,9 +109,9 @@ pub const WorkQuantum = enum(u16) {
     _,
     pub fn fromCount(amount: u32) error{InvalidLimits}!WorkQuantum {
         if (amount == 0 or amount > 65536) return error.InvalidLimits;
-        return @enumFromInt(@as(u16, @intCast(amount - 1)));
+        return @fromBackingInt(@intCast(@as(u16, @intCast(amount - 1))));
     }
     pub fn count(self: WorkQuantum) u32 {
-        return @as(u32, @intFromEnum(self)) + 1;
+        return @as(u32, @backingInt(self)) + 1;
     }
 };

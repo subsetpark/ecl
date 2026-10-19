@@ -25,11 +25,11 @@ fn invoke(
         return;
     }
     if (is("unknown-result")) {
-        output.* = .{ .tag = @enumFromInt(99), .adapter_status = 0 };
+        output.* = .{ .tag = @fromBackingInt(@intCast(99)), .adapter_status = 0 };
         return;
     }
     if (is("unknown-failure-kind")) {
-        _ = host.fail(context, @enumFromInt(99), "bad kind".ptr, "bad kind".len);
+        _ = host.fail(context, @fromBackingInt(@intCast(99)), "bad kind".ptr, "bad kind".len);
         output.* = .{ .tag = .fail, .adapter_status = 0 };
         return;
     }
@@ -40,7 +40,7 @@ fn invoke(
         var candidate: abi.Candidate = 0;
         var scalar = abi.Scalar{
             .size = if (is("scalar-size")) 0 else @sizeOf(abi.Scalar),
-            .kind = if (is("unknown-scalar-kind")) @enumFromInt(99) else .symbol,
+            .kind = if (is("unknown-scalar-kind")) @fromBackingInt(@intCast(99)) else .symbol,
             .bytes_ptr = if (is("invalid-utf8-scalar")) &invalid_utf8 else "x".ptr,
             .bytes_len = if (is("oversized-scalar")) abi.max_guest_scalar_bytes + 1 else 1,
         };
@@ -118,9 +118,9 @@ const requirements = [_]abi.CapabilityRequirement{
         .id = if (is("unsupported-capability"))
             99
         else
-            @intFromEnum(abi.CapabilityId.call),
+            @backingInt(abi.CapabilityId.call),
     },
-    .{ .id = @intFromEnum(abi.CapabilityId.reschedule) },
+    .{ .id = @backingInt(abi.CapabilityId.reschedule) },
 };
 
 const descriptor = abi.Descriptor{
@@ -147,7 +147,7 @@ export fn ecl_module_abi_v24(output: *abi.EntryResult) callconv(.c) void {
     if (is("entry-failure") or is("unknown-entry-status")) {
         const message = "fixture entry point failure";
         output.* = .{
-            .status = if (is("unknown-entry-status")) @enumFromInt(99) else .fail,
+            .status = if (is("unknown-entry-status")) @fromBackingInt(@intCast(99)) else .fail,
             .message_ptr = message.ptr,
             .message_len = message.len,
         };

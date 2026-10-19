@@ -36,7 +36,7 @@ const LexicalGuard = struct {
             const environment = scope.environmentOrNull();
             if (revision == absent_environment) {
                 if (environment != null) return false;
-            } else if (!(environment orelse return false).matchesShape(@enumFromInt(revision))) return false;
+            } else if (!(environment orelse return false).matchesShape(@fromBackingInt(@intCast(revision)))) return false;
             current = scope.parent;
         }
         if (self.core) |revision| return current == null and core.matchesShape(revision);
@@ -62,7 +62,7 @@ pub const GuardPool = struct {
     pub const capacity = 16;
     const Slot = struct {
         serial: u64 = 0,
-        scope_id: env.ScopeId = @enumFromInt(0),
+        scope_id: env.ScopeId = @fromBackingInt(@intCast(0)),
         phase: enum { building, validated } = .building,
         value: LexicalGuard = .{},
     };
@@ -73,7 +73,7 @@ pub const GuardPool = struct {
         if (self.serial == std.math.maxInt(u64)) return .none;
         self.serial += 1;
         self.slots[(self.serial - 1) % capacity] = .{ .serial = self.serial, .scope_id = scope_id };
-        return @enumFromInt(self.serial);
+        return @fromBackingInt(@intCast(self.serial));
     }
     fn slot(self: *GuardPool, serial: u64) ?*Slot {
         if (serial == 0) return null;
@@ -81,19 +81,19 @@ pub const GuardPool = struct {
         return if (selected.serial == serial) selected else null;
     }
     fn building(self: *GuardPool, id: ConstructionId) ?*LexicalGuard {
-        const selected = self.slot(@intFromEnum(id)) orelse return null;
+        const selected = self.slot(@backingInt(id)) orelse return null;
         return if (selected.phase == .building) &selected.value else null;
     }
     fn finish(self: *GuardPool, id: ConstructionId, start: ?*env.Scope, core: env.EnvironmentView) GuardId {
-        const selected = self.slot(@intFromEnum(id)) orelse return .none;
+        const selected = self.slot(@backingInt(id)) orelse return .none;
         if (selected.phase != .building or !selected.value.valid(start, core)) return .none;
         selected.phase = .validated;
-        return @enumFromInt(@intFromEnum(id));
+        return @fromBackingInt(@intCast(@backingInt(id)));
     }
     /// IDs are Unit-local observations; only this Unit's cache consumes them.
     /// The current activation supplies both context identity and chain liveness.
     pub fn resolve(self: *GuardPool, id: GuardId, scope_id: env.ScopeId, start: ?*env.Scope, core: env.EnvironmentView) GuardResolution {
-        const selected = self.slot(@intFromEnum(id)) orelse return .absent;
+        const selected = self.slot(@backingInt(id)) orelse return .absent;
         if (selected.scope_id != scope_id) return .absent;
         if (selected.phase != .validated or !selected.value.valid(start, core)) return .stale;
         return .{ .hit = if (selected.value.core != null) .core else .{ .scope = selected.value.selectedScope(start).? } };
@@ -146,7 +146,7 @@ pub const LexicalCursor = struct {
                             if (observed_environment != null and shape == null) {
                                 self.guard = .none;
                             } else {
-                                guard.revisions[guard.count] = if (shape) |revision| @intFromEnum(revision) else LexicalGuard.absent_environment;
+                                guard.revisions[guard.count] = if (shape) |revision| @backingInt(revision) else LexicalGuard.absent_environment;
                                 guard.count += 1;
                             }
                         }

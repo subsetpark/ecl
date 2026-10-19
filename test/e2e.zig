@@ -481,7 +481,7 @@ fn descendantProcesses(output: []const u8) !DescendantProcesses {
 
 fn expectProcessGone(pid: std.posix.pid_t, expected_group: std.posix.pid_t) !void {
     for (0..200) |_| {
-        std.posix.kill(pid, @enumFromInt(0)) catch |err| switch (err) {
+        std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch |err| switch (err) {
             error.ProcessNotFound => return,
             error.PermissionDenied => return error.ProcessProbePermissionDenied,
             else => |unexpected| return unexpected,

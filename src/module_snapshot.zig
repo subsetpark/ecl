@@ -32,12 +32,12 @@ pub const SourceScope = opaque {
     }
     pub fn scopeId(self: *const SourceScope) ScopeId {
         const source = self.state();
-        return source.owner.map.artifacts()[@intFromEnum(source.artifact)].scope;
+        return source.owner.map.artifacts()[@backingInt(source.artifact)].scope;
     }
     pub fn location(self: *const SourceScope) Match {
         const source = self.state();
-        const artifact = source.owner.map.artifacts()[@intFromEnum(source.artifact)];
-        const scope = source.owner.map.scopes()[@intFromEnum(artifact.scope)];
+        const artifact = source.owner.map.artifacts()[@backingInt(source.artifact)];
+        const scope = source.owner.map.scopes()[@backingInt(artifact.scope)];
         return .{ .scope_name = scope.name, .root = scope.root, .relative_path = artifact.path, .scope_id = artifact.scope, .artifact_id = source.artifact, .kind = artifact.kind };
     }
     pub fn registry(self: *const SourceScope) *modules.Registry {
@@ -45,14 +45,14 @@ pub const SourceScope = opaque {
     }
     pub fn exports(self: *const SourceScope, name: intern.ModuleName) bool {
         const source = self.state();
-        const names = source.owner.map.artifacts()[@intFromEnum(source.artifact)].exports;
+        const names = source.owner.map.artifacts()[@backingInt(source.artifact)].exports;
         var low: usize = 0;
         var high: usize = names.len;
         // Validation caps exports at 65,536; membership takes at most 17 comparisons.
         while (low < high) {
             const middle = low + (high - low) / 2;
             if (names[middle] == name) return true;
-            if (@intFromEnum(names[middle]) < @intFromEnum(name)) low = middle + 1 else high = middle;
+            if (@backingInt(names[middle]) < @backingInt(name)) low = middle + 1 else high = middle;
         }
         return false;
     }
@@ -82,16 +82,16 @@ pub const Snapshot = opaque {
             allocator.free(source.absolute_path);
         };
         for (sources, map.artifacts(), 0..) |*source, artifact, index| {
-            const absolute = try std.fs.path.join(allocator, &.{ map.scopes()[@intFromEnum(artifact.scope)].root, artifact.path });
+            const absolute = try std.fs.path.join(allocator, &.{ map.scopes()[@backingInt(artifact.scope)].root, artifact.path });
             errdefer allocator.free(absolute);
-            source.* = .{ .owner = owned, .artifact = @enumFromInt(@as(u32, @intCast(index))), .absolute_path = absolute, .private_registry = try modules.Registry.init(host) };
+            source.* = .{ .owner = owned, .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .absolute_path = absolute, .private_registry = try modules.Registry.init(host) };
             built += 1;
         }
         owned.* = .{ .host = host, .map = map, .sources = sources, .start_dir = start_dir };
         return fromBacking(owned);
     }
     pub fn sourceScope(self: *const Snapshot, artifact: ArtifactId) *const SourceScope {
-        return @ptrCast(&self.backing().sources[@intFromEnum(artifact)]);
+        return @ptrCast(&self.backing().sources[@backingInt(artifact)]);
     }
     pub fn sourcePathCursor(self: *const Snapshot, path: []const u8) error{OutOfMemory}!SourcePathCursor {
         const owner = self.backing();
@@ -105,7 +105,7 @@ pub const Snapshot = opaque {
     }
     pub fn localSource(self: *const Snapshot, id: ArtifactId) ?*const SourceScope {
         const owned = self.backing();
-        const index = @intFromEnum(id);
+        const index = @backingInt(id);
         if (index >= owned.sources.len or owned.map.artifacts()[index].scope != owned.map.local()) return null;
         return @ptrCast(&owned.sources[index]);
     }
@@ -113,14 +113,14 @@ pub const Snapshot = opaque {
         return .{ .owner = self.backing() };
     }
     pub fn artifactCommitted(self: *const Snapshot, artifact: ArtifactId) bool {
-        return self.backing().sources[@intFromEnum(artifact)].committed.load(.acquire);
+        return self.backing().sources[@backingInt(artifact)].committed.load(.acquire);
     }
     /// Only the artifact-loading lease mints commit authority after verification.
     pub fn commitArtifact(self: *const Snapshot, commit: modules.ArtifactCommit) void {
-        self.backing().sources[@intFromEnum(commit.artifact())].committed.store(true, .release);
+        self.backing().sources[@backingInt(commit.artifact())].committed.store(true, .release);
     }
     pub fn artifactModules(self: *const Snapshot, artifact: ArtifactId) []const intern.ModuleName {
-        return self.backing().map.artifacts()[@intFromEnum(artifact)].exports;
+        return self.backing().map.artifacts()[@backingInt(artifact)].exports;
     }
     pub fn deinit(self: *Snapshot) void {
         const owned = self.backing();
@@ -210,19 +210,19 @@ pub const LookupCursor = struct {
                 const name = artifact.exports[finding.export_index];
                 finding.export_index += 1;
                 if (std.mem.eql(u8, intern.get(intern.moduleId(name)), self.module_name))
-                    self.phase = .{ .visibility = .{ .artifact = @enumFromInt(@as(u32, @intCast(finding.artifact))) } };
+                    self.phase = .{ .visibility = .{ .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(finding.artifact)))) } };
                 return .pending;
             },
             .visibility => |*visibility| {
-                const artifact = self.owner.map.artifacts()[@intFromEnum(visibility.artifact)];
-                const scope = self.owner.map.scopes()[@intFromEnum(artifact.scope)];
-                const consumer = if (self.consumer) |id| self.owner.map.scopes()[@intFromEnum(id)] else null;
+                const artifact = self.owner.map.artifacts()[@backingInt(visibility.artifact)];
+                const scope = self.owner.map.scopes()[@backingInt(artifact.scope)];
+                const consumer = if (self.consumer) |id| self.owner.map.scopes()[@backingInt(id)] else null;
                 if (consumer) |current| {
                     if (visibility.edge < current.visible.len) {
                         const visible = current.visible[visibility.edge] == artifact.scope;
                         visibility.edge += 1;
                         if (!visible) return .pending;
-                        const source: *const SourceScope = @ptrCast(&self.owner.sources[@intFromEnum(visibility.artifact)]);
+                        const source: *const SourceScope = @ptrCast(&self.owner.sources[@backingInt(visibility.artifact)]);
                         self.phase = .complete;
                         return .{ .complete = .{ .matched = source.location() } };
                     }

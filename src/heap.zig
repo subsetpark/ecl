@@ -534,27 +534,27 @@ const HeaderImpl = extern struct {
     fn init(kind_value: HeapKind, len_value: u64) HeaderImpl {
         return .{
             .rc = .init(1),
-            .meta = @intFromEnum(kind_value),
+            .meta = @backingInt(kind_value),
             .len = len_value,
         };
     }
 
     fn kind(self: *const HeaderImpl) HeapKind {
-        return @enumFromInt(self.meta & kind_mask);
+        return @fromBackingInt(@intCast(self.meta & kind_mask));
     }
 
     fn setKind(self: *HeaderImpl, new_kind: HeapKind) void {
-        self.meta = (self.meta & ~kind_mask) | @intFromEnum(new_kind);
+        self.meta = (self.meta & ~kind_mask) | @backingInt(new_kind);
     }
 
     fn identity(self: *const HeaderImpl) ?CodeIdentity {
         const raw = self.meta >> identity_shift;
-        return if (raw == 0) null else @enumFromInt(raw);
+        return if (raw == 0) null else @fromBackingInt(@intCast(raw));
     }
 
     fn assignIdentity(self: *HeaderImpl, assigned: CodeIdentity) void {
         std.debug.assert(self.identity() == null);
-        const raw = @intFromEnum(assigned);
+        const raw = @backingInt(assigned);
         std.debug.assert(raw != 0 and raw <= identity_max);
         self.meta |= raw << identity_shift;
     }
@@ -742,7 +742,7 @@ pub const CodeIdentityIssuer = opaque {
                 next = observed;
             } else {
                 const state = try allocator.create(CodeIdentityIssuerState);
-                state.* = .{ .allocator = allocator, .namespace = @enumFromInt(next) };
+                state.* = .{ .allocator = allocator, .namespace = @fromBackingInt(@intCast(next)) };
                 return @ptrCast(state);
             }
         }
@@ -809,7 +809,7 @@ pub fn assignCodeIdentity(
     handle: *ListHandle,
     identity: CodeIdentity,
 ) CodeIdentityAssignment {
-    const raw_identity = @intFromEnum(identity);
+    const raw_identity = @backingInt(identity);
     if (raw_identity == 0 or raw_identity > max_code_identity)
         return .invalid_identity;
     const header = headerFromList(handle);
@@ -2326,7 +2326,7 @@ pub const HostOwner = struct {
                 .retire_fn = adapters.retire,
             },
         } };
-        return @enumFromInt(issuance);
+        return @fromBackingInt(@intCast(issuance));
     }
 
     /// Detached before the archive's directory is torn down; headers retiring
@@ -2344,7 +2344,7 @@ pub const HostOwner = struct {
             .vacant => return,
             .attached => |attached| attached,
         };
-        if (@intFromEnum(claimed) != attached.issuance) return;
+        if (@backingInt(claimed) != attached.issuance) return;
         self.releases.code_retirement = .{ .vacant = attached.issuance };
     }
 };

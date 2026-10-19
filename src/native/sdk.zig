@@ -212,8 +212,8 @@ pub fn overload(comptime binding_name: []const u8, comptime document: []const u8
                         const operation: P.Operations.Name = member[1];
                         result[index] = .{
                             .resource = resourceIndex(Ports, P),
-                            .operation = @intFromEnum(operation),
-                            .lane = @intFromEnum(P.Operations.lane(operation)),
+                            .operation = @backingInt(operation),
+                            .lane = @backingInt(P.Operations.lane(operation)),
                             .endpoints = P.Operations.endpointMask(operation),
                             .mode = P.operationMode(operation),
                         };
@@ -430,7 +430,7 @@ pub fn Call(comptime effect_source: []const u8) type {
                 index,
                 &output,
             ));
-            return @enumFromInt(output);
+            return @fromBackingInt(@intCast(output));
         }
 
         /// Forward a nested input without decoding or rebuilding it. The
@@ -453,7 +453,7 @@ pub fn Call(comptime effect_source: []const u8) type {
                 @intCast(path.len),
                 &output,
             )) {
-                .ok => .{ .candidate = @enumFromInt(output) },
+                .ok => .{ .candidate = @fromBackingInt(@intCast(output)) },
                 .yield_required => .yield_required,
                 .out_of_memory => error.OutOfMemory,
                 .invalid => .invalid,
@@ -474,7 +474,7 @@ pub fn Call(comptime effect_source: []const u8) type {
             var candidates: [EffectSpec.outputs.len]abi.Candidate = undefined;
             inline for (tuple.field_names, 0..) |field_name, index| {
                 const candidate = try self.state().invocation.makeCandidate(@field(outputs, field_name));
-                candidates[index] = @intFromEnum(candidate);
+                candidates[index] = @backingInt(candidate);
             }
             try capability.requireOk(self.state().invocation.host.complete(
                 self.state().invocation.context,
@@ -633,7 +633,7 @@ pub fn word(
                     return;
                 },
             };
-            output.* = .{ .tag = @enumFromInt(@intFromEnum(outcome)) };
+            output.* = .{ .tag = @fromBackingInt(@intCast(@backingInt(outcome))) };
         }
     };
 }
@@ -744,14 +744,14 @@ pub fn module(comptime spec: anytype) type {
         };
         var requirements_storage = requirements: {
             var result: [requirement_count]abi.CapabilityRequirement = undefined;
-            result[0] = .{ .id = @intFromEnum(abi.CapabilityId.call) };
+            result[0] = .{ .id = @backingInt(abi.CapabilityId.call) };
             if (uses_build_values)
-                result[1] = .{ .id = @intFromEnum(abi.CapabilityId.build_values) };
+                result[1] = .{ .id = @backingInt(abi.CapabilityId.build_values) };
             if (uses_reschedule)
                 result[1 + @as(usize, @intFromBool(uses_build_values))] = .{
-                    .id = @intFromEnum(abi.CapabilityId.reschedule),
+                    .id = @backingInt(abi.CapabilityId.reschedule),
                 };
-            if (Ports.len != 0) result[requirement_count - 1] = .{ .id = @intFromEnum(abi.CapabilityId.ports) };
+            if (Ports.len != 0) result[requirement_count - 1] = .{ .id = @backingInt(abi.CapabilityId.ports) };
             break :requirements result;
         };
         // The entry point returns this graph after its stack frame is gone;

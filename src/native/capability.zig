@@ -4,9 +4,9 @@ const std = @import("std");
 const abi = @import("ecl-native-abi");
 
 pub const Outcome = enum(u32) {
-    complete = @intFromEnum(abi.CallResult.complete),
-    fail = @intFromEnum(abi.CallResult.fail),
-    yield = @intFromEnum(abi.CallResult.yield),
+    complete = @backingInt(abi.CallResult.complete),
+    fail = @backingInt(abi.CallResult.fail),
+    yield = @backingInt(abi.CallResult.yield),
 };
 
 pub const Kind = abi.ValueKindWire;
@@ -287,7 +287,7 @@ pub const Invocation = struct {
         var wire = item.wire;
         var result: abi.Candidate = 0;
         try requireOk(self.host.scalar(self.context, &wire, &result));
-        return @enumFromInt(result);
+        return @fromBackingInt(@intCast(result));
     }
 };
 
@@ -344,7 +344,7 @@ pub const BuildValues = opaque {
 
     /// Consumes the candidate's builder on success only, like appendList.
     pub fn appendBulkValue(self: *BuildValues, slot: u32, count: u64, reverse: bool, item: Candidate) error{OutOfMemory}!BuildAppendResult {
-        var wire = @intFromEnum(item);
+        var wire = @backingInt(item);
         return self.bulk(slot, .append_candidate, .values, count, reverse, &.{}, &wire);
     }
 
@@ -353,14 +353,14 @@ pub const BuildValues = opaque {
     /// identical request after yield; no value is appended until decoding ends.
     pub fn appendTextSpan(self: *BuildValues, slot: u32, count: u64, input_index: u32, start: u64, length: u64, decoded_length: u64, width: abi.BulkKind) error{OutOfMemory}!BuildAppendResult {
         var unused: abi.Candidate = 0;
-        var request = [_]u64{ input_index, start, length, decoded_length, @intFromEnum(width) };
+        var request = [_]u64{ input_index, start, length, decoded_length, @backingInt(width) };
         return self.bulk(slot, .append_text_span, .values, count, false, &request, &unused);
     }
 
     pub fn finishBulk(self: *BuildValues, slot: u32, kind: abi.BulkKind, count: u64, reverse: bool) error{OutOfMemory}!BuildResult {
         var output: abi.Candidate = 0;
         return switch (try self.bulk(slot, .finish, kind, count, reverse, &.{}, &output)) {
-            .appended => .{ .candidate = @enumFromInt(output) },
+            .appended => .{ .candidate = @fromBackingInt(@intCast(output)) },
             .yield_required => .yield_required,
             .invalid => .invalid,
         };
@@ -385,7 +385,7 @@ pub const BuildValues = opaque {
             self.state().invocation.context,
             slot,
             item_count,
-            @intFromEnum(item),
+            @backingInt(item),
         ));
     }
 
@@ -417,8 +417,8 @@ pub const BuildValues = opaque {
             self.state().invocation.context,
             slot,
             entry_count,
-            @intFromEnum(key),
-            @intFromEnum(item),
+            @backingInt(key),
+            @backingInt(item),
         ));
     }
 
@@ -452,7 +452,7 @@ fn buildAppendResult(status: abi.HostStatus) error{OutOfMemory}!BuildAppendResul
 
 fn buildResult(status: abi.HostStatus, output: abi.Candidate) error{OutOfMemory}!BuildResult {
     return switch (status) {
-        .ok => .{ .candidate = @enumFromInt(output) },
+        .ok => .{ .candidate = @fromBackingInt(@intCast(output)) },
         .yield_required => .yield_required,
         .invalid => .invalid,
         .out_of_memory => error.OutOfMemory,

@@ -32,7 +32,7 @@ fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildR
     return .{
         .action = .child,
         .kind_identity = P.kindIdentity(),
-        .count = @intFromEnum(switch (dependency) {
+        .count = @backingInt(switch (dependency) {
             .independent => abi.ChildDependency.independent,
             .dependent => abi.ChildDependency.dependent,
             .inherited => abi.ChildDependency.inherited,
@@ -444,7 +444,7 @@ fn ControllerPort(comptime Spec: type) type {
             }, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
         }
         fn cancelOperation(raw: *anyopaque, lane: u32) callconv(.c) void {
-            Spec.cancelOperation(@ptrCast(@alignCast(raw)), @enumFromInt(lane));
+            Spec.cancelOperation(@ptrCast(@alignCast(raw)), @fromBackingInt(@intCast(lane)));
         }
         fn initState(raw: *anyopaque) callconv(.c) void {
             const state: *Spec.State = @ptrCast(@alignCast(raw));
@@ -461,7 +461,7 @@ fn ControllerPort(comptime Spec: type) type {
         fn execute(raw: *anyopaque, operation: u32, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
             var state: ControllerState = .{ .table = table, .context = context };
             inline for (comptime @import("std").meta.tags(Operations.Name)) |operation_name| {
-                if (operation == @intFromEnum(operation_name)) {
+                if (operation == @backingInt(operation_name)) {
                     const handler = Operations.get(operation_name).handler;
                     if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == void) {
                         handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
@@ -807,7 +807,7 @@ pub const Finalizer = opaque {
     /// At most 32 alternatives may be prepared by one finalizer invocation.
     pub fn prepareFailure(self: *Finalizer, kind: capability.ErrorKind, message: []const u8) ControllerError!void {
         const bounded = capability.boundedErrorMessage(message);
-        return self.cooperative().builder().apply(.{ .action = .prepare_failure, .count = @intFromEnum(kind), .scalar = capability.Scalar.symbol(bounded).wire });
+        return self.cooperative().builder().apply(.{ .action = .prepare_failure, .count = @backingInt(kind), .scalar = capability.Scalar.symbol(bounded).wire });
     }
     pub fn preparedFailure(self: *Finalizer) ControllerError!*const PreparedFailure {
         const owned = self.cooperative().state();
@@ -938,7 +938,7 @@ fn CooperativePort(comptime Spec: type) type {
         }
         fn execute(raw: *anyopaque, code: u32, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
             inline for (comptime @import("std").meta.tags(Operations.Name)) |operation| {
-                if (code == @intFromEnum(operation)) return invoke(Operations.get(operation).handler, raw, table, context);
+                if (code == @backingInt(operation)) return invoke(Operations.get(operation).handler, raw, table, context);
             }
             table.fail(context, .contract, "unsupported registered operation", "unsupported registered operation".len);
             return .completed;

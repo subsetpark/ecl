@@ -133,11 +133,11 @@ pub const CompletionSet = enum(usize) {
     _,
 
     fn fromBacking(owned: *CompletionBacking) CompletionSet {
-        return @enumFromInt(@intFromPtr(owned));
+        return @fromBackingInt(@intCast(@intFromPtr(owned)));
     }
     fn backing(self: CompletionSet) *CompletionBacking {
         std.debug.assert(self != .consumed and self != .empty);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn items(self: CompletionSet) []const []const u8 {
         std.debug.assert(self != .consumed);
@@ -178,11 +178,11 @@ pub const RenderedText = enum(usize) {
             return err;
         };
         owned.* = .{ .allocator = allocator, .bytes = owned_bytes };
-        return @enumFromInt(@intFromPtr(owned));
+        return @fromBackingInt(@intCast(@intFromPtr(owned)));
     }
     fn backing(self: RenderedText) *RenderedTextBacking {
         std.debug.assert(self != .consumed and self != .empty);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn bytes(self: RenderedText) []const u8 {
         std.debug.assert(self != .consumed);
@@ -316,7 +316,7 @@ pub const Session = enum(usize) {
 
     fn coreState(self: *const Session) *SessionCore {
         std.debug.assert(self.* != .consumed);
-        const erased: *OpaqueSessionCore = @ptrFromInt(@intFromEnum(self.*));
+        const erased: *OpaqueSessionCore = @ptrFromInt(@backingInt(self.*));
         return @ptrCast(@alignCast(erased));
     }
     /// Inputs outlive teardown; borrowed configuration strings and environment
@@ -497,7 +497,7 @@ pub const Session = enum(usize) {
         };
         core.scheduler.attachRetirement();
         test_authority = null;
-        return @enumFromInt(@intFromPtr(core));
+        return @fromBackingInt(@intCast(@intFromPtr(core)));
     }
     pub fn deinit(self: *Session) void {
         const core = self.coreState();
@@ -860,10 +860,10 @@ pub const Session = enum(usize) {
     /// which is explicitly movable. A capability that captured the handle's
     /// address would dangle the moment the Session value was moved.
     pub fn editorTerminal(self: *const Session) EditorTerminal {
-        return @enumFromInt(@intFromEnum(self.*));
+        return @fromBackingInt(@intCast(@backingInt(self.*)));
     }
     pub fn completionObserve(self: *const Session) CompletionObserve {
-        return @enumFromInt(@intFromEnum(self.*));
+        return @fromBackingInt(@intCast(@backingInt(self.*)));
     }
     /// Releases a value returned by this Session into its reclamation domain.
     /// The value must not be used afterward; traversal remains scheduler-owned.
@@ -972,7 +972,7 @@ pub const EditorTerminal = enum(usize) {
     _,
 
     fn owner(self: EditorTerminal) Session {
-        return @enumFromInt(@intFromEnum(self));
+        return @fromBackingInt(@intCast(@backingInt(self)));
     }
     /// Single-row editing needs a measured row. Null means the caller must use
     /// the canonical reader; no width is ever invented on its behalf.
@@ -1023,7 +1023,7 @@ pub const CompletionObserve = enum(usize) {
         self: CompletionObserve,
         prefix: []const u8,
     ) error{OutOfMemory}!CompletionSet {
-        var session: Session = @enumFromInt(@intFromEnum(self));
+        var session: Session = @fromBackingInt(@intCast(@backingInt(self)));
         return session.completionCandidates(prefix);
     }
 };

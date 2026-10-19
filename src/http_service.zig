@@ -279,7 +279,7 @@ const Cell = struct {
                 error.HttpHeadersOversize => return error.Overflow,
                 else => return err,
             };
-            response.status = @intFromEnum(head.head.status);
+            response.status = @backingInt(head.head.status);
             const redirect = self.redirects and !method.requestHasBody() and head.head.status.class() == .redirect and head.head.status != .not_modified;
             const status_end = std.mem.indexOf(u8, head.head.bytes, "\r\n") orelse return error.HttpHeadersInvalid;
             const field_bytes = head.head.bytes.len - status_end - 4;

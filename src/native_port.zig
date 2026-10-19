@@ -915,7 +915,7 @@ const CooperativeConstruction = struct {
 
 fn childRequest(ctx: *ControllerContext, request: *const abi.MessageBuildRequest) message_builder.Error!ChildRequest {
     const identity = request.kind_identity orelse return error.InvalidValue;
-    const dependency: abi.ChildDependency = @enumFromInt(request.count);
+    const dependency: abi.ChildDependency = @fromBackingInt(@intCast(request.count));
     switch (dependency) {
         .independent, .dependent, .inherited => {},
         _ => return error.InvalidState,
@@ -1284,8 +1284,8 @@ fn controllerResolveEndpoint(raw: *anyopaque, identity: *const anyopaque, owner:
         .exchange => .exchange,
         _ => return false,
     }) orelse return false;
-    return @intFromEnum(spec.transport) == @intFromEnum(transport) and
-        @intFromEnum(spec.direction) == @intFromEnum(direction) and parent.transport(index) != null;
+    return @backingInt(spec.transport) == @backingInt(transport) and
+        @backingInt(spec.direction) == @backingInt(direction) and parent.transport(index) != null;
 }
 
 fn controllerTransportFailure(ctx: *ControllerContext, failure: byte_transport.Failure) abi.ControllerStatus {
@@ -1630,7 +1630,7 @@ fn buildCooperative(ctx: *ControllerContext, request: *const abi.MessageBuildReq
             const op = operation orelse return error.InvalidState;
             if (op.mode != .finalizer or request.scalar.size != @sizeOf(abi.Scalar) or request.scalar.kind != .symbol or request.scalar.bytes_len > abi.max_error_message_bytes) return error.InvalidState;
             const bytes = if (request.scalar.bytes_len == 0) "" else (request.scalar.bytes_ptr orelse return error.InvalidValue)[0..@intCast(request.scalar.bytes_len)];
-            const failure = reportedFailure(@enumFromInt(request.count), bytes);
+            const failure = reportedFailure(@fromBackingInt(@intCast(request.count)), bytes);
             try builder.finish();
             building.phase = .{ .failure_choice = failure };
         },

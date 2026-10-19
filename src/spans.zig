@@ -69,7 +69,7 @@ const HeaderIndex = struct {
     free_head: u32 = 0,
 
     fn coordinates(identity: heap.CodeIdentity) struct { usize, usize, usize } {
-        const raw = @intFromEnum(identity);
+        const raw = @backingInt(identity);
         std.debug.assert(raw != 0 and raw <= heap.max_code_identity);
         return .{
             @intCast((raw >> 16) & 0xff),
@@ -82,16 +82,16 @@ const HeaderIndex = struct {
     /// are prepared for this candidate before anything is committed, so a
     /// rollback never depends on a page that a failure prevented from existing.
     fn candidate(self: *const HeaderIndex) error{OutOfMemory}!heap.CodeIdentity {
-        if (self.free_head != 0) return @enumFromInt(self.free_head);
+        if (self.free_head != 0) return @fromBackingInt(@intCast(self.free_head));
         if (self.next_identity > heap.max_code_identity) return error.OutOfMemory;
-        return @enumFromInt(self.next_identity);
+        return @fromBackingInt(@intCast(self.next_identity));
     }
 
     /// Takes `wanted` if it is still what `candidate` would return. A racing
     /// claim makes this false, and the owning cursor yields before asking on a
     /// later advance — losing consumes no identity.
     fn claim(self: *HeaderIndex, wanted: heap.CodeIdentity) bool {
-        const raw = @intFromEnum(wanted);
+        const raw = @backingInt(wanted);
         if (self.free_head == raw) {
             // Recycled: its page exists by construction, because a slot reaches
             // the free list only after having been installed.
@@ -117,7 +117,7 @@ const HeaderIndex = struct {
         const leaf = self.branches[branch_index].?.leaves[leaf_index].?;
         std.debug.assert(leaf.headers[entry_index] == null);
         leaf.free_next[entry_index] = self.free_head;
-        self.free_head = @intFromEnum(identity);
+        self.free_head = @backingInt(identity);
     }
 
     /// Clears one destroyed header's slot and offers its identity for reuse.
@@ -133,7 +133,7 @@ const HeaderIndex = struct {
         // slot is initialized again by `set` before that header is republished.
         leaf.entries[entry_index] = undefined;
         leaf.free_next[entry_index] = self.free_head;
-        self.free_head = @intFromEnum(identity);
+        self.free_head = @backingInt(identity);
     }
 
     fn set(
@@ -412,7 +412,7 @@ pub const SpanArchiveOwner = enum(usize) {
 
     fn privateState(self: *const SpanArchiveOwner) *SpanArchiveOwnerState {
         std.debug.assert(self.* != .consumed);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
 
     /// One reclamation root has one code provenance owner: a second archive on
@@ -437,11 +437,11 @@ pub const SpanArchiveOwner = enum(usize) {
         };
         backing.code_retirement = host_owner.attachCodeRetirement(runtime) orelse
             return error.CodeProvenanceTaken;
-        return @enumFromInt(@intFromPtr(backing));
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
     pub fn view(self: *const SpanArchiveOwner) SpanArchive {
-        return @enumFromInt(@intFromPtr(self.privateState().runtime));
+        return @fromBackingInt(@intCast(@intFromPtr(self.privateState().runtime)));
     }
 
     /// Host-driven synchronous reading returns a host-owned parsed value whose
@@ -502,7 +502,7 @@ pub const SpanArchive = enum(usize) {
 
     fn privateState(self: *const SpanArchive) *SpanArchiveState {
         std.debug.assert(self.* != .invalid);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
 
     fn allocator(self: *const SpanArchive) std.mem.Allocator {
@@ -1362,11 +1362,11 @@ pub const SpanArchive = enum(usize) {
         _,
 
         fn fromBacking(owned: *SourceIngestBacking) SourceIngestCursor {
-            return @enumFromInt(@intFromPtr(owned));
+            return @fromBackingInt(@intCast(@intFromPtr(owned)));
         }
         fn backing(self: *const SourceIngestCursor) *SourceIngestBacking {
             std.debug.assert(self.* != .consumed);
-            return @ptrFromInt(@intFromEnum(self.*));
+            return @ptrFromInt(@backingInt(self.*));
         }
         pub fn take(self: *SourceIngestCursor) SourceIngestCursor {
             const moved = self.*;
@@ -1869,7 +1869,7 @@ test "spans: one reclamation root has one code provenance owner" {
     // A receipt names one issuance independently of owner addresses: replaying the first
     // archive's receipt cannot detach the second's registration, so the
     // surviving archive keeps recycling its slots.
-    var stale: heap.HostOwner.CodeRetirementRegistration = @enumFromInt(1);
+    var stale: heap.HostOwner.CodeRetirementRegistration = @fromBackingInt(@intCast(1));
     owner.detachCodeRetirement(&stale);
     try std.testing.expectError(
         error.CodeProvenanceTaken,

@@ -805,7 +805,7 @@ pub const ValidateCursor = struct {
         );
         const requirement = try records.read(module.capability_index);
         try validateRecordSize(requirement.size, @sizeOf(abi.CapabilityRequirement));
-        switch (@as(abi.CapabilityId, @enumFromInt(requirement.id))) {
+        switch (@as(abi.CapabilityId, @fromBackingInt(@intCast(requirement.id)))) {
             .call, .build_values, .reschedule, .ports => {},
             _ => return error.UnsupportedCapabilityId,
         }
@@ -896,7 +896,7 @@ pub const ValidateCursor = struct {
 
     fn hasCapability(module: *const ModuleArtifacts, id: abi.CapabilityId) bool {
         for (module.requirements[0..module.capability_index]) |requirement|
-            if (requirement.id == @intFromEnum(id)) return true;
+            if (requirement.id == @backingInt(id)) return true;
         return false;
     }
 
@@ -1111,7 +1111,7 @@ pub fn mapErrorKind(kind: abi.ErrorKindWire) ?machine.ErrorKind {
 comptime {
     const info = @typeInfo(abi.ErrorKindWire).@"enum";
     for (info.field_names, info.field_values) |field_name, field_value| {
-        const wire: abi.ErrorKindWire = @enumFromInt(field_value);
+        const wire: abi.ErrorKindWire = @fromBackingInt(@intCast(field_value));
         if (!std.mem.eql(u8, @tagName(mapErrorKind(wire).?), field_name))
             @compileError("native error-kind mapping no longer matches machine.ErrorKind");
     }

@@ -594,7 +594,7 @@ const ListenCapacityFailure = ecl.CapacityFailure(struct {
                     context.fail(construction.diagnostic.kind, construction.diagnostic.message);
                     return .completed;
                 }
-                state.* = .{ .issuing = .{ .diagnostic = construction.diagnostic, .command = @enumFromInt(@intFromEnum(construction.command) + 1) } };
+                state.* = .{ .issuing = .{ .diagnostic = construction.diagnostic, .command = @fromBackingInt(@intCast(@backingInt(construction.command) + 1)) } };
             },
         }
         return .yielded;

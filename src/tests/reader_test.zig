@@ -137,7 +137,7 @@ test "span archive rejects a substitutable provenance issuer" {
     defer unrelated.deinit();
     try std.testing.expectEqual(
         heap.CodeIdentityAssignment.foreign_namespace,
-        heap.assignCodeIdentity(unrelated, quotation, @enumFromInt(1)),
+        heap.assignCodeIdentity(unrelated, quotation, @fromBackingInt(@intCast(1))),
     );
 
     var root = heap.OwnedValue.init(host.domain(), try materializeRoot(&archive, host.domain(), parsed.values()));

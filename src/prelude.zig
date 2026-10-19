@@ -58,7 +58,7 @@ pub fn installSource(
         source_name,
         source,
         &diag,
-        @intFromEnum(environment.coreScopeId()),
+        @backingInt(environment.coreScopeId()),
     );
     defer {
         while (!ingestion.advanceRetirement())

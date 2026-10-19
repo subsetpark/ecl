@@ -168,7 +168,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             } else if (config.length() != 0) controller.fail(.domain, "expected an initial counter or empty configuration");
         }
         pub fn run(comptime P: type, state: *State, comptime mode: CounterMode, comptime selected_lane: P.LaneType, controller: *ecl.Controller) ecl.ControllerError!void {
-            const current = &state.lanes[@intFromEnum(selected_lane)];
+            const current = &state.lanes[@backingInt(selected_lane)];
             defer if (acknowledge and controller.cancelled()) {
                 current.cancelled.store(false, .release);
                 _ = controller.acknowledgeCancellation();
@@ -446,7 +446,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
             // remaining exchanges and join their cancellation return.
         }
         pub fn cancelOperation(state: *State, selected: Lane) void {
-            Base.cancel(&state.lanes[@intFromEnum(selected)]);
+            Base.cancel(&state.lanes[@backingInt(selected)]);
         }
         pub fn cancel(state: *State) void {
             for (&state.lanes) |*current| Base.cancel(current);
@@ -689,7 +689,7 @@ const Duplex = struct {
         return result;
     }
     fn execute(raw: *anyopaque, operation: u32, table: *const ecl.abi.ControllerTable, context: *anyopaque) callconv(.c) void {
-        if (operation == @intFromEnum(Operations.Name.invalid_reply)) {
+        if (operation == @backingInt(Operations.Name.invalid_reply)) {
             _ = table.build_message(context, &.{ .action = .reply_endpoint, .endpoint = Endpoints.id(.receiver) });
         } else DuplexSdk.definition().execute.?(raw, operation, table, context);
     }

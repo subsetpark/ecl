@@ -164,7 +164,7 @@ pub const Exchange = struct {
         return self.terminal_result;
     }
     pub fn exchangeSource(self: *Operation, interest: exchanges.Interest) external.ReadinessSource {
-        return external.readinessSource(Operation, self, @intFromEnum(interest));
+        return external.readinessSource(Operation, self, @backingInt(interest));
     }
     pub fn retainReadiness(self: *Operation) void {
         self.ticket.retain();
@@ -269,8 +269,8 @@ pub const Exchange = struct {
     }
     pub fn readyLocked(self: *Operation, key: u64) bool {
         return switch (key) {
-            @intFromEnum(exchanges.Interest.cleanup) => self.lifetime == .closed,
-            @intFromEnum(exchanges.Interest.completion) => self.ticket.status() == .done or self.ticket.status() == .cancelled,
+            @backingInt(exchanges.Interest.cleanup) => self.lifetime == .closed,
+            @backingInt(exchanges.Interest.completion) => self.ticket.status() == .done or self.ticket.status() == .cancelled,
             else => false,
         };
     }

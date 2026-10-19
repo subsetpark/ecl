@@ -457,7 +457,7 @@ fn expectRedraw(
     var writer = std.Io.Writer.fixed(rendered);
     var diagnostics = std.Io.Writer.Discarding.init(&.{});
     var sink = console.Console.init(&writer, &diagnostics.writer);
-    try sink.redraw(@enumFromInt(columns), prompt, view);
+    try sink.redraw(@fromBackingInt(@intCast(columns)), prompt, view);
     try std.testing.expectEqualSlices(u8, expected.items, writer.buffered());
 
     // Whatever was selected fits the row it was planned for, so the redraw

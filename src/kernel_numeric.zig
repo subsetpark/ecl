@@ -2287,7 +2287,7 @@ const NumericBinaryPlan = opaque {
         std.debug.assert(!(shape == .scalar_leaf and left == .byte) and !(shape == .leaf_scalar and right == .byte));
         std.debug.assert(shape != .leaf_only);
         const table = comptime plans(operation);
-        return table[@intFromEnum(left)][@intFromEnum(right)][@intFromEnum(shape)];
+        return table[@backingInt(left)][@backingInt(right)][@backingInt(shape)];
     }
 
     const PlanTable = [number_classes.len][number_classes.len][binary_shapes.len]?*const NumericBinaryPlan;
@@ -2295,8 +2295,8 @@ const NumericBinaryPlan = opaque {
     comptime {
         // The table is indexed by enum value, so the class and shape lists
         // must list each enum in value order; `leaf_only` is never binary.
-        for (number_classes, 0..) |class, index| std.debug.assert(@intFromEnum(class) == index);
-        for (binary_shapes, 0..) |shape, index| std.debug.assert(@intFromEnum(shape) == index);
+        for (number_classes, 0..) |class, index| std.debug.assert(@backingInt(class) == index);
+        for (binary_shapes, 0..) |shape, index| std.debug.assert(@backingInt(shape) == index);
     }
 
     fn plans(comptime operation: BinaryOp) PlanTable {
@@ -2314,7 +2314,7 @@ const NumericBinaryPlan = opaque {
                         .out = out,
                         .step = binaryStep(operation, candidate_left, candidate_right, candidate_shape),
                     };
-                    table[@intFromEnum(candidate_left)][@intFromEnum(candidate_right)][@intFromEnum(candidate_shape)] =
+                    table[@backingInt(candidate_left)][@backingInt(candidate_right)][@backingInt(candidate_shape)] =
                         @ptrCast(&data);
                 }
             }

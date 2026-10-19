@@ -462,7 +462,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
         }
 
         fn slot(key: K, capacity: usize) usize {
-            const raw: u32 = @intFromEnum(key);
+            const raw: u32 = @backingInt(key);
             return @as(usize, raw *% 0x9e37_79b9) & (capacity - 1);
         }
     };

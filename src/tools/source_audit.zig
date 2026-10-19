@@ -94,8 +94,8 @@ const source_groups = [_]SourceGroup{
         "kernel_random.zig",   "kernel_flat.zig",  "driver_completion.zig",
     }),
     embeddedGroup(false, &.{
-        "source_audit.zig",            "tools/source_audit.zig",
-        "tools/bench_kernels.zig",     "tools/bench_workdrivers.zig",
+        "source_audit.zig",           "tools/source_audit.zig",
+        "tools/bench_kernels.zig",    "tools/bench_workdrivers.zig",
         "tools/ecl_source_check.zig",
     }),
     // Scheduler-owned external resources: process ports, filesystem roots,
@@ -911,7 +911,7 @@ fn auditTypedBudgetLiterals(file: []const u8, source: [:0]const u8) bool {
     if (tree.errors.len != 0) return true;
     var failed = false;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         var buffer: [2]std.zig.Ast.Node.Index = undefined;
         const literal = tree.fullStructInit(&buffer, node) orelse continue;
         const type_expr = literal.ast.type_expr.unwrap() orelse continue;
@@ -978,7 +978,7 @@ fn auditProductionFunctionTokenPair(
     }
     var failed = false;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         if (tree.nodeTag(node) != .fn_decl or excluded[tree.firstToken(node)]) continue;
         var found_first = false;
         var found_second = false;
@@ -1043,7 +1043,7 @@ fn auditWorkDriverOutputs(label: []const u8, source: [:0]const u8) bool {
     var failed = false;
     var node_index: usize = 0;
     while (node_index < tree.nodes.len) : (node_index += 1) {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_index));
         if (tree.nodeTag(node) != .fn_decl) continue;
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const function = tree.fullFnProto(&buffer, node) orelse continue;
@@ -1092,7 +1092,7 @@ fn auditFunctionTokens(
     defer tree.deinit(std.heap.page_allocator);
     var node_index: usize = 0;
     while (node_index < tree.nodes.len) : (node_index += 1) {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_index));
         if (tree.nodeTag(node) != .fn_decl) continue;
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const function = tree.fullFnProto(&buffer, node) orelse continue;
