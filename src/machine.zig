@@ -1586,9 +1586,11 @@ pub const ExecutionSite = struct {
     /// A nested activation continuing the same logical execution in `scope`:
     /// a dynamic `call`, an `@attempt` child, or a resumed qualified load.
     /// A quotation resolves where its invoker runs, so both scopes are the one
-    /// it was handed.
+    /// it was handed. An applied quotation may have come from any caller, so
+    /// it does not inherit embedded registration trust; a resumed load sets
+    /// the provenance it registers under itself.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return resumed(scope, invoker.home(), invoker.site.registration_provenance);
+        return resumed(scope, invoker.home(), invoker.site.registration_provenance.applied());
     }
 
     /// An application resuming in `scope` under its launch home. The only
@@ -3260,7 +3262,9 @@ pub const Machine = struct {
         return .{
             .parent_scope = current.scope(),
             .home = current.home(),
-            .registration_provenance = current.site.registration_provenance,
+            // A combinator applies a quotation value, which may have come from
+            // any caller, so embedded trust stays with the embedded code.
+            .registration_provenance = current.site.registration_provenance.applied(),
         };
     }
     fn installDriver(self: *Machine, context: anytype) void {
@@ -3521,6 +3525,20 @@ pub const Machine = struct {
     pub fn currentSource(self: *const Machine) ?*const map_state.SourceScope {
         const current = self.unit.current orelse return null;
         return current.site.registration_provenance.sourceScope();
+    }
+
+    /// Standard-library names are reserved, like `core`: only embedded loading
+    /// registers them, so a stdlib name means the same module in every scope,
+    /// whether or not it has loaded. User registration, aliasing, and removal
+    /// under one are `'domain`.
+    pub fn refuseReservedModule(self: *Machine, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
+        if (provenance == .standard_library) return;
+        if (self.unit.inherited.libraries().find(name) == null) return;
+        return self.failFmt(
+            .domain,
+            "module name `{s}` is reserved for the standard library",
+            .{intern.get(intern.moduleId(name))},
+        );
     }
 
     pub fn publicationRegistry(self: *const Machine, name: intern.ModuleName, provenance: modules.RegistrationProvenance) *modules.Registry {
@@ -5955,6 +5973,10 @@ pub const Machine = struct {
             return self.typeError("a module");
         };
         const provenance = self.unit.current.?.site.registration_provenance;
+        self.refuseReservedModule(name, provenance) catch |err| {
+            self.releaseDomain().releaseValue(module);
+            return err;
+        };
         const registry = self.publicationRegistry(name, provenance);
         return self.startDriver(ModuleRegisterDriver{
             .module = .init(module),
@@ -9741,6 +9763,7 @@ const ModuleCompletionDriver = struct {
                         "@defm requires a valid module name",
                     );
                     const provenance = validate.provenance;
+                    try evaluator.refuseReservedModule(name, provenance);
                     const registration = evaluator.publicationRegistry(name, provenance).registrationCursor(
                         validate.sealed.borrow().ref(),
                         name,

@@ -585,11 +585,11 @@ test "idioms: capture shapes preserve generic behavior" {
     try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 3);
 }
 
-test "idioms: an ordinary replacement cannot inherit stdlib recognition" {
+test "idioms: an ordinary module with stdlib's shape cannot inherit its recognition" {
     const source =
         "[] ((pop pop \"ordinary\") 'format-valid defp " ++
-        "(format-valid) 'format def) 'str @defm " ++
-        "[] \"\" str.format";
+        "(format-valid) 'format def) 'lookalike @defm " ++
+        "[] \"\" lookalike.format";
     var heap: SessionHeap = .init;
     defer retireHeap(&heap);
     var run = try execute(source, .automatic, heap.allocator());

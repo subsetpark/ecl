@@ -1536,8 +1536,13 @@ as ordinary ecl definitions and modules.
 `prelude.ecl` is embedded and evaluated during Session construction to populate
 the core environment. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,
-so a stray file cannot silently replace shipped code; explicit registration
-and in-session shadowing remain language operations.
+so a stray file cannot silently replace shipped code, and their names are
+reserved like `core`: only embedded loading registers them, so user code can
+neither replace, alias, nor remove one. That exemption belongs to embedded
+code, not to its dynamic extent: a quotation a stdlib word applies runs with
+ordinary provenance. A qualified stdlib name therefore
+resolves to the same module from every scope, which is what lets prelude and
+stdlib bodies call one another without depending on their caller.
 
 The placement rule is:
 

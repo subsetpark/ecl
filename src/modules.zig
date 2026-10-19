@@ -684,6 +684,16 @@ pub const RegistrationProvenance = union(enum) {
             else => null,
         };
     }
+
+    /// The provenance of a quotation this code applies as a value (`call`,
+    /// `@attempt`, a combinator). The value may have come from any caller, so
+    /// embedded trust stays with embedded code and never passes to it.
+    pub fn applied(self: RegistrationProvenance) RegistrationProvenance {
+        return switch (self) {
+            .standard_library => .ordinary,
+            .ordinary, .root_scope, .source => self,
+        };
+    }
 };
 
 const Registration = struct {

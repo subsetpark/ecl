@@ -6,8 +6,8 @@
 //! silently replace the stdlib, and `import` of a stdlib word must work with no
 //! `ECL_PATH` and no readable working directory at all.
 //!
-//! In-session shadowing and explicit `module` registration remain the
-//! documented ways to override one of these names.
+//! These names are reserved: user registration, aliasing, and removal under
+//! one are `'domain` (`Machine.refuseReservedModule`).
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");

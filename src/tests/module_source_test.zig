@@ -1016,3 +1016,32 @@ test "loader: explicit private-only artifacts retain file identity" {
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "hidden.answer", &.{"not exported"});
 }
+
+test "loader: a mapped file cannot privately register a stdlib name" {
+    var fixture = try runtime_fixture.Fixture.init();
+    defer fixture.deinit();
+    const map = "{'format 1 'local \"root\" 'scopes {\"root\" {'root \".\" 'visible [] 'sources [] 'artifacts [" ++
+        "{'path \"foo.ecl\" 'kind 'ecl 'exports [\"root.foo\"]}]}}}";
+    try writeInput(&fixture, "ecl.modules", map);
+    try writeInput(&fixture, "foo.ecl", "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm\n" ++
+        "[] (({'a 1} 'a 7 at-or) 'lookup def) 'root.foo @defm\n");
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .initial_cwd = fixture.cwd,
+    }), .default, .evaluate);
+    defer runtime.deinit();
+
+    try expectErrorContains(&runtime, "root.foo.lookup", &.{"module name `dict` is reserved for the standard library"});
+    try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+}
