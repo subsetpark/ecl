@@ -4330,7 +4330,7 @@ pub const Machine = struct {
                         .complete => |candidate| {
                             var built = candidate;
                             errdefer built.deinit();
-                            self.candidate = .init(try built.seal(evaluator.moduleRecognition()));
+                            self.candidate = .init(try built.seal(evaluator.moduleRecognition(.standard_library)));
                             return .stepped;
                         },
                     }
@@ -4455,7 +4455,7 @@ pub const Machine = struct {
                         // the publication stay with this driver's state.
                         var built = candidate;
                         errdefer built.deinit();
-                        var sealed = heap.Owned(modules.SealedImage).init(try built.seal(evaluator.moduleRecognition()));
+                        var sealed = heap.Owned(modules.SealedImage).init(try built.seal(evaluator.moduleRecognition(self.provenance)));
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releaseDomain(),
@@ -5489,7 +5489,11 @@ pub const Machine = struct {
     }
     /// What a module image built by this unit recognizes against when it
     /// seals: the session's recognizer and core. Null when the unit has none.
-    pub fn moduleRecognition(self: *Machine) ?env.ModuleRecognition {
+    /// Recognition for an image about to seal. Only a standard-library image's
+    /// definitions are trusted at dispatch, so any other image skips the work
+    /// rather than recording idioms nothing will read.
+    pub fn moduleRecognition(self: *Machine, provenance: modules.RegistrationProvenance) ?env.ModuleRecognition {
+        if (provenance != .standard_library) return null;
         const recognizer = self.unit.inherited.freeze_recognizer orelse return null;
         return .{
             .recognizer = recognizer,
@@ -9710,7 +9714,10 @@ const ModuleCompletionDriver = struct {
                     continue;
                 }
                 const completion = capture.completion;
-                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(evaluator.moduleRecognition()));
+                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(evaluator.moduleRecognition(switch (completion) {
+                    .named => |named| named.provenance,
+                    .value => .ordinary,
+                })));
                 capture.image.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 switch (completion) {
                     .value => self.state.borrowMut().* = .{ .value = .init(sealed.take()) },
