@@ -691,6 +691,16 @@ Within each bounded cache set, lexical entries are evicted before generation
 or module-local entries; adding lexical coverage cannot displace those existing
 specializations at other source occurrences.
 
+A data combinator's call owns a resolution plan for its quotation: one leased
+resolution per word position, kept from that word's first plain resolution in
+the call and released with the call. Each application's activation reaches the
+plan through its application frame and uses it only while running that exact
+quotation in a scope that has bound nothing, so nested quotations, callee
+bodies, and an application that defines a name resolve as before. A resolution
+carrying a module home, generation, pin, or borrowed scope is never planned.
+The lease keeps the planned binding's snapshot alive, which is what makes a
+replacement during the call invisible to it until its next call.
+
 The reserved qualifier `core` is decided before any of that. When the
 resolution cursor splits a dotted spelling and the module segment is exactly
 `core`, it looks the binding segment up in the core environment directly and

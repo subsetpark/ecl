@@ -1628,6 +1628,8 @@ pub const IsolatedApplication = struct {
     site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
+    /// Where a data combinator keeps the bindings its quotation resolved.
+    plan: ?*ResolutionPlan = null,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1693,6 +1695,8 @@ const ApplicationFrame = struct {
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
+    /// Borrowed from the combinator state `context` names.
+    plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
@@ -5973,6 +5977,7 @@ pub const Machine = struct {
             },
             .traced_word = inherited_trace,
             .selection = .{},
+            .plan = application.plan,
         } });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
@@ -6250,7 +6255,36 @@ pub const Machine = struct {
         self.unit.module_call_sites.install(self.releaseDomain(), site, word, candidate);
     }
 
+    /// The plan of the data combinator applying the running code, when that code
+    /// is the combinator's own quotation and this application has bound nothing.
+    fn applicationPlan(self: *Machine) ?*ResolutionPlan {
+        const current = &self.unit.current.?;
+        const index = current.application_tail orelse return null;
+        const frame = &self.unit.frames.items[@backingInt(index)];
+        const plan = switch (frame.*) {
+            .application => |*application| application.plan orelse return null,
+            else => return null,
+        };
+        if (plan.code != current.code) return null;
+        if (current.site.resolution_scope) |scope| if (scope.environmentOrNull() != null) return null;
+        return plan;
+    }
+
+    /// Keeps a plain resolution of `site` in the running data combinator's
+    /// plan, or returns null and leaves it with the caller. One that carries a
+    /// module home, generation, pin, or borrowed scope belongs to that one
+    /// dispatch and is never kept.
+    fn keepPlanned(self: *Machine, site: ?ErrorSite, resolved: Resolution) ?*Resolution {
+        const at = site orelse return null;
+        if (resolved.home != null or resolved.execution_generation != null or
+            resolved.borrow_pin != null or resolved.borrowed_cell != null) return null;
+        const plan = self.applicationPlan() orelse return null;
+        if (at.code != plan.code) return null;
+        return plan.keep(self.unit.allocator, at.index, resolved);
+    }
+
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        if (self.applicationPlan()) |plan| if (plan.find(self.unit.active_index)) |resolved| return executeResolved(self, resolved);
         const qualified_call_site = ErrorSite{
             .code = self.unit.current.?.code,
             .index = self.unit.active_index,
@@ -6306,6 +6340,7 @@ pub const Machine = struct {
         if (cache_scope) |cache| switch (self.lookupPlain(cached_site, word.name, cache)) {
             .miss => |miss| local_cache_scope = miss.guard,
             .hit => |resolution| {
+                if (self.keepPlanned(qualified_call_site, resolution)) |kept| return executeResolved(self, kept);
                 var resolved = resolution;
                 defer resolved.deinit(self.unit.allocator);
                 try executeResolved(self, &resolved);
@@ -7460,13 +7495,17 @@ const DispatchDriver = struct {
                 switch (outcome) {
                     .resolved => |resolution| {
                         var resolved = resolution;
-                        defer resolved.deinit(allocator);
                         if (comptime root_execution_metrics_enabled) {
                             if (resolved.execution_generation != null) {
                                 self_machine.unit.root_execution_metrics.qualified_cache_misses += 1;
                             }
                         }
                         if (call_site) |site| self_machine.cacheResolution(site, word, &resolved);
+                        if (self_machine.keepPlanned(call_site, resolved)) |kept| {
+                            try executeResolved(self_machine, kept);
+                            return .detached;
+                        }
+                        defer resolved.deinit(allocator);
                         try executeResolved(self_machine, &resolved);
                         return .detached;
                     },
@@ -8228,6 +8267,46 @@ pub const LookupChain = enum {
             .qualified => "qualified",
             .@"module-value" => "module-value",
         };
+    }
+};
+
+/// The bindings one data-combinator call has resolved for the words of its
+/// quotation. A word's first plain resolution in the call is kept and every
+/// later application reuses it, so the call sees the bindings in effect when it
+/// began and a redefinition made meanwhile takes effect at the next call. An
+/// application whose own scope has bound a name resolves as any code does, so
+/// a definition inside the quotation is still seen by the words after it.
+pub const ResolutionPlan = struct {
+    /// Borrowed: the combinator owns its quotation for the whole call.
+    code: *Header,
+    entries: []?Resolution = &.{},
+
+    pub fn init(code: *Header) ResolutionPlan {
+        return .{ .code = code };
+    }
+
+    fn find(self: *ResolutionPlan, index: u32) ?*Resolution {
+        if (index >= self.entries.len) return null;
+        if (self.entries[index]) |*resolution| return resolution;
+        return null;
+    }
+
+    /// Takes `resolution` for `index`, or returns null and leaves it with the
+    /// caller when there is no room to keep it.
+    fn keep(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32, resolution: Resolution) ?*Resolution {
+        if (self.entries.len == 0) {
+            self.entries = allocator.alloc(?Resolution, @intCast(self.code.length())) catch return null;
+            @memset(self.entries, null);
+        }
+        std.debug.assert(self.entries[index] == null);
+        self.entries[index] = resolution;
+        return &self.entries[index].?;
+    }
+
+    pub fn retire(self: *ResolutionPlan, _: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        for (self.entries) |*entry| if (entry.*) |*resolution| resolution.deinit(allocator);
+        allocator.free(self.entries);
+        self.entries = &.{};
     }
 };
 
@@ -9117,6 +9196,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .site = continuation.site,
                         .seeded = application.seeded,
                         .provenance = application.provenance,
+                        .plan = continuation.plan,
                     }, launch, continuation.traced_word);
                     return true;
                 },
@@ -9149,6 +9229,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .traced_word = continuation.traced_word,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
+                        .plan = continuation.plan,
                     } });
                     application_selection = .{};
                     defer suspended.deinit(self.releaseDomain(), self.unit.allocator);

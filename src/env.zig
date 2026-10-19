@@ -529,7 +529,8 @@ pub const BindingCell = struct {
 };
 
 /// An owned reference to one stable binding cell. Loading always rereads the
-/// cell's current snapshot; consumers never cache a binding payload.
+/// cell's current snapshot; the one consumer that holds a payload across
+/// executions is a data combinator's resolution plan, for the length of a call.
 pub const BindingCellHandle = enum(usize) {
     consumed = 0,
     _,

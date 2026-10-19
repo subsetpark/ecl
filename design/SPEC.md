@@ -639,7 +639,12 @@ Reflection operations inspect binding metadata through separate mechanisms.
 Lookup is late. A word occurrence's resolution metadata selects only a scope.
 Each execution looks up the binding in that scope; the occurrence retains no
 binding, body, value, or module generation. Replacing a binding in a mutable selected
-scope affects existing code. A module image's scope is immutable after
+scope affects existing code. The data combinators `each`, `zip-with`, `fold`,
+`fold1`, and `scan` bound this per call: a call looks up each word written in
+its quotation once, at that word's first execution in the call, and its later
+applications reuse that binding, so a replacement made while the call runs
+takes effect at its next call. An application that binds a name of its own
+looks up the words after that binding as any code does. A module image's scope is immutable after
 construction; replacing an image in a registration does not retarget words
 belonging to the former image. Attempting to resolve through a retired selected
 scope is a `'domain` error, never a fallback to another scope.
