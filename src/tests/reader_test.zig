@@ -49,13 +49,13 @@ test "decimal literals round-trip float bits without exponent scaling or double 
 
     const halfway = "1.00000000000000011102230246251565404236316680908203125";
     try expectFloatToken(halfway, 1.0);
-    const zeros = "0" ** 1000;
+    const zeros = &@as([1000]u8, @splat('0'));
     try expectFloatToken(halfway ++ zeros, 1.0);
     try expectFloatToken(halfway ++ zeros ++ "1", @bitCast(@as(u64, 0x3ff0000000000001)));
 
     // The exponent bound must account for token length, rather than changing
     // a finite value when a long fractional prefix cancels a large exponent.
-    const long = try std.mem.concat(allocator, u8, &.{ "0.", "0" ** 1_000_000, "1e1000001" });
+    const long = try std.mem.concat(allocator, u8, &.{ "0.", &@as([1_000_000]u8, @splat('0')), "1e1000001" });
     defer allocator.free(long);
     var cursor = lexer.ClassifyCursor.init(long);
     var steps: usize = 0;
@@ -137,7 +137,7 @@ test "span archive rejects a substitutable provenance issuer" {
     defer unrelated.deinit();
     try std.testing.expectEqual(
         heap.CodeIdentityAssignment.foreign_namespace,
-        heap.assignCodeIdentity(unrelated, quotation, @enumFromInt(1)),
+        heap.assignCodeIdentity(unrelated, quotation, @fromBackingInt(@intCast(1))),
     );
 
     var root = heap.OwnedValue.init(host.domain(), try materializeRoot(&archive, host.domain(), parsed.values()));

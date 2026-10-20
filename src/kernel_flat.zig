@@ -360,7 +360,7 @@ pub fn VectorFamily(
         const RightVector = @Vector(lanes, Right);
         const OutVector = @Vector(lanes, Out);
         const FaultMask = @Vector(lanes, bool);
-        const MaskLane = std.meta.Int(.unsigned, @bitSizeOf(Left));
+        const MaskLane = @Int(.unsigned, @bitSizeOf(Left));
         const LaneMask = @Vector(lanes, MaskLane);
         pub const Masked = MaskedVector(Out, MaskLane, lanes);
 

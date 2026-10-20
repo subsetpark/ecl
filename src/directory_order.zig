@@ -167,7 +167,7 @@ fn expectOrdered(comptime count: usize, seed: u64) !void {
         try std.testing.expect(std.mem.order(u8, sorted[index].name, item.name) != .gt);
     }
     // Every input appears exactly once.
-    var seen = [_]bool{false} ** names.len;
+    var seen: [names.len]bool = @splat(false);
     for (sorted) |item| {
         const index = (@intFromPtr(item.name.ptr) - @intFromPtr(&names)) / names[0].len;
         try std.testing.expect(!seen[index]);

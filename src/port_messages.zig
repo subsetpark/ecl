@@ -17,7 +17,7 @@ const EnvelopeState = struct {
     host: *const heap.HostCleanup,
     value: Value,
     footprint: message.Footprint,
-    attachments: [31]?*heap.PortHandle = .{null} ** 31,
+    attachments: [31]?*heap.PortHandle = @splat(null),
     reservation: ?*Budget = null,
     refs: std.atomic.Value(usize) = .init(1),
     fn capability(self: *EnvelopeState) *Envelope {
@@ -145,7 +145,7 @@ pub const Budget = opaque {
     }
     fn returnBytes(self: *Budget, count: usize) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         owned.used -= count;
         owned.notifyLocked();
@@ -159,7 +159,7 @@ const QueueState = struct {
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     waits: external.WaitList(QueueState) = .{},
-    messages: [max_messages]?*Envelope = .{null} ** max_messages,
+    messages: [max_messages]?*Envelope = @splat(null),
     capacity: usize,
     head: usize = 0,
     count: usize = 0,
@@ -179,7 +179,7 @@ const QueueState = struct {
         const size = item.state().footprint.bytes;
         if (size > budget.limit) return .overflow;
         if (self.count == self.capacity) return .full;
-        std.Io.Threaded.mutexLock(&budget.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&budget.mutex);
         defer std.Io.Threaded.mutexUnlock(&budget.mutex);
         if (item.state().reservation) |reserved| {
             if (reserved != self.budget) return .{ .failed = Failure.init(.domain, "message belongs to another transport budget") };
@@ -233,7 +233,7 @@ pub const Queue = opaque {
     }
     pub fn interrupt(self: *Queue) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         owned.notifyLocked();
         std.Io.Threaded.mutexUnlock(&owned.mutex);
         owned.budget.returnBytes(0);
@@ -254,7 +254,7 @@ pub const Queue = opaque {
     /// Consumes the message only on accepted; all other outcomes retain it.
     pub fn send(self: *Queue, item: *Envelope) Send {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         return switch (owned.sendLocked(item)) {
             .accepted => .accepted,
@@ -266,14 +266,14 @@ pub const Queue = opaque {
     }
     pub fn beginRead(self: *Queue) error{ConcurrentRead}!void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.reader) return error.ConcurrentRead;
         owned.reader = true;
     }
     pub fn endRead(self: *Queue) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         owned.reader = false;
         std.Io.Threaded.mutexUnlock(&owned.mutex);
     }
@@ -281,7 +281,7 @@ pub const Queue = opaque {
     /// Preparing the event may fail without consuming the queued message.
     pub fn peek(self: *Queue) Receive {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.count != 0) return .{ .message = owned.messages[owned.head].?.borrow() };
         return switch (owned.phase) {
@@ -327,7 +327,7 @@ pub const Queue = opaque {
         consumed: ?*Envelope = null,
         result: Claim = .retry,
         pub fn lock(self: *@This()) void {
-            std.Io.Threaded.mutexLock(&self.queue.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.queue.mutex);
         }
         pub fn unlock(self: *@This()) void {
             std.Io.Threaded.mutexUnlock(&self.queue.mutex);
@@ -360,7 +360,7 @@ pub const Queue = opaque {
     }
     pub fn finish(self: *Queue) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         if (owned.phase == .open) owned.phase = .eof;
         owned.notifyLocked();
         std.Io.Threaded.mutexUnlock(&owned.mutex);
@@ -368,7 +368,7 @@ pub const Queue = opaque {
     }
     pub fn fail(self: *Queue, failure: Failure) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         if (owned.phase == .open) owned.phase = .{ .failed = failure };
         owned.notifyLocked();
         std.Io.Threaded.mutexUnlock(&owned.mutex);
@@ -378,9 +378,9 @@ pub const Queue = opaque {
     /// cleanup must break cycles formed by messages containing their exchange.
     pub fn abort(self: *Queue) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         const discarded = owned.messages;
-        owned.messages = .{null} ** max_messages;
+        owned.messages = @splat(null);
         owned.count = 0;
         if (owned.phase == .open) owned.phase = .{ .failed = Failure.init(.io, "message endpoint is closed") };
         owned.notifyLocked();
@@ -403,7 +403,7 @@ pub const Controller = opaque {
     /// reservation. Buffered messages precede terminal failure.
     pub fn receiveMessage(self: *Controller, cancelled: *const std.atomic.Value(bool)) Received {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         while (!cancelled.load(.acquire) and owned.count == 0 and owned.phase == .open) owned.changed.waitUncancelable(io(), &owned.mutex);
         if (cancelled.load(.acquire)) return .cancelled;
@@ -423,7 +423,7 @@ pub const Controller = opaque {
     pub fn send(self: *Controller, item: *Envelope, cancelled: *const std.atomic.Value(bool)) bool {
         const owned = self.state();
         while (true) {
-            std.Io.Threaded.mutexLock(&owned.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
             if (cancelled.load(.acquire)) {
                 std.Io.Threaded.mutexUnlock(&owned.mutex);
                 return false;
@@ -444,7 +444,7 @@ pub const Controller = opaque {
                 .capacity => |epoch| {
                     std.Io.Threaded.mutexUnlock(&owned.mutex);
                     const budget = owned.budget.state();
-                    std.Io.Threaded.mutexLock(&budget.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&budget.mutex);
                     while (!cancelled.load(.acquire) and epoch == budget.epoch) budget.changed.waitUncancelable(io(), &budget.mutex);
                     std.Io.Threaded.mutexUnlock(&budget.mutex);
                 },

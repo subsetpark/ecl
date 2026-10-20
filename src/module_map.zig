@@ -157,7 +157,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     defer allocator.free(local_name);
     owned.local = findScope(owned, local_name) orelse return error.Invalid;
     for (owned.scopes.items, 0..) |*scope, index| {
-        const id: ScopeId = @enumFromInt(@as(u32, @intCast(index)));
+        const id: ScopeId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
         const definition = try data.asDict(dict.valueAt(definitions, index));
         const visibility = try sequence(try data.field(definition, "visible"));
         const visible = try allocator.alloc(ScopeId, visibility.list.length() + 1);
@@ -174,7 +174,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
         // Its cleanup is thereafter owned by the validated-map backing.
     }
     for (owned.scopes.items, 0..) |scope, index| {
-        const id: ScopeId = @enumFromInt(@as(u32, @intCast(index)));
+        const id: ScopeId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
         const definition = try data.asDict(dict.valueAt(definitions, index));
         const artifacts = try sequence(try data.field(definition, "artifacts"));
         for (0..@intCast(artifacts.list.length())) |artifact_index| {
@@ -253,7 +253,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     }
     std.mem.sort(Artifact, owned.artifacts.items, {}, struct {
         fn less(_: void, a: Artifact, b: Artifact) bool {
-            if (a.scope != b.scope) return @intFromEnum(a.scope) < @intFromEnum(b.scope);
+            if (a.scope != b.scope) return @backingInt(a.scope) < @backingInt(b.scope);
             return std.mem.order(u8, a.path, b.path) == .lt;
         }
     }.less);
@@ -268,7 +268,7 @@ fn addArtifact(owned: *Backing, scope: ScopeId, path: []const u8, kind: Kind, na
     };
     for (owned.artifacts.items) |prior| {
         count += prior.exports.len;
-        if (std.mem.eql(u8, owned.scopes.items[@intFromEnum(prior.scope)].root, owned.scopes.items[@intFromEnum(scope)].root) and
+        if (std.mem.eql(u8, owned.scopes.items[@backingInt(prior.scope)].root, owned.scopes.items[@backingInt(scope)].root) and
             std.mem.eql(u8, prior.path, path)) return error.Invalid;
         for (names) |name| for (prior.exports) |existing| {
             if (name == existing) return error.Invalid;
@@ -281,14 +281,14 @@ fn addArtifact(owned: *Backing, scope: ScopeId, path: []const u8, kind: Kind, na
     errdefer owned.allocator.free(exports);
     std.mem.sort(intern.ModuleName, exports, {}, struct {
         fn less(_: void, a: intern.ModuleName, b: intern.ModuleName) bool {
-            return @intFromEnum(a) < @intFromEnum(b);
+            return @backingInt(a) < @backingInt(b);
         }
     }.less);
     try owned.artifacts.append(owned.allocator, .{ .scope = scope, .path = owned_path, .kind = kind, .exports = exports });
 }
 
 fn findScope(owned: *const Backing, name: []const u8) ?ScopeId {
-    for (owned.scopes.items, 0..) |scope, index| if (std.mem.eql(u8, scope.name, name)) return @enumFromInt(@as(u32, @intCast(index)));
+    for (owned.scopes.items, 0..) |scope, index| if (std.mem.eql(u8, scope.name, name)) return @fromBackingInt(@intCast(@as(u32, @intCast(index))));
     return null;
 }
 fn ownedText(allocator: std.mem.Allocator, item: Value) Error![]u8 {

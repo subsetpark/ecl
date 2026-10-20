@@ -407,14 +407,21 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 fn lock(mutex: *std.Io.Mutex) void {
-    std.Io.Threaded.mutexLock(mutex);
+    std.Io.Threaded.mutexLockUncancelable(mutex);
 }
 fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
 }
 // Pipe writes must not depend on an embedding host's process-wide SIGPIPE
-// disposition. Mask only the activity thread and consume only newly pending
-// SIGPIPE before restoring the original mask.
+// disposition. Where the descriptor can opt out (Darwin, FreeBSD), no SIGPIPE
+// is generated at all: there a broken-pipe signal may be delivered to any
+// thread, so a per-thread mask cannot contain it. Elsewhere the signal is
+// thread-directed, so mask only the activity thread and consume only newly
+// pending SIGPIPE before restoring the original mask.
+fn suppressPipeSignal(file: std.Io.File) error{Failed}!void {
+    if (!@hasDecl(std.c.F, "SETNOSIGPIPE")) return;
+    if (std.c.fcntl(file.handle, std.c.F.SETNOSIGPIPE, @as(c_int, 1)) == -1) return error.Failed;
+}
 const PipeSignals = struct {
     previous: std.posix.sigset_t,
     pending_before: bool,
@@ -666,6 +673,11 @@ const Process = ecl.Port(.{
             defer finishStream(state, "stdin");
             defer file.close(io());
             const stream = try context.endpoint(Process, .stdin);
+            suppressPipeSignal(file) catch {
+                state.failed();
+                context.failStreams(.io, "process pipe operation failed");
+                return;
+            };
             // SAFETY: only the initialized prefix returned by read is consumed.
             var buffer: [4096]u8 = undefined;
             while (try stream.read(&buffer)) |count| {
@@ -795,8 +807,8 @@ const Process = ecl.Port(.{
             if (failed) return RequestParser.fail(context, .io, "process pipe operation failed");
             const info: struct { kind: []const u8, field: []const u8, number: i64 } = switch (term.?) {
                 .exited => |number| .{ .kind = "exited", .field = "code", .number = number },
-                .signal => |number| .{ .kind = "signaled", .field = "signal", .number = @intFromEnum(number) },
-                .stopped => |number| .{ .kind = "stopped", .field = "signal", .number = @intFromEnum(number) },
+                .signal => |number| .{ .kind = "signaled", .field = "signal", .number = @backingInt(number) },
+                .stopped => |number| .{ .kind = "stopped", .field = "signal", .number = @backingInt(number) },
                 .unknown => |number| .{ .kind = "unknown", .field = "status", .number = number },
             };
             const builder = context.builder();
@@ -843,7 +855,7 @@ fn observeLeader(pid: std.posix.pid_t) error{Io}!bool {
     var info = std.mem.zeroes(std.c.siginfo_t);
     while (true) {
         const result = wait_api.waitid(1, @intCast(pid), &info, options);
-        if (result == 0) return @intFromEnum(info.signo) != 0;
+        if (result == 0) return @backingInt(info.signo) != 0;
         switch (std.posix.errno(result)) {
             .INTR => continue,
             else => return error.Io,

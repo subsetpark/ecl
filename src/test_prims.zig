@@ -71,7 +71,7 @@ const CollectedComparator = struct {
 
     pub fn init(_: Context, left: Collected, right: Collected) Cursor {
         return .{
-            .source_order = std.math.order(if (left.source) |id| @as(i64, @intFromEnum(id)) else -1, if (right.source) |id| @as(i64, @intFromEnum(id)) else -1),
+            .source_order = std.math.order(if (left.source) |id| @as(i64, @backingInt(id)) else -1, if (right.source) |id| @as(i64, @backingInt(id)) else -1),
             .left_module = intern.get(intern.moduleId(left.module)),
             .right_module = intern.get(intern.moduleId(right.module)),
             .left_name = intern.get(intern.bindingId(left.metadata.name)),
@@ -123,7 +123,7 @@ fn descriptorValue(
     };
     count += 1;
     if (item.source) |source| {
-        pairs[count] = .{ .{ .symbol = keys.source }, .{ .int = @intFromEnum(source) } };
+        pairs[count] = .{ .{ .symbol = keys.source }, .{ .int = @backingInt(source) } };
         count += 1;
     }
     if (item.metadata.effect) |effect| {
@@ -378,7 +378,7 @@ const InvocationDriver = struct {
                     self.name_id = payload.symbol;
                 } else if (key.symbol == self.keys.source) {
                     if (self.source_id != null or payload != .int or payload.int < 0 or payload.int > std.math.maxInt(u32)) return invalid(evaluator);
-                    self.source_id = @enumFromInt(@as(u32, @intCast(payload.int)));
+                    self.source_id = @fromBackingInt(@intCast(@as(u32, @intCast(payload.int))));
                 } else if (key.symbol != self.keys.effect and key.symbol != self.keys.doc) {
                     return invalid(evaluator);
                 }

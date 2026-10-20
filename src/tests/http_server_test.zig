@@ -488,7 +488,7 @@ test "http server: header and body limits are answered 431 and 413" {
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{'max-header-bytes 64 'max-body-bytes 4}", ok_row, not_found_default);
     defer server.deinit();
-    const long_head = "GET /ok HTTP/1.1\r\nX: " ++ ("a" ** 100) ++ "\r\n\r\n";
+    const long_head = "GET /ok HTTP/1.1\r\nX: " ++ (&@as([100]u8, @splat('a'))) ++ "\r\n\r\n";
     try expectStatus(try exchange(port, long_head), "HTTP/1.1 431 Request Header Fields Too Large");
     try expectStatus(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"), "HTTP/1.1 413 Content Too Large");
     try expectResponse(try exchange(port, "POST /ok HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nfour"), ok_response);

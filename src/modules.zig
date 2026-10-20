@@ -184,7 +184,7 @@ const TestCatalog = struct {
     };
 
     fn rawName(name: intern.BindingName) u32 {
-        return @intFromEnum(name);
+        return @backingInt(name);
     }
 
     fn direction(name: intern.BindingName, mask: u32) usize {
@@ -873,7 +873,7 @@ const Arbiter = struct {
 /// unlinked. A retired slot's queue drains on its own: admission is closed,
 /// so each waiter that is granted discovers a superseded home and releases.
 fn arbiterQuiescent(owning: *ModuleSlot) bool {
-    std.Io.Threaded.mutexLock(&owning.arbiter.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&owning.arbiter.mutex);
     defer std.Io.Threaded.mutexUnlock(&owning.arbiter.mutex);
     return owning.arbiter.head == null and !owning.arbiter.active;
 }
@@ -881,7 +881,7 @@ fn arbiterQuiescent(owning: *ModuleSlot) bool {
 /// Closes admission from inside the arbiter lock, so no turn can be queued
 /// after the owner decides to remove the slot.
 fn closeArbiter(owning: *ModuleSlot) void {
-    std.Io.Threaded.mutexLock(&owning.arbiter.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&owning.arbiter.mutex);
     defer std.Io.Threaded.mutexUnlock(&owning.arbiter.mutex);
     owning.phase.store(.closing, .release);
 }
@@ -980,7 +980,7 @@ pub const StateTurn = struct {
         if (authority.* == .spent) return error.StateApplicationActive;
         const owning = self.lease.slot();
         const arbiter = &owning.arbiter;
-        std.Io.Threaded.mutexLock(&arbiter.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
         defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
         if (owning.phase.load(.acquire) != .live) return error.ModuleRemoved;
         self.previous = arbiter.tail;
@@ -1012,7 +1012,7 @@ pub const StateTurn = struct {
         if (self.holding) return true;
         std.debug.assert(self.linked);
         const arbiter = &self.lease.slot().arbiter;
-        std.Io.Threaded.mutexLock(&arbiter.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
         defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
         if (arbiter.active) {
             self.holding = arbiter.head == self;
@@ -1033,7 +1033,7 @@ pub const StateTurn = struct {
         }
         const arbiter = &self.lease.slot().arbiter;
         {
-            std.Io.Threaded.mutexLock(&arbiter.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
             defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
             if (self.previous) |before| before.next = self.next else arbiter.head = self.next;
             if (self.next) |after| after.previous = self.previous else arbiter.tail = self.previous;
@@ -1081,12 +1081,12 @@ const InventoryEntry = enum(usize) {
     _,
 
     fn init(entry: *SlotEntry) InventoryEntry {
-        return @enumFromInt(@intFromPtr(entry));
+        return @fromBackingInt(@intCast(@intFromPtr(entry)));
     }
 
     fn node(self: InventoryEntry) *SlotEntry {
         std.debug.assert(self != .detached);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
 };
 
@@ -1169,12 +1169,12 @@ const SlotLease = enum(usize) {
     fn retain(slot_ptr: *ModuleSlot) SlotLease {
         const old = slot_ptr.lease_refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != std.math.maxInt(u32));
-        return @enumFromInt(@intFromPtr(slot_ptr));
+        return @fromBackingInt(@intCast(@intFromPtr(slot_ptr)));
     }
 
     fn slot(self: SlotLease) *ModuleSlot {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
 
     fn clone(self: SlotLease) SlotLease {
@@ -1275,11 +1275,11 @@ pub const TestAuthority = enum(usize) {
     _,
 
     fn init(backing: *TestAuthorityState) TestAuthority {
-        return @enumFromInt(@intFromPtr(backing));
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
     fn state(self: TestAuthority) *TestAuthorityState {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn observation(self: TestAuthority) *const TestObservationAccess {
         return @ptrCast(self.state());
@@ -1436,11 +1436,11 @@ pub const GenerationPin = enum(usize) {
     _,
 
     fn initRetained(retained: *ExecutionHome) GenerationPin {
-        return @enumFromInt(@intFromPtr(retained));
+        return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
     fn home(self: GenerationPin) *ModuleHome {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn deinit(self: *GenerationPin) void {
         if (self.* == .consumed) return;
@@ -1452,7 +1452,7 @@ pub const GenerationPin = enum(usize) {
     /// pin adopted from a borrow can be deduplicated against pins already held
     /// without anyone learning what it points at.
     pub fn sameOwner(self: GenerationPin, other: GenerationPin) bool {
-        return @intFromEnum(self) == @intFromEnum(other);
+        return @backingInt(self) == @backingInt(other);
     }
 
     pub fn matches(
@@ -1676,11 +1676,11 @@ pub const GenerationLease = enum(usize) {
     _,
 
     fn initRetained(retained: *Registration) GenerationLease {
-        return @enumFromInt(@intFromPtr(retained));
+        return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
     fn registration(self: GenerationLease) *Registration {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn generationNumber(self: GenerationLease) u64 {
         return self.registration().generation;
@@ -1737,11 +1737,11 @@ pub const GenerationGuard = enum(usize) {
     _,
 
     fn initRetained(retained: *Registration) GenerationGuard {
-        return @enumFromInt(@intFromPtr(retained));
+        return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
     fn registration(self: GenerationGuard) *Registration {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn tryEnterCurrent(
         self: GenerationGuard,
@@ -1774,11 +1774,11 @@ pub const ExecutionGeneration = enum(usize) {
     _,
 
     fn initRetained(retained: *Registration) ExecutionGeneration {
-        return @enumFromInt(@intFromPtr(retained));
+        return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
     fn registration(self: ExecutionGeneration) *Registration {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn home(
         self: ExecutionGeneration,
@@ -1842,10 +1842,10 @@ pub const ImageRef = enum(usize) {
     _,
 
     fn init(target: *ModuleImage) ImageRef {
-        return @enumFromInt(@intFromPtr(target));
+        return @fromBackingInt(@intCast(@intFromPtr(target)));
     }
     fn image(self: ImageRef) *ModuleImage {
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
 };
 
@@ -1861,11 +1861,11 @@ const RetainedImage = enum(usize) {
     fn retain(borrowed: ImageRef) RetainedImage {
         const target = borrowed.image();
         target.retain();
-        return @enumFromInt(@intFromPtr(target));
+        return @fromBackingInt(@intCast(@intFromPtr(target)));
     }
     fn image(self: RetainedImage) *ModuleImage {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     fn deinit(self: *RetainedImage) void {
         if (self.* == .consumed) return;
@@ -1882,11 +1882,11 @@ pub const OwnedImage = enum(usize) {
     _,
 
     fn init(target: *ModuleImage) OwnedImage {
-        return @enumFromInt(@intFromPtr(target));
+        return @fromBackingInt(@intCast(@intFromPtr(target)));
     }
     fn borrow(self: *const OwnedImage) *ModuleImage {
         std.debug.assert(self.* != .consumed);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
     pub fn executionHome(
         self: *const OwnedImage,
@@ -1974,11 +1974,11 @@ pub const SealedImage = enum(usize) {
     _,
 
     fn init(target: *ModuleImage) SealedImage {
-        return @enumFromInt(@intFromPtr(target));
+        return @fromBackingInt(@intCast(@intFromPtr(target)));
     }
     fn borrow(self: *const SealedImage) *ModuleImage {
         std.debug.assert(self.* != .consumed);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
     /// A borrow for publication. Registration retains its own reference, so
     /// this capability's holder keeps owning the one it was sealed with.
@@ -2044,10 +2044,10 @@ pub const LoadingOwner = enum(usize) {
     _,
 
     pub fn of(holder: *const anyopaque) LoadingOwner {
-        return @enumFromInt(@intFromPtr(holder));
+        return @fromBackingInt(@intCast(@intFromPtr(holder)));
     }
     fn token(self: LoadingOwner) usize {
-        const raw = @intFromEnum(self);
+        const raw = @backingInt(self);
         std.debug.assert(raw != free_loading_owner);
         return raw;
     }
@@ -2091,10 +2091,10 @@ pub const ArtifactCommit = enum(u32) {
     _,
 
     fn init(published: map_state.ArtifactId) ArtifactCommit {
-        return @enumFromInt(@intFromEnum(published));
+        return @fromBackingInt(@intCast(@backingInt(published)));
     }
     pub fn artifact(self: ArtifactCommit) map_state.ArtifactId {
-        return @enumFromInt(@intFromEnum(self));
+        return @fromBackingInt(@intCast(@backingInt(self)));
     }
 };
 
@@ -2103,7 +2103,7 @@ pub const LoadingLease = enum(usize) {
     _,
 
     fn init(loading: *LoadingNode) LoadingLease {
-        return @enumFromInt(@intFromPtr(loading));
+        return @fromBackingInt(@intCast(@intFromPtr(loading)));
     }
     /// Trade a live artifact lease for the authority to publish that
     /// artifact. The lease is not released here: publication must become
@@ -2117,7 +2117,7 @@ pub const LoadingLease = enum(usize) {
     }
     fn node(self: LoadingLease) *LoadingNode {
         std.debug.assert(self != .finished);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn move(self: *LoadingLease) LoadingLease {
         const result = self.*;
@@ -2171,7 +2171,7 @@ pub const Registry = enum(usize) {
 
     fn privateState(self: *const Registry) *RegistryState {
         std.debug.assert(self.* != .consumed);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
 
     pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Registry {
@@ -2181,7 +2181,7 @@ pub const Registry = enum(usize) {
             .host = host,
             .directories = .init(null),
         };
-        return @enumFromInt(@intFromPtr(backing));
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
     /// Mint the capability seal owned by a test-mode Session. Its backing
@@ -2242,7 +2242,7 @@ pub const Registry = enum(usize) {
     }
 
     fn lockBlocking(self: *Registry) void {
-        std.Io.Threaded.mutexLock(&self.privateState().writer);
+        std.Io.Threaded.mutexLockUncancelable(&self.privateState().writer);
     }
 
     fn unlock(self: *Registry) void {

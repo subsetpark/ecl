@@ -50,7 +50,7 @@ const Cell = struct {
         return .unsupported;
     }
     pub fn resourceJoined(self: *Cell) bool {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return self.phase == .closed;
     }
@@ -82,7 +82,7 @@ const Cell = struct {
         self.close(null);
     }
     fn close(self: *Cell, scope: ?*external.ScopeIdentity) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         if (self.phase != .open or (if (scope) |s| !self.ownership.authorizesCancellation(s) else false)) {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return;
@@ -101,7 +101,7 @@ const Cell = struct {
         }
         retiring.document.members.retire(releases);
         allocator.free(retiring.document.tar);
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         self.phase = .closed;
         var detached = self.ownership.release();
         self.waits.notifyLocked(self);
@@ -149,7 +149,7 @@ pub fn adopt(scope: *scheduler.TaskScope, tar: []u8, members: Members) error{ Ou
         cell: *Cell,
         document: Document,
         pub fn lock(p: *@This()) void {
-            std.Io.Threaded.mutexLock(&p.cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&p.cell.mutex);
         }
         pub fn unlock(p: *@This()) void {
             std.Io.Threaded.mutexUnlock(&p.cell.mutex);
@@ -174,7 +174,7 @@ pub fn isArchive(item: Value) bool {
 }
 pub fn next(item: Value, path: *[path_limit]u8) error{ Closed, Invalid }!?Metadata {
     const cell = resource.Resource.project(Cell, item) orelse return error.Closed;
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return error.Closed;
     const document = &cell.phase.open;
@@ -190,7 +190,7 @@ pub fn next(item: Value, path: *[path_limit]u8) error{ Closed, Invalid }!?Metada
 }
 pub fn read(item: Value, output: []u8) error{Closed}!usize {
     const cell = resource.Resource.project(Cell, item) orelse return error.Closed;
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return error.Closed;
     const document = &cell.phase.open;

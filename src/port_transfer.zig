@@ -12,7 +12,7 @@ fn InitialPublication(comptime Cell: type, comptime ownership: fn (*Cell) *exter
     return struct {
         cell: *Cell,
         pub fn lock(self: *@This()) void {
-            std.Io.Threaded.mutexLock(&self.cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.cell.mutex);
         }
         pub fn unlock(self: *@This()) void {
             std.Io.Threaded.mutexUnlock(&self.cell.mutex);
@@ -55,7 +55,7 @@ pub fn ScopeTransfer(
     return struct {
         pub fn prepare(cell: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
             const destination: *scheduler.TaskScope = @ptrCast(@alignCast(to));
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             const rejected: ?heap.PortTransferError = if (!live(cell)) error.Closed else switch (ownership(cell).*) {
                 .none, .provisional => error.Closed,
                 .transferring => error.Busy,
@@ -69,7 +69,7 @@ pub fn ScopeTransfer(
             // destination: even a transient stale membership could cancel a
             // resource that has already moved to another owner.
             var publication: Publication = .{ .cell = cell, .origin = from };
-            var incoming: [16]?external.ScopeMember = .{null} ** 16;
+            var incoming: [16]?external.ScopeMember = @splat(null);
             incoming[0] = external.scopeMember(Cell, cell);
             if (!try destination.scheduler.publishExternalBatch(destination, incoming, &publication)) return error.Closed;
         }
@@ -78,7 +78,7 @@ pub fn ScopeTransfer(
             cell: *Cell,
             origin: *anyopaque,
             pub fn lock(self: *@This()) void {
-                std.Io.Threaded.mutexLock(&self.cell.mutex);
+                std.Io.Threaded.mutexLockUncancelable(&self.cell.mutex);
             }
             pub fn unlock(self: *@This()) void {
                 std.Io.Threaded.mutexUnlock(&self.cell.mutex);
@@ -95,14 +95,14 @@ pub fn ScopeTransfer(
         };
 
         pub fn commit(cell: *Cell) void {
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             var detached = ownership(cell).commitTransfer();
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             detached.detachAll();
         }
 
         pub fn abort(cell: *Cell) void {
-            std.Io.Threaded.mutexLock(&cell.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             var detached = ownership(cell).abortTransfer();
             std.Io.Threaded.mutexUnlock(&cell.mutex);
             detached.detachAll();

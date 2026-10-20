@@ -36,7 +36,7 @@ const State = struct {
     root: Value,
     limits: Limits,
     footprint: Footprint = .{},
-    attachments: [std.math.maxInt(u5)]?*heap.PortHandle = .{null} ** std.math.maxInt(u5),
+    attachments: [std.math.maxInt(u5)]?*heap.PortHandle = @splat(null),
     frames: poll.ChunkStack(Frame),
     phase: union(enum) { validating, ready, failed: ValidationError } = .validating,
 
@@ -239,7 +239,7 @@ test "port message: empty containers are values and capabilities count per attac
     var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
     const port = try heap.createBorrowedPort(Capability, .endpoint, std.testing.allocator, 1, &capability);
-    const attachments = [_]Value{port} ** 17;
+    const attachments: [17]Value = @splat(port);
     const input = try list.fromValues(std.testing.allocator, &attachments);
     cleanup.releaseValue(port);
     defer cleanup.releaseValue(input);

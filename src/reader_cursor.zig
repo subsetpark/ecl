@@ -356,10 +356,10 @@ pub const PendingUnit = enum(usize) {
     pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!PendingUnit {
         const backing = try allocator.create(PendingUnitBacking);
         backing.* = .{ .text = .init(allocator) };
-        return @enumFromInt(@intFromPtr(backing));
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
     fn state(self: PendingUnit) *PendingUnitBacking {
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn deinit(self: *PendingUnit) void {
         const owned = self.state();

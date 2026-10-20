@@ -177,7 +177,7 @@ const Cell = struct {
         self.releaseReadiness();
     }
     pub fn cancelExternalMember(self: *Cell, scope: *external.ScopeIdentity) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         if (self.ownership.authorizesCancellation(scope)) self.cancelLocked();
     }
@@ -217,7 +217,7 @@ const Cell = struct {
         // This controller alone owns the Future. Cancellation only signals us;
         // it never operates on that Future from a scheduler worker.
         var future = std.Io.concurrent(self.service.io, Cell.exchangeTask, .{self}) catch |err| return .{ .io = err };
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         while (!self.io_finished and !self.cancelled.load(.acquire))
             self.changed.waitUncancelable(blockingIo(), &self.mutex);
         const cancel = self.cancelled.load(.acquire);
@@ -226,7 +226,7 @@ const Cell = struct {
     }
     fn exchangeTask(self: *Cell) ?Fault {
         defer {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             self.io_finished = true;
             self.changed.broadcast(blockingIo());
             std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -252,7 +252,10 @@ const Cell = struct {
         defer client.deinit();
         if (self.service.trust) |trust| {
             client.now = trust.now;
-            try client.ca_bundle.addCertsFromFilePathAbsolute(scratch, self.service.io, trust.now, trust.ca_file);
+            // Relative paths resolve against the working directory. The
+            // absolute-only std entry point asserts on a relative path, which
+            // would abort the process instead of failing the request.
+            try client.ca_bundle.addCertsFromFilePath(scratch, self.service.io, trust.now, std.Io.Dir.cwd(), trust.ca_file);
         }
         const redirect_storage = try scratch.alloc(u8, 8 * 1024);
         defer scratch.free(redirect_storage);
@@ -279,7 +282,7 @@ const Cell = struct {
                 error.HttpHeadersOversize => return error.Overflow,
                 else => return err,
             };
-            response.status = @intFromEnum(head.head.status);
+            response.status = @backingInt(head.head.status);
             const redirect = self.redirects and !method.requestHasBody() and head.head.status.class() == .redirect and head.head.status != .not_modified;
             const status_end = std.mem.indexOf(u8, head.head.bytes, "\r\n") orelse return error.HttpHeadersInvalid;
             const field_bytes = head.head.bytes.len - status_end - 4;
@@ -370,7 +373,7 @@ pub const Request = opaque {
     }
     pub fn result(self: *Request) union(enum) { pending, complete, failed: Failure } {
         const cell = self.state();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         return switch (cell.phase) {
             .preparing, .active => .pending,
@@ -381,7 +384,7 @@ pub const Request = opaque {
     /// Completion synchronizes every response write and transfers its storage.
     pub fn take(self: *Request) Response {
         const cell = self.state();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         std.debug.assert(cell.phase == .joined);
         const response = cell.phase.joined.response;
@@ -390,7 +393,7 @@ pub const Request = opaque {
     }
     pub fn cancel(self: *Request) void {
         const cell = self.state();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&cell.mutex);
         cell.cancelLocked();
     }
@@ -399,7 +402,7 @@ pub const Request = opaque {
     pub fn retire(self: *Request) bool {
         const cell = self.state();
         self.cancel();
-        std.Io.Threaded.mutexLock(&cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         const active = cell.phase == .active;
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         if (active) return false;

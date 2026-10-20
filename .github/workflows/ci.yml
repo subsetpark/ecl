@@ -18,7 +18,7 @@ jobs:
     name: Debug tiers
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: Debug
+      optimize: debug
       run_precommit: ${{ github.event_name == 'pull_request' }}
       run_quality: ${{ github.event_name != 'pull_request' }}
       run_full_suite: ${{ github.event_name != 'pull_request' }}
@@ -33,7 +33,7 @@ jobs:
     name: ReleaseSafe tiers
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
@@ -46,7 +46,7 @@ jobs:
     if: github.event_name != 'pull_request'
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseFast
+      optimize: fast
       run_snapshots: true
 
   git-macos:
@@ -55,15 +55,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install Zig 0.16
+      - name: Install Zig 0.17
         shell: bash
         run: |
           python3 - <<'PYTHON'
           import hashlib, pathlib, platform, subprocess, urllib.request
           architecture = 'aarch64' if platform.machine() == 'arm64' else 'x86_64'
-          expected = {'aarch64': 'b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489', 'x86_64': '0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7'}
+          expected = {'aarch64': 'b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a', 'x86_64': '4f9a1c5269aa17ebda5e6d3c2b89d6cbf36f7d2b22a0306e9ab98f25f95529c6'}
           archive = pathlib.Path('/tmp/zig.tar.xz')
-          with urllib.request.urlopen(f'https://ziglang.org/download/0.16.0/zig-{architecture}-macos-0.16.0.tar.xz', timeout=60) as response:
+          with urllib.request.urlopen(f'https://ziglang.org/download/0.17.0/zig-{architecture}-macos-0.17.0.tar.xz', timeout=60) as response:
               archive.write_bytes(response.read())
           assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected[architecture]
           pathlib.Path('/tmp/zig').mkdir(exist_ok=True)
@@ -77,6 +77,6 @@ jobs:
           import os, pathlib, subprocess
           # Zig's ZIP dependency downloader needs tmp even on a cold cache.
           pathlib.Path(os.environ['ZIG_GLOBAL_CACHE_DIR'], 'tmp').mkdir(parents=True, exist_ok=True)
-          subprocess.run(['/tmp/zig/zig', 'build', 'test-pkg-git', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
-          subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', 'test-pkg-fetch', '-Doptimize=ReleaseSafe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
+          subprocess.run(['/tmp/zig/zig', 'build', 'test-pkg-git', '-Doptimize=safe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
+          subprocess.run(['/tmp/zig/zig', 'build', 'test-git-extension', 'test-pkg-fetch', '-Doptimize=safe'], stdin=subprocess.DEVNULL, timeout=900, check=True)
           PYTHON

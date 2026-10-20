@@ -85,7 +85,7 @@ pub const LowerCursor = struct {
             index: usize = 0,
             work: BodyWork = .top,
         },
-        word_start: struct { words: Words = .{0} ** 3, index: usize = 0 },
+        word_start: struct { words: Words = @splat(0), index: usize = 0 },
         word_intern: struct {
             words: Words,
             index: usize,
@@ -189,7 +189,7 @@ pub const LowerCursor = struct {
                 .pending => {},
                 .complete => |id| names_state.work = .{ .put = .{
                     .index = insertion.index,
-                    .cursor = names_state.locals.putCursor(@enumFromInt(id), insertion.index),
+                    .cursor = names_state.locals.putCursor(@fromBackingInt(@intCast(id)), insertion.index),
                 } },
             },
             .put => |*put| switch (put.cursor.advance()) {
@@ -248,7 +248,7 @@ pub const LowerCursor = struct {
                 return switch (self.body[body_state.index].value) {
                     .word => |id| result: {
                         body_state.work = .{ .lookup_top = body_state.locals.rawLookup(
-                            @enumFromInt(id.name),
+                            @fromBackingInt(@intCast(id.name)),
                         ) };
                         break :result false;
                     },
@@ -278,7 +278,7 @@ pub const LowerCursor = struct {
                 .word => |id| result: {
                     body_state.work = .{ .lookup_nested = .{
                         .name = id.name,
-                        .cursor = body_state.locals.rawLookup(@enumFromInt(id.name)),
+                        .cursor = body_state.locals.rawLookup(@fromBackingInt(@intCast(id.name))),
                     } };
                     break :result false;
                 },

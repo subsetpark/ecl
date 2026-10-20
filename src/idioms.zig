@@ -194,23 +194,22 @@ const fold1_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "rolldown", .binding = .source } },
     .{ .word = .{ .spelling = "fold" } },
 };
-const unary_count = std.meta.fields(numeric.UnaryOp).len;
-const binary_count = std.meta.fields(numeric.BinaryOp).len;
+const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
+const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
     var entries: [unary_count + binary_count * 5 + 5 + 18 + 16]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
-    for (std.meta.fields(numeric.UnaryOp)) |field| {
+    for (std.meta.tags(numeric.UnaryOp)) |operation| {
         entries[index] = .{
             .context = .each,
             .pattern = &operation_pattern,
-            .operation = .{ .unary = @enumFromInt(field.value) },
+            .operation = .{ .unary = operation },
         };
         index += 1;
     }
-    for (std.meta.fields(numeric.BinaryOp)) |field| {
-        const operation: numeric.BinaryOp = @enumFromInt(field.value);
+    for (std.meta.tags(numeric.BinaryOp)) |operation| {
         entries[index] = .{
             .context = .each,
             .pattern = &constant_operation_pattern,
@@ -325,7 +324,7 @@ const max_pattern_len = blk: {
 /// so an offered phrase visits only the entries it could match.
 const entries_by_shape = blk: {
     @setEvalBranchQuota(100_000);
-    var table: [std.meta.fields(Context).len][max_pattern_len + 1][]const u16 = undefined;
+    var table: [@typeInfo(Context).@"enum".field_names.len][max_pattern_len + 1][]const u16 = undefined;
     for (std.meta.tags(Context)) |context| {
         for (0..max_pattern_len + 1) |length| {
             var found: [registry.len]u16 = undefined;
@@ -336,7 +335,7 @@ const entries_by_shape = blk: {
                 count += 1;
             }
             const shaped = found[0..count].*;
-            table[@intFromEnum(context)][length] = &shaped;
+            table[@backingInt(context)][length] = &shaped;
         }
     }
     break :blk table;
@@ -344,7 +343,7 @@ const entries_by_shape = blk: {
 
 fn entriesShaped(context: Context, length: usize) []const u16 {
     if (length > max_pattern_len) return &.{};
-    return entries_by_shape[@intFromEnum(context)][length];
+    return entries_by_shape[@backingInt(context)][length];
 }
 
 /// Every trusted definition a direct entry can recognize, by name.
@@ -1439,10 +1438,10 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
 /// written-in scope, the core, or a scope the running activation reaches.
 fn stampOnRunningChain(evaluator: *machine.Machine, stamp: u32) bool {
     if (stamp == 0) return true;
-    if (@intFromEnum(evaluator.unit.environment.coreScopeId()) == stamp) return true;
+    if (@backingInt(evaluator.unit.environment.coreScopeId()) == stamp) return true;
     var node = evaluator.unit.current.?.resolutionScope();
     while (node) |scope| : (node = scope.parent) {
-        if (@intFromEnum(scope.cellId()) == stamp) return true;
+        if (@backingInt(scope.cellId()) == stamp) return true;
     }
     return false;
 }

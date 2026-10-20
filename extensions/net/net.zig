@@ -9,7 +9,7 @@ fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 fn lock(mutex: *std.Io.Mutex) void {
-    std.Io.Threaded.mutexLock(mutex);
+    std.Io.Threaded.mutexLockUncancelable(mutex);
 }
 fn unlock(mutex: *std.Io.Mutex) void {
     std.Io.Threaded.mutexUnlock(mutex);
@@ -594,7 +594,7 @@ const ListenCapacityFailure = ecl.CapacityFailure(struct {
                     context.fail(construction.diagnostic.kind, construction.diagnostic.message);
                     return .completed;
                 }
-                state.* = .{ .issuing = .{ .diagnostic = construction.diagnostic, .command = @enumFromInt(@intFromEnum(construction.command) + 1) } };
+                state.* = .{ .issuing = .{ .diagnostic = construction.diagnostic, .command = @fromBackingInt(@intCast(@backingInt(construction.command) + 1)) } };
             },
         }
         return .yielded;

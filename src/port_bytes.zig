@@ -117,20 +117,20 @@ pub const Pipe = opaque {
     }
     pub fn beginRead(self: *Pipe) error{ConcurrentRead}!void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.reader) return error.ConcurrentRead;
         owned.reader = true;
     }
     pub fn endRead(self: *Pipe) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         owned.reader = false;
         std.Io.Threaded.mutexUnlock(&owned.mutex);
     }
     pub fn read(self: *Pipe, bytes: []u8) Read {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.ring.len != 0) {
             const count = owned.ring.pop(bytes[0..@min(bytes.len, max_chunk)]);
@@ -150,14 +150,14 @@ pub const Pipe = opaque {
         const owned = self.state();
         const prepared = try owned.writers.prepare(owned.host.allocator());
         errdefer prepared.discard();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.phase != .open) return error.Finished;
         return prepared.admitWriter(owned, std.math.maxInt(usize)).?;
     }
     pub fn finish(self: *Pipe) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         owned.phase.finish();
         owned.notifyLocked();
@@ -166,14 +166,14 @@ pub const Pipe = opaque {
     /// the accepted prefix for readers. A prior terminal failure stays terminal.
     pub fn stopProduction(self: *Pipe) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         owned.phase.complete();
         owned.notifyLocked();
     }
     pub fn fail(self: *Pipe, failure: Failure, discard: bool) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (discard) owned.ring.discard();
         owned.phase.fail(failure);
@@ -181,7 +181,7 @@ pub const Pipe = opaque {
     }
     pub fn interrupt(self: *Pipe) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         owned.notifyLocked();
         std.Io.Threaded.mutexUnlock(&owned.mutex);
     }
@@ -195,7 +195,7 @@ pub const Controller = opaque {
     }
     pub fn readChunk(self: *Controller, bytes: []u8, cancelled: *const std.atomic.Value(bool)) ControllerRead {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         while (!cancelled.load(.acquire) and owned.ring.len == 0 and (owned.phase == .open or owned.phase == .finishing))
             owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
@@ -222,7 +222,7 @@ pub const Controller = opaque {
         defer permit.finish();
         var offset: usize = 0;
         while (offset < bytes.len) {
-            std.Io.Threaded.mutexLock(&owned.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
             const epoch = owned.epoch;
             std.Io.Threaded.mutexUnlock(&owned.mutex);
             if (cancelled.load(.acquire)) return .cancelled;
@@ -230,7 +230,7 @@ pub const Controller = opaque {
                 .written => |count| offset += count,
                 .failed => |failure| return .{ .failed = failure },
                 .pending => {
-                    std.Io.Threaded.mutexLock(&owned.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
                     while (epoch == owned.epoch and !cancelled.load(.acquire))
                         owned.changed.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &owned.mutex);
                     std.Io.Threaded.mutexUnlock(&owned.mutex);

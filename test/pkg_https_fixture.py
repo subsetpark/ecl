@@ -9,8 +9,11 @@ import hashlib
 import http.server
 import io
 import json
+import os
 import ssl
+import sys
 import tarfile
+import threading
 from typing import Mapping
 
 
@@ -245,7 +248,22 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cert", required=True)
     parser.add_argument("--key", required=True)
+    parser.add_argument(
+        "--exit-on-stdin-eof",
+        action="store_true",
+        help="exit when stdin closes, so the fixture never outlives a crashed parent",
+    )
     args = parser.parse_args()
+
+    if args.exit_on_stdin_eof:
+        # A parent that dies without reaping us (a panicking test) closes our
+        # stdin. Without this the orphan keeps the inherited stderr open and
+        # whoever reads that stream (the zig build runner) waits for EOF.
+        def exit_on_eof() -> None:
+            sys.stdin.buffer.read()
+            os._exit(0)
+
+        threading.Thread(target=exit_on_eof, daemon=True).start()
 
     server = FixtureServer(("127.0.0.1", 0), Handler)
     port = int(server.server_address[1])

@@ -474,8 +474,7 @@ const Transaction = struct {
     host_table: abi.HostTable,
     candidates: std.ArrayList(CandidateEntry) = .empty,
     outputs: std.ArrayList(Value) = .empty,
-    builders: [abi.max_builder_slots]?*AggregateBuilder =
-        [_]?*AggregateBuilder{null} ** abi.max_builder_slots,
+    builders: [abi.max_builder_slots]?*AggregateBuilder = @splat(null),
     next_builder_serial: u32 = 1,
     candidate_generation: u32 = 0,
     terminal: Terminal = .idle,
@@ -569,7 +568,7 @@ const Transaction = struct {
         if (self.terminal != .idle) return .invalid;
         var failure: Terminal = .{ .fail = .{
             .kind = .type,
-            .message = [_]u8{0} ** abi.max_error_message_bytes,
+            .message = @as([abi.max_error_message_bytes]u8, @splat(0)),
             .message_len = message.len,
         } };
         @memcpy(failure.fail.message[0..message.len], message);
@@ -929,9 +928,9 @@ fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: a
             const source = call.activeEvaluator().nativeInputBorrowed(call.definition.effect.inputs, @intCast(request[0]));
             if (source != .list or request[1] > source.list.length() or request[2] > source.list.length() - request[1] or request[3] >= std.math.maxInt(u32)) return .invalid;
             const representation: value.HeapKind = switch (request[4]) {
-                @intFromEnum(abi.BulkKind.char1) => .leaf_char1,
-                @intFromEnum(abi.BulkKind.char2) => .leaf_char2,
-                @intFromEnum(abi.BulkKind.char4) => .leaf_char4,
+                @backingInt(abi.BulkKind.char1) => .leaf_char1,
+                @backingInt(abi.BulkKind.char2) => .leaf_char2,
+                @backingInt(abi.BulkKind.char4) => .leaf_char4,
                 else => return .invalid,
             };
             if (builder.text_span == null) {
@@ -1279,7 +1278,7 @@ fn hostFail(
     const kind_value = descriptor_api.mapErrorKind(kind) orelse return .invalid;
     var failure: Terminal = .{ .fail = .{
         .kind = kind_value,
-        .message = [_]u8{0} ** abi.max_error_message_bytes,
+        .message = @as([abi.max_error_message_bytes]u8, @splat(0)),
         .message_len = message.len,
     } };
     @memcpy(failure.fail.message[0..message.len], message);

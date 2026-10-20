@@ -20,8 +20,7 @@ const MachineError = support.MachineError;
 const Op = support.SequenceOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(Op)) |field| {
-        const operation: Op = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Op)) |operation| {
         if (comptime definition(operation)) |word| try core.installBuiltin(word);
     }
 }
@@ -1404,7 +1403,7 @@ const ShapeCursor = struct {
     };
     allocator: std.mem.Allocator,
     actions: @import("poll.zig").ChunkStack(Action),
-    dimensions: [support.max_depth]usize = .{0} ** support.max_depth,
+    dimensions: [support.max_depth]usize = @splat(0),
     rank: usize = 0,
     leaf_depth: ?usize = null,
 

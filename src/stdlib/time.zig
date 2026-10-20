@@ -241,14 +241,14 @@ fn toUtc(evaluator: *Machine) MachineError!void {
     const civil = civilFromMilliseconds(try popTimestamp(evaluator));
     const symbols = try Field.symbols();
     const fields = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
-        .{ .{ .symbol = symbols[@intFromEnum(Field.year)] }, .{ .int = civil.year } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.month)] }, .{ .int = civil.month } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.day)] }, .{ .int = civil.day } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.hour)] }, .{ .int = civil.hour } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.minute)] }, .{ .int = civil.minute } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.second)] }, .{ .int = civil.second } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.millisecond)] }, .{ .int = civil.millisecond } },
-        .{ .{ .symbol = symbols[@intFromEnum(Field.weekday)] }, .{ .int = civil.weekday } },
+        .{ .{ .symbol = symbols[@backingInt(Field.year)] }, .{ .int = civil.year } },
+        .{ .{ .symbol = symbols[@backingInt(Field.month)] }, .{ .int = civil.month } },
+        .{ .{ .symbol = symbols[@backingInt(Field.day)] }, .{ .int = civil.day } },
+        .{ .{ .symbol = symbols[@backingInt(Field.hour)] }, .{ .int = civil.hour } },
+        .{ .{ .symbol = symbols[@backingInt(Field.minute)] }, .{ .int = civil.minute } },
+        .{ .{ .symbol = symbols[@backingInt(Field.second)] }, .{ .int = civil.second } },
+        .{ .{ .symbol = symbols[@backingInt(Field.millisecond)] }, .{ .int = civil.millisecond } },
+        .{ .{ .symbol = symbols[@backingInt(Field.weekday)] }, .{ .int = civil.weekday } },
     });
     try evaluator.pushOwned(fields);
 }

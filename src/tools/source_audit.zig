@@ -94,9 +94,9 @@ const source_groups = [_]SourceGroup{
         "kernel_random.zig",   "kernel_flat.zig",  "driver_completion.zig",
     }),
     embeddedGroup(false, &.{
-        "source_audit.zig",               "tools/source_audit.zig",
-        "tools/captured_test_runner.zig", "tools/bench_kernels.zig",
-        "tools/bench_workdrivers.zig",    "tools/ecl_source_check.zig",
+        "source_audit.zig",           "tools/source_audit.zig",
+        "tools/bench_kernels.zig",    "tools/bench_workdrivers.zig",
+        "tools/ecl_source_check.zig",
     }),
     // Scheduler-owned external resources: process ports, filesystem roots,
     // and network listeners share the nominal capability
@@ -243,8 +243,8 @@ fn auditFormalValueKinds() bool {
         std.log.err("formal value kinds: first chapter has no body separator", .{});
         return true;
     };
-    const fields = @typeInfo(ValueTag).@"enum".fields;
-    var seen = [_]bool{false} ** fields.len;
+    const fields = @typeInfo(ValueTag).@"enum".field_names;
+    var seen: [fields.len]bool = @splat(false);
     var declaration_count: usize = 0;
     var lines = std.mem.splitScalar(u8, source[0..head_end], '\n');
     while (lines.next()) |raw_line| {
@@ -257,8 +257,8 @@ fn auditFormalValueKinds() bool {
             continue;
         declaration_count += 1;
         var matched = false;
-        inline for (fields, 0..) |field, index| {
-            const expected = field.name ++ "-type";
+        inline for (fields, 0..) |field_name, index| {
+            const expected = field_name ++ "-type";
             if (std.mem.eql(u8, declaration, expected)) {
                 if (seen[index]) {
                     std.log.err("formal value kinds: duplicate declaration `{s}`", .{declaration});
@@ -274,10 +274,10 @@ fn auditFormalValueKinds() bool {
         }
     }
     var failed = declaration_count != fields.len;
-    inline for (fields, 0..) |field, index| if (!seen[index]) {
+    inline for (fields, 0..) |field_name, index| if (!seen[index]) {
         std.log.err("formal value kinds: value.Tag.{s} has no `{s}-type` declaration", .{
-            field.name,
-            field.name,
+            field_name,
+            field_name,
         });
         failed = true;
     };
@@ -375,9 +375,9 @@ fn auditExtensionImports() bool {
             const close = tokenizer.next();
             const spelling = source[argument.loc.start..argument.loc.end];
             if (open.tag != .l_paren or argument.tag != .string_literal or close.tag != .r_paren or
-                (!std.mem.eql(u8, spelling, "\"std\"") and !std.mem.eql(u8, spelling, "\"builtin\"") and !std.mem.eql(u8, spelling, "\"ecl-native\"") and !localExtensionImport(file, spelling)))
+                (!std.mem.eql(u8, spelling, "\"std\"") and !std.mem.eql(u8, spelling, "\"builtin\"") and !std.mem.eql(u8, spelling, "\"ecl-native\"") and !std.mem.eql(u8, spelling, "\"c\"") and !localExtensionImport(file, spelling)))
             {
-                std.log.err("extension boundary: {s} may import only std, compiler target metadata, ecl-native, and classified local units", .{file});
+                std.log.err("extension boundary: {s} may import only std, compiler target metadata, ecl-native, its own translated C header as c, and classified local units", .{file});
                 failed = true;
             }
         }
@@ -906,12 +906,12 @@ fn auditWorkBudgetIssuers() bool {
 }
 
 fn auditTypedBudgetLiterals(file: []const u8, source: [:0]const u8) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
     defer tree.deinit(std.heap.page_allocator);
     if (tree.errors.len != 0) return true;
     var failed = false;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         var buffer: [2]std.zig.Ast.Node.Index = undefined;
         const literal = tree.fullStructInit(&buffer, node) orelse continue;
         const type_expr = literal.ast.type_expr.unwrap() orelse continue;
@@ -939,7 +939,7 @@ fn auditProductionTokens(
     source: [:0]const u8,
     forbidden: []const []const []const u8,
 ) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch {
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch {
         std.log.err("{s}: could not parse source for architecture audit", .{label});
         return true;
     };
@@ -965,7 +965,7 @@ fn auditProductionFunctionTokenPair(
     first_spelling: []const u8,
     second_spelling: []const u8,
 ) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
     defer tree.deinit(std.heap.page_allocator);
     if (tree.errors.len != 0) return true;
     const excluded = std.heap.page_allocator.alloc(bool, tree.tokens.len) catch return true;
@@ -978,7 +978,7 @@ fn auditProductionFunctionTokenPair(
     }
     var failed = false;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         if (tree.nodeTag(node) != .fn_decl or excluded[tree.firstToken(node)]) continue;
         var found_first = false;
         var found_second = false;
@@ -1002,7 +1002,7 @@ fn auditErasedCasts(
     source: [:0]const u8,
     allowed_factories: []const []const u8,
 ) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
     defer tree.deinit(std.heap.page_allocator);
     if (tree.errors.len != 0) return true;
     var failed = false;
@@ -1037,13 +1037,13 @@ fn auditErasedCasts(
 /// commit those values to the operand stack. Checking the declared return
 /// type makes this boundary cover new drivers without maintaining a name list.
 fn auditWorkDriverOutputs(label: []const u8, source: [:0]const u8) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
     defer tree.deinit(std.heap.page_allocator);
     if (tree.errors.len != 0) return true;
     var failed = false;
     var node_index: usize = 0;
     while (node_index < tree.nodes.len) : (node_index += 1) {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_index));
         if (tree.nodeTag(node) != .fn_decl) continue;
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const function = tree.fullFnProto(&buffer, node) orelse continue;
@@ -1070,7 +1070,7 @@ fn auditTokens(
     source: [:0]const u8,
     forbidden: []const []const []const u8,
 ) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch {
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch {
         std.log.err("{s}: could not parse source for architecture audit", .{label});
         return true;
     };
@@ -1088,11 +1088,11 @@ fn auditFunctionTokens(
     function_name: []const u8,
     forbidden: []const []const []const u8,
 ) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
     defer tree.deinit(std.heap.page_allocator);
     var node_index: usize = 0;
     while (node_index < tree.nodes.len) : (node_index += 1) {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_index));
         if (tree.nodeTag(node) != .fn_decl) continue;
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const function = tree.fullFnProto(&buffer, node) orelse continue;
@@ -1170,13 +1170,13 @@ const first_party_definition_sources = [_][:0]const u8{
 /// infer. Scan parsed tokens from every production source, including escaped
 /// string literals, without treating comments or documentation as declarations.
 fn auditBuiltinMarks(comptime expected: []const []const u8, comptime kind: enum { unit, dynamic }) bool {
-    var found = [_]bool{false} ** expected.len;
+    var found: [expected.len]bool = @splat(false);
     var failed = false;
     const allocator = std.heap.page_allocator;
     for (source_groups) |group| {
         if (!group.production) continue;
         for (group.sources) |source| {
-            var tree = std.zig.Ast.parse(allocator, source, .zig) catch {
+            var tree = std.zig.Ast.parse(allocator, source, .{}) catch {
                 std.log.err("builtin marks: cannot parse production source", .{});
                 return true;
             };

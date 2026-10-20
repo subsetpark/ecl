@@ -2,15 +2,11 @@
     .name = .ecl,
     .version = "0.1.0",
     .fingerprint = 0xbb89c5cedcae736c, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .minish = .{
-            .url = "https://github.com/CogitatorTech/minish/archive/refs/tags/v0.3.0.tar.gz",
-            .hash = "minish-0.3.0-SQtSTYI3AgCxWdWbKxS_lvmfbp0wJk29ZW5C9CozJaxm",
-        },
-        .ohsnap = .{
-            .url = "https://github.com/mnemnion/ohsnap/archive/refs/tags/v0.5.1.tar.gz",
-            .hash = "ohsnap-0.5.1-iWxzyj2qAADjYk9IZ2awVmEM9vhRHvz114xTRkKQVM_S",
+            .url = "https://github.com/CogitatorTech/minish/archive/refs/tags/v0.5.0.tar.gz",
+            .hash = "minish-0.5.0-SQtSTXUkAwA1iUHhQRCfM-092BYRlYDLTFCSodBi_EFq",
         },
         .libgit2 = .{
             .lazy = true,

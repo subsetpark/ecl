@@ -20,8 +20,7 @@ const MachineError = support.MachineError;
 const Op = support.OrderOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(Op)) |field| {
-        const operation: Op = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Op)) |operation| {
         try core.installBuiltin(definition(operation));
     }
 }

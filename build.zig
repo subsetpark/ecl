@@ -8,12 +8,6 @@ pub fn build(b: *std.Build) void {
     const runtime_linkage: ?std.builtin.LinkMode =
         if (target.result.os.tag == .linux) .dynamic else null;
     const minish = b.dependency("minish", .{}).module("minish");
-    const ohsnap = b.dependency("ohsnap", .{
-        .target = target,
-        .optimize = optimize,
-        .module_name = @as([]const []const u8, &.{"root"}),
-        .root_directory = @as([]const []const u8, &.{"test"}),
-    }).module("ohsnap");
     const native_abi = b.createModule(.{
         .root_source_file = b.path("src/native/abi.zig"),
         .target = target,
@@ -108,7 +102,7 @@ pub fn build(b: *std.Build) void {
     native_fixture_step.dependOn(native_build.installExtension(b, instance_fixture, "native-fixture"));
     _ = fixture_files.addCopyFile(instance_fixture.getEmittedBin(), "instanceprobe.eclmod");
     const native_fixture_options = b.addOptions();
-    native_fixture_options.addOptionPath(
+    native_fixture_options.addOptionPathDirectory(
         "directory",
         fixture_files.getDirectory(),
     );
@@ -129,7 +123,7 @@ pub fn build(b: *std.Build) void {
     archive_fixture_options.addOption([]const u8, "malformed_tar", @embedFile("test/fixtures/archive/malformed-tar.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "malformed_pax", @embedFile("test/fixtures/archive/malformed-pax.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "malformed", @embedFile("test/fixtures/archive/malformed.tgz.hex"));
-    archive_fixture_options.addOption([]const u8, "long_path", "pkg/" ++ ("s" ** 110) ++ ".ecl");
+    archive_fixture_options.addOption([]const u8, "long_path", "pkg/" ++ (&@as([110]u8, @splat('s'))) ++ ".ecl");
     archive_fixture_options.addOption([]const u8, "package_valid", @embedFile("test/fixtures/pkg/valid.tgz.hex"));
 
     const malformed_defects = [_][]const u8{
@@ -262,6 +256,12 @@ pub fn build(b: *std.Build) void {
         git_source.pic = true;
         git_source.sanitize_thread = git_tsan;
         git_source.addIncludePath(b.path("extensions/git"));
+        const snapshot_header = b.addTranslateC(.{
+            .root_source_file = b.path("extensions/git/snapshot.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        git_source.addImport("c", snapshot_header.createModule());
         git_source.addIncludePath(libgit2.artifact("git2").getEmittedIncludeTree());
         git_source.addCSourceFile(.{ .file = b.path("extensions/git/snapshot.c"), .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror" } });
         const git_extension = if (git_tsan) instrumented: {
@@ -332,7 +332,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
     const native_runtime_options = b.addOptions();
     native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
-    native_runtime_options.addOptionPath(
+    native_runtime_options.addOptionPathDirectory(
         "fixture_dir",
         fixture_files.getDirectory(),
     );
@@ -374,16 +374,6 @@ pub fn build(b: *std.Build) void {
     pkg_fixture_options.addOptionPath("server_cert", b.path("test/fixtures/pkg/server.pem"));
     pkg_fixture_options.addOptionPath("server_key", b.path("test/fixtures/pkg/server-key.pem"));
 
-    const captured_test_runner_mod = b.createModule(.{
-        .root_source_file = b.path("src/tools/captured_test_runner.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    });
-    const captured_test_runner = b.addExecutable(.{
-        .name = "ecl-captured-test-runner",
-        .root_module = captured_test_runner_mod,
-    });
-
     const repl_tests = b.addSystemCommand(&.{"expect"});
     repl_tests.addFileArg(b.path("test/repl.exp"));
     repl_tests.addArtifactArg(exe);
@@ -418,10 +408,7 @@ pub fn build(b: *std.Build) void {
     addTestInputs(test_mod, &test_imports, &test_fixture_inputs);
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
-    // Minish writes a passing summary to stderr. Run the two property-bearing
-    // artifacts as explicit children so Zig 0.16 does not report a successful
-    // test process as a failed command; the wrapper forwards real failures.
-    const run_tests = addCapturedTestRun(b, captured_test_runner, tests);
+    const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
@@ -595,7 +582,7 @@ pub fn build(b: *std.Build) void {
     const oom_mod = b.createModule(.{
         .root_source_file = b.path("src/oom_root.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     configureRuntime(oom_mod, native_abi, native_sdk, test_options);
     addTestInputs(oom_mod, &.{.{ .name = "native-instance", .module = native_instance }}, &host_fixture_inputs);
@@ -646,7 +633,7 @@ pub fn build(b: *std.Build) void {
     const audit_mod = b.createModule(.{
         .root_source_file = b.path("src/source_audit.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const audit_options = b.addOptions();
     audit_options.addOption([:0]const u8, "git_extension_source", @embedFile("extensions/git/git.zig"));
@@ -670,7 +657,7 @@ pub fn build(b: *std.Build) void {
     bench_mod.link_libc = true;
     const bench_exe = b.addExecutable(.{ .name = "ecl-bench-kernels", .root_module = bench_mod });
     const run_bench = b.addRunArtifact(bench_exe);
-    if (b.args) |args| run_bench.addArgs(args);
+    run_bench.addPassthruArgs();
     const bench_step = b.step(
         "bench-kernels",
         "Characterize the typed kernel seam (select a mode with -Doptimize)",
@@ -690,7 +677,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_workdriver_timing = b.addRunArtifact(workdriver_bench_exe);
     run_workdriver_timing.addArg("--timing");
-    if (b.args) |args| run_workdriver_timing.addArgs(args);
+    run_workdriver_timing.addPassthruArgs();
 
     const instrumented_options = b.addOptions();
     instrumented_options.addOption(usize, "default_worker_count", 1);
@@ -714,7 +701,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_workdriver_counters = b.addRunArtifact(workdriver_counter_exe);
     run_workdriver_counters.addArg("--counters");
-    if (b.args) |args| run_workdriver_counters.addArgs(args);
+    run_workdriver_counters.addPassthruArgs();
     run_workdriver_counters.step.dependOn(&run_workdriver_timing.step);
     const workdriver_bench_step = b.step(
         "bench-workdrivers",
@@ -725,14 +712,14 @@ pub fn build(b: *std.Build) void {
         "Install timing and counter artifacts without running measurements",
     );
     switch (optimize) {
-        .ReleaseSafe, .ReleaseFast => {
+        .safe, .fast => {
             workdriver_bench_step.dependOn(&run_workdriver_counters.step);
             build_workdriver_bench_step.dependOn(&b.addInstallArtifact(workdriver_bench_exe, .{}).step);
             build_workdriver_bench_step.dependOn(&b.addInstallArtifact(workdriver_counter_exe, .{}).step);
         },
         else => {
             const release_required = b.addFail(
-                "WorkDriver benchmarks require -Doptimize=ReleaseSafe or ReleaseFast",
+                "WorkDriver benchmarks require -Doptimize=safe or fast",
             );
             workdriver_bench_step.dependOn(&release_required.step);
             build_workdriver_bench_step.dependOn(&release_required.step);
@@ -751,8 +738,8 @@ pub fn build(b: *std.Build) void {
     const e2e_options = b.addOptions();
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     e2e_options.addOptionPath("process_exe", process_fixture.getEmittedBin());
-    e2e_options.addOption(std.builtin.OptimizeMode, "optimize", optimize);
-    e2e_options.addOptionPath(
+    e2e_options.addOption(std.lang.Optimize, "optimize", optimize);
+    e2e_options.addOptionPathDirectory(
         "native_fixture_dir",
         fixture_files.getDirectory(),
     );
@@ -764,7 +751,7 @@ pub fn build(b: *std.Build) void {
     e2e_mod.addOptions("build_options", e2e_options);
     e2e_mod.addImport("minish", minish);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
-    const run_e2e_tests = addCapturedTestRun(b, captured_test_runner, e2e_tests);
+    const run_e2e_tests = b.addRunArtifact(e2e_tests);
     run_e2e_tests.step.dependOn(&fixture_files.step);
     test_step.dependOn(&run_e2e_tests.step);
     // The same CLI acceptance run as a named step, so it can be gated on its
@@ -780,11 +767,7 @@ pub fn build(b: *std.Build) void {
     scheduler_shell_mod.addOptions("build_options", e2e_options);
     scheduler_shell_mod.addImport("minish", minish);
     const scheduler_shell_tests = b.addTest(.{ .root_module = scheduler_shell_mod });
-    const run_scheduler_shell_tests = addCapturedTestRun(
-        b,
-        captured_test_runner,
-        scheduler_shell_tests,
-    );
+    const run_scheduler_shell_tests = b.addRunArtifact(scheduler_shell_tests);
     const scheduler_shell_step = b.step(
         "test-scheduler-shell",
         "Run public executable scheduler properties",
@@ -918,7 +901,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     reference_mod.addOptions("reference_options", reference_options);
-    reference_mod.addImport("ohsnap", ohsnap);
     const reference_tests = b.addTest(.{ .root_module = reference_mod });
     const run_reference_tests = b.addRunArtifact(reference_tests);
     const reference_step = b.step(
@@ -932,9 +914,9 @@ pub fn build(b: *std.Build) void {
         "acceptance",
         "Run the v1 terminal acceptance suite with a release binary",
     );
-    if (optimize == .Debug) {
+    if (optimize == .debug) {
         const release_required = b.addFail(
-            "v1 acceptance requires a release binary; pass -Doptimize=ReleaseSafe or ReleaseFast",
+            "v1 acceptance requires a release binary; pass -Doptimize=safe or fast",
         );
         acceptance_step.dependOn(&release_required.step);
     } else {
@@ -999,10 +981,9 @@ pub fn build(b: *std.Build) void {
     );
     for (analyzed_roots) |analyzed| {
         const analysis = b.addTest(.{ .root_module = analyzed });
-        // No binary is requested, so this is analysis only: the expensive
+        // Nothing asks for its binary, so this is analysis only: the expensive
         // codegen and link stages never run. Do not impose runtime linkage:
         // pure-Zig test roots have no shared library to satisfy -dynamic.
-        analysis.generated_bin = null;
         analysis_step.dependOn(&analysis.step);
     }
 
@@ -1112,7 +1093,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     precommit_tests.linkage = runtime_linkage;
-    const run_precommit_tests = addCapturedTestRun(b, captured_test_runner, precommit_tests);
+    const run_precommit_tests = b.addRunArtifact(precommit_tests);
     run_precommit_tests.step.dependOn(&fixture_files.step);
     const precommit_test_step = b.step(
         "test-precommit",
@@ -1124,13 +1105,13 @@ pub fn build(b: *std.Build) void {
     // and every standard module still ends in `@defm`. All of it is cheap
     // enough that there is no reason to discover it in CI instead.
     const check_zig_fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "src", "test", "extensions" },
+        .paths = b.pathList(&.{ "build.zig", "src", "test", "extensions" }),
         .check = true,
     });
     const ecl_source_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/ecl_source_check.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     ecl_source_mod.addImport("ecl-internal", internal_mod);
     ecl_source_mod.link_libc = true;
@@ -1194,10 +1175,9 @@ pub fn build(b: *std.Build) void {
     // The assembler reads and writes through the `'cwd` filesystem root the
     // command line supplies, so it receives the build root and relativizes the
     // absolute paths the build graph hands it beneath that root.
-    const build_root = b.build_root.path orelse b.pathFromRoot(".");
     const assemble_spec = b.addRunArtifact(exe);
     assemble_spec.addFileArg(b.path("design/spec/assemble.ecl"));
-    assemble_spec.addArg(build_root);
+    assemble_spec.addDirectoryArg(b.path("."));
     const assembled_spec = assemble_spec.addOutputFileArg("SPEC.md");
     assemble_spec.addFileArg(b.path("design/SPEC.src.md"));
     assemble_spec.addArg("generated-preamble");
@@ -1221,7 +1201,7 @@ pub fn build(b: *std.Build) void {
 
     const check_spec_run = b.addRunArtifact(exe);
     check_spec_run.addFileArg(b.path("design/spec/assemble.ecl"));
-    check_spec_run.addArg(build_root);
+    check_spec_run.addDirectoryArg(b.path("."));
     check_spec_run.addArg("--check");
     check_spec_run.addFileArg(b.path("design/SPEC.md"));
     check_spec_run.addFileArg(b.path("design/SPEC.src.md"));
@@ -1291,20 +1271,21 @@ pub fn build(b: *std.Build) void {
     // because a lint failure is otherwise only discoverable after a push, which
     // is the same round trip this tier exists to remove. Untracked sources are
     // included: a new file is exactly the one most likely to trip a rule.
+    // Whether zlint is present is decided when the step runs rather than
+    // while configuring, which would make every configuration depend on PATH.
+    const lint_sources = "{ git ls-files '*.zig'; git ls-files --others --exclude-standard '*.zig'; } | " ++
+        "zlint -S --deny-warnings";
     const lint_step = b.step("lint", "Run zlint over first-party Zig sources (needs zlint on PATH)");
-    const zlint_available = if (b.findProgram(&.{"zlint"}, &.{})) |_| true else |_| false;
     const run_lint = b.addSystemCommand(&.{
         "sh", "-c",
-        "{ git ls-files '*.zig'; git ls-files --others --exclude-standard '*.zig'; } | " ++
-            "zlint -S --deny-warnings",
+        "command -v zlint >/dev/null || " ++
+            "{ echo 'zlint is not on PATH; install it from github.com/DonIsaac/zlint to run this gate' >&2; exit 1; }; " ++
+            lint_sources,
     });
-    if (zlint_available) {
-        lint_step.dependOn(&run_lint.step);
-    } else {
-        lint_step.dependOn(&b.addFail(
-            "zlint is not on PATH; install it from github.com/DonIsaac/zlint to run this gate",
-        ).step);
-    }
+    lint_step.dependOn(&run_lint.step);
+    const run_lint_when_present = b.addSystemCommand(&.{
+        "sh", "-c", "command -v zlint >/dev/null || exit 0; " ++ lint_sources,
+    });
 
     const installed_apps = b.addSystemCommand(&.{ "python3", "test/installed_apps.py" });
     installed_apps.addArtifactArg(exe);
@@ -1330,7 +1311,7 @@ pub fn build(b: *std.Build) void {
         "precommit",
         "The local gate: formatting, architecture audit, whole-tree analysis, and the fast test tier",
     );
-    if (zlint_available) precommit_step.dependOn(&run_lint.step);
+    precommit_step.dependOn(&run_lint_when_present.step);
     precommit_step.dependOn(&check_zig_fmt.step);
     precommit_step.dependOn(&run_audit.step);
     precommit_step.dependOn(&run_ecl_source.step);
@@ -1348,17 +1329,6 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&host_metadata.step);
     precommit_step.dependOn(&run_pkg_tests.step);
     precommit_step.dependOn(git_extension_step);
-}
-
-fn addCapturedTestRun(
-    b: *std.Build,
-    runner: *std.Build.Step.Compile,
-    tests: *std.Build.Step.Compile,
-) *std.Build.Step.Run {
-    const run = b.addRunArtifact(runner);
-    run.addArtifactArg(tests);
-    run.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-    return run;
 }
 
 fn configureRuntime(

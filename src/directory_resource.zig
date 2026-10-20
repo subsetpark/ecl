@@ -46,7 +46,7 @@ fn Handle(comptime Object: type) type {
             return .unsupported;
         }
         pub fn resourceJoined(self: *Cell) bool {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             defer std.Io.Threaded.mutexUnlock(&self.mutex);
             return self.phase == .closed;
         }
@@ -78,7 +78,7 @@ fn Handle(comptime Object: type) type {
             self.close(null);
         }
         fn close(self: *Cell, scope: ?*external.ScopeIdentity) void {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             const authorized = if (scope) |token| self.ownership.authorizesCancellation(token) or
                 (self.dependency == .attached and self.dependency.attached.membership.authorizesCancellation(token)) else true;
             const active = switch (self.phase) {
@@ -110,7 +110,7 @@ fn Handle(comptime Object: type) type {
             return group;
         }
         pub fn childrenClosed(self: *Cell) void {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             const completed = self.children.open;
             self.children = .{ .closed = completed };
             const access = self.beginRetirementLocked();
@@ -119,7 +119,7 @@ fn Handle(comptime Object: type) type {
             if (access) |authority| fs.retireHandle(authority, self, &self.retirement);
         }
         fn childGroup(self: *Cell, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!*scheduler.ExternalGroup {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             if (self.phase != .open) {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 return error.ScopeClosing;
@@ -132,7 +132,7 @@ fn Handle(comptime Object: type) type {
             }
             std.Io.Threaded.mutexUnlock(&self.mutex);
             const candidate = try scheduler.ExternalGroup.create(scope.scheduler, Cell, self);
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             if (self.phase != .open) {
                 std.Io.Threaded.mutexUnlock(&self.mutex);
                 candidate.release();
@@ -150,7 +150,7 @@ fn Handle(comptime Object: type) type {
                 cell: *Cell,
                 group: *scheduler.ExternalGroup,
                 pub fn lock(p: *@This()) void {
-                    std.Io.Threaded.mutexLock(&p.cell.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&p.cell.mutex);
                 }
                 pub fn unlock(p: *@This()) void {
                     std.Io.Threaded.mutexUnlock(&p.cell.mutex);
@@ -176,7 +176,7 @@ fn Handle(comptime Object: type) type {
             return active.access;
         }
         fn releaseLease(self: *Cell) void {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             switch (self.phase) {
                 .open, .sealing => |*active| active.leases -= 1,
                 .closing => |*active| active.leases -= 1,
@@ -192,7 +192,7 @@ fn Handle(comptime Object: type) type {
                 if (!self.phase.retiring.object.cleanupStep()) return false;
             } else self.phase.retiring.object.close(self.io);
             if (self.phase.retiring.reservation) |reservation| reservation.release();
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             self.phase = .closed;
             var detached = self.ownership.release();
             var dependency = self.dependency;
@@ -271,7 +271,7 @@ pub fn adoptEnumeration(access: *external.FilesystemAccess, scope: *scheduler.Ta
 /// callers own their result independently of later reads or resource closure.
 pub fn next(item: Value) Next {
     const cell = resource.Resource.project(EnumerationCell, item) orelse return .closed;
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return .closed;
     var admission: ?fs.OperationSlot = if (cell.phase.open.reservation) |ticket| ticket.claim() orelse return .{ .failed = .limit } else null;
@@ -419,13 +419,13 @@ pub const WriteClaim = opaque {
     }
     pub fn remaining(self: *WriteClaim) u64 {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.cell.mutex);
         return owned.stream.remaining();
     }
     pub fn ready(self: *WriteClaim) bool {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.cell.mutex);
         return (owned.cell.phase != .open and owned.cell.phase != .sealing) or owned.permit.active();
     }
@@ -434,7 +434,7 @@ pub const WriteClaim = opaque {
     }
     pub fn fail(self: *WriteClaim, reason: fs.Reason) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.cell.mutex);
         owned.stream.fail(reason);
         std.Io.Threaded.mutexUnlock(&owned.cell.mutex);
     }
@@ -446,7 +446,7 @@ pub const WriteClaim = opaque {
             .ready => {},
         }
         const failure_reason = owned.stream.write(bytes);
-        std.Io.Threaded.mutexLock(&owned.cell.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.cell.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.cell.mutex);
         if (owned.cell.phase != .open and owned.cell.phase != .sealing) owned.stream.fail(.io);
         if (owned.stream.finishAppend(bytes.len, failure_reason)) |reason| return .{ .failed = reason };
@@ -471,7 +471,7 @@ pub fn acquireWrite(item: Value) error{OutOfMemory}!WriteAdmission {
     defer if (candidate) |owned| cell.resourceAllocator().destroy(owned);
     var prepared: ?*WriterLane.Prepared = try cell.writes.prepare(cell.resourceAllocator());
     defer if (prepared) |owned| owned.discard();
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return .closed;
     const stream = cell.phase.open.object;
@@ -487,7 +487,7 @@ pub fn acquireWrite(item: Value) error{OutOfMemory}!WriteAdmission {
 fn dependentGroup(parent: Value, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing }!?*scheduler.ExternalGroup {
     if (resource.Resource.project(StageCell, parent)) |stage| return try stage.childGroup(scope);
     const cell = resource.Resource.project(DirectoryCell, parent) orelse return null;
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return error.ScopeClosing;
     if (cell.dependency == .attached) {
@@ -509,7 +509,7 @@ pub fn commitFile(item: Value) Commit {
     return commitCell(StreamCell, cell);
 }
 fn commitCell(comptime Cell: type, cell: *Cell) Commit {
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     if (cell.phase == .open) {
         const active = cell.phase.open;
         cell.phase = .{ .sealing = active };
@@ -572,7 +572,7 @@ pub fn acquire(item: Value) error{ OutOfMemory, Closed, Io }!*Lease {
 fn acquireCell(comptime Cell: type, cell: *Cell, origin: Origin) error{ OutOfMemory, Closed, Io }!*Lease {
     const owned = try cell.issuer.allocator().create(LeaseState);
     errdefer cell.issuer.allocator().destroy(owned);
-    std.Io.Threaded.mutexLock(&cell.mutex);
+    std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
     defer std.Io.Threaded.mutexUnlock(&cell.mutex);
     if (cell.phase != .open) return error.Closed;
     const root = if (Cell == StageCell) cell.phase.open.object.directory() else cell.phase.open.object;

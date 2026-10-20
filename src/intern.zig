@@ -28,36 +28,36 @@ comptime {
 }
 
 pub fn namespaceId(name: NamespaceName) u32 {
-    return @intFromEnum(name);
+    return @backingInt(name);
 }
 
 pub fn bindingId(name: BindingName) u32 {
-    return @intFromEnum(name);
+    return @backingInt(name);
 }
 
 pub fn moduleId(name: ModuleName) u32 {
-    return @intFromEnum(name) & ~dotted_module_mask;
+    return @backingInt(name) & ~dotted_module_mask;
 }
 
 pub fn moduleNameFromBinding(name: BindingName) ModuleName {
-    return @enumFromInt(bindingId(name));
+    return @fromBackingInt(@intCast(bindingId(name)));
 }
 
 pub fn moduleBindingName(name: ModuleName) ?BindingName {
-    if (@intFromEnum(name) & dotted_module_mask != 0) return null;
-    return @enumFromInt(moduleId(name));
+    if (@backingInt(name) & dotted_module_mask != 0) return null;
+    return @fromBackingInt(@intCast(moduleId(name)));
 }
 
 pub fn qualifiedName(module: ModuleName, binding: BindingName) QualifiedName {
-    return @enumFromInt((@as(u64, @intFromEnum(module)) << 32) | bindingId(binding));
+    return @fromBackingInt(@intCast((@as(u64, @backingInt(module)) << 32) | bindingId(binding)));
 }
 
 pub fn qualifiedModule(name: QualifiedName) ModuleName {
-    return @enumFromInt(@as(u32, @truncate(@intFromEnum(name) >> 32)));
+    return @fromBackingInt(@intCast(@as(u32, @truncate(@backingInt(name) >> 32))));
 }
 
 pub fn qualifiedBinding(name: QualifiedName) BindingName {
-    return @enumFromInt(@as(u32, @truncate(@intFromEnum(name))));
+    return @fromBackingInt(@intCast(@as(u32, @truncate(@backingInt(name)))));
 }
 
 /// A word as a diagnostic names it.
@@ -78,24 +78,24 @@ pub const TraceWord = enum(u64) {
     const no_trace_atom: u32 = 0xffff_ffff;
 
     pub fn plain(id: u32) TraceWord {
-        return @enumFromInt((@as(u64, no_trace_module) << 32) | id);
+        return @fromBackingInt(@intCast((@as(u64, no_trace_module) << 32) | id));
     }
 
     pub fn moduleLocal(module: ModuleName, local: BindingName) TraceWord {
-        std.debug.assert(@intFromEnum(module) != no_trace_module);
-        return @enumFromInt((@as(u64, @intFromEnum(module)) << 32) | bindingId(local));
+        std.debug.assert(@backingInt(module) != no_trace_module);
+        return @fromBackingInt(@intCast((@as(u64, @backingInt(module)) << 32) | bindingId(local)));
     }
 
     /// The unqualified atom. For a module-local word this is the definition's
     /// own name, which is what recognition and idiom matching compare.
     pub fn atom(self: TraceWord) u32 {
-        return @truncate(@intFromEnum(self));
+        return @truncate(@backingInt(self));
     }
 
     pub fn qualified(self: TraceWord) ?QualifiedName {
-        const module: u32 = @truncate(@intFromEnum(self) >> 32);
+        const module: u32 = @truncate(@backingInt(self) >> 32);
         if (module == no_trace_module) return null;
-        return @enumFromInt(@intFromEnum(self));
+        return @fromBackingInt(@intCast(@backingInt(self)));
     }
 
     /// The module part of a qualified spelling, or null when the word is a
@@ -227,13 +227,10 @@ const AtomicBucket = std.atomic.Value(u32);
 pub const Table = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
-    buckets: [bucket_count]AtomicBucket =
-        [_]AtomicBucket{AtomicBucket.init(no_entry)} ** bucket_count,
+    buckets: [bucket_count]AtomicBucket = @splat(AtomicBucket.init(no_entry)),
     count: std.atomic.Value(u32) = .init(0),
-    entry_segments: [max_segments]AtomicEntrySegment =
-        [_]AtomicEntrySegment{AtomicEntrySegment.init(null)} ** max_segments,
-    byte_segments: [max_segments]AtomicByteSegment =
-        [_]AtomicByteSegment{AtomicByteSegment.init(null)} ** max_segments,
+    entry_segments: [max_segments]AtomicEntrySegment = @splat(AtomicEntrySegment.init(null)),
+    byte_segments: [max_segments]AtomicByteSegment = @splat(AtomicByteSegment.init(null)),
     byte_segment_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Table {
@@ -343,7 +340,7 @@ pub const Table = struct {
                 },
                 .reserve => result: {
                     if (self.bytes.len > std.math.maxInt(u32)) return error.OutOfMemory;
-                    std.Io.Threaded.mutexLock(&self.table.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&self.table.mutex);
                     defer std.Io.Threaded.mutexUnlock(&self.table.mutex);
                     const reservation = try self.table.reserveSpace(self.bytes.len);
                     reservation.segment.used += self.bytes.len;
@@ -364,7 +361,7 @@ pub const Table = struct {
                     break :result .pending;
                 },
                 .commit => result: {
-                    std.Io.Threaded.mutexLock(&self.table.mutex);
+                    std.Io.Threaded.mutexLockUncancelable(&self.table.mutex);
                     defer std.Io.Threaded.mutexUnlock(&self.table.mutex);
                     const hash = self.lookup.hash.?;
                     const bucket = bucketIndex(hash);
@@ -599,7 +596,7 @@ pub const NamespaceCursor = struct {
             return .{ .complete = null };
         return switch (self.lexical.advance()) {
             .pending => .pending,
-            .complete => |valid| .{ .complete = if (valid) @enumFromInt(self.id) else null },
+            .complete => |valid| .{ .complete = if (valid) @fromBackingInt(@intCast(self.id)) else null },
         };
     }
 };
@@ -632,7 +629,7 @@ pub const ModuleNameCursor = struct {
         if (self.index == self.bytes.len) {
             const segment = self.bytes[self.segment_start..self.index];
             return .{ .complete = if (segment.len != 0 and !isReservedBytes(segment))
-                @enumFromInt(self.id | if (self.dotted) dotted_module_mask else 0)
+                @fromBackingInt(@intCast(self.id | if (self.dotted) dotted_module_mask else 0))
             else
                 null };
         }

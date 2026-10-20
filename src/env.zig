@@ -512,7 +512,7 @@ pub const BindingCell = struct {
         self.releases.retire(self, &self.retirement);
     }
     fn lockRetired(self: *BindingCell) void {
-        std.Io.Threaded.mutexLock(&self.retire_lock);
+        std.Io.Threaded.mutexLockUncancelable(&self.retire_lock);
     }
     fn detachRetired(self: *BindingCell) ?*BindingSnapshot {
         if (!self.publisher.quiescent()) return null;
@@ -542,11 +542,11 @@ pub const BindingCellHandle = enum(usize) {
 
     fn initRetained(binding_cell: *BindingCell) BindingCellHandle {
         binding_cell.retain();
-        return @enumFromInt(@intFromPtr(binding_cell));
+        return @fromBackingInt(@intCast(@intFromPtr(binding_cell)));
     }
     fn cell(self: BindingCellHandle) *BindingCell {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn load(self: BindingCellHandle) BindingLease {
         return self.cell().load();
@@ -701,12 +701,12 @@ pub const EnvironmentView = enum(usize) {
     _,
 
     fn init(environment: *const Environment) EnvironmentView {
-        return @enumFromInt(@intFromPtr(environment));
+        return @fromBackingInt(@intCast(@intFromPtr(environment)));
     }
 
     fn target(self: EnvironmentView) *const Environment {
         std.debug.assert(self != .invalid);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
 
     pub fn acquireShape(self: EnvironmentView) ShapeLease {
@@ -734,11 +734,11 @@ pub const EnvironmentView = enum(usize) {
     pub fn observeShape(self: EnvironmentView) ?ShapeRevision {
         const revision = self.target().shape_generation.load(.acquire);
         if (revision & 1 != 0) return null;
-        return @enumFromInt(revision);
+        return @fromBackingInt(@intCast(revision));
     }
 
     pub fn matchesShape(self: EnvironmentView, revision: ShapeRevision) bool {
-        return self.target().shape_generation.load(.acquire) == @intFromEnum(revision);
+        return self.target().shape_generation.load(.acquire) == @backingInt(revision);
     }
 };
 
@@ -888,7 +888,7 @@ pub const Environment = struct {
         };
     }
     fn lockBlocking(self: *Environment) void {
-        std.Io.Threaded.mutexLock(&self.writer);
+        std.Io.Threaded.mutexLockUncancelable(&self.writer);
     }
     fn unlock(self: *Environment) void {
         std.Io.Threaded.mutexUnlock(&self.writer);
@@ -1539,7 +1539,7 @@ pub const Scope = struct {
             .module_root => |target| target,
             .isolated => blk: {
                 if (self.isolated_environment.load(.acquire)) |target| break :blk target;
-                std.Io.Threaded.mutexLock(&self.publication_lock);
+                std.Io.Threaded.mutexLockUncancelable(&self.publication_lock);
                 defer std.Io.Threaded.mutexUnlock(&self.publication_lock);
                 if (self.isolated_environment.load(.acquire)) |target| break :blk target;
                 const created = try self.allocator.create(Environment);
@@ -1676,12 +1676,12 @@ pub const ModulePublisher = enum(usize) {
     _,
 
     fn init(environment: *Environment) ModulePublisher {
-        return @enumFromInt(@intFromPtr(environment));
+        return @fromBackingInt(@intCast(@intFromPtr(environment)));
     }
 
     fn target(self: ModulePublisher) *Environment {
         std.debug.assert(self != .invalid);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
 
     pub fn publish(
@@ -1709,8 +1709,8 @@ pub const ModulePublisher = enum(usize) {
         if (recognition) |selected| try environment.recognizeDirect(.{
             .own = environment,
             .core = selected.core.target(),
-            .own_scope = @intFromEnum(own_scope),
-            .core_scope = @intFromEnum(selected.core_scope),
+            .own_scope = @backingInt(own_scope),
+            .core_scope = @backingInt(selected.core_scope),
         }, selected.recognizer);
         environment.freeze();
     }
@@ -1926,7 +1926,7 @@ const ScopeIndex = struct {
     const max_id: u32 = (1 << id_bits) - 1;
 
     fn coordinates(id: ScopeId) struct { usize, usize, usize } {
-        const raw = @intFromEnum(id);
+        const raw = @backingInt(id);
         std.debug.assert(raw != 0 and raw <= max_id);
         return .{
             @intCast((raw >> 16) & 0xff),
@@ -1963,11 +1963,11 @@ const ScopeIndex = struct {
             if (leaf_candidate) |unused| allocator.destroy(unused);
         }
 
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         const raw = self.next.load(.monotonic);
         if (raw > max_id) return error.OutOfMemory;
-        const id: ScopeId = @enumFromInt(raw);
+        const id: ScopeId = @fromBackingInt(@intCast(raw));
         const branch_index, const leaf_index, const entry_index = coordinates(id);
         const branch = self.branches[branch_index].load(.acquire) orelse installed: {
             const chosen = branch_candidate.?;
@@ -2021,7 +2021,7 @@ pub const Env = enum(usize) {
 
     fn privateState(self: *const Env) *EnvState {
         std.debug.assert(self.* != .consumed);
-        return @ptrFromInt(@intFromEnum(self.*));
+        return @ptrFromInt(@backingInt(self.*));
     }
 
     pub fn init(host_owner: *heap.HostOwner) error{OutOfMemory}!Env {
@@ -2040,7 +2040,7 @@ pub const Env = enum(usize) {
             // escapes and before anything can read it.
             .core_cell = undefined,
         };
-        const result: Env = @enumFromInt(@intFromPtr(backing));
+        const result: Env = @fromBackingInt(@intCast(@intFromPtr(backing)));
         backing.core_cell = .{ .id = .none, .core = true };
         // Core needs a real id: a prelude word's tokens name it, and id zero
         // would mean "unscoped" and resolve them wherever they were invoked,
@@ -2172,7 +2172,7 @@ pub const Env = enum(usize) {
         // there is no safe earlier point to free one. Taking ownership before
         // registering leaves the failure path with nothing to undo.
         {
-            std.Io.Threaded.mutexLock(&backing.cells_mutex);
+            std.Io.Threaded.mutexLockUncancelable(&backing.cells_mutex);
             defer std.Io.Threaded.mutexUnlock(&backing.cells_mutex);
             backing.cells.append(allocator, cell) catch |err| {
                 allocator.destroy(cell);
@@ -2377,7 +2377,7 @@ pub const BuildingEnv = struct {
     /// is not consumed, so the session that owns it does not start.
     pub fn finish(self: *BuildingEnv, recognizer: ?FreezeRecognizer) error{OutOfMemory}!void {
         const core = &self.target.privateState().core;
-        const core_scope = @intFromEnum(self.target.coreScopeId());
+        const core_scope = @backingInt(self.target.coreScopeId());
         if (recognizer) |selected| try core.recognizeDirect(.{
             .own = core,
             .core = null,
@@ -2475,7 +2475,7 @@ test "env: issued scope ids leave their reserved high bits clear" {
     for (0..issued) |_| {
         // Names nothing: this assertion concerns only issued ids.
         const cell = try container.newScopeCell(null, null);
-        const raw = @intFromEnum(cell.id);
+        const raw = @backingInt(cell.id);
         try std.testing.expect(raw != 0);
         try std.testing.expect(raw <= ScopeIndex.max_id);
         try std.testing.expectEqual(@as(u32, 0), raw >> id_bits);

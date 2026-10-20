@@ -256,8 +256,8 @@ const PublicationState = struct {
         detached: external.Ownership.Detached = .{},
     };
     host: *const heap.HostCleanup,
-    entries: [16]?Entry = .{null} ** 16,
-    groups: [16]?*scheduler.ExternalGroup = .{null} ** 16,
+    entries: [16]?Entry = @splat(null),
+    groups: [16]?*scheduler.ExternalGroup = @splat(null),
     count: usize = 0,
     group_count: usize = 0,
     published: bool = false,
@@ -278,7 +278,7 @@ const PublicationState = struct {
                 break;
             };
             if (duplicate) continue;
-            std.Io.Threaded.mutexLock(cell.mutex());
+            std.Io.Threaded.mutexLockUncancelable(cell.mutex());
             const group = switch (cell.groupLocked()) {
                 .published => {
                     std.Io.Threaded.mutexUnlock(cell.mutex());
@@ -315,7 +315,7 @@ const PublicationState = struct {
         return result;
     }
     pub fn members(self: *@This()) [16]?external.ScopeMember {
-        var result: [16]?external.ScopeMember = .{null} ** 16;
+        var result: [16]?external.ScopeMember = @splat(null);
         for (self.entries[0..self.count], 0..) |entry, index| {
             if (entry.?.membership) result[index] = entry.?.cell.member();
         }
@@ -323,7 +323,7 @@ const PublicationState = struct {
     }
     pub fn lock(self: *@This()) void {
         for (self.groups[0..self.group_count]) |group| group.?.lockPublication();
-        for (self.entries[0..self.count]) |entry| std.Io.Threaded.mutexLock(entry.?.cell.mutex());
+        for (self.entries[0..self.count]) |entry| std.Io.Threaded.mutexLockUncancelable(entry.?.cell.mutex());
     }
     pub fn unlock(self: *@This()) void {
         var index = self.count;
@@ -432,7 +432,7 @@ pub const Publication = opaque {
             }
         };
         var transaction: Transaction = .{ .owner = owner, .handoff = handoff };
-        _ = try scope.scheduler.publishExternalBatch(scope, if (handoff) |publication| publication.members() else .{null} ** 16, &transaction);
+        _ = try scope.scheduler.publishExternalBatch(scope, if (handoff) |publication| publication.members() else @splat(null), &transaction);
     }
     fn members(self: *@This()) [16]?external.ScopeMember {
         return self.state().members();
@@ -477,7 +477,7 @@ const PublicationProbe = struct {
             return .ready;
         }
         pub fn resourceClose(self: *@This()) void {
-            std.Io.Threaded.mutexLock(&self.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
             self.authority.revokeLocked();
             std.Io.Threaded.mutexUnlock(&self.mutex);
         }
@@ -526,7 +526,7 @@ const PublicationProbe = struct {
     const Initial = struct {
         child: *Child,
         pub fn lock(self: *@This()) void {
-            std.Io.Threaded.mutexLock(&self.child.mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.child.mutex);
         }
         pub fn unlock(self: *@This()) void {
             std.Io.Threaded.mutexUnlock(&self.child.mutex);
@@ -611,7 +611,7 @@ const PublicationProbe = struct {
             detached.detachAll();
         }
         var initial: Initial = .{ .child = &child };
-        var members: [16]?external.ScopeMember = .{null} ** 16;
+        var members: [16]?external.ScopeMember = @splat(null);
         members[0] = child.resourceMember();
         try std.testing.expect(try group.publish(members, &initial));
         const value = try Resource.create(Child, .staged, 1, &child);

@@ -32,7 +32,7 @@ fn childRequest(comptime P: type, dependency: ChildDependency) abi.MessageBuildR
     return .{
         .action = .child,
         .kind_identity = P.kindIdentity(),
-        .count = @intFromEnum(switch (dependency) {
+        .count = @backingInt(switch (dependency) {
             .independent => abi.ChildDependency.independent,
             .dependent => abi.ChildDependency.dependent,
             .inherited => abi.ChildDependency.inherited,
@@ -380,9 +380,9 @@ fn ControllerPort(comptime Spec: type) type {
     comptime {
         if (@typeInfo(Lane) != .@"enum") @compileError("ecl-native: Port Lane must be an enum");
         const info = @typeInfo(Lane).@"enum";
-        if (!info.is_exhaustive or info.fields.len == 0 or info.fields.len > abi.max_port_lanes)
+        if (info.mode != .exhaustive or info.field_values.len == 0 or info.field_values.len > abi.max_port_lanes)
             @compileError("ecl-native: Port Lane must declare 1 to 16 exhaustive lanes");
-        for (info.fields, 0..) |field, index| if (field.value != index)
+        for (info.field_values, 0..) |value, index| if (value != index)
             @compileError("ecl-native: Port Lane values must be contiguous from zero");
         if (cancellation == .acknowledge and (!@hasDecl(Spec, "cancelOperation") or @TypeOf(Spec.cancelOperation) != fn (*Spec.State, Lane) void))
             @compileError("ecl-native: recoverable cancellation requires fn cancelOperation(*State, Lane) void");
@@ -401,13 +401,13 @@ fn ControllerPort(comptime Spec: type) type {
     const DeclaredEndpoints = declarations.Endpoints(if (@hasDecl(Spec, "endpoints")) Spec.endpoints else .{});
     const DeclaredOperations = declarations.Operations(Lane, DeclaredEndpoints, if (@hasDecl(Spec, "operations")) Spec.operations else .{});
     const activity_entries = if (@hasDecl(Spec, "activities")) Spec.activities else .{};
-    const activity_fields = @import("std").meta.fields(@TypeOf(activity_entries));
+    const activity_fields = @typeInfo(@TypeOf(activity_entries)).@"struct".field_names;
     if (activity_fields.len > @import("port-declarations").max_activities) @compileError("ecl-native: at most four resource activities may be declared");
     const activity_definitions = blk: {
         var values: [activity_fields.len]abi.ActivityDefinition = undefined;
         var owned: u64 = 0;
-        for (activity_fields, 0..) |field, index| {
-            values[index] = activityDefinition(Spec.State, DeclaredEndpoints, @field(activity_entries, field.name));
+        for (activity_fields, 0..) |field_name, index| {
+            values[index] = activityDefinition(Spec.State, DeclaredEndpoints, @field(activity_entries, field_name));
             if (owned & values[index].endpoints != 0) @compileError("ecl-native: resource endpoints belong to one activity");
             owned |= values[index].endpoints;
         }
@@ -438,13 +438,13 @@ fn ControllerPort(comptime Spec: type) type {
             return &kind_identity;
         }
         pub fn definition() abi.PortDefinition {
-            return .{ .capacity_failure = if (@hasDecl(Spec, "CapacityFailure")) Spec.CapacityFailure.definition() else null, .activity_count = activities.len, .activities_ptr = if (activities.len == 0) null else &activities, .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".fields.len, .cancellation = switch (cancellation) {
+            return .{ .capacity_failure = if (@hasDecl(Spec, "CapacityFailure")) Spec.CapacityFailure.definition() else null, .activity_count = activities.len, .activities_ptr = if (activities.len == 0) null else &activities, .state_size = @sizeOf(Spec.State), .state_alignment = @alignOf(Spec.State), .name_ptr = name.ptr, .name_len = name.len, .init_state = initState, .initialize = initialize, .execute = execute, .cancel = cancelState, .cleanup = cleanup, .lane_count = @typeInfo(Lane).@"enum".field_names.len, .cancellation = switch (cancellation) {
                 .close_resource => .close_resource,
                 .acknowledge => .acknowledge,
             }, .cancel_operation = if (cancellation == .acknowledge) cancelOperation else null, .shutdown = if (@hasDecl(Spec, "shutdown")) shutdown else null, .identity = kindIdentity() };
         }
         fn cancelOperation(raw: *anyopaque, lane: u32) callconv(.c) void {
-            Spec.cancelOperation(@ptrCast(@alignCast(raw)), @enumFromInt(lane));
+            Spec.cancelOperation(@ptrCast(@alignCast(raw)), @fromBackingInt(@intCast(lane)));
         }
         fn initState(raw: *anyopaque) callconv(.c) void {
             const state: *Spec.State = @ptrCast(@alignCast(raw));
@@ -461,7 +461,7 @@ fn ControllerPort(comptime Spec: type) type {
         fn execute(raw: *anyopaque, operation: u32, table: *const abi.ControllerTable, context: *anyopaque) callconv(.c) void {
             var state: ControllerState = .{ .table = table, .context = context };
             inline for (comptime @import("std").meta.tags(Operations.Name)) |operation_name| {
-                if (operation == @intFromEnum(operation_name)) {
+                if (operation == @backingInt(operation_name)) {
                     const handler = Operations.get(operation_name).handler;
                     if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == void) {
                         handler(@ptrCast(@alignCast(raw)), @ptrCast(&state));
@@ -807,7 +807,7 @@ pub const Finalizer = opaque {
     /// At most 32 alternatives may be prepared by one finalizer invocation.
     pub fn prepareFailure(self: *Finalizer, kind: capability.ErrorKind, message: []const u8) ControllerError!void {
         const bounded = capability.boundedErrorMessage(message);
-        return self.cooperative().builder().apply(.{ .action = .prepare_failure, .count = @intFromEnum(kind), .scalar = capability.Scalar.symbol(bounded).wire });
+        return self.cooperative().builder().apply(.{ .action = .prepare_failure, .count = @backingInt(kind), .scalar = capability.Scalar.symbol(bounded).wire });
     }
     pub fn preparedFailure(self: *Finalizer) ControllerError!*const PreparedFailure {
         const owned = self.cooperative().state();
@@ -903,7 +903,7 @@ fn CooperativePort(comptime Spec: type) type {
         pub const Endpoints = EndpointSet;
         pub const Operations = OperationSet;
         pub fn operationMode(comptime operation: Operations.Name) abi.OperationMode {
-            return if (@typeInfo(@TypeOf(Operations.get(operation).handler)).@"fn".params[1].type.? == *Finalizer) .finalizer else .ordinary;
+            return if (@typeInfo(@TypeOf(Operations.get(operation).handler)).@"fn".param_types[1].? == *Finalizer) .finalizer else .ordinary;
         }
         pub const name = Spec.name;
         var identity: u8 = 0;
@@ -938,7 +938,7 @@ fn CooperativePort(comptime Spec: type) type {
         }
         fn execute(raw: *anyopaque, code: u32, table: *const abi.CooperativeTable, context: *anyopaque) callconv(.c) abi.CooperativeProgress {
             inline for (comptime @import("std").meta.tags(Operations.Name)) |operation| {
-                if (code == @intFromEnum(operation)) return invoke(Operations.get(operation).handler, raw, table, context);
+                if (code == @backingInt(operation)) return invoke(Operations.get(operation).handler, raw, table, context);
             }
             table.fail(context, .contract, "unsupported registered operation", "unsupported registered operation".len);
             return .completed;
@@ -952,7 +952,7 @@ fn CooperativePort(comptime Spec: type) type {
         fn invoke(comptime handler: anytype, raw: *anyopaque, table: *const abi.CooperativeTable, context: *anyopaque) abi.CooperativeProgress {
             var state: CooperativeState = .{ .table = table, .context = context };
             const call: *Cooperative = @ptrCast(&state);
-            const Context = @typeInfo(@TypeOf(handler)).@"fn".params[1].type.?;
+            const Context = @typeInfo(@TypeOf(handler)).@"fn".param_types[1].?;
             const typed_call: Context = @ptrCast(&state);
             const progress = if (@typeInfo(@TypeOf(handler)).@"fn".return_type.? == CooperativeProgress)
                 handler(@as(*Spec.State, @ptrCast(@alignCast(raw))), typed_call)

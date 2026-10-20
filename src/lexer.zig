@@ -13,7 +13,7 @@ pub const Span = struct {
 /// an error path.
 pub const Diag = struct {
     span: Span = .{},
-    message_buffer: [512]u8 = [_]u8{0} ** 512,
+    message_buffer: [512]u8 = @splat(0),
     message_len: usize = 0,
 
     pub fn text(self: *const Diag) []const u8 {

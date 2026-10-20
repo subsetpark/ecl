@@ -57,7 +57,7 @@ test "plain call sites preserve child shadowing and deep lexical fallback" {
         "[1 1 2 1]",
     );
     try support.expectStack(
-        "7 'outside set " ++ "[] (" ** 10 ++ "outside" ++ ") @attempt 'ok at first" ** 10,
+        "7 'outside set " ++ support.repeated("[] (", 10) ++ "outside" ++ support.repeated(") @attempt 'ok at first", 10),
         "7",
     );
 }
@@ -65,7 +65,7 @@ test "plain call sites preserve child shadowing and deep lexical fallback" {
 test "plain call sites remain correct after observation pool and cache churn" {
     try support.expectStack(
         "1 'outside set (outside) 'probe def probe probe probe " ++
-            "3 (" ++ "outside pop " ** 32 ++ ") times " ++
+            "3 (" ++ support.repeated("outside pop ", 32) ++ ") times " ++
             "2 'outside set probe " ++
             "(outside) 'escaped set [] (3 'outside set escaped call) @attempt 'ok at first",
         "1 1 1 2 3",

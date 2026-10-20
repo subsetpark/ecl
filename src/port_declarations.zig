@@ -21,10 +21,10 @@ pub const Endpoint = struct {
 /// Entries are a named struct, not a tuple. Names are the public binding names.
 /// The containing declaration supplies nominal identity for each selector.
 pub fn Endpoints(comptime entries: anytype) type {
-    const fields = std.meta.fields(@TypeOf(entries));
+    const fields = @typeInfo(@TypeOf(entries)).@"struct".field_names;
     if (fields.len > 64) @compileError("port: at most 64 endpoints may be declared");
-    for (fields) |field| {
-        const item: Endpoint = @field(entries, field.name);
+    for (fields) |field_name| {
+        const item: Endpoint = @field(entries, field_name);
         if (item.doc.len == 0) @compileError("port: endpoint documentation is required");
     }
     return struct {
@@ -37,7 +37,7 @@ pub fn Endpoints(comptime entries: anytype) type {
             return get(name).name orelse @tagName(name);
         }
         pub fn id(name: Name) u6 {
-            return @intCast(@intFromEnum(name));
+            return @intCast(@backingInt(name));
         }
         pub fn mask(comptime names: anytype) u64 {
             var bits: u64 = 0;
@@ -57,15 +57,15 @@ pub fn Endpoints(comptime entries: anytype) type {
 /// Each entry declares doc, handler, lane, and endpoints together. Handler
 /// signatures are checked by the consuming typed or ABI bridge.
 pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entries: anytype) type {
-    const lanes = std.meta.fields(Lane);
-    if (lanes.len == 0 or lanes.len > 16 or !@typeInfo(Lane).@"enum".is_exhaustive)
+    const lanes = @typeInfo(Lane).@"enum";
+    if (lanes.field_values.len == 0 or lanes.field_values.len > 16 or lanes.mode != .exhaustive)
         @compileError("port: declare 1 to 16 exhaustive lanes");
-    for (lanes, 0..) |field, index| {
-        if (field.value != index) @compileError("port: lane values must be contiguous from zero");
+    for (lanes.field_values, 0..) |value, index| {
+        if (value != index) @compileError("port: lane values must be contiguous from zero");
     }
-    const fields = std.meta.fields(@TypeOf(entries));
-    for (fields) |field| {
-        const entry = @field(entries, field.name);
+    const fields = @typeInfo(@TypeOf(entries)).@"struct".field_names;
+    for (fields) |field_name| {
+        const entry = @field(entries, field_name);
         if (entry.doc.len == 0) @compileError("port: operation documentation is required");
         _ = @as(Lane, entry.lane);
         _ = EndpointSet.mask(entry.endpoints);
@@ -88,8 +88,8 @@ pub fn Operations(comptime Lane: type, comptime EndpointSet: type, comptime entr
             return if (@hasField(@TypeOf(entry), "name")) entry.name else @tagName(name);
         }
         pub fn lane(name: Name) Lane {
-            inline for (fields) |field| {
-                if (name == @field(Name, field.name)) return @field(entries, field.name).lane;
+            inline for (fields) |field_name| {
+                if (name == @field(Name, field_name)) return @field(entries, field_name).lane;
             }
             unreachable;
         }
@@ -109,9 +109,9 @@ pub const WorkQuantum = enum(u16) {
     _,
     pub fn fromCount(amount: u32) error{InvalidLimits}!WorkQuantum {
         if (amount == 0 or amount > 65536) return error.InvalidLimits;
-        return @enumFromInt(@as(u16, @intCast(amount - 1)));
+        return @fromBackingInt(@intCast(@as(u16, @intCast(amount - 1))));
     }
     pub fn count(self: WorkQuantum) u32 {
-        return @as(u32, @intFromEnum(self)) + 1;
+        return @as(u32, @backingInt(self)) + 1;
     }
 };

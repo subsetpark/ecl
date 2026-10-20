@@ -64,6 +64,7 @@ pub const default_worker_count: usize = session_options.default_worker_count;
 
 /// Deterministic HTTPS verification inputs. `ca_file` is borrowed on input;
 /// the Session copies it and owns the copy for the lifetime of every Unit.
+/// It is absolute or relative to the process working directory.
 pub const TlsTrustOverride = struct {
     ca_file: []const u8,
     now: std.Io.Timestamp,
@@ -133,11 +134,11 @@ pub const CompletionSet = enum(usize) {
     _,
 
     fn fromBacking(owned: *CompletionBacking) CompletionSet {
-        return @enumFromInt(@intFromPtr(owned));
+        return @fromBackingInt(@intCast(@intFromPtr(owned)));
     }
     fn backing(self: CompletionSet) *CompletionBacking {
         std.debug.assert(self != .consumed and self != .empty);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn items(self: CompletionSet) []const []const u8 {
         std.debug.assert(self != .consumed);
@@ -178,11 +179,11 @@ pub const RenderedText = enum(usize) {
             return err;
         };
         owned.* = .{ .allocator = allocator, .bytes = owned_bytes };
-        return @enumFromInt(@intFromPtr(owned));
+        return @fromBackingInt(@intCast(@intFromPtr(owned)));
     }
     fn backing(self: RenderedText) *RenderedTextBacking {
         std.debug.assert(self != .consumed and self != .empty);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     pub fn bytes(self: RenderedText) []const u8 {
         std.debug.assert(self != .consumed);
@@ -316,7 +317,7 @@ pub const Session = enum(usize) {
 
     fn coreState(self: *const Session) *SessionCore {
         std.debug.assert(self.* != .consumed);
-        const erased: *OpaqueSessionCore = @ptrFromInt(@intFromEnum(self.*));
+        const erased: *OpaqueSessionCore = @ptrFromInt(@backingInt(self.*));
         return @ptrCast(@alignCast(erased));
     }
     /// Inputs outlive teardown; borrowed configuration strings and environment
@@ -497,7 +498,7 @@ pub const Session = enum(usize) {
         };
         core.scheduler.attachRetirement();
         test_authority = null;
-        return @enumFromInt(@intFromPtr(core));
+        return @fromBackingInt(@intCast(@intFromPtr(core)));
     }
     pub fn deinit(self: *Session) void {
         const core = self.coreState();
@@ -860,10 +861,10 @@ pub const Session = enum(usize) {
     /// which is explicitly movable. A capability that captured the handle's
     /// address would dangle the moment the Session value was moved.
     pub fn editorTerminal(self: *const Session) EditorTerminal {
-        return @enumFromInt(@intFromEnum(self.*));
+        return @fromBackingInt(@intCast(@backingInt(self.*)));
     }
     pub fn completionObserve(self: *const Session) CompletionObserve {
-        return @enumFromInt(@intFromEnum(self.*));
+        return @fromBackingInt(@intCast(@backingInt(self.*)));
     }
     /// Releases a value returned by this Session into its reclamation domain.
     /// The value must not be used afterward; traversal remains scheduler-owned.
@@ -972,7 +973,7 @@ pub const EditorTerminal = enum(usize) {
     _,
 
     fn owner(self: EditorTerminal) Session {
-        return @enumFromInt(@intFromEnum(self));
+        return @fromBackingInt(@intCast(@backingInt(self)));
     }
     /// Single-row editing needs a measured row. Null means the caller must use
     /// the canonical reader; no width is ever invented on its behalf.
@@ -1023,7 +1024,7 @@ pub const CompletionObserve = enum(usize) {
         self: CompletionObserve,
         prefix: []const u8,
     ) error{OutOfMemory}!CompletionSet {
-        var session: Session = @enumFromInt(@intFromEnum(self));
+        var session: Session = @fromBackingInt(@intCast(@backingInt(self)));
         return session.completionCandidates(prefix);
     }
 };
@@ -1059,13 +1060,13 @@ fn sessionTypeExposesAuthority(
         .vector => |vector| sessionTypeExposesAuthority(vector.child, depth - 1, position),
         .error_union => |error_union| sessionTypeExposesAuthority(error_union.payload, depth - 1, position),
         .@"struct" => |structure| exposed: {
-            inline for (structure.fields) |field|
-                if (sessionTypeExposesAuthority(field.type, depth - 1, position)) break :exposed true;
+            inline for (structure.field_types) |field_type|
+                if (sessionTypeExposesAuthority(field_type, depth - 1, position)) break :exposed true;
             break :exposed false;
         },
         .@"union" => |union_info| exposed: {
-            inline for (union_info.fields) |field|
-                if (sessionTypeExposesAuthority(field.type, depth - 1, position)) break :exposed true;
+            inline for (union_info.field_types) |field_type|
+                if (sessionTypeExposesAuthority(field_type, depth - 1, position)) break :exposed true;
             break :exposed false;
         },
         else => false,
@@ -1079,18 +1080,18 @@ fn environValue(entries: []const machine.Environ.Entry, name: []const u8) ?[]con
 
 comptime {
     @setEvalBranchQuota(4_000);
-    for (std.meta.declarations(Session)) |declaration| {
-        const declaration_info = @typeInfo(@TypeOf(@field(Session, declaration.name)));
+    for (@typeInfo(Session).@"enum".decl_names) |declaration_name| {
+        const declaration_info = @typeInfo(@TypeOf(@field(Session, declaration_name)));
         if (declaration_info != .@"fn") continue;
         const function = declaration_info.@"fn";
-        for (function.params) |parameter| {
-            const parameter_type = parameter.type orelse continue;
+        for (function.param_types) |maybe_parameter_type| {
+            const parameter_type = maybe_parameter_type orelse continue;
             if (sessionTypeExposesAuthority(parameter_type, 8, .parameter))
-                @compileError("public Session parameter exposes owner authority: " ++ declaration.name);
+                @compileError("public Session parameter exposes owner authority: " ++ declaration_name);
         }
         const return_type = function.return_type orelse continue;
         if (sessionTypeExposesAuthority(return_type, 8, .result))
-            @compileError("public Session return exposes owner authority: " ++ declaration.name);
+            @compileError("public Session return exposes owner authority: " ++ declaration_name);
     }
 }
 
@@ -1500,7 +1501,7 @@ test "parse diagnostics preserve source names beyond the inline error budget" {
     defer runtime_inputs4.deinit();
     var session = try Session.init(allocator, &.{}, runtime_inputs4.inputs(.{}), .default, .evaluate);
     defer session.deinit();
-    const source_name = [_]u8{'p'} ** 512;
+    const source_name: [512]u8 = @splat('p');
     const error_value = switch (try session.runUnit(&source_name, "1 ]")) {
         .err => |failure| failure,
         .ok, .incomplete => return error.ExpectedParseFailure,

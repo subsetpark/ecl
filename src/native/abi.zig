@@ -467,7 +467,7 @@ pub const EntryFn = *const fn (output: *EntryResult) callconv(.c) void;
 fn assertWireField(comptime T: type) void {
     switch (@typeInfo(T)) {
         .int, .float, .bool, .void, .@"opaque" => {},
-        .@"enum" => |enumeration| if (enumeration.is_exhaustive)
+        .@"enum" => |enumeration| if (enumeration.mode == .exhaustive)
             @compileError("native ABI wire enums must have a non-exhaustive `_` tag: " ++ @typeName(T)),
         .pointer => |pointer| {
             if (pointer.size == .slice)
@@ -479,22 +479,21 @@ fn assertWireField(comptime T: type) void {
             else => @compileError("native ABI optionals must be pointer-shaped"),
         },
         .@"fn" => |function| {
-            const CallingConvention = @TypeOf(function.calling_convention);
-            const convention: CallingConvention.Tag = function.calling_convention;
+            const CallingConvention = @TypeOf(function.attrs.@"callconv");
+            const convention: CallingConvention.Tag = function.attrs.@"callconv";
             const c_convention: CallingConvention.Tag = builtin.target.cCallingConvention().?;
             if (convention != c_convention or
-                function.is_generic or function.is_var_args)
+                function.is_generic or function.attrs.varargs)
                 @compileError("native ABI callbacks must be non-generic C functions");
-            inline for (function.params) |parameter| {
-                if (parameter.type == null) @compileError("native ABI callbacks require concrete parameters");
-                assertWireField(parameter.type.?);
+            inline for (function.param_types) |parameter_type| {
+                assertWireField(parameter_type orelse @compileError("native ABI callbacks require concrete parameters"));
             }
             if (function.return_type) |Return| assertWireField(Return);
         },
         .@"struct" => |record| {
             if (record.layout != .@"extern")
                 @compileError("native ABI nested records must use extern layout");
-            inline for (record.fields) |field| assertWireField(field.type);
+            inline for (record.field_types) |field_type| assertWireField(field_type);
         },
         else => @compileError("native ABI records contain a non-wire field type: " ++ @typeName(T)),
     }
@@ -506,7 +505,7 @@ fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expect
         else => @compileError("native ABI record must be a struct"),
     };
     if (record.layout != .@"extern") @compileError("native ABI record must use extern layout");
-    inline for (record.fields) |field| assertWireField(field.type);
+    inline for (record.field_types) |field_type| assertWireField(field_type);
     if (@sizeOf(T) != expected_size or @alignOf(T) != expected_alignment)
         @compileError("native ABI record layout changed: " ++ @typeName(T));
 }
@@ -554,11 +553,11 @@ comptime {
     const expected_error_names = [_][]const u8{
         "type", "shape", "conform", "overflow", "domain", "parse", "io", "user", "contract",
     };
-    const fields = @typeInfo(ErrorKindWire).@"enum".fields;
-    if (fields.len != expected_error_names.len)
+    const field_names = @typeInfo(ErrorKindWire).@"enum".field_names;
+    if (field_names.len != expected_error_names.len)
         @compileError("native ABI author error-kind set changed");
-    for (fields, expected_error_names) |field, expected|
-        if (!sameBytes(field.name, expected)) @compileError("native ABI author error-kind mapping changed");
+    for (field_names, expected_error_names) |field_name, expected|
+        if (!sameBytes(field_name, expected)) @compileError("native ABI author error-kind mapping changed");
 }
 
 fn sameBytes(comptime left: []const u8, comptime right: []const u8) bool {

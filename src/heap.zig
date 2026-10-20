@@ -371,16 +371,16 @@ test "module capability exhausts allocation failures" {
 const ProbePort = struct {
     releases: usize = 0,
 
-    fn releasePort(self: *ProbePort) void {
+    pub fn releasePort(self: *ProbePort) void {
         self.releases += 1;
     }
 
     // A probe holds no scope membership, so there is nothing to move.
-    fn prepareScopeTransfer(_: *ProbePort, _: *anyopaque, _: *anyopaque) PortTransferError!void {
+    pub fn prepareScopeTransfer(_: *ProbePort, _: *anyopaque, _: *anyopaque) PortTransferError!void {
         return error.Closed;
     }
-    fn commitScopeTransfer(_: *ProbePort) void {}
-    fn abortScopeTransfer(_: *ProbePort) void {}
+    pub fn commitScopeTransfer(_: *ProbePort) void {}
+    pub fn abortScopeTransfer(_: *ProbePort) void {}
 };
 
 fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
@@ -403,12 +403,12 @@ fn portCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
 
 test "port payload projection rejects a foreign backend" {
     const ForeignPort = struct {
-        fn releasePort(_: *@This()) void {}
-        fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) PortTransferError!void {
+        pub fn releasePort(_: *@This()) void {}
+        pub fn prepareScopeTransfer(_: *@This(), _: *anyopaque, _: *anyopaque) PortTransferError!void {
             return error.Closed;
         }
-        fn commitScopeTransfer(_: *@This()) void {}
-        fn abortScopeTransfer(_: *@This()) void {}
+        pub fn commitScopeTransfer(_: *@This()) void {}
+        pub fn abortScopeTransfer(_: *@This()) void {}
     };
     var cleanup = testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
@@ -429,7 +429,7 @@ test "port capability exhausts allocation failures" {
 const ProbeBorrowedPort = struct {
     releases: usize = 0,
 
-    fn releasePort(self: *@This()) void {
+    pub fn releasePort(self: *@This()) void {
         self.releases += 1;
     }
 };
@@ -471,18 +471,18 @@ test "port exchange transfer consumes its prepared authority once" {
         commits: usize = 0,
         aborts: usize = 0,
 
-        fn releasePort(_: *@This()) void {}
-        fn prepareScopeTransfer(self: *@This(), from: *anyopaque, to: *anyopaque) PortTransferError!void {
+        pub fn releasePort(_: *@This()) void {}
+        pub fn prepareScopeTransfer(self: *@This(), from: *anyopaque, to: *anyopaque) PortTransferError!void {
             if (self.owner != from) return error.NotOwner;
             if (self.prepared != null) return error.Busy;
             self.prepared = to;
         }
-        fn commitScopeTransfer(self: *@This()) void {
+        pub fn commitScopeTransfer(self: *@This()) void {
             self.owner = self.prepared.?;
             self.prepared = null;
             self.commits += 1;
         }
-        fn abortScopeTransfer(self: *@This()) void {
+        pub fn abortScopeTransfer(self: *@This()) void {
             self.prepared = null;
             self.aborts += 1;
         }
@@ -534,27 +534,27 @@ const HeaderImpl = extern struct {
     fn init(kind_value: HeapKind, len_value: u64) HeaderImpl {
         return .{
             .rc = .init(1),
-            .meta = @intFromEnum(kind_value),
+            .meta = @backingInt(kind_value),
             .len = len_value,
         };
     }
 
     fn kind(self: *const HeaderImpl) HeapKind {
-        return @enumFromInt(self.meta & kind_mask);
+        return @fromBackingInt(@intCast(self.meta & kind_mask));
     }
 
     fn setKind(self: *HeaderImpl, new_kind: HeapKind) void {
-        self.meta = (self.meta & ~kind_mask) | @intFromEnum(new_kind);
+        self.meta = (self.meta & ~kind_mask) | @backingInt(new_kind);
     }
 
     fn identity(self: *const HeaderImpl) ?CodeIdentity {
         const raw = self.meta >> identity_shift;
-        return if (raw == 0) null else @enumFromInt(raw);
+        return if (raw == 0) null else @fromBackingInt(@intCast(raw));
     }
 
     fn assignIdentity(self: *HeaderImpl, assigned: CodeIdentity) void {
         std.debug.assert(self.identity() == null);
-        const raw = @intFromEnum(assigned);
+        const raw = @backingInt(assigned);
         std.debug.assert(raw != 0 and raw <= identity_max);
         self.meta |= raw << identity_shift;
     }
@@ -742,7 +742,7 @@ pub const CodeIdentityIssuer = opaque {
                 next = observed;
             } else {
                 const state = try allocator.create(CodeIdentityIssuerState);
-                state.* = .{ .allocator = allocator, .namespace = @enumFromInt(next) };
+                state.* = .{ .allocator = allocator, .namespace = @fromBackingInt(@intCast(next)) };
                 return @ptrCast(state);
             }
         }
@@ -809,7 +809,7 @@ pub fn assignCodeIdentity(
     handle: *ListHandle,
     identity: CodeIdentity,
 ) CodeIdentityAssignment {
-    const raw_identity = @intFromEnum(identity);
+    const raw_identity = @backingInt(identity);
     if (raw_identity == 0 or raw_identity > max_code_identity)
         return .invalid_identity;
     const header = headerFromList(handle);
@@ -1612,8 +1612,8 @@ pub fn requireSingleHostCapability(comptime Root: type) void {
     if (!@hasField(Root, "host") or @FieldType(Root, "host") != *const HostCleanup)
         @compileError(@typeName(Root) ++ " must store exactly its opaque HostCleanup capability");
     const root_info = @typeInfo(Root).@"struct";
-    inline for (root_info.fields) |field| {
-        if (field.type == std.mem.Allocator or field.type == *ReleaseDomain)
+    inline for (root_info.field_types) |field_type| {
+        if (field_type == std.mem.Allocator or field_type == *ReleaseDomain)
             @compileError(@typeName(Root) ++ " must derive allocator and domain from HostCleanup");
     }
 }
@@ -1625,10 +1625,10 @@ pub fn requireOpaqueHostRoot(comptime Handle: type, comptime State: type) void {
     };
     if (handle_info.tag_type != usize or @sizeOf(Handle) != @sizeOf(usize))
         @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized handle");
-    if (handle_info.is_exhaustive or
-        handle_info.fields.len != 1 or
-        !std.mem.eql(u8, handle_info.fields[0].name, "consumed") or
-        handle_info.fields[0].value != 0)
+    if (handle_info.mode == .exhaustive or
+        handle_info.field_names.len != 1 or
+        !std.mem.eql(u8, handle_info.field_names[0], "consumed") or
+        handle_info.field_values[0] != 0)
     {
         @compileError(@typeName(Handle) ++ " must expose only its consumed state");
     }
@@ -1646,10 +1646,10 @@ pub fn requireOpaqueHostOwnerRoot(comptime Handle: type, comptime State: type) v
     };
     if (handle_info.tag_type != usize or @sizeOf(Handle) != @sizeOf(usize))
         @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized host owner");
-    if (handle_info.is_exhaustive or
-        handle_info.fields.len != 1 or
-        !std.mem.eql(u8, handle_info.fields[0].name, "consumed") or
-        handle_info.fields[0].value != 0)
+    if (handle_info.mode == .exhaustive or
+        handle_info.field_names.len != 1 or
+        !std.mem.eql(u8, handle_info.field_names[0], "consumed") or
+        handle_info.field_values[0] != 0)
     {
         @compileError(@typeName(Handle) ++ " must expose only its consumed state");
     }
@@ -1666,10 +1666,10 @@ pub fn requireOpaqueWorkerFacade(comptime Handle: type, comptime State: type) vo
     };
     if (handle_info.tag_type != usize or @sizeOf(Handle) != @sizeOf(usize))
         @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized facade");
-    if (handle_info.is_exhaustive or
-        handle_info.fields.len != 1 or
-        !std.mem.eql(u8, handle_info.fields[0].name, "invalid") or
-        handle_info.fields[0].value != 0)
+    if (handle_info.mode == .exhaustive or
+        handle_info.field_names.len != 1 or
+        !std.mem.eql(u8, handle_info.field_names[0], "invalid") or
+        handle_info.field_values[0] != 0)
     {
         @compileError(@typeName(Handle) ++ " must expose only its invalid state");
     }
@@ -1679,11 +1679,11 @@ pub fn requireOpaqueWorkerFacade(comptime Handle: type, comptime State: type) vo
         .@"struct" => |info| info,
         else => @compileError(@typeName(State) ++ " must be private worker state"),
     };
-    inline for (state_info.fields) |field| {
-        if (field.type == *const HostCleanup or
-            field.type == *HostCleanup or
-            field.type == *const HostOwner or
-            field.type == *HostOwner)
+    inline for (state_info.field_types) |field_type| {
+        if (field_type == *const HostCleanup or
+            field_type == *HostCleanup or
+            field_type == *const HostOwner or
+            field_type == *HostOwner)
         {
             @compileError(@typeName(State) ++ " must not retain host cleanup authority");
         }
@@ -1709,10 +1709,10 @@ fn requireOpaqueHandle(comptime Handle: type, comptime role: []const u8) void {
     };
     if (handle_info.tag_type != usize or @sizeOf(Handle) != @sizeOf(usize))
         @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized " ++ role ++ " handle");
-    if (handle_info.is_exhaustive or
-        handle_info.fields.len != 1 or
-        !std.mem.eql(u8, handle_info.fields[0].name, "invalid") or
-        handle_info.fields[0].value != 0)
+    if (handle_info.mode == .exhaustive or
+        handle_info.field_names.len != 1 or
+        !std.mem.eql(u8, handle_info.field_names[0], "invalid") or
+        handle_info.field_values[0] != 0)
     {
         @compileError(@typeName(Handle) ++ " must expose only its invalid state");
     }
@@ -1726,11 +1726,11 @@ pub fn requireSingleHostOwner(comptime State: type) void {
     if (!@hasField(State, "host_owner") or @FieldType(State, "host_owner") != *HostOwner)
         @compileError(@typeName(State) ++ " must store exactly one HostOwner pointer");
     const state_info = @typeInfo(State).@"struct";
-    inline for (state_info.fields) |field| {
-        if (field.type == std.mem.Allocator or
-            field.type == *ReleaseDomain or
-            field.type == *const HostCleanup or
-            field.type == *HostCleanup)
+    inline for (state_info.field_types) |field_type| {
+        if (field_type == std.mem.Allocator or
+            field_type == *ReleaseDomain or
+            field_type == *const HostCleanup or
+            field_type == *HostCleanup)
         {
             @compileError(@typeName(State) ++ " must derive allocator and domain from HostOwner");
         }
@@ -1926,7 +1926,7 @@ pub const ReleaseDomain = struct {
     const Admission = enum { new, continuation };
 
     fn enqueueZero(self: *ReleaseDomain, header: *Header, admission: Admission) void {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         if (admission == .new) _ = self.pending_owners.fetchAdd(1, .release);
         std.debug.assert(object(header).next_destroy == null);
         if (self.last) |last| object(last).next_destroy = header else self.first = header;
@@ -1938,7 +1938,7 @@ pub const ReleaseDomain = struct {
     }
 
     fn enqueueRetirement(self: *ReleaseDomain, node: *Retirement, admission: Admission) void {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         if (admission == .new) _ = self.pending_owners.fetchAdd(1, .release);
         std.debug.assert(node.next == null);
         if (self.retirement_last) |last| last.next = node else self.retirement_first = node;
@@ -1954,7 +1954,7 @@ pub const ReleaseDomain = struct {
     }
 
     fn popZero(self: *ReleaseDomain) ?*Header {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         const header = self.first orelse {
             std.Io.Threaded.mutexUnlock(&self.queue_mutex);
             return null;
@@ -1967,7 +1967,7 @@ pub const ReleaseDomain = struct {
     }
 
     fn popRetirement(self: *ReleaseDomain) ?*Retirement {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         const node = self.retirement_first orelse {
             std.Io.Threaded.mutexUnlock(&self.queue_mutex);
             return null;
@@ -1980,7 +1980,7 @@ pub const ReleaseDomain = struct {
     }
 
     pub fn hasPending(self: *ReleaseDomain) bool {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.queue_mutex);
         return self.first != null or self.retirement_first != null;
     }
@@ -1988,7 +1988,7 @@ pub const ReleaseDomain = struct {
     /// Availability is distinct from backlog: an active claim owns all queued
     /// descendants until its bounded turn ends.
     pub fn hasAvailable(self: *ReleaseDomain) bool {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.queue_mutex);
         return self.execution == .available;
     }
@@ -1999,7 +1999,7 @@ pub const ReleaseDomain = struct {
             const domain: *ReleaseDomain = @ptrCast(@alignCast(self));
             std.debug.assert(budget != 0);
             const empty = domain.advanceLocked(budget);
-            std.Io.Threaded.mutexLock(&domain.queue_mutex);
+            std.Io.Threaded.mutexLockUncancelable(&domain.queue_mutex);
             const notify = domain.first != null or domain.retirement_first != null;
             domain.execution = if (notify) .available else .empty;
             domain.claim_released.broadcast(std.Io.Threaded.global_single_threaded.io());
@@ -2010,7 +2010,7 @@ pub const ReleaseDomain = struct {
     };
 
     pub fn claim(self: *ReleaseDomain) ?*ExecutionClaim {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.queue_mutex);
         if (self.execution != .available) return null;
         self.execution = .claimed;
@@ -2037,7 +2037,7 @@ pub const ReleaseDomain = struct {
     /// serialized so every intrusive node has one active owner.
     pub fn advance(self: *ReleaseDomain, budget: usize) bool {
         std.debug.assert(budget != 0);
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         while (self.execution == .claimed)
             self.claim_released.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.queue_mutex);
         self.execution = .claimed;
@@ -2326,7 +2326,7 @@ pub const HostOwner = struct {
                 .retire_fn = adapters.retire,
             },
         } };
-        return @enumFromInt(issuance);
+        return @fromBackingInt(@intCast(issuance));
     }
 
     /// Detached before the archive's directory is torn down; headers retiring
@@ -2344,7 +2344,7 @@ pub const HostOwner = struct {
             .vacant => return,
             .attached => |attached| attached,
         };
-        if (@intFromEnum(claimed) != attached.issuance) return;
+        if (@backingInt(claimed) != attached.issuance) return;
         self.releases.code_retirement = .{ .vacant = attached.issuance };
     }
 };
@@ -2545,10 +2545,10 @@ fn disposeOwned(
                     if (!has_retire)
                         @compileError(@typeName(T) ++ " selects retirement without a retire method");
                     const retire_info = @typeInfo(@TypeOf(T.retire)).@"fn";
-                    if (retire_info.params.len == 2)
+                    if (retire_info.param_types.len == 2)
                         item.retire(releases)
-                    else if (retire_info.params.len == 3 and
-                        retire_info.params[2].type.? == std.mem.Allocator)
+                    else if (retire_info.param_types.len == 3 and
+                        retire_info.param_types[2].? == std.mem.Allocator)
                         item.retire(releases, allocator)
                     else
                         @compileError("unsupported retire protocol for " ++ @typeName(T));
@@ -2558,17 +2558,17 @@ fn disposeOwned(
                     if (!has_deinit)
                         @compileError(@typeName(T) ++ " selects deinit without a deinit method");
                     const deinit_info = @typeInfo(@TypeOf(T.deinit)).@"fn";
-                    if (deinit_info.params.len == 1)
+                    if (deinit_info.param_types.len == 1)
                         item.deinit()
-                    else if (deinit_info.params.len == 2 and
-                        deinit_info.params[1].type.? == std.mem.Allocator)
+                    else if (deinit_info.param_types.len == 2 and
+                        deinit_info.param_types[1].? == std.mem.Allocator)
                         item.deinit(allocator)
-                    else if (deinit_info.params.len == 2 and
-                        deinit_info.params[1].type.? == *ReleaseDomain)
+                    else if (deinit_info.param_types.len == 2 and
+                        deinit_info.param_types[1].? == *ReleaseDomain)
                         item.deinit(releases)
-                    else if (deinit_info.params.len == 3 and
-                        deinit_info.params[1].type.? == *ReleaseDomain and
-                        deinit_info.params[2].type.? == std.mem.Allocator)
+                    else if (deinit_info.param_types.len == 3 and
+                        deinit_info.param_types[1].? == *ReleaseDomain and
+                        deinit_info.param_types[2].? == std.mem.Allocator)
                         item.deinit(releases, allocator)
                     else
                         @compileError("unsupported deinit protocol for " ++ @typeName(T));
@@ -2600,16 +2600,17 @@ fn deinitOwnedFields(
     owner: anytype,
 ) void {
     const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
-    const fields = @typeInfo(Owner).@"struct".fields;
-    inline for (0..fields.len) |offset| {
-        const field = fields[fields.len - 1 - offset];
-        const Field = field.type;
+    const info = @typeInfo(Owner).@"struct";
+    inline for (0..info.field_names.len) |offset| {
+        const position = info.field_names.len - 1 - offset;
+        const field_name = info.field_names[position];
+        const Field = info.field_types[position];
         if (comptime isOwnedMarker(Field)) {
-            @field(owner, field.name).deinit(releases, allocator);
+            @field(owner, field_name).deinit(releases, allocator);
         } else switch (@typeInfo(Field)) {
             .optional => |optional| if (comptime isOwnedMarker(optional.child)) {
-                if (@field(owner, field.name)) |*owned| owned.deinit(releases, allocator);
-                @field(owner, field.name) = null;
+                if (@field(owner, field_name)) |*owned| owned.deinit(releases, allocator);
+                @field(owner, field_name) = null;
             },
             else => {},
         }

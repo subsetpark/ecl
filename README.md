@@ -22,12 +22,12 @@ between prereleases.
 
 ## Get and build
 
-Building requires Zig 0.16.0, as pinned by `build.zig.zon`:
+Building requires Zig 0.17.0, as pinned by `build.zig.zon`:
 
 ```sh
 git clone https://github.com/subsetpark/ecl.git
 cd ecl
-zig build install -Doptimize=ReleaseSafe
+zig build install -Doptimize=safe
 ./zig-out/bin/ecl --version
 ./zig-out/bin/ecl
 ```
@@ -35,7 +35,7 @@ zig build install -Doptimize=ReleaseSafe
 To install under `~/.local` and make `ecl` available in your shell:
 
 ```sh
-zig build install -Doptimize=ReleaseSafe --prefix ~/.local
+zig build install -Doptimize=safe --prefix ~/.local
 export PATH="$HOME/.local/bin:$PATH"
 ecl --version
 ```

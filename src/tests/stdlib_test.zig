@@ -57,7 +57,7 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
     try expectDisplay(&runtime, "pop inspection-side-effect", "0");
     try expectDisplay(&runtime, "pop () source.declarations", "()");
     try expectDisplay(&runtime, "pop \"[] () 'parsed @defm\" parse source.declarations", "('parsed)");
-    try expectDisplay(&runtime, "pop (" ++ ("'many @defm " ** 4097) ++ ") source.declarations len", "4097");
+    try expectDisplay(&runtime, "pop (" ++ support.repeated("'many @defm ", 4097) ++ ") source.declarations len", "4097");
     try support.expectError(.{
         .name = "source inspection rejects non-list input",
         .source = "42 source.declarations",

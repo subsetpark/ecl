@@ -212,8 +212,8 @@ pub fn overload(comptime binding_name: []const u8, comptime document: []const u8
                         const operation: P.Operations.Name = member[1];
                         result[index] = .{
                             .resource = resourceIndex(Ports, P),
-                            .operation = @intFromEnum(operation),
-                            .lane = @intFromEnum(P.Operations.lane(operation)),
+                            .operation = @backingInt(operation),
+                            .lane = @backingInt(P.Operations.lane(operation)),
                             .endpoints = P.Operations.endpointMask(operation),
                             .mode = P.operationMode(operation),
                         };
@@ -285,10 +285,10 @@ pub fn Call(comptime effect_source: []const u8) type {
 
         const AdapterState = struct {
             invocation: capability.Invocation,
-            views: [EffectSpec.inputs.len]?capability.ViewState = .{null} ** EffectSpec.inputs.len,
-            list_cursors: [EffectSpec.inputs.len]?capability.ListCursorState = .{null} ** EffectSpec.inputs.len,
-            dict_cursors: [EffectSpec.inputs.len]?capability.DictCursorState = .{null} ** EffectSpec.inputs.len,
-            nested: [EffectSpec.inputs.len]?capability.NestedState = .{null} ** EffectSpec.inputs.len,
+            views: [EffectSpec.inputs.len]?capability.ViewState = @splat(null),
+            list_cursors: [EffectSpec.inputs.len]?capability.ListCursorState = @splat(null),
+            dict_cursors: [EffectSpec.inputs.len]?capability.DictCursorState = @splat(null),
+            nested: [EffectSpec.inputs.len]?capability.NestedState = @splat(null),
         };
 
         fn initAdapter(
@@ -430,7 +430,7 @@ pub fn Call(comptime effect_source: []const u8) type {
                 index,
                 &output,
             ));
-            return @enumFromInt(output);
+            return @fromBackingInt(@intCast(output));
         }
 
         /// Forward a nested input without decoding or rebuilding it. The
@@ -453,7 +453,7 @@ pub fn Call(comptime effect_source: []const u8) type {
                 @intCast(path.len),
                 &output,
             )) {
-                .ok => .{ .candidate = @enumFromInt(output) },
+                .ok => .{ .candidate = @fromBackingInt(@intCast(output)) },
                 .yield_required => .yield_required,
                 .out_of_memory => error.OutOfMemory,
                 .invalid => .invalid,
@@ -469,12 +469,12 @@ pub fn Call(comptime effect_source: []const u8) type {
             };
             if (!tuple.is_tuple)
                 @compileError("ecl-native: complete expects a tuple of outputs");
-            if (tuple.fields.len != EffectSpec.outputs.len)
+            if (tuple.field_names.len != EffectSpec.outputs.len)
                 @compileError("ecl-native: complete output arity does not match the declared effect");
             var candidates: [EffectSpec.outputs.len]abi.Candidate = undefined;
-            inline for (tuple.fields, 0..) |field, index| {
-                const candidate = try self.state().invocation.makeCandidate(@field(outputs, field.name));
-                candidates[index] = @intFromEnum(candidate);
+            inline for (tuple.field_names, 0..) |field_name, index| {
+                const candidate = try self.state().invocation.makeCandidate(@field(outputs, field_name));
+                candidates[index] = @backingInt(candidate);
             }
             try capability.requireOk(self.state().invocation.host.complete(
                 self.state().invocation.context,
@@ -516,11 +516,11 @@ pub fn word(
         .@"fn" => |info| info,
         else => @compileError("ecl-native: callback must be a function"),
     };
-    if (function.is_generic or function.is_var_args)
+    if (function.is_generic or function.attrs.varargs)
         @compileError("ecl-native: callback must be non-generic and non-variadic");
-    if (function.params.len == 0 or function.params[0].type == null)
+    if (function.param_types.len == 0 or function.param_types[0] == null)
         @compileError("ecl-native: callback first parameter must be *ecl.Call(\"inputs -- outputs\")");
-    const First = function.params[0].type.?;
+    const First = function.param_types[0].?;
     const first_pointer = switch (@typeInfo(First)) {
         .pointer => |pointer| pointer,
         else => @compileError("ecl-native: callback first parameter must be *ecl.Call(\"inputs -- outputs\")"),
@@ -532,18 +532,18 @@ pub fn word(
     var build_values = false;
     var reschedule = false;
     var RescheduleType: type = void;
-    for (function.params[1..]) |parameter| {
-        if (parameter.type == null) @compileError("ecl-native: callback capabilities must have concrete types");
-        if (parameter.type.? == *BuildValues) {
+    for (function.param_types[1..]) |maybe_parameter_type| {
+        const parameter_type = maybe_parameter_type orelse @compileError("ecl-native: callback capabilities must have concrete types");
+        if (parameter_type == *BuildValues) {
             if (build_values) @compileError("ecl-native: callback names a capability more than once");
             if (reschedule)
                 @compileError("ecl-native: BuildValues must precede Reschedule");
             build_values = true;
-        } else if (isReschedulePointer(parameter.type.?)) {
+        } else if (isReschedulePointer(parameter_type)) {
             if (reschedule) @compileError("ecl-native: callback names a capability more than once");
 
             reschedule = true;
-            RescheduleType = @typeInfo(parameter.type.?).pointer.child;
+            RescheduleType = @typeInfo(parameter_type).pointer.child;
         } else {
             @compileError("ecl-native: callback parameter is not a supported capability");
         }
@@ -618,8 +618,8 @@ pub fn word(
             // SAFETY: every callback parameter is initialized by the exhaustive capability dispatch below.
             var arguments: std.meta.ArgsTuple(Callback) = undefined;
             arguments[0] = call;
-            inline for (function.params[1..], 1..) |parameter, index| {
-                const T = parameter.type.?;
+            inline for (function.param_types[1..], 1..) |parameter_type, index| {
+                const T = parameter_type.?;
                 if (comptime T == *BuildValues) arguments[index] = @ptrCast(&build_state) else arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state);
             }
             const result = @call(.auto, callback, arguments);
@@ -633,7 +633,7 @@ pub fn word(
                     return;
                 },
             };
-            output.* = .{ .tag = @enumFromInt(@intFromEnum(outcome)) };
+            output.* = .{ .tag = @fromBackingInt(@intCast(@backingInt(outcome))) };
         }
     };
 }
@@ -744,14 +744,14 @@ pub fn module(comptime spec: anytype) type {
         };
         var requirements_storage = requirements: {
             var result: [requirement_count]abi.CapabilityRequirement = undefined;
-            result[0] = .{ .id = @intFromEnum(abi.CapabilityId.call) };
+            result[0] = .{ .id = @backingInt(abi.CapabilityId.call) };
             if (uses_build_values)
-                result[1] = .{ .id = @intFromEnum(abi.CapabilityId.build_values) };
+                result[1] = .{ .id = @backingInt(abi.CapabilityId.build_values) };
             if (uses_reschedule)
                 result[1 + @as(usize, @intFromBool(uses_build_values))] = .{
-                    .id = @intFromEnum(abi.CapabilityId.reschedule),
+                    .id = @backingInt(abi.CapabilityId.reschedule),
                 };
-            if (Ports.len != 0) result[requirement_count - 1] = .{ .id = @intFromEnum(abi.CapabilityId.ports) };
+            if (Ports.len != 0) result[requirement_count - 1] = .{ .id = @backingInt(abi.CapabilityId.ports) };
             break :requirements result;
         };
         // The entry point returns this graph after its stack frame is gone;

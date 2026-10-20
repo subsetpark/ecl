@@ -215,12 +215,12 @@ pub const FilesystemErrorData = struct {
 /// until an unwind materializes the language dict.
 pub const EclErr = struct {
     kind: ErrorKind,
-    message: [512]u8 = [_]u8{0} ** 512,
+    message: [512]u8 = @splat(0),
     message_len: usize = 0,
     word: ?intern.TraceWord = null,
     trace_parent: ?intern.TraceWord = null,
     site: ?FailureSite = null,
-    data: [6]ErrorData = .{empty_error_data} ** 6,
+    data: [6]ErrorData = @splat(empty_error_data),
     data_len: usize = 0,
     raised: ?Value = null,
     pub fn init(kind: ErrorKind, message: []const u8) EclErr {
@@ -388,10 +388,10 @@ const OrdinaryErrorCursor = struct {
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
-    names: [9]u32 = .{0} ** 9,
+    names: [9]u32 = @splat(0),
     // Every recorded datum plus the three location fields.
-    data_pairs: [9]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 9,
-    outer_pairs: [5]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 5,
+    data_pairs: [9]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
+    outer_pairs: [5]dict.Pair = @splat(.{ .{ .int = 0 }, .{ .int = 0 } }),
     state: State = .{ .names = 0 },
 
     fn init(
@@ -737,10 +737,10 @@ const RaisedErrorCursor = struct {
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
-    names: [8]u32 = .{0} ** 8,
-    fields: [5]?Value = .{null} ** 5,
-    message_bytes: [512]u8 = .{0} ** 512,
-    data_fields: [3]?Value = .{null} ** 3,
+    names: [8]u32 = @splat(0),
+    fields: [5]?Value = @splat(null),
+    message_bytes: [512]u8 = @splat(0),
+    data_fields: [3]?Value = @splat(null),
     built: BuiltValues = .{},
     state: State = .{ .names = 0 },
 
@@ -1269,7 +1269,7 @@ const Eval = struct {
         if (stamp == 0) return true;
         var node: ?*env.Scope = self.site.resolution_scope;
         while (node) |link| : (node = link.parent) {
-            if (@intFromEnum(link.cellId()) == stamp) return true;
+            if (@backingInt(link.cellId()) == stamp) return true;
         }
         return false;
     }
@@ -1313,11 +1313,11 @@ const OwnedApplication = enum(usize) {
     _,
 
     fn init(application: *StateApplication) OwnedApplication {
-        return @enumFromInt(@intFromPtr(application));
+        return @fromBackingInt(@intCast(@intFromPtr(application)));
     }
     fn borrow(self: OwnedApplication) *StateApplication {
         std.debug.assert(self != .consumed);
-        return @ptrFromInt(@intFromEnum(self));
+        return @ptrFromInt(@backingInt(self));
     }
     fn move(self: *OwnedApplication) OwnedApplication {
         const result = self.*;
@@ -1462,10 +1462,10 @@ pub const StackWindow = enum(u32) {
 
     fn init(depth: usize, seeded: u32) ?StackWindow {
         if (depth < seeded) return null;
-        return @enumFromInt(@as(u32, @intCast(depth - seeded)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(depth - seeded))));
     }
     pub fn base(self: StackWindow) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
     pub fn observed(self: StackWindow, depth: usize) ?usize {
         const start: usize = self.base();
@@ -1500,7 +1500,7 @@ fn mintApplicationProvenanceNonce() error{OutOfMemory}!ApplicationProvenanceNonc
             .monotonic,
         )) |observed| {
             next = observed;
-        } else return @enumFromInt(@as(u32, @intCast(next)));
+        } else return @fromBackingInt(@intCast(@as(u32, @intCast(next))));
     }
     return error.OutOfMemory;
 }
@@ -1511,8 +1511,8 @@ fn encodeApplicationProvenanceTarget(
 ) *const ApplicationProvenanceTarget {
     comptime if (@sizeOf(usize) != 8)
         @compileError("application provenance capabilities require a 64-bit target");
-    const raw = (@as(usize, @intFromEnum(nonce)) << 32) |
-        @as(usize, @intFromEnum(index));
+    const raw = (@as(usize, @backingInt(nonce)) << 32) |
+        @as(usize, @backingInt(index));
     std.debug.assert(raw != 0);
     return @ptrFromInt(raw);
 }
@@ -1742,10 +1742,10 @@ const ArtifactLoad = enum(u32) {
     _,
 
     fn init(maybe_artifact: ?map_state.ArtifactId) ArtifactLoad {
-        return if (maybe_artifact) |id| @enumFromInt(@intFromEnum(id)) else .none;
+        return if (maybe_artifact) |id| @fromBackingInt(@intCast(@backingInt(id))) else .none;
     }
     fn artifact(self: ArtifactLoad) ?map_state.ArtifactId {
-        return if (self == .none) null else @enumFromInt(@intFromEnum(self));
+        return if (self == .none) null else @fromBackingInt(@intCast(@backingInt(self)));
     }
 };
 pub const Frame = union(enum(u8)) {
@@ -3034,7 +3034,7 @@ pub const Unit = struct {
     pub fn inAttempt(self: *const Unit) bool {
         var index = self.boundary_index;
         while (index) |frame_index| {
-            const boundary = self.frames.items[@intFromEnum(frame_index)].boundary;
+            const boundary = self.frames.items[@backingInt(frame_index)].boundary;
             if (boundary.mode == .attempt) return true;
             index = boundary.previous_boundary;
         }
@@ -3242,9 +3242,9 @@ pub const Machine = struct {
     ) MachineError!modules.TestDeclarationCursor {
         const boundary_index = self.unit.boundary_index orelse
             return self.fail(.domain, "test is legal only at a direct module construction root");
-        if (@intFromEnum(boundary_index) + 1 != self.unit.frames.items.len)
+        if (@backingInt(boundary_index) + 1 != self.unit.frames.items.len)
             return self.fail(.domain, "test is legal only at a direct module construction root");
-        const frame = &self.unit.frames.items[@intFromEnum(boundary_index)];
+        const frame = &self.unit.frames.items[@backingInt(boundary_index)];
         if (frame.* != .boundary or frame.boundary.mode != .module)
             return self.fail(.domain, "test is legal only at a direct module construction root");
         const candidate = &frame.boundary.mode.module.image;
@@ -4632,7 +4632,7 @@ pub const Machine = struct {
                 self.text.borrow().sourceName(),
                 self.text.borrow().source(),
                 &self.diag,
-                @intFromEnum(try evaluator.unit.environment.scopeIdFor(evaluator.unit.lexicalScope())),
+                @backingInt(try evaluator.unit.environment.scopeIdFor(evaluator.unit.lexicalScope())),
             );
             self.state = .{ .ingesting = ingestion };
         }
@@ -5244,7 +5244,7 @@ pub const Machine = struct {
             const boundary = self.unit.boundary_index orelse return null;
             // During an unwind the index momentarily names the frame that was
             // just popped, so only bounds determine whether it may be read.
-            const index: usize = @intFromEnum(boundary);
+            const index: usize = @backingInt(boundary);
             if (index >= self.unit.frames.items.len) return null;
             const frame = self.unit.frames.items[index];
             if (frame != .boundary) return null;
@@ -5727,7 +5727,7 @@ pub const Machine = struct {
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
         if (application_tail) |application_index| {
-            const frame = &self.unit.frames.items[@intFromEnum(application_index)];
+            const frame = &self.unit.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(quotation);
         }
@@ -5756,7 +5756,7 @@ pub const Machine = struct {
         const check_index = current.effect_tail orelse return null;
         if (!self.isSourceTailPosition(current)) return null;
         std.debug.assert(self.unit.effect_check_index == check_index);
-        const frame = &self.unit.frames.items[@intFromEnum(check_index)];
+        const frame = &self.unit.frames.items[@backingInt(check_index)];
         std.debug.assert(frame.* == .effect_check);
         frame.effect_check.replaceSourceCandidate(self.releaseDomain(), code);
         return check_index;
@@ -5780,11 +5780,11 @@ pub const Machine = struct {
         const raw_index: u32 = @truncate(raw);
         const raw_nonce: u32 = @truncate(raw >> 32);
         if (raw_nonce == 0 or raw_index >= self.unit.frames.items.len) return null;
-        const index: ApplicationFrameIndex = @enumFromInt(raw_index);
-        const frame = &self.unit.frames.items[@intFromEnum(index)];
+        const index: ApplicationFrameIndex = @fromBackingInt(@intCast(raw_index));
+        const frame = &self.unit.frames.items[@backingInt(index)];
         if (frame.* != .application) return null;
         const nonce = frame.application.provenance_nonce orelse return null;
-        if (@intFromEnum(nonce) != raw_nonce) return null;
+        if (@backingInt(nonce) != raw_nonce) return null;
         return index;
     }
 
@@ -5796,7 +5796,7 @@ pub const Machine = struct {
         self: *Machine,
     ) error{OutOfMemory}!?*const ApplicationProvenanceTarget {
         const index = self.tailApplicationIndex() orelse return null;
-        const frame = &self.unit.frames.items[@intFromEnum(index)];
+        const frame = &self.unit.frames.items[@backingInt(index)];
         std.debug.assert(frame.* == .application);
         if (frame.application.provenance_nonce == null)
             frame.application.provenance_nonce = try mintApplicationProvenanceNonce();
@@ -5810,7 +5810,7 @@ pub const Machine = struct {
     fn retireCompletedEval(self: *Machine, current: Eval) void {
         if (current.borrowed_scope) |cell| cell.releaseBorrow();
         if (current.application_selection) |application_index| {
-            const frame = &self.unit.frames.items[@intFromEnum(application_index)];
+            const frame = &self.unit.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
             frame.application.selection.completeOwned(self.releaseDomain(), current.code);
         } else {
@@ -5917,7 +5917,7 @@ pub const Machine = struct {
                 return error.OutOfMemory;
             };
         }
-        const application_index: ApplicationFrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
+        const application_index: ApplicationFrameIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.frames.items.len))));
         var continuation = OwnedFrame.init(.{ .application = .{
             .context = application.context,
             .resume_fn = application.resume_fn,
@@ -5927,7 +5927,7 @@ pub const Machine = struct {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = .{
                     .child = child.?,
-                    .previous_base = @enumFromInt(@as(u32, @intCast(self.unit.stack_base))),
+                    .previous_base = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.stack_base)))),
                 } },
             },
             .traced_word = inherited_trace,
@@ -5938,7 +5938,7 @@ pub const Machine = struct {
         if (launch == .isolated) self.unit.stack_base = base.base();
         if (select_initial) {
             const target = provenance_target.?;
-            const frame = &self.unit.frames.items[@intFromEnum(target)];
+            const frame = &self.unit.frames.items[@backingInt(target)];
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(application.quotation);
         }
@@ -6054,7 +6054,7 @@ pub const Machine = struct {
                     modules.anchorHandle(home, self.unit.module_access),
                 );
                 var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-                    admission.?.begin(@intFromEnum(stamp_scope)),
+                    admission.?.begin(@backingInt(stamp_scope)),
                 );
                 admission = null;
                 defer cursor.deinit(self.releaseDomain(), self.allocator());
@@ -6161,7 +6161,7 @@ pub const Machine = struct {
 
     fn cacheScope(self: *Machine, stamp: u32) ?CacheScope {
         const core = self.unit.environment.coreScopeId();
-        if (stamp == @intFromEnum(core)) return .{ .id = core, .start = null };
+        if (stamp == @backingInt(core)) return .{ .id = core, .start = null };
         const site = self.unit.current.?.site;
         const scope = stampedResolutionScope(site, stamp) orelse return null;
         return .{ .id = scope.cellId(), .start = site.resolution_scope };
@@ -6308,7 +6308,7 @@ pub const Machine = struct {
             return;
         }
 
-        const written: ?*env.Scope = switch (self.unit.environment.scopeOf(@enumFromInt(word.scope))) {
+        const written: ?*env.Scope = switch (self.unit.environment.scopeOf(@fromBackingInt(@intCast(word.scope)))) {
             .unscoped => self.unit.current.?.resolutionScope(),
             // Core is a terminal phase that no scope denotes.
             .core => null,
@@ -6594,7 +6594,7 @@ pub const Machine = struct {
         word: intern.TraceWord,
         quotation: *Header,
     ) error{OutOfMemory}!void {
-        const index: FrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
+        const index: FrameIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.frames.items.len))));
         var continuation = OwnedFrame.init(.{ .boundary = .{
             .mode = mode,
             .stack_base = stack_base,
@@ -6727,16 +6727,16 @@ pub const OwnedUnitInput = enum(u128) {
         const seed_bits: u128 = if (seeds) |items| @intFromPtr(items) else 0;
         std.debug.assert(body_bits != 0 and body_bits <= pointer_mask);
         std.debug.assert(seed_bits <= pointer_mask);
-        return @enumFromInt(body_bits | (seed_bits << 64));
+        return @fromBackingInt(@intCast(body_bits | (seed_bits << 64)));
     }
 
     fn bodyHeader(self: OwnedUnitInput) ?*Header {
-        const bits = @intFromEnum(self) & pointer_mask;
+        const bits = @backingInt(self) & pointer_mask;
         return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
     }
 
     fn seedHeader(self: OwnedUnitInput) ?*Header {
-        const bits = @intFromEnum(self) >> 64;
+        const bits = @backingInt(self) >> 64;
         return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
     }
 
@@ -6754,15 +6754,15 @@ pub const OwnedUnitInput = enum(u128) {
 
     fn takeBody(self: *OwnedUnitInput) *Header {
         const body = self.bodyHeader().?;
-        const seed_bits = @intFromEnum(self.*) & ~pointer_mask;
-        self.* = if (seed_bits == 0) .consumed else @enumFromInt(seed_bits);
+        const seed_bits = @backingInt(self.*) & ~pointer_mask;
+        self.* = if (seed_bits == 0) .consumed else @fromBackingInt(@intCast(seed_bits));
         return body;
     }
 
     fn takeSeeds(self: *OwnedUnitInput) ?*Header {
         const seeds = self.seedHeader();
-        const body_bits = @intFromEnum(self.*) & pointer_mask;
-        self.* = if (body_bits == 0) .consumed else @enumFromInt(body_bits);
+        const body_bits = @backingInt(self.*) & pointer_mask;
+        self.* = if (body_bits == 0) .consumed else @fromBackingInt(@intCast(body_bits));
         return seeds;
     }
 
@@ -7904,7 +7904,7 @@ fn stampedResolutionScope(site: ExecutionSite, stamp: u32) ?*env.Scope {
     if (stamp == 0) return null;
     var node: ?*env.Scope = site.resolution_scope;
     while (node) |scope| : (node = scope.parent) {
-        if (@intFromEnum(scope.cellId()) == stamp) return scope;
+        if (@backingInt(scope.cellId()) == stamp) return scope;
         if (scope.environmentOrNull() != null) return null;
     }
     return null;
@@ -7960,8 +7960,8 @@ const ModuleCallSiteCache = struct {
         if (capacity != resolution_core.GuardPool.capacity) @compileError("cache and guard storage must have the same bound");
     }
     guards: resolution_core.GuardPool = .{},
-    entries: [capacity]?Entry = .{null} ** capacity,
-    victims: [set_count]u1 = .{0} ** set_count,
+    entries: [capacity]?Entry = @splat(null),
+    victims: [set_count]u1 = @splat(0),
 
     fn set(site: ErrorSite) usize {
         return (@intFromPtr(site.code) >> 4 ^ site.index) % set_count;
@@ -8954,7 +8954,7 @@ fn scheduleWord(
     const application_tail = self.tailApplicationIndex();
     _ = self.suspendCurrent() catch return error.OutOfMemory;
     if (check) |*effect_check| {
-        const check_index: EffectCheckIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
+        const check_index: EffectCheckIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.frames.items.len))));
         effect_check.activateSource(body, check_index, self.unit.effect_check_index);
         var continuation = OwnedFrame.init(.{ .effect_check = effect_check.* });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
@@ -9026,7 +9026,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             const launch: Machine.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
-                    const window: StackWindow = @enumFromInt(@as(u32, @intCast(self.unit.stack_base)));
+                    const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.stack_base))));
                     self.releaseApplicationScope(isolated.child);
                     self.unit.stack_base = isolated.previous_base.base();
                     break :blk .{ .isolated, window };
@@ -9142,7 +9142,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             return true;
         },
         .boundary => |boundary| {
-            std.debug.assert(@intFromEnum(self.unit.boundary_index.?) == self.unit.frames.items.len);
+            std.debug.assert(@backingInt(self.unit.boundary_index.?) == self.unit.frames.items.len);
             self.unit.boundary_index = boundary.previous_boundary;
             self.unit.stack_base = boundary.previous_base;
             self.unit.active_word = boundary.word;
@@ -9861,7 +9861,7 @@ const FailureDriver = struct {
         fn frameTarget(self: UnwindTarget) usize {
             return switch (self) {
                 .uncaught => 0,
-                .caught => |caught| @as(usize, @intFromEnum(caught.boundary_index)) + 1,
+                .caught => |caught| @as(usize, @backingInt(caught.boundary_index)) + 1,
             };
         }
         fn localsTarget(self: UnwindTarget) usize {
@@ -10070,7 +10070,7 @@ const FailureDriver = struct {
                     } });
                     continue;
                 };
-                const boundary = evaluator.unit.frames.items[@intFromEnum(boundary_index)].boundary;
+                const boundary = evaluator.unit.frames.items[@backingInt(boundary_index)].boundary;
                 if (boundary.mode == .attempt) {
                     const item = nearest.error_value;
                     self.beginUnwind(item, .{ .caught = .{

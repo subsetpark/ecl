@@ -160,6 +160,6 @@ pub fn unicodeScalar(codepoint: u64) ?u21 {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@typeInfo(HeapKind).@"enum".fields.len != 13)
+    if (@typeInfo(HeapKind).@"enum".field_names.len != 13)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }

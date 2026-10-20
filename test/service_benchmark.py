@@ -1,7 +1,7 @@
 """Measure public service workloads using a native ReleaseSafe Linux binary.
 
 Run with stdin closed and an outer timeout. Build the binary with
--Doptimize=ReleaseSafe before invoking this host fixture. /proc sampling covers
+-Doptimize=safe before invoking this host fixture. /proc sampling covers
 only the interpreter, not its subprocesses or controlled peer sockets.
 """
 import argparse

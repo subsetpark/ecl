@@ -74,7 +74,7 @@ test "formatter measures a module seed against its opening line" {
         "### module commented\n[] # seed details\n() 'commented @defm\n",
     );
 
-    const wide_seed = "a" ** 98;
+    const wide_seed = &@as([98]u8, @splat('a'));
     const wide_source = try std.fmt.allocPrint(
         allocator,
         "[{s}] () 'wide @defm\n",
@@ -89,7 +89,7 @@ test "formatter measures a module seed against its opening line" {
     defer allocator.free(wide_expected);
     try expectFormat(wide_source, wide_expected);
 
-    const wide_body = "b" ** 89;
+    const wide_body = &@as([89]u8, @splat('b'));
     const wide_body_source = try std.fmt.allocPrint(
         allocator,
         "[] ({s}) 'm @defm\n",

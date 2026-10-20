@@ -42,7 +42,7 @@ pub const Columns = enum(u16) {
     /// Cells usable for buffer text after the prompt, keeping one spare column
     /// so a full row cannot itself trigger a wrap.
     fn available(self: Columns, prompt: Prompt) ?usize {
-        const columns = @intFromEnum(self);
+        const columns = @backingInt(self);
         const reserved = prompt.text().len + 1;
         return if (columns <= reserved) null else columns - reserved;
     }
@@ -76,7 +76,7 @@ pub fn geometry() Geometry {
         const result = std.os.linux.ioctl(handle, std.os.linux.T.IOCGWINSZ, @intFromPtr(&size));
         if (std.os.linux.errno(result) != .SUCCESS) return .unavailable;
     } else if (std.c.ioctl(handle, std.posix.T.IOCGWINSZ, &size) != 0) return .unavailable;
-    return if (size.col == 0) .unavailable else .{ .known = @enumFromInt(size.col) };
+    return if (size.col == 0) .unavailable else .{ .known = @fromBackingInt(@intCast(size.col)) };
 }
 
 /// Narrow a view to what fits one row, trimming each side away from the
@@ -183,7 +183,7 @@ pub const Console = struct {
 
     pub fn writeOutput(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
         const writer = self.output;
-        std.Io.Threaded.mutexLock(&self.output_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeAll(bytes) catch return error.WriteFailed;
         if (newline) writer.writeByte('\n') catch return error.WriteFailed;
@@ -192,7 +192,7 @@ pub const Console = struct {
 
     pub fn writeDiagnostics(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
         const writer = self.diagnostics;
-        std.Io.Threaded.mutexLock(&self.diagnostics_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.diagnostics_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.diagnostics_mutex);
         writer.writeAll(bytes) catch return error.WriteFailed;
         if (newline) writer.writeByte('\n') catch return error.WriteFailed;
@@ -227,7 +227,7 @@ pub const Console = struct {
         const before = window.before;
         const after = window.after;
         const writer = self.output;
-        std.Io.Threaded.mutexLock(&self.output_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeByte('\r') catch return error.WriteFailed;
         writer.writeAll(prompt.text()) catch return error.WriteFailed;
@@ -242,7 +242,7 @@ pub const Console = struct {
 
     pub fn writeCandidates(self: *Console, candidates: []const []const u8) error{WriteFailed}!void {
         const writer = self.output;
-        std.Io.Threaded.mutexLock(&self.output_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.output_mutex);
         writer.writeAll("\r\n") catch return error.WriteFailed;
         for (candidates, 0..) |candidate, index| {
@@ -274,7 +274,7 @@ test "console serializes a complete writer use" {
     var diagnostics = std.Io.Writer.Discarding.init(&.{});
     var console = Console.init(&writer, &diagnostics.writer);
     try console.writeOutput("whole", false);
-    try console.redraw(@enumFromInt(40), .primary, .{ .before = "ab", .after = "c" });
+    try console.redraw(@fromBackingInt(@intCast(40)), .primary, .{ .before = "ab", .after = "c" });
     try console.writeCandidates(&.{ "one", "two" });
     try std.testing.expectEqualStrings(
         "whole\recl> abc\x1b[0K\recl> ab\r\none  two\r\n",
@@ -289,7 +289,7 @@ test "console escapes every byte a terminal would act on" {
     var console = Console.init(&writer, &diagnostics.writer);
     // C0 before the cursor, a malformed byte after it, and C1 inside a
     // candidate name all reach the same escaping policy.
-    try console.redraw(@enumFromInt(40), .continuation, .{ .before = "\x1b[2J", .after = "\xff" });
+    try console.redraw(@fromBackingInt(@intCast(40)), .continuation, .{ .before = "\x1b[2J", .after = "\xff" });
     try console.writeCandidates(&.{ "\u{9b}2J", "plain" });
     try std.testing.expectEqualStrings(
         "\r.. \\x1b[2J\\xff\x1b[0K\r.. \\x1b[2J\r\n\\xc2\\x9b2J  plain\r\n",

@@ -186,8 +186,7 @@ fn without(comptime set: OperandSet, comptime removed: OperandSet) OperandSet {
 
 fn operations(comptime Enum: type, comptime tag: []const u8) []const Operation {
     comptime var result: []const Operation = &.{};
-    inline for (std.meta.fields(Enum)) |field| {
-        const operation: Enum = @enumFromInt(field.value);
+    inline for (comptime std.meta.tags(Enum)) |operation| {
         result = result ++ [_]Operation{@unionInit(Operation, tag, operation)};
     }
     return result;

@@ -74,7 +74,7 @@ pub const Result = opaque {
     /// storage retires outside the state lock, including provisional children.
     pub fn replace(self: *Result, incoming: *messages.Envelope) bool {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         if (owned.phase != .running or owned.value != .available) {
             std.Io.Threaded.mutexUnlock(&owned.mutex);
             return false;
@@ -89,7 +89,7 @@ pub const Result = opaque {
     /// their retirement even after close discards ordinary result storage.
     pub fn replaceDetails(self: *Result, incoming: *diagnostics.Owned) bool {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         if (owned.phase != .running) {
             std.Io.Threaded.mutexUnlock(&owned.mutex);
             return false;
@@ -107,7 +107,7 @@ pub const Result = opaque {
         const choice = try owned.host.allocator().create(Choice);
         errdefer owned.host.allocator().destroy(choice);
         choice.* = .{ .failure = failure, .details = details };
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.phase != .running) return error.InvalidState;
         if (owned.choices.count == max_failure_choices) return error.Overflow;
@@ -117,7 +117,7 @@ pub const Result = opaque {
     }
     pub fn preparedFailure(self: *Result) ?*const PreparedFailure {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.phase != .running) return null;
         return if (owned.choices.last) |choice| choice.capability() else null;
@@ -126,7 +126,7 @@ pub const Result = opaque {
     /// against this issuer before dereferencing an extension-supplied token.
     pub fn selectFailure(self: *Result, token: *const PreparedFailure) ?Failure {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.phase != .frozen or owned.choices.selected != null) return null;
         var cursor = owned.choices.first;
@@ -142,7 +142,7 @@ pub const Result = opaque {
     /// provisional resource attachments can follow this transition.
     pub fn freeze(self: *Result) bool {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         if (owned.phase == .terminal or owned.value != .available) {
             std.Io.Threaded.mutexUnlock(&owned.mutex);
             return false;
@@ -156,7 +156,7 @@ pub const Result = opaque {
     }
     pub fn mutable(self: *Result) bool {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         return owned.phase == .running and owned.value == .available;
     }
@@ -164,13 +164,13 @@ pub const Result = opaque {
     /// The first terminal fact wins; repeating observation cannot revise it.
     pub fn complete(self: *Result, terminal: Terminal) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         if (owned.phase != .terminal) owned.phase = .{ .terminal = terminal };
     }
     pub fn completion(self: *Result) Completion {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         defer std.Io.Threaded.mutexUnlock(&owned.mutex);
         return switch (owned.phase) {
             .running, .frozen => .pending,
@@ -183,7 +183,7 @@ pub const Result = opaque {
     }
     pub fn discard(self: *Result) void {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         const discarded = if (owned.value == .available) owned.value.available else null;
         if (discarded != null) owned.value = .discarded;
         std.Io.Threaded.mutexUnlock(&owned.mutex);
@@ -195,7 +195,7 @@ pub const Result = opaque {
     /// second caller can claim even a scalar-only value.
     pub fn claim(self: *Result, scope: *scheduler.TaskScope) error{ OutOfMemory, ScopeClosing, Overflow }!Claim {
         const owned = self.state();
-        std.Io.Threaded.mutexLock(&owned.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owned.mutex);
         const view = if (owned.value == .available) owned.value.available.borrow() else null;
         std.Io.Threaded.mutexUnlock(&owned.mutex);
         defer if (view) |item| item.release();
@@ -212,7 +212,7 @@ const ResultPublication = struct {
     consumed: ?*messages.Envelope = null,
     result: Claim = .pending,
     pub fn lock(self: *@This()) void {
-        std.Io.Threaded.mutexLock(&self.state.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.state.mutex);
     }
     pub fn unlock(self: *@This()) void {
         std.Io.Threaded.mutexUnlock(&self.state.mutex);

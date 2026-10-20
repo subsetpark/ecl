@@ -133,7 +133,7 @@ const LockedAllocator = struct {
         return_address: usize,
     ) ?[*]u8 {
         const self: *LockedAllocator = @ptrCast(@alignCast(context));
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return self.child.rawAlloc(len, alignment, return_address);
     }
@@ -146,7 +146,7 @@ const LockedAllocator = struct {
         return_address: usize,
     ) bool {
         const self: *LockedAllocator = @ptrCast(@alignCast(context));
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return self.child.rawResize(memory, alignment, new_len, return_address);
     }
@@ -159,7 +159,7 @@ const LockedAllocator = struct {
         return_address: usize,
     ) ?[*]u8 {
         const self: *LockedAllocator = @ptrCast(@alignCast(context));
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         return self.child.rawRemap(memory, alignment, new_len, return_address);
     }
@@ -171,7 +171,7 @@ const LockedAllocator = struct {
         return_address: usize,
     ) void {
         const self: *LockedAllocator = @ptrCast(@alignCast(context));
-        std.Io.Threaded.mutexLock(&self.mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
         self.child.rawFree(memory, alignment, return_address);
     }
@@ -1280,28 +1280,32 @@ const HttpMemoryIo = struct {
     fn connect(_: ?*anyopaque, address: *const std.Io.net.IpAddress, _: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
         return .{ .handle = 0, .address = address.* };
     }
-    fn read(_: ?*anyopaque, _: std.Io.net.Socket.Handle, buffers: [][]u8) std.Io.net.Stream.Reader.Error!usize {
-        const response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nX-Test: yes\r\n\r\nok";
-        var copied: usize = 0;
-        for (buffers) |buffer| {
-            const count = @min(buffer.len, response.len - copied);
-            @memcpy(buffer[0..count], response[copied..][0..count]);
-            copied += count;
-            if (copied == response.len) return copied;
+    fn operate(raw: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        switch (operation) {
+            .net_read => |read| {
+                const response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nX-Test: yes\r\n\r\nok";
+                var copied: usize = 0;
+                for (read.data) |buffer| {
+                    const count = @min(buffer.len, response.len - copied);
+                    @memcpy(buffer[0..count], response[copied..][0..count]);
+                    copied += count;
+                    if (copied == response.len) return .{ .net_read = .{ .data_len = copied } };
+                }
+                return .{ .net_read = error.Unexpected };
+            },
+            .net_write => |write| {
+                var count = write.header.len;
+                for (write.data, 0..) |buffer, index| count += buffer.len * (if (index + 1 == write.data.len) write.splat else 1);
+                return .{ .net_write = count };
+            },
+            else => return std.testing.io.vtable.operate(raw, operation),
         }
-        return error.Unexpected;
     }
-    fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, buffers: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-        var count = header.len;
-        for (buffers, 0..) |buffer, index| count += buffer.len * (if (index + 1 == buffers.len) splat else 1);
-        return count;
-    }
-    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket.Handle) void {}
+    fn close(_: ?*anyopaque, _: []const std.Io.net.Socket) void {}
     fn vtable() std.Io.VTable {
         var result = std.testing.io.vtable.*;
         result.netConnectIp = connect;
-        result.netRead = read;
-        result.netWrite = write;
+        result.operate = operate;
         result.netClose = close;
         return result;
     }

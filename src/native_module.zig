@@ -40,7 +40,7 @@ const OwnedConfiguration = struct {
 };
 
 pub const LoadFailure = struct {
-    bytes: [512]u8 = [_]u8{0} ** 512,
+    bytes: [512]u8 = @splat(0),
     len: usize = 0,
 
     pub fn text(self: *const LoadFailure) []const u8 {
@@ -283,7 +283,7 @@ fn publish(loading: Loading) error{ OutOfMemory, InvalidConfiguration }!Loading 
         definition.init_state(storage.ptr);
         state_value.lifecycle = .{ .initializing = .{ .definition = definition, .storage = storage } };
     }
-    std.Io.Threaded.mutexLock(&owner.state().retired_mutex);
+    std.Io.Threaded.mutexLockUncancelable(&owner.state().retired_mutex);
     state_value.next = owner.state().instances;
     owner.state().instances = state_value;
     std.Io.Threaded.mutexUnlock(&owner.state().retired_mutex);
@@ -319,7 +319,7 @@ const InstanceState = struct {
     const Stateful = struct {
         definition: abi.InstanceDefinition,
         storage: []align(64) u8,
-        endpoint_capacities: [abi.max_port_definitions]?*[64]usize = .{null} ** abi.max_port_definitions,
+        endpoint_capacities: [abi.max_port_definitions]?*[64]usize = @splat(null),
     };
     fn portOwner(self: *const InstanceState) *native_port.Owner {
         return self.private_ports orelse self.owner.state().ports;
@@ -340,7 +340,7 @@ const InstanceState = struct {
             if (endpoint.transport != .bytes) return .failed;
             const page = lifecycle.endpoint_capacities[kind] orelse allocation: {
                 const created = self.host.allocator().create([64]usize) catch return .out_of_memory;
-                created.* = .{0} ** 64;
+                created.* = @splat(0);
                 lifecycle.endpoint_capacities[kind] = created;
                 break :allocation created;
             };
@@ -370,7 +370,7 @@ const InstanceState = struct {
         const self: *InstanceState = @ptrCast(@alignCast(raw));
         const length = std.math.cast(usize, size) orelse return null;
         if (self.refs.load(.acquire) == 0) return null;
-        std.Io.Threaded.mutexLock(&self.memory_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.memory_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.memory_mutex);
         if (length > self.memory_limit - self.memory_used) return null;
         const bytes = self.host.allocator().alignedAlloc(u8, .@"64", length) catch return null;
@@ -379,7 +379,7 @@ const InstanceState = struct {
     }
     fn releaseNative(raw: *anyopaque, bytes: [*]align(64) u8, size: u64) callconv(.c) void {
         const self: *InstanceState = @ptrCast(@alignCast(raw));
-        std.Io.Threaded.mutexLock(&self.memory_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&self.memory_mutex);
         defer std.Io.Threaded.mutexUnlock(&self.memory_mutex);
         self.host.allocator().free(bytes[0..@intCast(size)]);
         self.memory_used -= @intCast(size);
@@ -444,7 +444,7 @@ pub const ModuleInstance = opaque {
 
     pub fn hasCapability(self: *const ModuleInstance, id: abi.CapabilityId) bool {
         for (self.requirements()) |requirement|
-            if (requirement.id == @intFromEnum(id)) return true;
+            if (requirement.id == @backingInt(id)) return true;
         return false;
     }
 
@@ -537,7 +537,7 @@ const OwnerState = struct {
             const middle = start + (end - start) / 2;
             const item = self.configurations[middle];
             if (item.name == name) return item;
-            if (@intFromEnum(item.name) < @intFromEnum(name)) start = middle + 1 else end = middle;
+            if (@backingInt(item.name) < @backingInt(name)) start = middle + 1 else end = middle;
         }
         return null;
     }
@@ -614,7 +614,7 @@ pub const Owner = opaque {
         }
         std.mem.sort(OwnedConfiguration, owned, {}, struct {
             fn less(_: void, left: OwnedConfiguration, right: OwnedConfiguration) bool {
-                return @intFromEnum(left.name) < @intFromEnum(right.name);
+                return @backingInt(left.name) < @backingInt(right.name);
             }
         }.less);
         for (owned, 0..) |configuration, index| {
@@ -649,7 +649,7 @@ pub const Owner = opaque {
 
     fn enqueueRetired(self: *Owner, instance: *InstanceState) void {
         const owner_state = self.state();
-        std.Io.Threaded.mutexLock(&owner_state.retired_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owner_state.retired_mutex);
         std.debug.assert(instance.retired_next == null);
         if (owner_state.retired_last) |last|
             last.retired_next = instance
@@ -661,7 +661,7 @@ pub const Owner = opaque {
 
     fn popRetired(self: *Owner) ?*InstanceState {
         const owner_state = self.state();
-        std.Io.Threaded.mutexLock(&owner_state.retired_mutex);
+        std.Io.Threaded.mutexLockUncancelable(&owner_state.retired_mutex);
         defer std.Io.Threaded.mutexUnlock(&owner_state.retired_mutex);
         const instance = owner_state.retired_first orelse return null;
         owner_state.retired_first = instance.retired_next;
@@ -704,7 +704,7 @@ pub const Loader = opaque {
             "native module `{s}` is authoritative but dynamic loading requires the system loader (and a dynamically linked libc host on Linux)",
             .{path},
         ) };
-        const terminated = try self.state().host.allocator().dupeZ(u8, path);
+        const terminated = try self.state().host.allocator().dupeSentinel(u8, path, 0);
         defer self.state().host.allocator().free(terminated);
         var library = std.DynLib.openZ(terminated.ptr) catch |err| return .{ .failure = .init(
             "cannot open native module `{s}`: {s}; opening a native library executes arbitrary trusted code before ECL can inspect its descriptor",
@@ -861,7 +861,7 @@ fn ownerFromState(state_value: *OwnerState) *Owner {
 }
 
 pub fn capabilityName(id: u32) []const u8 {
-    return switch (@as(abi.CapabilityId, @enumFromInt(id))) {
+    return switch (@as(abi.CapabilityId, @fromBackingInt(@intCast(id)))) {
         .call => "call",
         .build_values => "build-values",
         .reschedule => "reschedule",

@@ -17,7 +17,7 @@ jobs:
     name: Complete Debug and detector tiers
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: Debug
+      optimize: debug
       run_precommit: true
       run_quality: true
       run_full_suite: true
@@ -32,7 +32,7 @@ jobs:
     name: Complete ReleaseSafe tiers
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
@@ -44,7 +44,7 @@ jobs:
     name: Compile shared OOM artifact
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       cache_scope: oom
       run_oom: true
       oom_target: test-oom-compile
@@ -54,7 +54,7 @@ jobs:
     needs: oom-compile
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       cache_scope: oom
       run_oom: true
       oom_target: test-oom-core
@@ -64,7 +64,7 @@ jobs:
     needs: oom-compile
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       cache_scope: oom
       run_oom: true
       oom_target: test-oom-surfaces
@@ -75,7 +75,7 @@ jobs:
     needs: oom-compile
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       cache_scope: oom
       run_oom: true
       oom_target: test-oom-surfaces
@@ -86,7 +86,7 @@ jobs:
     needs: oom-compile
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseSafe
+      optimize: safe
       cache_scope: oom
       run_oom: true
       oom_target: test-oom-surfaces
@@ -96,7 +96,7 @@ jobs:
     name: Complete ReleaseFast and CLI tiers
     uses: ./.github/workflows/build-type.yml
     with:
-      optimize: ReleaseFast
+      optimize: fast
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true

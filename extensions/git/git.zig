@@ -1,9 +1,7 @@
 //! SDK-only HTTPS snapshot port. The C backend owns its entire native graph.
 const std = @import("std");
 const ecl = @import("ecl-native");
-const c = @cImport({
-    @cInclude("snapshot.h");
-});
+const c = @import("c");
 
 // A library must not bootstrap Zig's host I/O runtime while reporting a fatal
 // programming defect. Keep the diagnostic bounded and preserve safety aborts.
