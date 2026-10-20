@@ -369,6 +369,9 @@ const BindingSpec = struct {
 
 const BindingSnapshot = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
+    /// Slices read the current snapshot without a reference, so a detached
+    /// chain waits for every slice that might have read it before it retires.
+    deferred: heap.ReleaseDomain.Deferred = .{},
     spec: BindingSpec,
     previous: ?*BindingSnapshot,
     fn create(
@@ -416,6 +419,8 @@ pub const BindingLease = struct {
     doc: ?*DocumentationString,
     source: ?reader_types.SourceSlice,
     direct_idiom: ?DirectIdiom,
+    /// False for a slice reader's borrow, which holds no references.
+    owned: bool = true,
 
     fn fromSpec(spec: BindingSpec, releases: *heap.ReleaseDomain) BindingLease {
         return .{
@@ -445,7 +450,7 @@ pub const BindingLease = struct {
     }
 
     pub fn deinit(self: *BindingLease) void {
-        self.heldSpec().retire(self.releases);
+        if (self.owned) self.heldSpec().retire(self.releases);
         self.* = undefined;
     }
 
@@ -494,7 +499,7 @@ pub const BindingCell = struct {
         self.publisher.publish(snapshot);
         const retired = self.detachRetired();
         std.Io.Threaded.mutexUnlock(&self.retire_lock);
-        if (retired) |first| self.releases.retire(first, &first.retirement);
+        if (retired) |first| self.releases.retireAfterSlices(first, &first.retirement, &first.deferred);
     }
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
@@ -505,7 +510,7 @@ pub const BindingCell = struct {
         std.debug.assert(self.publisher.quiescent());
         const snapshots = self.publisher.currentOwned();
         self.publisher.publish(null);
-        if (snapshots) |first| releases.retire(first, &first.retirement);
+        if (snapshots) |first| releases.retireAfterSlices(first, &first.retirement, &first.deferred);
         allocator.destroy(self);
         return true;
     }
@@ -537,8 +542,20 @@ pub const BindingCell = struct {
             self.lockRetired();
             const retired = self.detachRetired();
             std.Io.Threaded.mutexUnlock(&self.retire_lock);
-            if (retired) |first| self.releases.retire(first, &first.retirement);
+            if (retired) |first| self.releases.retireAfterSlices(first, &first.retirement, &first.deferred);
         }
+        return result;
+    }
+
+    /// The current binding for a reader inside a slice: one load, no reader
+    /// count and no references. Valid until the slice ends, because a
+    /// replaced snapshot retires only after every slice that began before its
+    /// replacement has ended. The lease owns nothing; anything kept past the
+    /// dispatch must be retained on its own, as a scheduled body already is.
+    pub fn borrow(self: *BindingCell, _: *const heap.ReleaseDomain.SliceRecord) BindingLease {
+        const snapshot = self.publisher.current.load(.seq_cst).?;
+        var result = BindingLease.fromSpec(snapshot.spec, self.releases);
+        result.owned = false;
         return result;
     }
 };
@@ -560,6 +577,9 @@ pub const BindingCellHandle = enum(usize) {
     }
     pub fn load(self: BindingCellHandle) BindingLease {
         return self.cell().load();
+    }
+    pub fn borrow(self: BindingCellHandle, slice: *const heap.ReleaseDomain.SliceRecord) BindingLease {
+        return self.cell().borrow(slice);
     }
 
     pub fn deinit(self: *BindingCellHandle) void {
@@ -2213,6 +2233,12 @@ pub const Env = enum(usize) {
     /// It never retires: core lives for the `Env`'s lifetime.
     pub fn coreCell(self: *Env) *ScopeCell {
         return &self.privateState().core_cell;
+    }
+
+    /// The domain binding snapshots retire into, and so the one a slice must
+    /// enter to read them without references.
+    pub fn bindingDomain(self: *const Env) *heap.ReleaseDomain {
+        return heap.hostDomain(self.privateState().host);
     }
 
     /// The core environment, which owns core's name slots.

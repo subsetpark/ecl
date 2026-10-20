@@ -1791,6 +1791,25 @@ pub const ReleaseDomain = struct {
         context: *anyopaque,
         wake_fn: *const fn (*anyopaque, WakeReason) void,
     };
+
+    /// One running slice of execution. A slice may read an object published
+    /// for slice readers through a plain load, holding no reference, because
+    /// the object's retirement waits for every slice that might have read it:
+    /// `epoch` is the domain's epoch when the slice began, or zero between
+    /// slices. A slice must not keep such a pointer past its own end.
+    pub const SliceRecord = struct {
+        epoch: std.atomic.Value(u64) = .init(0),
+        next_free: ?*SliceRecord = null,
+    };
+
+    /// A retirement waiting out the slices that began before it. The object
+    /// embeds this beside its `Retirement`, which is prepared at deferral and
+    /// enqueued only once every slice older than `epoch` has ended.
+    pub const Deferred = struct {
+        next: ?*Deferred = null,
+        epoch: u64 = 0,
+        node: ?*Retirement = null,
+    };
     pub const WakeReason = enum { retirement_available, backpressure_relieved };
 
     /// The archive's O(1) notification that one code header it indexed is
@@ -1807,6 +1826,14 @@ pub const ReleaseDomain = struct {
     };
 
     allocator: std.mem.Allocator,
+    /// Slice records and deferred retirements, under one lock. Slices are
+    /// coarse -- a fuel quantum at least -- so taking it twice per slice is
+    /// not on the per-word path.
+    slices_mutex: std.Io.Mutex = .init,
+    slice_epoch: std.atomic.Value(u64) = .init(1),
+    slice_records: std.ArrayList(*SliceRecord) = .empty,
+    free_slice_records: ?*SliceRecord = null,
+    deferred: ?*Deferred = null,
     queue_mutex: std.Io.Mutex = .init,
     claim_released: std.Io.Condition = .init,
     execution: enum { empty, available, claimed } = .empty,
@@ -1909,6 +1936,100 @@ pub const ReleaseDomain = struct {
             identity,
             @ptrCast(@alignCast(header)),
         );
+    }
+
+    /// Begins a slice that may read slice-published objects without holding
+    /// references to them.
+    pub fn enterSlice(self: *ReleaseDomain) error{OutOfMemory}!*SliceRecord {
+        const record = record: {
+            std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
+            defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+            if (self.free_slice_records) |free| {
+                self.free_slice_records = free.next_free;
+                free.next_free = null;
+                break :record free;
+            }
+            try self.slice_records.ensureUnusedCapacity(self.allocator, 1);
+            const created = try self.allocator.create(SliceRecord);
+            created.* = .{};
+            self.slice_records.appendAssumeCapacity(created);
+            break :record created;
+        };
+        // Announced before the slice reads anything. A retirement whose epoch
+        // this read does not reach was deferred after its object stopped being
+        // published, so the slice can never load that object; one it does reach
+        // waits for this slice to end.
+        record.epoch.store(self.slice_epoch.load(.seq_cst), .seq_cst);
+        return record;
+    }
+
+    /// Ends a slice and releases every deferred retirement no slice still
+    /// guards.
+    pub fn exitSlice(self: *ReleaseDomain, record: *SliceRecord) void {
+        record.epoch.store(0, .seq_cst);
+        std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
+        record.next_free = self.free_slice_records;
+        self.free_slice_records = record;
+        const ready = self.collectDeferredLocked();
+        std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+        self.enqueueDeferred(ready);
+    }
+
+    /// Retires `owner` once every slice that began before now has ended. The
+    /// caller has already stopped publishing it, so no later slice can reach it.
+    pub fn retireAfterSlices(
+        self: *ReleaseDomain,
+        owner: anytype,
+        node: *Retirement,
+        deferred: *Deferred,
+    ) void {
+        const Pointer = @TypeOf(owner);
+        const pointer = @typeInfo(Pointer).pointer;
+        const adapters = RetirementAdapters(pointer.child);
+        std.debug.assert(node.context == null and node.advance_fn == null and node.next == null);
+        node.context = @ptrCast(owner);
+        node.advance_fn = adapters.advance;
+        std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
+        deferred.* = .{
+            .next = self.deferred,
+            .epoch = self.slice_epoch.fetchAdd(1, .seq_cst) + 1,
+            .node = node,
+        };
+        self.deferred = deferred;
+        const ready = self.collectDeferredLocked();
+        std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+        self.enqueueDeferred(ready);
+    }
+
+    /// Detaches every deferred retirement whose epoch no active slice
+    /// predates. Caller holds `slices_mutex`.
+    fn collectDeferredLocked(self: *ReleaseDomain) ?*Deferred {
+        if (self.deferred == null) return null;
+        var oldest: u64 = std.math.maxInt(u64);
+        for (self.slice_records.items) |record| {
+            const epoch = record.epoch.load(.seq_cst);
+            if (epoch != 0 and epoch < oldest) oldest = epoch;
+        }
+        var ready: ?*Deferred = null;
+        var link = &self.deferred;
+        while (link.*) |item| {
+            if (item.epoch <= oldest) {
+                link.* = item.next;
+                item.next = ready;
+                ready = item;
+            } else link = &item.next;
+        }
+        return ready;
+    }
+
+    fn enqueueDeferred(self: *ReleaseDomain, ready: ?*Deferred) void {
+        var cursor = ready;
+        while (cursor) |item| {
+            cursor = item.next;
+            const node = item.node.?;
+            item.* = .{};
+            self.enqueueRetirement(node, .new);
+        }
     }
 
     pub fn retire(self: *ReleaseDomain, owner: anytype, node: *Retirement) void {
@@ -2124,7 +2245,33 @@ pub const ReleaseDomain = struct {
     }
 
     fn drainOwned(self: *ReleaseDomain) void {
-        while (!self.advance(65_536)) {}
+        // Draining to quiescence implies no slice is running, so whatever is
+        // deferred is released. Retiring can defer more -- a cell defers its
+        // snapshots -- so this alternates until both are empty.
+        while (true) {
+            const ready = ready: {
+                std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
+                defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+                break :ready self.collectDeferredLocked();
+            };
+            self.enqueueDeferred(ready);
+            while (!self.advance(65_536)) {}
+            std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
+            defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+            var all_idle = true;
+            for (self.slice_records.items) |record| {
+                if (record.epoch.load(.seq_cst) != 0) all_idle = false;
+            }
+            // A running slice still guards what remains; it is released when
+            // that slice exits, not here.
+            if (!all_idle) return;
+            if (self.deferred != null) continue;
+            for (self.slice_records.items) |record| self.allocator.destroy(record);
+            self.slice_records.deinit(self.allocator);
+            self.slice_records = .empty;
+            self.free_slice_records = null;
+            return;
+        }
     }
 
     fn releaseNextChild(self: *ReleaseDomain, header: *Header) bool {

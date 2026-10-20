@@ -605,9 +605,14 @@ A binding payload is one closed choice:
 - a validated native callable.
 
 Effect metadata, documentation, visibility, source slices, and module-local
-diagnostic identity travel in the same snapshot. Readers acquire leases;
-writers build before taking the publication lock, validate and swap in constant
-time, and retire the old snapshot after unlocking.
+diagnostic identity travel in the same snapshot. Writers build before taking
+the publication lock, validate and swap in constant time, and retire the old
+snapshot after unlocking. A dispatch inside a slice borrows the current
+snapshot with one load and takes no references: every slice records the
+domain's epoch when it begins, and a replaced snapshot is retired only once
+every slice that began before its replacement has ended. Anything a dispatch
+keeps beyond itself, such as a scheduled body, is retained on its own.
+Readers outside a slice, such as reflection, acquire counted leases instead.
 
 Slots are reached two ways, and their lifetimes follow. A session or core slot
 has an id in a lock-free directory whose ids are never reused; those roots

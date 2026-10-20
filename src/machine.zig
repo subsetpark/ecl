@@ -3092,6 +3092,9 @@ pub fn PathActionDriver(
 
 pub const Machine = struct {
     unit: *Unit,
+    /// Present while this machine runs inside a slice, which lets a dispatch
+    /// read a binding without taking references to it.
+    slice: ?*const heap.ReleaseDomain.SliceRecord = null,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -6115,7 +6118,7 @@ pub const Machine = struct {
         borrow_pin: *?modules.GenerationPin,
     ) ?Resolution {
         const cell = slot.current() orelse return null;
-        var lease = cell.load();
+        var lease = if (self.slice) |slice| cell.borrow(slice) else cell.load();
         if (written == null or cell == slot.coreCell()) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
@@ -6262,6 +6265,7 @@ pub const Machine = struct {
                 self.releaseDomain(),
                 self.unit.module_access,
                 cached_site,
+                self.slice,
             )) {
                 .absent => {},
                 .stale => {
@@ -6759,7 +6763,10 @@ pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     // the previous one already polled cancellation, and every driver polls
     // before it draws.
     unit.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
-    var evaluator = Machine{ .unit = unit };
+    const domain = unit.environment.bindingDomain();
+    const slice = try domain.enterSlice();
+    defer domain.exitSlice(slice);
+    var evaluator = Machine{ .unit = unit, .slice = slice };
     const status = loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
@@ -7823,6 +7830,7 @@ const ModuleCallSiteCache = struct {
         releases: *heap.ReleaseDomain,
         access: *const modules.ExecutionAccess,
         found: ?usize,
+        slice: ?*const heap.ReleaseDomain.SliceRecord,
     ) CallSiteCacheLookup {
         const slot_index = found orelse return .absent;
         const candidate = &(self.entries[slot_index] orelse return .absent);
@@ -7832,7 +7840,7 @@ const ModuleCallSiteCache = struct {
             self.entries[slot_index] = null;
             return .stale;
         };
-        const lease = qualified.cell.load();
+        const lease = if (slice) |held| qualified.cell.borrow(held) else qualified.cell.load();
         const home = execution.home(access);
         return .{ .hit = .{
             .lease = lease,
