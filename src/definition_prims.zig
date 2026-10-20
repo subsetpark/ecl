@@ -1,6 +1,7 @@
 //! Definition annotations and binding metadata reflection.
 const std = @import("std");
 const value = @import("value.zig");
+const poll = @import("poll.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
@@ -177,10 +178,6 @@ const DefineDriver = struct {
             document: ?Value,
             index: usize = 0,
         },
-        normalize_doc: struct {
-            context: AnnotationContext,
-            normalizer: heap.Owned(doc_text.NormalizeCursor),
-        },
         prepare_effect: AnnotationContext,
         copy_effect: struct {
             context: AnnotationContext,
@@ -215,10 +212,6 @@ const DefineDriver = struct {
             switch (self.*) {
                 .scan_annotation => |*scan| scan.candidate.deinit(releases, allocator),
                 .validate_annotation => |*validation| validation.context.source.deinit(releases, allocator),
-                .normalize_doc => |*normalization| {
-                    normalization.normalizer.deinit(releases, allocator);
-                    normalization.context.source.deinit(releases, allocator);
-                },
                 .prepare_effect => |*context| context.source.deinit(releases, allocator),
                 .copy_effect => |*copy| {
                     copy.items.deinit(releases, allocator);
@@ -314,14 +307,15 @@ const DefineDriver = struct {
                         continue;
                     }
                 }
+                // The documentation is kept as written; `doc` normalizes it
+                // when asked, and `see` through the formatter.
                 if (validation.document) |document| {
-                    const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator(), document);
-                    const context = validation.context;
-                    self.state.borrowMut().* = .{ .normalize_doc = .{
-                        .context = context,
-                        .normalizer = .init(normalizer),
-                    } };
-                } else if (validation.context.separator_at != null) {
+                    const doc_value = env.documentation(document.list) orelse return malformed(evaluator);
+                    heap.retainValue(document);
+                    self.annotation.borrowMut().doc_source = document;
+                    self.annotation.borrowMut().doc_value = doc_value;
+                }
+                if (validation.context.separator_at != null) {
                     const context = validation.context;
                     self.state.borrowMut().* = .{ .prepare_effect = context };
                 } else {
@@ -331,26 +325,6 @@ const DefineDriver = struct {
                     );
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                 }
-            },
-            .normalize_doc => |*normalization| switch (try normalization.normalizer.borrowMut().advance(work)) {
-                .pending => return .stepped,
-                .complete => |normalized| {
-                    self.annotation.borrowMut().doc_source = normalized;
-                    self.annotation.borrowMut().doc_value = env.documentation(normalized.list) orelse
-                        return malformed(evaluator);
-                    normalization.normalizer.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    if (normalization.context.separator_at != null) {
-                        const context = normalization.context;
-                        self.state.borrowMut().* = .{ .prepare_effect = context };
-                    } else {
-                        normalization.context.source.deinit(
-                            evaluator.releaseDomain(),
-                            evaluator.allocator(),
-                        );
-                        self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
-                    }
-                    return .stepped;
-                },
             },
             .prepare_effect => |*context| {
                 const items = try evaluator.allocator().alloc(Value, context.effect_end);
@@ -548,32 +522,64 @@ fn installLookup(evaluator: *Machine, requested: u32) MachineError!void {
         .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
     });
 }
+/// A binding's documentation as written, retained while it is normalized:
+/// definitions keep it unnormalized, and `doc` and `see` normalize it to show.
+const DocumentNormalization = struct {
+    document: heap.Owned(Value),
+    normalizer: heap.Owned(doc_text.NormalizeCursor),
+
+    fn init(evaluator: *Machine, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
+        const item: Value = .{ .list = env.documentationHeader(document) };
+        const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator(), item);
+        heap.retainValue(item);
+        return .{ .document = .init(item), .normalizer = .init(normalizer) };
+    }
+
+    /// The normalized string, owned, once done.
+    fn advance(self: *DocumentNormalization, work: *poll.WorkBudget) error{OutOfMemory}!?Value {
+        return switch (try self.normalizer.borrowMut().advance(work)) {
+            .pending => null,
+            .complete => |normalized| normalized,
+        };
+    }
+
+    pub fn deinit(self: *DocumentNormalization, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.normalizer.deinit(releases, allocator);
+        self.document.deinit(releases, allocator);
+    }
+};
+
 const LookupDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
     resolution: heap.Owned(machine.ResolutionCursor),
+    normalization: heap.Owned(DocumentNormalization) = .none,
     pub fn advance(evaluator: *Machine, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
-        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
-            .pending => {},
-            .complete => |outcome| {
-                var resolved = switch (try resolveForReflection(
-                    evaluator,
-                    self,
-                    self.requested,
-                    outcome,
-                )) {
-                    .retry => |progress| return progress,
-                    .resolved => |resolution| resolution,
-                };
-                defer resolved.deinit(evaluator.allocator());
-                try evaluator.pushBorrowed(.{ .list = env.documentationHeader(
-                    resolved.lease.doc orelse return evaluator.fail(.domain, "binding has no documentation"),
-                ) });
-                return .completed;
-            },
-        };
+        while (work.spend()) {
+            if (self.normalization.isPresent()) {
+                if (try self.normalization.borrowMut().advance(work)) |normalized|
+                    return .{ .output = normalized };
+            } else switch (self.resolution.borrowMut().advance()) {
+                .pending => {},
+                .complete => |outcome| {
+                    var resolved = switch (try resolveForReflection(
+                        evaluator,
+                        self,
+                        self.requested,
+                        outcome,
+                    )) {
+                        .retry => |progress| return progress,
+                        .resolved => |resolution| resolution,
+                    };
+                    defer resolved.deinit(evaluator.allocator());
+                    const document = resolved.lease.doc orelse
+                        return evaluator.fail(.domain, "binding has no documentation");
+                    self.normalization = .init(try .init(evaluator, document));
+                },
+            }
+        }
         return .stepped;
     }
 };
@@ -804,17 +810,21 @@ const SeeDriver = struct {
 
     const Context = struct {
         resolved: heap.Owned(machine.Resolution),
+        /// The binding's documentation, normalized.
+        document: heap.Owned(Value) = .none,
 
         fn deinit(
             self: *Context,
             releases: *heap.ReleaseDomain,
             allocator: std.mem.Allocator,
         ) void {
+            self.document.deinit(releases, allocator);
             self.resolved.deinit(releases, allocator);
         }
     };
     const State = union(enum) {
         resolve: heap.Owned(machine.ResolutionCursor),
+        normalize: struct { context: Context, normalization: DocumentNormalization },
         plan: struct {
             context: Context,
             step: u8,
@@ -832,6 +842,10 @@ const SeeDriver = struct {
         ) void {
             switch (self.*) {
                 .resolve => |*cursor| cursor.deinit(releases, allocator),
+                .normalize => |*normalize| {
+                    normalize.normalization.deinit(releases, allocator);
+                    normalize.context.deinit(releases, allocator);
+                },
                 .plan => |*plan| plan.context.deinit(releases, allocator),
                 .render => |*context| context.deinit(releases, allocator),
                 .format => |*format_state| {
@@ -868,7 +882,7 @@ const SeeDriver = struct {
             // The annotation is written piecewise so the documentation keeps
             // its line breaks: the effect words render canonically, the
             // string as prose.
-            0 => if (resolved.lease.doc) |document| {
+            0 => if (plan.context.document.isPresent()) {
                 try self.add(.{ .bytes = "(" });
                 if (resolved.lease.effect) |effect| {
                     const header = effect.header();
@@ -880,7 +894,7 @@ const SeeDriver = struct {
                     }
                 }
                 try self.add(.{ .bytes = ": " });
-                try self.add(.{ .document = .{ .list = env.documentationHeader(document) } });
+                try self.add(.{ .document = plan.context.document.borrow() });
                 try self.add(.{ .bytes = ")" });
             } else if (resolved.lease.effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
@@ -953,13 +967,33 @@ const SeeDriver = struct {
                         .resolved => |resolution| resolution,
                     };
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.state.borrowMut().* = .{ .plan = .{
-                        .context = .{ .resolved = .init(resolved) },
-                        .step = 0,
-                        .requirement_index = 0,
-                        .requirement_separator = false,
-                    } };
+                    var context: Context = .{ .resolved = .init(resolved) };
+                    const document = resolved.lease.doc orelse {
+                        self.state.borrowMut().* = .{ .plan = .{
+                            .context = context,
+                            .step = 0,
+                            .requirement_index = 0,
+                            .requirement_separator = false,
+                        } };
+                        continue;
+                    };
+                    const normalization = DocumentNormalization.init(evaluator, document) catch |err| {
+                        context.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        return err;
+                    };
+                    self.state.borrowMut().* = .{ .normalize = .{ .context = context, .normalization = normalization } };
                 },
+            },
+            .normalize => |*normalize| if (try normalize.normalization.advance(work)) |normalized| {
+                normalize.normalization.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                var context = normalize.context;
+                context.document = .init(normalized);
+                self.state.borrowMut().* = .{ .plan = .{
+                    .context = context,
+                    .step = 0,
+                    .requirement_index = 0,
+                    .requirement_separator = false,
+                } };
             },
             .plan => |*plan| try self.advancePlan(plan),
             .render => |*context| switch (try self.actions.borrowMut().advance(work)) {
