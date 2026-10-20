@@ -265,7 +265,7 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "'kind 'cancelled") != null);
 }
 
-test "env: creating and removing names bump the shape generation and rebinding does not" {
+test "env: rebinding keeps a name and removing it hides it from enumeration" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
@@ -280,19 +280,10 @@ test "env: creating and removing names bump the shape generation and rebinding d
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
     _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
-    try std.testing.expectEqual(@as(u64, 1), environment.shapeGeneration());
     _ = try scope.publisher().module.publish(second, binding.module(effect.effect, .public));
-    try std.testing.expectEqual(@as(u64, 2), environment.shapeGeneration());
-    // Creating or removing a name publishes a shape; rebinding one replaces
-    // its cell in place and publishes none. That asymmetry is why this counter
-    // is named for shapes rather than for mutation: it is not a "did anything
-    // change" signal and nothing may read it as one.
     _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
-    try std.testing.expectEqual(@as(u64, 2), environment.shapeGeneration());
     try std.testing.expect(try unpublish(&scope, first));
-    try std.testing.expectEqual(@as(u64, 3), environment.shapeGeneration());
     try std.testing.expect(!(try unpublish(&scope, first)));
-    try std.testing.expectEqual(@as(u64, 3), environment.shapeGeneration());
     const names = try namesOwned(&environment, std.testing.allocator);
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
@@ -539,12 +530,7 @@ fn reclamationReader(context: ReclamationRaceContext) void {
             break;
         },
     };
-    // Publication cannot hand the old shape chain to reclamation while this
-    // production cursor still owns the Publisher lease. Its final release is
-    // the event that makes retirement visible to the domain.
-    if (context.releases.hasPending()) context.failed.store(true, .release);
     lookup.deinit();
-    if (!context.releases.hasPending()) context.failed.store(true, .release);
     context.phase.store(3, .release);
 
     // Acquire the next production snapshot before the second publication.
@@ -664,9 +650,10 @@ test "env: concurrent cell publication is lease-safe and TSan-clean" {
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, envWorker, .{context});
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    // Four threads race to bind the same name: exactly one creates it, and
-    // the three that lose rebind the cell without publishing a shape.
-    try std.testing.expectEqual(@as(u64, 1), container.sessionView().shapeGeneration());
+    // Four threads race to bind the same name, and it is bound exactly once.
+    const names = try namesOwned(container.sessionView(), std.testing.allocator);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqualSlices(u32, &.{intern.namespaceId(context.name)}, names);
 }
 
 test "env: concurrent readers writers and retirement reclaim production snapshots" {
@@ -736,9 +723,8 @@ test "environment and registry retirement stays bounded after a delayed reader d
         defer binding.release(releases);
         _ = try scope.publisher().top.publish(binding_name, binding.top());
 
-        // A production lookup cursor keeps the removed shape and its cell
-        // alive until it finishes. Re-publication uses a distinct cell, while
-        // the delayed cursor must still observe the old complete binding.
+        // A lookup cursor reads the slot when it advances, so one opened before
+        // a removal and re-publication observes the re-published binding.
         var delayed_removed = environment.sessionView().directLookupCursor(
             intern.namespaceId(binding_name),
         );
@@ -751,18 +737,6 @@ test "environment and registry retirement stays bounded after a delayed reader d
         var old_binding = delayed_binding;
         old_binding.deinit();
         delayed_removed.deinit();
-        host.cleanup().drain();
-
-        // One public shape lease deliberately delays reclamation while a long
-        // shape history accumulates. Releasing it must transfer the whole
-        // history to bounded retirement work rather than freeing it on the
-        // reader's stack. Distinct names make every shape larger than the last
-        // so this covers growing-state history separately from unset churn.
-        const shape_churn = try NamePool.init(allocator, "bounded-shape-churn", 256);
-        defer shape_churn.deinit();
-        var delayed = environment.sessionView().acquireShape();
-        for (shape_churn.names) |churn_name| _ = try scope.publisher().top.publish(churn_name, binding.top());
-        delayed.deinit();
         host.cleanup().drain();
 
         // Hold a production AcquireCursor's real Directory lease while both

@@ -1572,7 +1572,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
     // release from ECL -- cannot discriminate, because four separate mechanisms
     // already narrow the window to instruction scale that no ECL-level yield can
     // land inside: `unmodule` quiesces the slot before retiring, a live module
-    // value legitimately holds its image, the resolution walk's `ShapeLease`
+    // value legitimately holds its image, the resolution walk's counted lookup cursor
     // together with the environment teardown wait covers the lookup, and
     // `scheduleWord`'s pin covers the frame. So the borrow's necessity is stated
     // here as an API fact instead, where the drop can be constructed exactly and

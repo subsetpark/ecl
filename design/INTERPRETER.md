@@ -590,11 +590,16 @@ defined links to an empty slot that a later definition fills.
 
 ### Lookup is late and definitions are stable publication points
 
-Each environment publishes an immutable name-to-cell shape. A binding cell is
-stable, while its immutable payload snapshot may be replaced. A slot shares its
-root's cell for its name: a binding made while the slot exists reuses the
-slot's cell, so the cell's identity never changes, and removing the name only
-clears the slot's bound flag. Executing a word reads its slot and loads the
+An environment is its root's slot table: one slot per name the root has bound
+or a word in it has linked, made on first need and kept until the root
+retires. A binding cell is stable, while its immutable payload snapshot may be
+replaced. A name's first binding gives its slot a cell and every later binding,
+including one after removal, replaces that cell's payload, so the cell's
+identity never changes; removing the name only clears the slot's bound flag,
+and the cell keeps its last payload until the name is bound again or the root
+retires. Binding and removal are constant-time under the root's writer lock.
+Enumeration and lookup by name read the table without a lock; enumeration is
+not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
 cell's current payload, so a redefinition reaches every existing occurrence at
 its next execution, including combinator bodies already running.
 
@@ -1495,7 +1500,7 @@ outside those locks.
 Readers pair every immutable pointer with evidence that its allocation remains
 alive:
 
-- a binding or shape lease;
+- a binding lease, or a counted name or lookup cursor;
 - a directory or generation lease;
 - a module generation pin;
 - the running activation's own image, or a pin taken on a slot's image root
