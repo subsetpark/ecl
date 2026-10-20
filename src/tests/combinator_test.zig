@@ -205,56 +205,62 @@ test "combinators: contracts and conformability are structural errors" {
     });
 }
 
-test "combinators: child scopes are fresh and discarded" {
+test "combinators: definitions inside an application are refused" {
+    // Applications run at their caller's level but are not roots, so nothing
+    // they do can add a name for later code to resolve.
     try support.expectErrors(&.{
         .{
             .name = "each scope",
-            .source = "[1 2 3] (dup 'k set k *) each pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1 2 3] (dup 'k set k *) each",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "zip-with scope",
-            .source = "[1] [2] (pop dup 'k set k pop) zip-with pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1] [2] (pop dup 'k set k pop) zip-with",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "for scope",
-            .source = "[1] (dup 'k set pop) for k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1] (dup 'k set pop) for",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "fold scope",
-            .source = "[1] 0 (+ dup 'k set) fold pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1] 0 (+ dup 'k set) fold",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "scan scope",
-            .source = "[1] 0 (+ dup 'k set) scan pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1] 0 (+ dup 'k set) scan",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "infra scope",
-            .source = "[1] (dup 'k set) infra pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1] (dup 'k set) infra",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "stencil scope",
-            .source = "[1] 1 (dup 'k set) stencil pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "[1] 1 (dup 'k set) stencil",
+            .kind = "domain",
+            .word = "def",
         },
         .{
             .name = "unfold scope",
-            .source = "0 (dup 'k set pop 0) () unfold pop pop k",
-            .kind = "undefined-word",
-            .word = "k",
+            .source = "0 (dup 'k set pop 0) () unfold",
+            .kind = "domain",
+            .word = "def",
         },
+        .{ .name = "attempt", .source = "[] (1 'k set) @attempt 'err at raise", .kind = "domain", .word = "def" },
+        .{ .name = "task", .source = "[] (1 'k set) @spawn task.await 'err at raise", .kind = "domain", .word = "def" },
+        .{ .name = "undef", .source = "1 'k set [1] ('k undef) each", .kind = "domain", .word = "undef" },
+        .{ .name = "import", .source = "[1] ('result ('ok) import) each", .kind = "domain", .word = "import" },
     });
 }
 
@@ -652,7 +658,8 @@ test "empty inline iterations remain cancellable and bounded-frame" {
         .name = "cancelled times",
         .source = "70000 () times",
         .kind = "cancelled",
-        .word = "times",
+        // Observed where the empty iterations exhaust their fuel, which names
+        // no word: the loop is between applications, not inside one.
         .message = "unit cancelled",
     });
     try std.testing.expect(runtime.lastPolls() >= 1);
@@ -677,21 +684,15 @@ test "combinators: vector reductions reuse only accumulators they own" {
     });
 }
 
-test "combinators: body words resolve through an unbound child as in its parent" {
-    // A body word carries the stamp of the scope that read it and runs in a
-    // child that bound nothing, so it resolves exactly as it would in the
-    // parent and its call site may be cached. The moment the child binds,
-    // that equivalence ends for the rest of the element, and the next element
-    // starts from a fresh, unbound child again.
+test "combinators: body words resolve as in the caller" {
+    // A body word carries the stamp of the root that read it, so it resolves
+    // exactly as it would in the caller, and a redefinition between
+    // applications reaches the next one.
     try support.expectStacks(&.{
         .{ .name = "plain body", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
-        .{ .name = "body that binds after a cached word", .source = "[1 2 3] (dup 'k set k *) each", .expected = "[1 4 9]" },
-        .{ .name = "body that binds before a cached word", .source = "[5 7] ('k set k dup *) each", .expected = "[25 49]" },
-        .{ .name = "shadowing a cached word in one element only", .source = "[1 2 3] (dup 2 = ((pop 42 42) 'dup def) () if dup *) each", .expected = "[1 1764 9]" },
-        .{ .name = "nested application under the child", .source = "[1 2 3] ((1 +) call dup *) each", .expected = "[4 9 16]" },
+        .{ .name = "nested application", .source = "[1 2 3] ((1 +) call dup *) each", .expected = "[4 9 16]" },
         .{ .name = "locals body", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
         .{ .name = "redefinition between applications", .source = "(dup *) 'sq def [1 2 3] (sq) each (pop 7) 'sq def [1 2 3] (sq) each", .expected = "[1 4 9] [7 7 7]" },
-        .{ .name = "child bindings do not survive the element", .source = "[1 2] ('k set 0) each pop [] (k) @attempt result.ok?", .expected = "0" },
     });
 }
 
@@ -775,9 +776,9 @@ test "combinators: loops guards reductions and result materialization stay cance
     try expectCancelledAfterSetup("70000 range", "-1 find", .automatic);
     try expectCancelledAfterSetup("70000 range", "0 (+) fold", .automatic);
     try expectCancelledAfterSetup("3 range (pop 70000 range 1.0 *) each", "(+) fold1", .automatic);
-    // The idiom loop consumes fewer than one kernel quantum; its second
-    // traversal, result specialization, is what crosses the poll boundary.
-    try expectCancelledAfterSetup("40000 range", "(1 +) each", .automatic);
+    // More than one kernel quantum of elements, so the idiom loop itself
+    // reaches a poll; word dispatch never polls.
+    try expectCancelledAfterSetup("70000 range", "(1 +) each", .automatic);
     try expectCancelledAfterSetup("70000 range", "2 () stencil", .automatic);
     try expectCancelledAfterSetup("0", "(pop 1) (1 + dup) unfold", .automatic);
 }

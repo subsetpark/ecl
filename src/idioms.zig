@@ -6,7 +6,6 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const resolution_core = @import("resolution_core.zig");
 const equal = @import("equal.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
@@ -414,8 +413,8 @@ fn frozenBindingMatches(
     primitive: ?env.PrimitiveImpl,
     origin: ExpectedOrigin,
 ) bool {
-    if (!lookup.admits(word.scope)) return false;
-    var hit = lookup.resolve(word.scope, word.name) orelse return false;
+    if (!lookup.admits(word.slot)) return false;
+    var hit = lookup.resolve(word.slot, word.name) orelse return false;
     defer hit.lease.deinit();
     const binding_matches = switch (binding) {
         .builtin => hit.lease.binding == .builtin and
@@ -537,9 +536,8 @@ fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, ca
 }
 
 /// Matches an offered phrase against the registry entries of its context and
-/// length. The work is bounded by the registry's shape, so it runs where the
-/// combinator applies; a pattern word whose resolution the call-site cache
-/// cannot answer is handed out to be resolved across turns.
+/// length. The work is bounded by the registry's shape and each pattern word
+/// is one slot read, so the whole match runs where the combinator applies.
 const Matcher = struct {
     candidate: Candidate,
     entries: []const u16,
@@ -550,13 +548,7 @@ const Matcher = struct {
     expected_binding: BindingKind = .builtin,
 
     /// A pattern word to resolve; `cache` is where its answer is recorded.
-    const Pending = struct {
-        word: u32,
-        start: ?*env.Scope,
-        guard: ?resolution_core.GuardContext,
-        cache: ?machine.ErrorSite,
-    };
-    const Step = union(enum) { progressed, done: ?RegistryEntry, resolve: Pending };
+    const Step = union(enum) { progressed, done: ?RegistryEntry };
 
     fn phraseSite(self: *const Matcher) machine.ErrorSite {
         return .{ .code = self.candidate.phrase.list, .index = @intCast(self.atom_index) };
@@ -581,47 +573,36 @@ const Matcher = struct {
         self.expected = null;
         self.expected_binding = .builtin;
     }
-    /// Resolves a pattern word where the phrase runs, through the call-site
-    /// cache `executeWord` uses when the word's stamp allows it.
-    fn resolve(self: *Matcher, evaluator: *Machine, site: machine.ErrorSite, word: value.WordRef) Step {
-        const lookup = evaluator.probePlain(site, word) orelse return .{ .resolve = .{
-            .word = word.name,
-            .start = evaluator.unit.current.?.resolutionScope(),
-            .guard = null,
-            .cache = null,
-        } };
-        switch (lookup) {
-            .hit => |resolution| {
-                var resolved = resolution;
-                defer resolved.deinit(evaluator.allocator());
-                self.accept(&resolved);
-                return .progressed;
-            },
-            .miss => |miss| return .{ .resolve = .{
-                .word = word.name,
-                .start = miss.start,
-                .guard = miss.guard,
-                .cache = site,
-            } },
-        }
+    /// Resolves a pattern word through its slot. A word that resolves to
+    /// nothing a plain word may run, or whose root has retired, is simply not
+    /// the expected binding; generic execution reports any error.
+    fn resolve(self: *Matcher, evaluator: *Machine, word: value.WordRef) Step {
+        evaluator.beginBindingRead();
+        defer evaluator.endBindingRead();
+        var resolved = evaluator.peekSlotWord(word) orelse {
+            self.rejectEntry();
+            return .progressed;
+        };
+        defer resolved.deinit(evaluator.allocator());
+        self.accept(&resolved);
+        return .progressed;
     }
     fn expectWord(
         self: *Matcher,
         evaluator: *Machine,
-        site: machine.ErrorSite,
         word: value.WordRef,
         expected_word: ExpectedWord,
     ) Step {
         std.debug.assert(expected_word.origin == .trusted);
         if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling) or
-            !stampOnRunningChain(evaluator, word.scope))
+            !slotOnRunningRoot(evaluator, word.slot))
         {
             self.rejectEntry();
             return .progressed;
         }
         self.expected_binding = expected_word.binding;
         self.expected = null;
-        return self.resolve(evaluator, site, word);
+        return self.resolve(evaluator, word);
     }
     fn step(self: *Matcher, evaluator: *Machine) Step {
         if (self.entry_index == self.entries.len) return .{ .done = null };
@@ -655,12 +636,12 @@ const Matcher = struct {
                     self.rejectEntry();
                     return .progressed;
                 }
-                return self.expectWord(evaluator, .{ .code = actual.list, .index = 0 }, quoted.word, expected_word);
+                return self.expectWord(evaluator, quoted.word, expected_word);
             },
             .operation => {
                 if (actual != .word or
                     !std.mem.eql(u8, intern.get(actual.word.name), entry.operation.spelling()) or
-                    !stampOnRunningChain(evaluator, actual.word.scope))
+                    !slotOnRunningRoot(evaluator, actual.word.slot))
                 {
                     self.rejectEntry();
                     return .progressed;
@@ -672,7 +653,7 @@ const Matcher = struct {
                     operationPrimitive(entry.operation)
                 else
                     null;
-                return self.resolve(evaluator, self.phraseSite(), actual.word);
+                return self.resolve(evaluator, actual.word);
             },
             .word => |expected_word| {
                 if (actual != .word) {
@@ -685,16 +666,14 @@ const Matcher = struct {
                     self.capture.active_word = actual.word.name;
                     self.capture.active_index = @intCast(self.atom_index);
                 }
-                return self.expectWord(evaluator, self.phraseSite(), actual.word, expected_word);
+                return self.expectWord(evaluator, actual.word, expected_word);
             },
         }
         return .progressed;
     }
 };
 
-/// Matches as far as the call-site cache allows, settling at once when it
-/// answers every pattern word; otherwise a driver resolves the missing word
-/// and carries the match on from there.
+/// Matches the phrase, then applies the selected entry or declines.
 fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline) MachineError!void {
     var matching = matcher;
     while (true) switch (matching.step(evaluator)) {
@@ -704,51 +683,8 @@ fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline) Machine
             decline.discard(evaluator);
             return applySelected(evaluator, matching.candidate.phrase, selected, matching.capture);
         },
-        .resolve => |pending| return evaluator.startDriver(IdiomDriver{
-            .matcher = matching,
-            .fallback = .init(decline.take(evaluator)),
-            .cache = pending.cache,
-            .word = pending.word,
-            .resolution = .init(.init(evaluator, pending.word, pending.start, null, null, pending.guard)),
-        }),
     };
 }
-
-/// Resolves one pattern word the call-site cache could not answer, then lets
-/// the matcher continue.
-const IdiomDriver = struct {
-    pub const inline_driver = true;
-
-    matcher: Matcher,
-    fallback: heap.Owned(machine.IdiomFallback),
-    resolution: heap.Owned(machine.ResolutionCursor),
-    cache: ?machine.ErrorSite,
-    word: u32,
-
-    pub fn advance(evaluator: *Machine, self: *IdiomDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
-            .pending => {},
-            .complete => |outcome| {
-                self.resolution.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                if (outcome.binding()) |resolution| {
-                    var resolved = resolution;
-                    defer resolved.deinit(evaluator.allocator());
-                    if (self.cache) |site| evaluator.cacheResolution(site, self.word, &resolved);
-                    self.matcher.accept(&resolved);
-                } else self.matcher.rejectEntry();
-                const matcher = self.matcher;
-                const fallback = self.fallback.take();
-                evaluator.retireDriver(self);
-                try matchOffered(evaluator, matcher, .{ .made = fallback });
-                return .detached;
-            },
-        };
-        return .stepped;
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
 fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
     const stack = evaluator.unit.stack.items;
@@ -1375,43 +1311,21 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
     };
 }
 
-/// Whether a token's stamp names a scope on the chain the recognizer is about to
-/// resolve in.
-///
-/// Recognition resolves a token in the running chain and compares the result
-/// against the primitive it would substitute. That comparison is only meaningful
-/// for a token whose stamp points *at* that chain; one stamped elsewhere -- a
-/// quotation that escaped its module and is being applied here -- resolves
-/// somewhere the recognizer is not looking, and recognizing it ran the core
-/// builtin where the module's own shadow was the answer.
-///
-/// The relation is membership. Three equality proxies each
-/// failed on a different population before that was clear: the activation's own
-/// scope (a nested application runs in a descendant that minted no cell) and the
-/// unit root (prelude and stdlib idioms are stamped with neither) both
-/// under-approximate, because a stamp is an *ancestor* of the running chain far
-/// more often than it is the running chain.
-///
-/// It walks from the running chain outward rather than resolving the stamp,
-/// which is what keeps it free of any borrow: every node here is
-/// activation-owned and alive by construction, ids are never recycled, and a
-/// node whose `cellId` equals the stamp is by identity the node that minted it.
-/// So membership-by-id *is* encloses-or-equals, computed with integer compares
-/// over a chain whose length dispatch's own refinement already walks.
-///
-/// Zero is unscoped -- it resolves where invoked, so it matches by definition.
-/// A core stamp resolves against core alone, which no scope denotes, so it
-/// cannot appear on any chain; it is admitted directly, and the untouched
-/// resolution behind this gate still suppresses recognition when anything on the
-/// chain has rebound the name.
-/// Whether a word written with `stamp` resolves in the running chain: no
-/// written-in scope, the core, or a scope the running activation reaches.
-fn stampOnRunningChain(evaluator: *machine.Machine, stamp: u32) bool {
-    if (stamp == 0) return true;
-    if (@backingInt(evaluator.unit.environment.coreScopeId()) == stamp) return true;
-    var node = evaluator.unit.current.?.resolutionScope();
-    while (node) |scope| : (node = scope.parent) {
-        if (@backingInt(scope.cellId()) == stamp) return true;
-    }
-    return false;
+/// Whether a word linked to `slot_id` resolves where the phrase runs: its
+/// slot belongs to core or to the running activation's root. An unlinked word
+/// links where it runs, so it matches by definition. Recognition then reads
+/// the slot, so a root that has shadowed the name still declines.
+fn slotOnRunningRoot(evaluator: *machine.Machine, slot_id: u32) bool {
+    const root_id: u32 = switch (env.wordTarget(slot_id)) {
+        .unlinked => return true,
+        .image => |scope| @backingInt(scope),
+        .slot => |id| root: {
+            const slot = evaluator.unit.environment.slot(id) orelse return false;
+            const root = slot.rootCell();
+            if (root.core) return true;
+            break :root @backingInt(root.id);
+        },
+    };
+    const running = evaluator.unit.current.?.resolutionScope() orelse return false;
+    return @backingInt(running.cellId()) == root_id;
 }

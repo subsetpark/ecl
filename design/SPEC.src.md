@@ -81,9 +81,9 @@ interpretation.
 
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
-name. Reader-authored word occurrences retain where their names are to be
-looked up, while lookup remains late: they retain a scope and resolve the
-binding at execution time.
+name. Word occurrences retain where their names are to be looked up, while lookup
+remains late: each retains its name's slot in the root it was written in and
+resolves the binding at execution time.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration owns the
@@ -338,8 +338,8 @@ elements in order.
 
 Ordinary word evaluation is one observable operation:
 
-1. Determine the occurrence's effective resolution scope.
-2. Resolve its spelling to a binding in that scope.
+1. Read the occurrence's name slot.
+2. Take the slot's current binding.
 3. Establish the binding's activation context.
 4. Evaluate the binding's executable body.
 
@@ -347,31 +347,30 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-Lookup is late. A word occurrence's resolution metadata selects only a scope.
-Each execution looks up the binding in that scope; the occurrence retains no
-binding, body, value, or module generation. Replacing a binding in a mutable selected
-scope affects existing code. The data combinators `each`, `zip-with`, `fold`,
-`fold1`, and `scan` bound this per call: a call looks up each word written in
-its quotation once, at that word's first execution in the call, and its later
-applications reuse that binding, so a replacement made while the call runs
-takes effect at its next call. An application that binds a name of its own
-looks up the words after that binding as any code does. A module image's scope is immutable after
-construction; replacing an image in a registration does not retarget words
-belonging to the former image. Attempting to resolve through a retired selected
-scope is a `'domain` error, never a fallback to another scope.
+Lookup is late. A word occurrence selects only a name slot (see Bindings and
+scope). Each execution reads the slot's current binding; the occurrence retains
+no binding, body, value, or module generation. Replacing a binding in a root
+affects existing code at its next execution, including code already running
+and the quotations of combinators in progress. A module image is immutable
+after construction; replacing an image in a registration does not retarget
+words belonging to the former image. Executing a word whose root has retired is
+a `'domain` error, never a fallback to another root.
 
-The reader annotates each word occurrence with its current scope. Moving,
-copying, concatenating, or splicing values preserves each occurrence's own
-annotation, so one quotation may contain words from several scopes. A
-quotation consequently has no single resolution scope. A word occurrence
-created without reader context has no scope annotation and resolves in the
-invoking activation's resolution context.
+The reader links each word occurrence to the slot for its name in the root the
+source is read into: the session, the module image under construction, or core
+for the prelude. Moving, copying, concatenating, or splicing values preserves
+each occurrence's own slot, so one quotation may contain words from several
+roots, and a quotation has no single resolution root. A word built at run time
+(`word`, `qualify`, and words built by the standard library or native code)
+links to the slot for its name in the root of the activation that built it;
+words built by the implementation itself link to core. No word resolves by
+where it happens to be invoked.
 
 A reader-produced aggregate may separately retain **reader lineage**, which
 records that the aggregate and its reader-built descendants came from a
 particular source construction. Reader lineage supports attribution and the
 module-body re-scoping rule; it is not an AST, a captured environment, or a
-quotation-wide resolution scope. Runtime aggregate reconstruction does not
+quotation-wide resolution root. Runtime aggregate reconstruction does not
 acquire reader lineage. Resolution context, reader lineage, and provenance are
 semantic metadata on stored occurrences and aggregates, but none is part of
 value identity.
@@ -463,7 +462,7 @@ Three quotation-application behaviors exist:
   are `call`, `dip`, `keep`, `bi`, `tri`, `bi2`, `tri2`, `both`, `if`, `when`,
   `unless`, `case`, and `times`.
 - **Checkpointed inline guards**: `cond`, `while`, and `linrec` test quotations run
-  in the current scope against a retained operand-stack checkpoint. A test
+  inline against a retained operand-stack checkpoint. A test
   may consume, rearrange, or add values; its top value must be a 0/1 boolean,
   and its complete operand result is discarded before control continues from
   the checkpoint. Environment writes, IO, and other non-stack effects are
@@ -586,28 +585,33 @@ screen and out of reach.
 
 ## Bindings and scope
 
-### Scope chains
+### Roots and name slots
 
-A scope is a local binding map with a fixed parent. Unqualified resolution
-searches locally and then follows that parent chain. The complete scope shapes
-are:
+Definitions live in *roots*. There are exactly three kinds:
 
 ```text
-core           (no parent)
-session      → core
-child        → enclosing scope
-module image → core
+core           frozen; primitives and the prelude
+session        → core
+module image   → core; frozen after construction
 ```
 
-Session-authored code may therefore shadow core definitions. A child unit may
-define names visible to code authored or dynamically resolved in that child.
-A module image sees its own public and private bindings followed by core and
-never sees the invoking session. Core and prelude definitions resolve in core.
-Parentage does not change after scope creation.
+A root holds one *name slot* per name that has been written in it or defined
+in it. A slot yields the root's own binding for that name when there is one,
+and otherwise core's binding for that name; with neither it is an
+`'undefined-word` error at execution. Defining a name in a root fills its slot
+and removing the name empties it, so every occurrence linked to the slot
+observes the change at its next execution. A word read before its name is
+defined links to an empty slot that a later definition fills.
+
+Session-authored code may therefore shadow core definitions. A module image
+sees its own public and private bindings followed by core and never sees the
+invoking session. Core and prelude definitions resolve in core. There are no
+other scopes: combinator applications, `@attempt`, and tasks introduce no
+namespace of their own.
 
 `core` is a reserved qualifier, not a registration. A qualified word whose
 module segment is exactly `core` resolves its binding segment in core alone,
-skipping every session, child, and image scope, so a shadowed core definition
+skipping the session and every module image, so a shadowed core definition
 remains reachable: after `(2 *) 'dup def`, `core.dup` is still the primitive.
 Only public core bindings resolve this way; a missing or private name is
 `'undefined-word` with `'scope 'core`. `'core 'dup qualify` constructs the same
@@ -621,12 +625,12 @@ first use. `register`, `@defm`, and `unmodule` with a standard-library module
 name are `'domain`, as is `alias` with one as either the alias or its target. A
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
-Resolution scope and module home are independent parts of an activation.
-Resolution scope determines where a word's spelling is looked up. Module home
+Resolution and module home are independent parts of an activation. A word's
+slot determines where its spelling is looked up. Module home
 determines privacy and registration-owned authority. Homeless helpers preserve
 their caller's module home; dispatch into a module changes home according to
-the module rules without changing the resolution annotation carried by
-caller-supplied words.
+the module rules without changing the slots carried by caller-supplied
+words.
 
 ### Binding model
 
@@ -660,10 +664,18 @@ representations but expose the same binding model.
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
   and effect metadata, and `doc` returns documentation.
 - `'name unset` and `'name undef` are exact aliases. They remove a binding
-  only from the current writable scope and otherwise do nothing. Removing a
-  shadow reveals the next binding in the ordinary parent/core lookup chain;
-  it never mutates that parent. The name must be unqualified and non-reserved,
-  under the same namespace validation as `def`.
+  only from the current root and otherwise do nothing. Removing a shadow
+  reveals core's binding for the name; it never mutates core. The name must be
+  unqualified and non-reserved, under the same namespace validation as `def`.
+- Definitions happen only at root level. `def`, `defp`, `set`, `setp`,
+  `unset`, `undef`, and `import` write the current root, which is the session
+  for top-level code, the image for a module's construction body, and the
+  module's own image inside a module word. A word body without a module home
+  writes the root of the activation that called it. Inside a combinator
+  application (`each`, `zip-with`, `for`, `fold`, `scan`, `update`, `stencil`,
+  `unfold`, `infra`, and the words built on them), inside `@attempt`, and
+  inside a task, every one of these is `'domain`. Values local to a body
+  belong on the stack or in locals.
 - `defp`/`setp` are the private forms, legal only inside a module body
   (see Modules); at top level they are errors.
 - Because `set`/`setp` are sugar, their failures are raised by the words
@@ -902,7 +914,7 @@ anonymously, be passed as data, and be registered more than once.
   not. Definition names and aliases remain one unqualified segment. Qualified
   executable names split at their final dot, so `core.utils.f` always means
   module `core.utils`, binding `f`. The exact name `core` is reserved for the
-  core qualifier (see Scope chains): registering a module or an alias under it
+  core qualifier (see Roots and name slots): registering a module or an alias under it
   is `'domain`, while `core.utils` stays an ordinary module name. Host
   and native factories apply the reader's single scalar-level symbol-segment
   grammar; ASCII or Unicode whitespace, delimiters, malformed UTF-8, and other
@@ -932,9 +944,9 @@ anonymously, be passed as data, and be registered more than once.
   module word may be unannotated, documentation-only, effect-only, or
   both; `set`/`setp` publish the bare literal capture. Privacy is
   subtractive: private definitions are omitted entirely from the module's
-  public face. Definitions
-  made inside the module body's isolated child units (e.g. inside an
-  `@attempt`) are dynamic and are never exported.
+  public face. A
+  definition attempted inside a combinator application, an `@attempt`, or a
+  task started by the construction body is `'domain`, as it is everywhere.
 - **Tests are a distinct module-owned namespace.**
   `annotation? (body) 'name test` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
@@ -994,10 +1006,9 @@ anonymously, be passed as data, and be registered more than once.
   actually defined in. A primitive or an embedded prelude definition was
   published against core alone, so core alone is its chain: it never resolves
   against a session or a module environment, whichever happens to be
-  executing. Every other binding resolves against the scope resolution found
-  it in — the session root for a top-level definition, and the child scope
-  itself for one made inside an `@attempt`, so siblings defined in the same
-  child see each other. There is no case where a binding resolves against a
+  executing. Every other binding resolves against the root it was defined in: the
+  session for a top-level definition and the image for a module's. There is
+  no case where a binding resolves against a
   chain it was not defined in. So a module exporting a word named like a core one shadows it
   for that module's own callers, never inside the prelude words the module
   calls: `table.where` will shadow bare references to `where` inside of
@@ -1185,7 +1196,7 @@ anonymously, be passed as data, and be registered more than once.
   splits at its final dot into a module name and a public binding name. The
   module name selects a canonical registration directly or through an alias,
   except that the reserved module segment `core` selects the core scope (see
-  Scope chains) and never consults the registry.
+  Roots and name slots) and never consults the registry.
   A missing registration or public binding raises `'undefined-word`.
   Filesystem search, embedded resources, module maps, native loading, and
   eager or on-demand acquisition are host facilities outside the language

@@ -354,11 +354,11 @@ The lowering produces ordinary forms consumed directly by the frame machine.
 This keeps the machine point-free and local lifetime visible: the lowered
 prefix moves inputs into locals, indexed reads retrieve them, and a final
 operation drops the region. The three backend names are reserved from every
-publication, so in every scope they can only mean their core primitives. The
-machine binds them by interned name when the activation holds the word's
-stamped scope; foreign stamps take ordinary resolution, including its retired
-scope failure. The reader preserves source spans for the produced forms,
-keeping diagnostics anchored to the user's source.
+publication, so they can only mean their core primitives. Lowering emits them
+unlinked, and the machine binds an unlinked backend word by interned name
+without reading a slot; a linked one, written as ordinary text, dispatches
+through its slot like any word. The reader preserves source spans for the
+produced forms, keeping diagnostics anchored to the user's source.
 
 ### Source metadata lives on a separate code plane
 
@@ -563,41 +563,40 @@ late binding, and each occurrence's definition context.
 
 ### The word occurrence is the unit of resolution
 
-A `WordRef` stores an interned name and a `ScopeId`. The reader stamps each
-word occurrence with the scope in which its text was read. Copying, moving, or
-splicing a word copies that stamp, so a single quotation may contain words from
-several origins.
+Definitions live in roots: the session, each module image, and core. A
+`WordRef` stores an interned name and a link to that name's *slot* in the root
+its text was written in. The reader links each word occurrence as it reads it;
+a module construction body is relinked to its image's slots; a word built at
+run time links to the root of the activation that built it, and one the
+implementation builds for itself links to core. Copying, moving, or splicing a
+word copies its link, so a single quotation may contain words from several
+roots.
 
 This is a syntactic closure that captures resolution context and no values:
 
-- a stamped word resolves through the chain it was written against;
-- an unscoped word constructed at runtime resolves where it is invoked; and
-- the quotation containing either word has no single captured environment.
+- a linked word resolves in the root it was written in, falling back to core;
+- the quotation containing it has no single captured environment.
 
 Putting context on the identifier is what makes ordinary list concatenation
 correct. A quotation-wide environment would lose the origins of words spliced
 from different sources. The design takes its cue from Bawden and Rees's
 syntactic closures and Flatt's scope-carrying identifiers, but ecl has no macro
-expansion. Its scopes form a parent chain, so one innermost identity plus that
-chain is sufficient; a set of expansion scopes and subset disambiguation would
-add machinery with no semantic work to do.
+expansion and no nested scopes, so one root per identifier is the whole
+context.
 
-Scope IDs index stable cells and carry no ownership. Resolving through a cell
-acquires and validates the relevant scope or module owner before dereferencing
-it. IDs increase monotonically, and an identifier naming a retired image
-resolves to a definite retired-domain failure.
+A slot belongs to one root and names one binding cell: the root's own binding
+for its name, else core's, else nothing. A word linked before its name is
+defined links to an empty slot that a later definition fills.
 
 ### Lookup is late and definitions are stable publication points
 
-Environments are short chains: a child reaches its parent, a session scope
-reaches the session environment and then core, and a module reaches its own
-environment and then core. There is no implicit import-order tier. Qualified
-module lookup and explicit import are separate operations.
-
 Each environment publishes an immutable name-to-cell shape. A binding cell is
-stable, while its immutable payload snapshot may be replaced. Executing a word
-therefore performs a fresh lookup and loads the cell's current payload. Existing
-code sees a redefinition in a mutable scope while its own values stay unchanged.
+stable, while its immutable payload snapshot may be replaced. A slot shares its
+root's cell for its name: a binding made while the slot exists reuses the
+slot's cell, so the cell's identity never changes, and removing the name only
+clears the slot's bound flag. Executing a word reads its slot and loads the
+cell's current payload, so a redefinition reaches every existing occurrence at
+its next execution, including combinator bodies already running.
 
 A binding payload is one closed choice:
 
@@ -606,29 +605,50 @@ A binding payload is one closed choice:
 - a validated native callable.
 
 Effect metadata, documentation, visibility, source slices, and module-local
-diagnostic identity travel in the same snapshot. Readers acquire leases;
-writers build before taking the publication lock, validate and swap in constant
-time, and retire the old snapshot after unlocking.
+diagnostic identity travel in the same snapshot. Writers build before taking
+the publication lock, validate and swap in constant time, and retire the old
+snapshot after unlocking. Reclamation is epoch-based, in the read-side form
+of Fraser's EBR and userspace RCU: a word dispatch opens a read section that
+records the domain's epoch, borrows the current snapshot with one load and no
+references, and clears the record when it has retained whatever it keeps (a
+scheduled body, an effect, a native call). A replaced snapshot retires once no
+open section predates its replacement. A slice that is not dispatching never
+delays reclamation; a thread descheduled inside a dispatch does until it runs
+again, the scheme's known limit, against which a robust scheme such as
+interval-based reclamation would trade a per-read reservation. Readers outside
+a slice, such as reflection, acquire counted leases instead.
 
-Execution and shadow inspection consume the same bounded lexical candidate
-walk: the written or current scope chain, followed by public core bindings.
-Each candidate carries its location and owned binding lease; execution may
-also request a captured cell for its cache. Execution consumes the first hit,
-while shadow inspection continues through later hits. Qualified loading,
-generation pins, and execution authority remain outside that shared walk.
+Slots are reached two ways, and their lifetimes follow. A session or core slot
+has an id in a lock-free directory whose ids are never reused; those roots
+never retire before the `Env`, so their slots live as long as it does. A word
+written in a module image instead carries the image's scope id with a tag bit,
+and finds its slot by name in the image's fixed bucket table once the image is
+proven live. Images churn, so their slots take no directory id and are freed
+with the image; nothing outside a live image can reach them.
+
+A slot that yields nothing a plain word may run — a qualified name, one awaiting
+autoload, an undefined word, or only a private core binding — falls back to the
+resolution cursor, which looks in the word's root and then core, or through the
+registry for a dotted name. Shadow inspection uses the same bounded walk and
+continues past the first hit. Qualified loading, generation pins, and execution
+authority remain outside it.
 
 ### An execution site correlates three contexts
 
 An activation needs three related but non-identical facts:
 
-- `scope`: where its own definitions land and what invoked unscoped
-  quotations inherit;
-- `resolution_scope`: where its stamped body references resolve; and
+- `scope`: the root its own definitions land in, and whether they may;
+- `resolution_scope`: the root reflection and unlinked words resolve in; and
 - `home`: the module image and registration whose privacy and durable state it
   may use.
 
-`ExecutionSite` carries them together and exposes named constructors for root,
-image, inherited, and resumed execution. They cannot safely be reconstructed
+Whether definitions may land is a flag on the site. Top-level code and module
+construction set it; isolated combinator applications, `@attempt`, and tasks
+clear it; everything else inherits it from its invoker, so a helper that
+defines works at top level and is refused inside an `each`. That flag, not a
+child scope, is what keeps those bodies from defining: they run in their
+invoker's root. `ExecutionSite` carries these together and exposes named
+constructors for root, image, inherited, and resumed execution. They cannot safely be reconstructed
 from one another. A source definition may resolve against its defining chain
 while inheriting a caller's module home, and an anonymous module image may have
 private code but no registered state slot.
@@ -663,43 +683,11 @@ turns the result into an execution pin before code runs. A Unit retains each
 generation it dispatches through. A module-local word can therefore keep
 running during replacement without a raw environment pointer escaping.
 
-Each Unit has a fixed-capacity source-occurrence cache. A first successful
-plain lookup records its resolution context; a repeat in that context admits
-scope observations. Plain lexical and core
-hits own a binding cell and validate every preceding searched scope, including
-the absence of an environment. Shape publication brackets its revision so a
-candidate derived during mutation is rejected. Rebinding loads the current
-cell value; adding, removing, or shadowing a name invalidates the observed
-shape. Guards cover at most eight scopes; deeper chains keep using resumable
-resolution. A bounded Unit-owned pool stores guards outside hot cursor result
-payloads; slot reuse invalidates both old entries and unfinished candidates.
-The starting scope identity selects an immutable parent chain, whose live scopes
-keep their once-installed environments alive. That identity is the stamped
-scope the running activation resolves in directly: the running scope, or an
-ancestor reached only through scopes that have no environment, such as the
-child a combinator applies its body in. The reach is established afresh at
-every dispatch, so a child that binds a name leaves the cache for the rest of
-that application. A module-local cache context also requires the activation's
-home to belong to the stamped module root; foreign homes use ordinary
-resolution. Guards retain revisions rather
-than snapshot readers, so a dormant entry cannot prevent reclamation of
-publication history. Execution context and the existing module generation
-guards continue to determine
-authority and visibility. Lookup continuations fit a bounded 736-byte inline
-driver slot, including their lexical observation tokens.
-Within each bounded cache set, lexical entries are evicted before generation
-or module-local entries; adding lexical coverage cannot displace those existing
-specializations at other source occurrences.
-
-A data combinator's call owns a resolution plan for its quotation: one leased
-resolution per word position, kept from that word's first plain resolution in
-the call and released with the call. Each application's activation reaches the
-plan through its application frame and uses it only while running that exact
-quotation in a scope that has bound nothing, so nested quotations, callee
-bodies, and an application that defines a name resolve as before. A resolution
-carrying a module home, generation, pin, or borrowed scope is never planned.
-The lease keeps the planned binding's snapshot alive, which is what makes a
-replacement during the call invisible to it until its next call.
+Qualified words keep a small per-Unit cache keyed by source occurrence. A hit
+holds the binding cell and the registration generation it was found under, and
+is valid only while that generation is still the registration's current one; a
+stale entry is evicted and the word resolves afresh. Plain words need no cache:
+their slots answer directly.
 
 The reserved qualifier `core` is decided before any of that. When the
 resolution cursor splits a dotted spelling and the module segment is exactly
@@ -1510,7 +1498,8 @@ alive:
 - a binding or shape lease;
 - a directory or generation lease;
 - a module generation pin;
-- a scope-cell borrow paired with image liveness; or
+- the running activation's own image, or a pin taken on a slot's image root
+  before its slot is read; or
 - a source slice that retains its backing allocation.
 
 Observation capabilities return metadata or pinned cursors. They do not expose

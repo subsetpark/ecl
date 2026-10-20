@@ -260,17 +260,16 @@ test "binding: set installs and replaces values while let is absent" {
     try expectErrorContains(&runtime, "3 'bad def", &.{ "'kind 'type", "use set for values" });
 }
 
-test "scope: isolated @attempt and child import do not leak" {
+test "scope: @attempt refuses definitions and imports" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "[] (1 'k set) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectErrorContains(&runtime, "[] ([] (1 'k set missing) @attempt pop) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
+    try expectErrorContains(&runtime, "[] (1 'k set) @attempt 'err at raise", &.{ "'kind 'domain", "'word 'def" });
     try expectOk(&runtime, "[] (7 'x set) 'm @defm");
-    try expectErrorContains(&runtime, "[] ('m ('x) import x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
+    try expectErrorContains(&runtime, "[] ('m ('x) import x) @attempt 'err at raise", &.{ "'kind 'domain", "'word 'import" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
@@ -291,8 +290,6 @@ test "module: privacy module-body contract top-level private and qualified trace
     // durable stack. They create no bindings, so no name appears for them.
     try expectOk(&runtime, "[] (1) 'bad @defm");
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "[] ([] (1 'hidden set) @attempt pop) 'temporary @defm");
-    try expectErrorContains(&runtime, "temporary.hidden", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "[] (( -- n ) (missing) 'boom def) 'trace-module @defm");
     try expectErrorContains(&runtime, "trace-module.boom", &.{ "'word 'missing", "'trace ['missing 'trace-module.boom]" });
     try expectOk(&runtime, "[] (( n -- n ) (dup 0 > (1 - f 1 +) (pop missing) if) 'f def) 'recursive @defm");
@@ -495,22 +492,6 @@ test "module: import inside a module body binds module-locally" {
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     // The binding landed exclusively in the image built by `@defm`.
     try expectErrorContains(&runtime, "x", &.{ "'kind 'undefined-word", "'word 'x" });
-}
-
-test "scope: a binding resolves in the scope it was defined in, child scopes included" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    // Both definitions land in the `@attempt` child, so the second resolves
-    // the first. Reading the unit root instead left siblings invisible to each
-    // other, which was the last exception to "resolves where it was defined".
-    try expectOk(&runtime, "[] ((1) 'helper def (helper) 'caller def caller) @attempt 'ok at first");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
-    // A child definition is still dynamic: it does not outlive its boundary.
-    try expectErrorContains(&runtime, "helper", &.{ "'kind 'undefined-word", "'word 'helper" });
 }
 
 test "scope: an undefined word names the chain it searched" {

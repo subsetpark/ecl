@@ -235,9 +235,9 @@ test "numeric: result materialization remains cancellable" {
     defer runtime.deinit();
     try runtime.pushBorrowed(input);
     try std.testing.expect((try runtime.runUnit("<test>", "1 + pop")) == .ok);
-    // One poll comes from computation; profiling and copying the result
-    // each contribute another full traversal.
-    try std.testing.expect(runtime.lastPolls() >= 3);
+    // The typed kernel writes its result directly, so the one traversal of
+    // more than a kernel quantum is what polls.
+    try std.testing.expect(runtime.lastPolls() >= 1);
 }
 
 test "numeric: short kernel loops share the unit poll budget" {

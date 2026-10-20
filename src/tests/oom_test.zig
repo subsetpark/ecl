@@ -557,13 +557,13 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-combinators.ecl",
         "[(1) (111) (222)] cond pop " ++
             "1 (dup 0 =) () (1 -) () linrec pop " ++
-            "[1 2 3] (dup 'each-local set each-local *) each pop " ++
-            "[1] [2] (pop dup 'zip-with-local set zip-with-local pop) zip-with pop " ++
-            "[1] (dup 'for-local set pop) for " ++
+            "[1 2 3] (|x| x x *) each pop " ++
+            "[1] [2] (|a b| a) zip-with pop " ++
+            "[1] (|x| x pop) for " ++
             "{'a 1} (1 + pop) for " ++
-            "[1] 0 (+ dup 'fold-local set) fold pop " ++
-            "[1] 0 (+ dup 'scan-local set) scan pop " ++
-            "[1] (dup 'infra-local set) infra pop " ++
+            "[1] 0 (|acc x| acc x +) fold pop " ++
+            "[1] 0 (|acc x| acc x +) scan pop " ++
+            "[1] (|x| x) infra pop " ++
             "[1 2] 2 (sum) stencil pop " ++
             "1 (0 >) (dup 1 - swap) unfold pop pop " ++
             // Capture-shape recognition allocates on its own path (the fused

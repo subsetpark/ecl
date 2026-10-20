@@ -122,12 +122,16 @@ def main():
                 return result.stdout if ok else result.stderr
 
             def fetch(req, filename):
+                # Locals rather than set: the concurrent and recovered
+                # phases run this inside @spawn and @attempt, which may not
+                # define. The reader stays beneath the accumulator so the loop
+                # body reaches it with over instead of capturing it.
                 return (
-                    'git.snapshot [] port.open \'p set p git.fetch ' + req + ' port.begin \'x set '
-                    'x git.output port.endpoint \'r set [] r 65536 port.read '
-                    '(dup empty? not) (cat r 65536 port.read) while pop '
+                    'git.snapshot [] port.open (|p| p git.fetch ' + req + ' port.begin (|x| '
+                    'x git.output port.endpoint [] over 65536 port.read '
+                    '(dup empty? not) (cat over 65536 port.read) while pop nip '
                     "'cwd " + json.dumps(filename) + ' fs.create-bytes '
-                    'x port.result x port.close p port.close'
+                    'x port.result x port.close) call p port.close) call'
                 )
 
             for selector, revision, filename in [('tag', 'release', 'tag.tgz'),

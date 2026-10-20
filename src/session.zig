@@ -1310,7 +1310,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             try evaluator.callOwned(body.take().list);
         }
         fn reflect(evaluator: *machine.Machine) machine.MachineError!void {
-            try evaluator.executeWord(.{ .name = try intern.intern("which"), .scope = 0 });
+            try evaluator.executeWord(.{ .name = try intern.intern("which") });
         }
     };
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);

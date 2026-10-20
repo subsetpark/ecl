@@ -403,7 +403,7 @@ const AtomBuilder = struct {
     quoted: bool,
     /// The scope the words this atom yields were written in — the reading
     /// unit's. Zero for a quoted name, which is inert data.
-    word_scope: u32,
+    word_linker: value.WordLinker,
     classifier: ?lexer.ClassifyCursor = null,
     classification: ?lexer.Classification = null,
     symbol: ?lexer.SymbolCursor = null,
@@ -415,10 +415,10 @@ const AtomBuilder = struct {
     /// which is why recognition is a cursor step rather than a comparison.
     marker: enum { none, module, task_digits, port_digits },
 
-    fn init(token: Token, quoted: bool, word_scope: u32) AtomBuilder {
+    fn init(token: Token, quoted: bool, word_linker: value.WordLinker) AtomBuilder {
         return .{
             .token = token,
-            .word_scope = word_scope,
+            .word_linker = word_linker,
             .quoted = quoted,
             .marker = if (quoted)
                 .none
@@ -514,7 +514,7 @@ const AtomBuilder = struct {
                 else
                     // The unit that read this text is the scope the word was
                     // written in. A quoted name is inert data and stays unscoped.
-                    .{ .word = .{ .name = id, .scope = self.word_scope } },
+                    .{ .word = .{ .name = id, .slot = try self.word_linker.link(id) } },
             },
         };
     }
@@ -542,7 +542,7 @@ const StringBuilder = struct {
     token: Token,
     spans: *reader.SpanTable,
     provenance_namespace: heap.CodeProvenanceNamespace,
-    word_scope: u32,
+    word_linker: value.WordLinker,
     state: State,
 
     const Unicode = union(enum) {
@@ -642,14 +642,14 @@ const StringBuilder = struct {
         token: Token,
         spans: *reader.SpanTable,
         provenance_namespace: heap.CodeProvenanceNamespace,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) StringBuilder {
         return .{
             .allocator = allocator,
             .token = token,
             .spans = spans,
             .provenance_namespace = provenance_namespace,
-            .word_scope = word_scope,
+            .word_linker = word_linker,
             .state = .{ .parsing = .{
                 .line = token.span.line,
                 .col = token.span.col + 1,
@@ -997,7 +997,7 @@ const CollectionBuilder = struct {
     spans: *reader.SpanTable,
     diag: *reader.Diag,
     provenance_namespace: heap.CodeProvenanceNamespace,
-    word_scope: u32,
+    word_linker: value.WordLinker,
     state: State = .allocate_body,
 
     const Forms = union(enum) {
@@ -1164,7 +1164,7 @@ const CollectionBuilder = struct {
         spans: *reader.SpanTable,
         diag: *reader.Diag,
         provenance_namespace: heap.CodeProvenanceNamespace,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) CollectionBuilder {
         return .{
             .allocator = allocator,
@@ -1173,7 +1173,7 @@ const CollectionBuilder = struct {
             .spans = spans,
             .diag = diag,
             .provenance_namespace = provenance_namespace,
-            .word_scope = word_scope,
+            .word_linker = word_linker,
         };
     }
     fn deinit(self: *CollectionBuilder, releases: *heap.ReleaseDomain) void {
@@ -1443,7 +1443,7 @@ const ParserCursor = struct {
     spans: *reader.SpanTable,
     diag: *reader.Diag,
     provenance_namespace: heap.CodeProvenanceNamespace,
-    word_scope: u32,
+    word_linker: value.WordLinker,
     state: State = .reading,
     retirement_phase: enum { state, contexts, storage, complete } = .state,
 
@@ -1454,7 +1454,7 @@ const ParserCursor = struct {
         spans: *reader.SpanTable,
         diag: *reader.Diag,
         provenance_namespace: heap.CodeProvenanceNamespace,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) error{OutOfMemory}!ParserCursor {
         return .{
             .allocator = allocator,
@@ -1466,7 +1466,7 @@ const ParserCursor = struct {
             .spans = spans,
             .diag = diag,
             .provenance_namespace = provenance_namespace,
-            .word_scope = word_scope,
+            .word_linker = word_linker,
         };
     }
     fn deinit(self: *ParserCursor) void {
@@ -1532,15 +1532,15 @@ const ParserCursor = struct {
     fn beginScalar(self: *ParserCursor, token: Token) error{Parse}!void {
         std.debug.assert(self.state == .reading);
         self.state = .{ .scalar = switch (token.kind) {
-            .atom => .{ .atom = .init(token, false, self.word_scope) },
-            .quoted => .{ .atom = .init(token, true, self.word_scope) },
+            .atom => .{ .atom = .init(token, false, self.word_linker) },
+            .quoted => .{ .atom = .init(token, true, self.word_linker) },
             .character => .{ .character = .init(token) },
             .string => .{ .string = .init(
                 self.allocator,
                 token,
                 self.spans,
                 self.provenance_namespace,
-                self.word_scope,
+                self.word_linker,
             ) },
             .semicolon => {
                 self.diag.set(token.span, "`;` is reserved");
@@ -1648,7 +1648,7 @@ const ParserCursor = struct {
             self.spans,
             self.diag,
             self.provenance_namespace,
-            self.word_scope,
+            self.word_linker,
         ) };
         // SAFETY: CollectionBuilder owns every allocation formerly held by
         // `context`; the moved-from local is never observed again.
@@ -1719,7 +1719,7 @@ pub const ReadCursor = struct {
     source: []const u8,
     diag: *reader.Diag,
     provenance_namespace: heap.CodeProvenanceNamespace,
-    word_scope: u32,
+    word_linker: value.WordLinker,
     tokens: TokenList,
     spans: reader.SpanTable,
     state: State,
@@ -1769,7 +1769,7 @@ pub const ReadCursor = struct {
             spans: *reader.SpanTable,
             diag: *reader.Diag,
             provenance_namespace: heap.CodeProvenanceNamespace,
-            word_scope: u32,
+            word_linker: value.WordLinker,
         ) error{OutOfMemory}!ParserOwner {
             const cursor = try allocator.create(ParserCursor);
             errdefer allocator.destroy(cursor);
@@ -1780,7 +1780,7 @@ pub const ReadCursor = struct {
                 spans,
                 diag,
                 provenance_namespace,
-                word_scope,
+                word_linker,
             );
             return .{ .allocator = allocator, .cursor = cursor };
         }
@@ -1855,7 +1855,7 @@ pub const ReadCursor = struct {
         source: []const u8,
         diag: *reader.Diag,
     ) ReadCursor {
-        return initCode(allocator, releases, source_name, source, diag, .none, 0);
+        return initCode(allocator, releases, source_name, source, diag, .none, .unlinked);
     }
 
     pub fn initCode(
@@ -1865,7 +1865,7 @@ pub const ReadCursor = struct {
         source: []const u8,
         diag: *reader.Diag,
         provenance_namespace: heap.CodeProvenanceNamespace,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) ReadCursor {
         const tokens = TokenList.init(allocator);
         diag.* = .{};
@@ -1876,7 +1876,7 @@ pub const ReadCursor = struct {
             .source = source,
             .diag = diag,
             .provenance_namespace = provenance_namespace,
-            .word_scope = word_scope,
+            .word_linker = word_linker,
             .tokens = tokens,
             .spans = .init(allocator),
             .state = .{ .tokenize = .init(source, null) },
@@ -2035,7 +2035,7 @@ pub const ReadCursor = struct {
                         &self.spans,
                         self.diag,
                         self.provenance_namespace,
-                        self.word_scope,
+                        self.word_linker,
                     );
                     self.state = .{ .parse = parser };
                     break :result .pending;
@@ -2188,7 +2188,7 @@ pub fn read(
     source: []const u8,
     diag: *reader.Diag,
 ) (error{ OutOfMemory, Parse })!reader.HostReadResult {
-    return readCode(host, source_name, source, diag, .none, 0);
+    return readCode(host, source_name, source, diag, .none, .unlinked);
 }
 
 pub fn readCode(
@@ -2197,7 +2197,7 @@ pub fn readCode(
     source: []const u8,
     diag: *reader.Diag,
     provenance_namespace: heap.CodeProvenanceNamespace,
-    word_scope: u32,
+    word_linker: value.WordLinker,
 ) (error{ OutOfMemory, Parse })!reader.HostReadResult {
     const allocator = host.allocator();
     const releases = heap.hostDomain(host);
@@ -2208,7 +2208,7 @@ pub fn readCode(
         source,
         diag,
         provenance_namespace,
-        word_scope,
+        word_linker,
     );
     defer cursor.deinitHost();
     return switch (try poll.driveFallible(reader.ReadResult, &cursor, .{})) {

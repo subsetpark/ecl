@@ -2009,7 +2009,11 @@ pub const WorkerScheduler = enum(usize) {
             .inherited => |site| site.scope,
             .module => |home| home.scope(request.parent_unit.module_access),
         };
-        unit.replaceRootScope(env.Scope.lazy(self.allocator(), parent_scope));
+        // A task runs in its spawner's scope, which is always a root: the
+        // session, which outlives every task in it, or a module image, which
+        // the generation pin below keeps alive. It may not define there.
+        unit.execution_scope = parent_scope;
+        unit.root_defining = false;
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;

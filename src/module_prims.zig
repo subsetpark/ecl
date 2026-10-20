@@ -185,6 +185,7 @@ fn withoutWord(evaluator: *Machine) MachineError!void {
 
 fn importWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
+    _ = try evaluator.definitionScope();
     var requested = try evaluator.popList();
     errdefer requested.deinit();
     const module_id = try evaluator.popSymbol();
@@ -405,9 +406,11 @@ const ImportDriver = struct {
                 }
             }
             if (self.forwarding_body == null) {
+                // The forwarding word is written into the importing root.
+                const linker = try evaluator.rootLinker(self.scope);
                 self.forwarding_body = .init(try list.fromValuesGeneric(
                     evaluator.allocator(),
-                    &.{.{ .word = .{ .name = requested.qualified } }},
+                    &.{.{ .word = .{ .name = requested.qualified, .slot = try linker.link(requested.qualified) } }},
                 ));
                 continue;
             }
@@ -566,7 +569,7 @@ const QualifyDriver = struct {
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |word| return .{ .output = .{ .word = .{ .name = word } } },
+                .complete => |word| return .{ .output = .{ .word = try evaluator.linkedWord(word) } },
             }
         }
         return .stepped;

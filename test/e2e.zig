@@ -1507,11 +1507,11 @@ test "e2e: M6 combinators parse and contract payloads" {
     defer rebound.deinit();
     try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
-    var isolated = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup 'k set k *) each pop k" });
-    defer isolated.deinit();
-    try isolated.expect(.{
+    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup 'k set k *) each" });
+    defer refused.deinit();
+    try refused.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'undefined-word", "'word 'k" },
+        .stderr_contains = &.{ "'kind 'domain", "definitions are legal only at root level" },
     });
 }
 

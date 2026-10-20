@@ -96,18 +96,35 @@ pub const DictPayload = struct {
     hashes: *ListHandle,
 };
 
-/// A word occurrence: its interned name, and the scope its text was written
-/// in. The scope rides here rather than on the enclosing quotation because a
-/// word is the unit that resolves — which is what makes splicing work, since
-/// `cat` copies `Value`s and each token keeps the scope it was written in. It
-/// costs nothing: `Value` is pinned at 16 bytes and the `word` variant used
-/// four of its eight payload bytes.
+/// A word occurrence: its interned name, and its name's slot in the root its
+/// text was written in. The slot rides here rather than on the enclosing
+/// quotation because a word is the unit that resolves — which is what makes
+/// splicing work, since `cat` copies `Value`s and each token keeps the slot it
+/// was linked to. It costs nothing: `Value` is pinned at 16 bytes and the
+/// `word` variant used four of its eight payload bytes.
 pub const WordRef = struct {
     name: u32,
-    /// `env.ScopeId` as a bare integer, kept untyped here so `value.zig` stays
-    /// free of any dependency on the environment. Zero is "no written-in
-    /// scope", which resolves wherever the word is invoked.
-    scope: u32 = 0,
+    /// `env.SlotId` as a bare integer, kept untyped here so `value.zig` stays
+    /// free of any dependency on the environment. Zero is a word linked to
+    /// nothing, which only the locals backend's reserved words are.
+    slot: u32 = 0,
+};
+
+/// How a producer of word occurrences links each one to its name's slot in
+/// the root it writes into. Carried by value through the reader so that
+/// neither the reader nor `value.zig` depends on the environment. The
+/// context is two opaque words the link function alone interprets.
+pub const WordLinker = struct {
+    context: [2]usize = .{ 0, 0 },
+    link_fn: ?*const fn (context: [2]usize, name: u32) error{OutOfMemory}!u32 = null,
+
+    /// Links nothing: every word it produces carries slot zero.
+    pub const unlinked: WordLinker = .{};
+
+    pub fn link(self: WordLinker, name: u32) error{OutOfMemory}!u32 {
+        const function = self.link_fn orelse return 0;
+        return function(self.context, name);
+    }
 };
 
 pub const Value = union(Tag) {
