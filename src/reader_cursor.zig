@@ -20,7 +20,6 @@ const FormList = poll.ChunkList(locals.SpannedValue);
 const NameList = poll.ChunkList(locals.Name);
 const TokenList = poll.ChunkList(Token);
 const CodepointList = poll.ChunkList(u32);
-const SpanList = poll.ChunkList(Span);
 const max_nesting_depth = 10_000;
 
 const TokenKind = enum {
@@ -562,12 +561,12 @@ const AtomBuilder = struct {
     }
 };
 
+/// A string literal's codepoints. The string keeps one source position, its
+/// own, in its enclosing list; its characters are data and record none.
 const StringBuilder = struct {
     allocator: std.mem.Allocator,
     token: Token,
-    spans: *reader.SpanTable,
     provenance_namespace: heap.CodeProvenanceNamespace,
-    word_linker: value.WordLinker,
     state: State,
 
     const Unicode = union(enum) {
@@ -582,46 +581,23 @@ const StringBuilder = struct {
         /// Over the token's body, positioned in source coordinates.
         cursor: lexer.Cursor,
         codepoints: CodepointList,
-        char_spans: SpanList,
         unicode: Unicode = .ordinary,
 
         fn retire(self: *Parsing, releases: *heap.ReleaseDomain) void {
             self.codepoints.retire(releases);
-            self.char_spans.retire(releases);
         }
-    };
-    const AllocatedCodepoints = struct {
-        parsing: Parsing,
-        codepoints: []u32,
-    };
-    const Copying = struct {
-        parsing: Parsing,
-        codepoints: []u32,
-        spans: []Span,
-        iterator: CodepointList.Iterator,
-        index: usize = 0,
     };
     const State = union(enum) {
         parsing: Parsing,
-        allocate_codepoints: Parsing,
-        allocate_spans: AllocatedCodepoints,
-        copy_codepoints: Copying,
-        copy_spans: struct {
+        gather: struct {
             parsing: Parsing,
             codepoints: []u32,
-            spans: []Span,
-            iterator: SpanList.Iterator,
+            from: CodepointList.Iterator,
             index: usize = 0,
         },
         materialize: struct {
             codepoints: []u32,
-            spans: []Span,
             materializer: list.CodepointMaterializer,
-        },
-        spans: struct {
-            spans: []Span,
-            result: Value,
-            writer: reader.SpanTable.PutCursor,
         },
         complete,
 
@@ -631,30 +607,14 @@ const StringBuilder = struct {
             allocator: std.mem.Allocator,
         ) void {
             switch (self.*) {
-                .parsing, .allocate_codepoints => |*parsing| parsing.retire(releases),
-                .allocate_spans => |*allocated| {
-                    allocator.free(allocated.codepoints);
-                    allocated.parsing.retire(releases);
-                },
-                .copy_codepoints => |*copy| {
-                    allocator.free(copy.spans);
-                    allocator.free(copy.codepoints);
-                    copy.parsing.retire(releases);
-                },
-                .copy_spans => |*copy| {
-                    allocator.free(copy.spans);
-                    allocator.free(copy.codepoints);
-                    copy.parsing.retire(releases);
+                .parsing => |*parsing| parsing.retire(releases),
+                .gather => |*gather| {
+                    allocator.free(gather.codepoints);
+                    gather.parsing.retire(releases);
                 },
                 .materialize => |*materialization| {
                     materialization.materializer.retire(releases);
-                    allocator.free(materialization.spans);
                     allocator.free(materialization.codepoints);
-                },
-                .spans => |*span_state| {
-                    span_state.writer.deinit();
-                    releases.releaseValue(span_state.result);
-                    allocator.free(span_state.spans);
                 },
                 .complete => {},
             }
@@ -664,20 +624,15 @@ const StringBuilder = struct {
     fn init(
         allocator: std.mem.Allocator,
         token: Token,
-        spans: *reader.SpanTable,
         provenance_namespace: heap.CodeProvenanceNamespace,
-        word_linker: value.WordLinker,
     ) StringBuilder {
         return .{
             .allocator = allocator,
             .token = token,
-            .spans = spans,
             .provenance_namespace = provenance_namespace,
-            .word_linker = word_linker,
             .state = .{ .parsing = .{
                 .cursor = .{ .source = token.bytes, .line = token.span.line, .col = token.span.col + 1 },
                 .codepoints = .init(allocator),
-                .char_spans = .init(allocator),
             } },
         };
     }
@@ -687,9 +642,8 @@ const StringBuilder = struct {
     fn retire(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
         self.state.retire(releases, self.allocator);
     }
-    fn append(parsing: *Parsing, codepoint: u32, span: Span) error{OutOfMemory}!void {
+    fn append(parsing: *Parsing, codepoint: u32) error{OutOfMemory}!void {
         try parsing.codepoints.append(codepoint);
-        try parsing.char_spans.append(span);
     }
     fn failUnknown(self: *StringBuilder, diag: *reader.Diag, codepoint: u21, span: Span) error{Parse} {
         _ = self;
@@ -717,7 +671,7 @@ const StringBuilder = struct {
                         diag.set(unicode.span, "invalid Unicode escape");
                         return error.Parse;
                     }
-                    try append(parsing, unicode.value, unicode.span);
+                    try append(parsing, unicode.value);
                     parsing.unicode = .ordinary;
                     return .pending;
                 }
@@ -738,7 +692,7 @@ const StringBuilder = struct {
         const span = parsing.cursor.span();
         const next = parsing.cursor.bump().?;
         if (next != '\\') {
-            try append(parsing, next, span);
+            try append(parsing, next);
             return .pending;
         }
         if (parsing.cursor.atEnd()) {
@@ -758,9 +712,10 @@ const StringBuilder = struct {
             } else return self.failUnknown(diag, escaped, span),
             else => return self.failUnknown(diag, escaped, span),
         };
-        try append(parsing, codepoint, span);
+        try append(parsing, codepoint);
         return .pending;
     }
+    /// Gathering codepoints takes further budget units, one a codepoint.
     fn advance(
         self: *StringBuilder,
         releases: *heap.ReleaseDomain,
@@ -771,88 +726,35 @@ const StringBuilder = struct {
             .parsing => |*parsing| switch (try self.parseOne(parsing, diag)) {
                 .pending => .pending,
                 .complete => result: {
+                    const codepoints = try self.allocator.alloc(u32, parsing.codepoints.count);
                     const moved = parsing.*;
-                    self.state = .{ .allocate_codepoints = moved };
+                    self.state = .{ .gather = .{
+                        .parsing = moved,
+                        .codepoints = codepoints,
+                        .from = moved.codepoints.iterator(),
+                    } };
                     break :result .pending;
                 },
             },
-            .allocate_codepoints => |*parsing| result: {
-                const codepoints = try self.allocator.alloc(u32, parsing.codepoints.count);
-                const moved = parsing.*;
-                self.state = .{ .allocate_spans = .{
-                    .parsing = moved,
-                    .codepoints = codepoints,
-                } };
-                break :result .pending;
-            },
-            .allocate_spans => |*allocated| result: {
-                const spans = try self.allocator.alloc(Span, allocated.parsing.char_spans.count);
-                const parsing = allocated.parsing;
-                const codepoints = allocated.codepoints;
-                self.state = .{ .copy_codepoints = .{
-                    .parsing = parsing,
-                    .codepoints = codepoints,
-                    .spans = spans,
-                    .iterator = parsing.codepoints.iterator(),
-                } };
-                break :result .pending;
-            },
-            .copy_codepoints => |*copy| if (copy.iterator.next()) |item| result: {
-                copy.codepoints[copy.index] = item.*;
-                copy.index += 1;
-                break :result .pending;
-            } else result: {
-                const parsing = copy.parsing;
-                const codepoints = copy.codepoints;
-                const spans = copy.spans;
-                self.state = .{ .copy_spans = .{
-                    .parsing = parsing,
-                    .codepoints = codepoints,
-                    .spans = spans,
-                    .iterator = parsing.char_spans.iterator(),
-                } };
-                break :result .pending;
-            },
-            .copy_spans => |*copy| if (copy.iterator.next()) |item| result: {
-                copy.spans[copy.index] = item.*;
-                copy.index += 1;
-                break :result .pending;
-            } else result: {
-                const codepoints = copy.codepoints;
-                const spans = copy.spans;
-                const materializer = list.CodepointMaterializer.initCode(
-                    self.allocator,
-                    codepoints,
-                    self.provenance_namespace,
-                );
-                copy.parsing.retire(releases);
+            .gather => |*gather| result: {
+                for (0..work.chunk(gather.codepoints.len - gather.index)) |_| {
+                    gather.codepoints[gather.index] = gather.from.next().?.*;
+                    gather.index += 1;
+                }
+                if (gather.index != gather.codepoints.len) break :result .pending;
+                const codepoints = gather.codepoints;
+                gather.parsing.retire(releases);
                 self.state = .{ .materialize = .{
                     .codepoints = codepoints,
-                    .spans = spans,
-                    .materializer = materializer,
+                    .materializer = .initCode(self.allocator, codepoints, self.provenance_namespace),
                 } };
                 break :result .pending;
             },
             .materialize => |*materialization| switch (try poll.advanceOne(&materialization.materializer)) {
                 .pending => .pending,
                 .complete => |item| result: {
-                    const spans = materialization.spans;
                     materialization.materializer.deinit();
                     self.allocator.free(materialization.codepoints);
-                    self.state = .{ .spans = .{
-                        .spans = spans,
-                        .result = item,
-                        .writer = .init(self.spans, self.allocator, item.list, spans),
-                    } };
-                    break :result .pending;
-                },
-            },
-            .spans => |*span_state| switch (try span_state.writer.advance(work)) {
-                .pending => .pending,
-                .complete => result: {
-                    const item = span_state.result;
-                    span_state.writer.deinit();
-                    self.allocator.free(span_state.spans);
                     self.state = .complete;
                     break :result .{ .complete = item };
                 },
@@ -1471,13 +1373,7 @@ const ParserCursor = struct {
             .atom => .{ .atom = .init(token, false, self.word_linker) },
             .quoted => .{ .atom = .init(token, true, self.word_linker) },
             .character => .{ .character = .init(token) },
-            .string => .{ .string = .init(
-                self.allocator,
-                token,
-                self.spans,
-                self.provenance_namespace,
-                self.word_linker,
-            ) },
+            .string => .{ .string = .init(self.allocator, token, self.provenance_namespace) },
             .semicolon => {
                 self.diag.set(token.span, "`;` is reserved");
                 return error.Parse;
