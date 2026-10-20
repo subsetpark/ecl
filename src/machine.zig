@@ -6115,52 +6115,52 @@ pub const Machine = struct {
         self.unit.module_call_sites.install(self.releaseDomain(), site, word, candidate);
     }
 
-    /// What the word's slot yields, as a dispatch-ready resolution, or null
+    /// Initializes `out` with what the word's slot yields, as a dispatch-ready
+    /// resolution, and returns true; returns false, leaving `out` undefined,
     /// when the slot yields nothing a plain word may run: no binding in the
     /// root or core, or only a private core one. `written` is the slot's root
-    /// scope, already proven live, or null for core.
+    /// scope, already proven live, or null for core. The resolution is built in
+    /// the caller's storage because returning it by value cost a copy of the
+    /// whole lease on every dispatch.
     fn slotResolution(
         self: *Machine,
         slot: *const env.Slot,
         name: u32,
         written: ?*env.Scope,
         borrow_pin: *?modules.GenerationPin,
-    ) ?Resolution {
-        const cell = slot.current() orelse return null;
-        var lease = if (self.slice) |slice| cell.borrow(slice) else cell.load();
+        out: *Resolution,
+    ) bool {
+        const cell = slot.current() orelse return false;
+        out.* = .{
+            .lease = if (self.slice) |slice| cell.borrow(slice) else cell.load(),
+            .execution_generation = null,
+            .home = null,
+            .trace_word = .plain(name),
+            .origin = .core,
+        };
         if (written == null or cell == slot.coreCell()) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
-            if (lease.visibility == .private) {
-                lease.deinit();
-                return null;
+            if (out.lease.visibility == .private) {
+                out.lease.deinit();
+                return false;
             }
-            const pin = borrow_pin.*;
-            borrow_pin.* = null;
-            return .{
-                .lease = lease,
-                .execution_generation = null,
-                .home = null,
-                .borrow_pin = pin,
-                .trace_word = .plain(name),
-                .origin = .core,
-            };
-        }
-        const local = lease.traceWord();
-        const home = if (local == null) null else self.homeForSlot(written.?);
-        const pin = borrow_pin.*;
-        borrow_pin.* = null;
-        return .{
-            .lease = lease,
-            .execution_generation = null,
-            .home = home,
-            .borrow_pin = pin,
-            .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(name),
-            .origin = if (home) |resolved| moduleResolutionOrigin(resolved) else .direct,
+        } else {
             // A module-local binding resolves against its image, which the
             // home supplies; anything else against the root it was found in.
-            .defining_scope = if (home != null) null else written,
-        };
+            const local = out.lease.traceWord();
+            if (if (local == null) null else self.homeForSlot(written.?)) |home| {
+                out.home = home;
+                out.trace_word = homeTraceWord(home, local.?);
+                out.origin = moduleResolutionOrigin(home);
+            } else {
+                out.origin = .direct;
+                out.defining_scope = written;
+            }
+        }
+        out.borrow_pin = borrow_pin.*;
+        borrow_pin.* = null;
+        return true;
     }
 
     /// The home a module-local binding in `image` runs under: the running
@@ -6234,16 +6234,16 @@ pub const Machine = struct {
         return self.fail(.domain, "the scope this word was written in has retired");
     }
 
-    /// A plain word for idiom recognition: what its slot yields, or null when
-    /// that is nothing a plain word may run. Recognition only ever declines,
+    /// A plain word for idiom recognition: initializes `out` with what its
+    /// slot yields, or returns false when that is nothing a plain word may run. Recognition only ever declines,
     /// so this never records a failure: an unlinked word, or one whose root
     /// has retired, is simply not a match, and generic execution reports it.
-    pub fn peekSlotWord(self: *Machine, word: value.WordRef) ?Resolution {
-        if (word.slot == 0) return null;
+    pub fn peekSlotWord(self: *Machine, word: value.WordRef, out: *Resolution) bool {
+        if (word.slot == 0) return false;
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
-        const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return null;
-        return self.slotResolution(target.slot orelse return null, word.name, target.written, &borrow_pin);
+        const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
+        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, out);
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
@@ -6258,10 +6258,11 @@ pub const Machine = struct {
         const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
             return self.failRetiredWord(word.name);
         const written = target.written;
-        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin) else null) |resolution| {
-            var resolved = resolution;
-            defer resolved.deinit(self.unit.allocator);
-            try executeResolved(self, &resolved);
+        // SAFETY: read only after `slotResolution` returns true, which initializes it.
+        var slot_resolution: Resolution = undefined;
+        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, &slot_resolution) else false) {
+            defer slot_resolution.deinit(self.unit.allocator);
+            try executeResolved(self, &slot_resolution);
             return;
         }
 

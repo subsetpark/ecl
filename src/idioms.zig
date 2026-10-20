@@ -579,10 +579,12 @@ const Matcher = struct {
     fn resolve(self: *Matcher, evaluator: *Machine, word: value.WordRef) Step {
         evaluator.beginBindingRead();
         defer evaluator.endBindingRead();
-        var resolved = evaluator.peekSlotWord(word) orelse {
+        // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
+        var resolved: machine.Resolution = undefined;
+        if (!evaluator.peekSlotWord(word, &resolved)) {
             self.rejectEntry();
             return .progressed;
-        };
+        }
         defer resolved.deinit(evaluator.allocator());
         self.accept(&resolved);
         return .progressed;
