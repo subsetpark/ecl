@@ -1494,10 +1494,15 @@ const ParserCursor = struct {
             .scalar => |*scalar| scalar,
             else => unreachable,
         };
-        const progress: ScalarProgress = switch (scalar.*) {
-            .atom => |*builder| try builder.advance(self.diag),
-            .string => |*builder| try builder.advance(self.releases, self.diag, work),
-            .character => |*builder| try builder.advance(self.diag),
+        // The builder runs until its scalar is done or the budget is spent, a
+        // unit a transition after the one this step was paid for.
+        const progress: ScalarProgress = while (true) {
+            const next: ScalarProgress = switch (scalar.*) {
+                .atom => |*builder| try builder.advance(self.diag),
+                .string => |*builder| try builder.advance(self.releases, self.diag, work),
+                .character => |*builder| try builder.advance(self.diag),
+            };
+            if (next != .pending or !work.spend()) break next;
         };
         return switch (progress) {
             .pending => .pending,
@@ -1637,7 +1642,12 @@ const ParserCursor = struct {
     fn step(self: *ParserCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ParseProgress {
         return switch (self.state) {
             .scalar => self.advanceScalar(work),
-            .collection => |*collection| switch (try collection.advance(work)) {
+            // Like a scalar, a container runs until it is built or the budget
+            // is spent.
+            .collection => |*collection| switch (while (true) {
+                const next = try collection.advance(work);
+                if (next != .pending or !work.spend()) break next;
+            }) {
                 .pending => .pending,
                 .complete => |form| result: {
                     collection.deinit(self.releases);
