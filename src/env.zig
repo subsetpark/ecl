@@ -1906,28 +1906,43 @@ fn Directory(comptime Id: type, comptime Entry: type) type {
             return leaf.entries[entry_index].load(.acquire);
         }
 
-        /// Issues the next id and installs the entry. Candidate pages are
-        /// allocated before the lock is taken, so no allocation happens while a
-        /// publisher holds it; a racing publisher preparing the same page loses
-        /// and destroys its unused candidate.
+        /// Issues the next id and installs the entry. A missing page is
+        /// allocated with the lock released and the target rechecked after, so
+        /// no allocation happens while a publisher holds it and a registration
+        /// into existing pages allocates nothing. A candidate a racing
+        /// publisher made unnecessary is destroyed unused.
         fn register(
             self: *Self,
             allocator: std.mem.Allocator,
             entry: *Entry,
         ) error{OutOfMemory}!Id {
-            var branch_candidate: ?*Branch = try allocator.create(Branch);
-            branch_candidate.?.* = .{};
-            var leaf_candidate: ?*Leaf = allocator.create(Leaf) catch |err| {
-                allocator.destroy(branch_candidate.?);
-                return err;
-            };
-            leaf_candidate.?.* = .{};
+            var branch_candidate: ?*Branch = null;
+            var leaf_candidate: ?*Leaf = null;
             defer {
                 if (branch_candidate) |unused| allocator.destroy(unused);
                 if (leaf_candidate) |unused| allocator.destroy(unused);
             }
 
-            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+            while (true) {
+                std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+                const raw = self.next.load(.monotonic);
+                const id: Id = @fromBackingInt(@intCast(@min(raw, max_id)));
+                const branch_index, const leaf_index, _ = coordinates(id);
+                const present = self.branches[branch_index].load(.acquire);
+                const needs_branch = present == null and branch_candidate == null;
+                const needs_leaf = leaf_candidate == null and
+                    (present == null or present.?.leaves[leaf_index].load(.acquire) == null);
+                if (raw > max_id or !(needs_branch or needs_leaf)) break;
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+                if (needs_branch) {
+                    branch_candidate = try allocator.create(Branch);
+                    branch_candidate.?.* = .{};
+                }
+                if (needs_leaf) {
+                    leaf_candidate = try allocator.create(Leaf);
+                    leaf_candidate.?.* = .{};
+                }
+            }
             defer std.Io.Threaded.mutexUnlock(&self.mutex);
             const raw = self.next.load(.monotonic);
             if (raw > max_id) return error.OutOfMemory;
@@ -2295,6 +2310,10 @@ pub const Env = enum(usize) {
         environment.lockBlocking();
         defer environment.unlock();
         const image = root.ownerHandle() != null;
+        // A core-build scope carries a non-core cell, but its words are core's:
+        // the slot names core's cell and takes no fallback lock on itself.
+        const into_core = root.core or environment == &backing.core;
+        const slot_root = if (into_core) &backing.core_cell else root;
         if (environment.slots.get(name)) |existing| return if (image)
             @fromBackingInt(image_root_flag | @backingInt(root.id))
         else
@@ -2326,12 +2345,12 @@ pub const Env = enum(usize) {
         else
             try backing.slot_index.register(allocator, created);
         created.name.store(name, .monotonic);
-        created.root.store(root, .monotonic);
+        created.root.store(slot_root, .monotonic);
         if (environment.boundCellLocked(name)) |cell| {
             created.cell.store(cell, .release);
             created.bound.store(true, .release);
         }
-        if (!root.core) {
+        if (!into_core) {
             // Core's shape holds its cells until the Env is torn down, so the
             // fallback needs no reference of its own. Lock order is always a
             // root's writer before core's: core never links into another root.

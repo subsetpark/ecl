@@ -1861,7 +1861,10 @@ pub const ReleaseDomain = struct {
     /// Records checked out by running slices. A running slice's epoch is zero
     /// between read sections, so only this count says a record is in use.
     running_slices: usize = 0,
+    /// Oldest first: epochs are taken under `slices_mutex` and appended, so
+    /// the ready retirements are always a prefix.
     deferred: ?*Deferred = null,
+    deferred_last: ?*Deferred = null,
     queue_mutex: std.Io.Mutex = .init,
     claim_released: std.Io.Condition = .init,
     execution: enum { empty, available, claimed } = .empty,
@@ -2019,11 +2022,12 @@ pub const ReleaseDomain = struct {
         node.advance_fn = adapters.advance;
         std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
         deferred.* = .{
-            .next = self.deferred,
+            .next = null,
             .epoch = self.slice_epoch.fetchAdd(1, .seq_cst) + 1,
             .node = node,
         };
-        self.deferred = deferred;
+        if (self.deferred_last) |last| last.next = deferred else self.deferred = deferred;
+        self.deferred_last = deferred;
         const ready = self.collectDeferredLocked();
         std.Io.Threaded.mutexUnlock(&self.slices_mutex);
         self.enqueueDeferred(ready);
@@ -2038,15 +2042,17 @@ pub const ReleaseDomain = struct {
             const epoch = record.epoch.load(.seq_cst);
             if (epoch != 0 and epoch < oldest) oldest = epoch;
         }
-        var ready: ?*Deferred = null;
-        var link = &self.deferred;
-        while (link.*) |item| {
-            if (item.epoch <= oldest) {
-                link.* = item.next;
-                item.next = ready;
-                ready = item;
-            } else link = &item.next;
+        const ready = self.deferred;
+        var last: ?*Deferred = null;
+        var cursor = self.deferred;
+        while (cursor) |item| : (cursor = item.next) {
+            if (item.epoch > oldest) break;
+            last = item;
         }
+        const tail = last orelse return null;
+        self.deferred = tail.next;
+        if (self.deferred == null) self.deferred_last = null;
+        tail.next = null;
         return ready;
     }
 

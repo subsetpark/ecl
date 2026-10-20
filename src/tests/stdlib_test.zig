@@ -260,8 +260,9 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
 
 test "stdlib: concurrent first references converge on one published module" {
     // Both spellings of the miss (a reader-qualified word and one built at
-    // run time) race for the same lazy registration. The loading lease
-    // serializes them, so every unit observes one module.
+    // run time) race for the same lazy registration, from tasks, which are
+    // not roots, against a cold module. The loading lease serializes them,
+    // so every unit observes one module.
     for ([_]usize{ 1, 8 }) |workers| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
@@ -271,11 +272,11 @@ test "stdlib: concurrent first references converge on one published module" {
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each " ++
-                "([1] result.ok) ([2] 'result 'ok qualify execute) 2 pack ([] swap @spawn) each (task.await) each",
-            "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
-                "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]}) " ++
-                "({'ok ({'ok [1]})} {'ok ({'ok [2]})})",
+            "([1] result.ok) ([2] 'result 'ok qualify execute) 2 pack ([] swap @spawn) each (task.await) each " ++
+                "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each",
+            "({'ok ({'ok [1]})} {'ok ({'ok [2]})}) " ++
+                "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
+                "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]})",
         );
     }
 }

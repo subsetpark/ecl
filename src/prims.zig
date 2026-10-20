@@ -36,7 +36,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged." },
         .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or the already-interned symbol a string spells; " ++
             "a spelling that was never interned is 'domain." },
-        .{ .name = "word", .primitive = wordWord, .effect = "symbol -- word", .doc = "Convert a symbol to an executable word that resolves where it is invoked." },
+        .{ .name = "word", .primitive = wordWord, .effect = "symbol -- word", .doc = "Convert a symbol to an executable word linked to its name in the root of the activation that builds it." },
         .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or create the symbol a string spells, growing the " ++
             "process-lifetime name table when it is new." },
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },

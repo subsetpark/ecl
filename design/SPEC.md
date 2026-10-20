@@ -1233,7 +1233,7 @@ namespace of their own.
 
 `core` is a reserved qualifier, not a registration. A qualified word whose
 module segment is exactly `core` resolves its binding segment in core alone,
-skipping every session, child, and image scope, so a shadowed core definition
+skipping the session and every module image, so a shadowed core definition
 remains reachable: after `(2 *) 'dup def`, `core.dup` is still the primitive.
 Only public core bindings resolve this way; a missing or private name is
 `'undefined-word` with `'scope 'core`. `'core 'dup qualify` constructs the same
