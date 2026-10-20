@@ -205,6 +205,15 @@ test "combinators: contracts and conformability are structural errors" {
     });
 }
 
+/// A body of 1,200 forms, deep enough for plan entries two node levels below
+/// the root.
+const deep_plan_source = source: {
+    @setEvalBranchQuota(10_000);
+    var text: []const u8 = "[1] (";
+    for (0..600) |_| text = text ++ "1 + ";
+    break :source text ++ ") each";
+};
+
 test "combinators: finite iterations keep their words' bindings and still check each application" {
     // A call decides each word's binding, and the idiom match of a phrase a
     // word offers, at that word's first execution and reuses them for the
@@ -219,8 +228,9 @@ test "combinators: finite iterations keep their words' bindings and still check 
         .{ .name = "next infra call", .source = "(1) 'k def [1 2] (pop k) infra (2) 'k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
         // A kept match still meets each row's operand classes.
         .{ .name = "kept match across classes", .source = "[[1 2 3] [4.5 5.5] [7]] ((+) fold1) each", .expected = "(6 10.0 7)" },
-        // Word positions past a plan's capacity resolve as any word does.
+        // A body longer than one page of plan entries is planned throughout.
         .{ .name = "long body", .source = "[1 2] (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + ) each", .expected = "[21 22]" },
+        .{ .name = "deep body", .source = deep_plan_source, .expected = "[601]" },
         // A word `execute` dispatches runs at `execute`'s position and takes
         // none of its plan entry.
         .{ .name = "dispatched word", .source = "[1 2 3] (dup (+) first execute) each", .expected = "[2 4 6]" },

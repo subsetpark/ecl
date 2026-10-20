@@ -605,10 +605,11 @@ its next execution, including open-ended loop bodies already running.
 
 A finite iteration's call owns a plan for its quotation, reached through the
 application frame and used only while that exact quotation is the running
-code. It holds entries for at most sixteen word positions in a fixed table
-allocated at its first entry, so making, probing, and retiring a plan is
-constant work whatever the quotation's length; a position past that resolves
-as any word does. An entry keeps the word's resolution from its first
+code. Its entries are paged by word position under fixed-fanout nodes, as
+many levels as the quotation's length needs; each node and page is allocated
+and cleared by the first entry that needs it, and a retired plan is freed a
+node or page per release-domain turn, so no step does work in proportion to
+the quotation. An entry keeps the word's resolution from its first
 execution in the call, with a lease that holds references, and, for a word that
 offers a phrase to recognition, the retained phrase and the registry entry its
 pattern matched. Later applications reuse both and still check the matched

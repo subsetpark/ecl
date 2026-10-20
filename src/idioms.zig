@@ -440,7 +440,7 @@ pub fn tryApply(
     if (entries.len == 0) return decline.run(evaluator);
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
-    const planned = evaluator.planEntry();
+    const planned = try evaluator.planEntry();
     if (planned) |entry| if (entry.offered) |offered| if (offered.request == request and offered.phrase == candidate.phrase.list)
         return applyMatched(evaluator, candidate.phrase, offered.entry, .{
             .constant = offered.constant,

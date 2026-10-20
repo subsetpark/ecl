@@ -6269,26 +6269,25 @@ pub const Machine = struct {
     }
 
     /// The running finite iteration's entry for the position executing now,
-    /// made on first use, or null when no plan applies or there is no memory
-    /// for one.
-    pub fn planEntry(self: *Machine) ?*PlanEntry {
+    /// made on first use, or null when no plan applies.
+    pub fn planEntry(self: *Machine) error{OutOfMemory}!?*PlanEntry {
         const plan = self.applicationPlan() orelse return null;
-        return plan.entry(self.unit.allocator, self.unit.active_index);
+        return try plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
     /// The entry for `word` when it is the form at the executing position. A
     /// word a primitive dispatches, as `execute` does, runs at that
     /// primitive's position and takes no entry: the position's binding is the
     /// primitive's.
-    fn planEntryFor(self: *Machine, word: value.WordRef) ?*PlanEntry {
+    fn planEntryFor(self: *Machine, word: value.WordRef) error{OutOfMemory}!?*PlanEntry {
         const plan = self.applicationPlan() orelse return null;
         const form = list.atUnchecked(.{ .list = plan.code }, self.unit.active_index);
         if (form != .word or form.word.name != word.name or form.word.slot != word.slot) return null;
-        return plan.entry(self.unit.allocator, self.unit.active_index);
+        return try plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
-        const plan_entry = self.planEntryFor(word);
+        const plan_entry = try self.planEntryFor(word);
         if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
@@ -8024,50 +8023,139 @@ pub const OfferedMatch = struct {
 /// later application, so the call is atomic under its bindings: a replacement
 /// made while it runs takes effect at its next call.
 pub const ResolutionPlan = struct {
-    /// Word positions one plan holds entries for. A position past that resolves
-    /// as any word does, which is always correct, and keeps making, probing,
-    /// and retiring a plan constant work whatever the quotation's length.
-    const capacity = 16;
-    const Slot = struct { index: u32, entry: PlanEntry };
-
     /// Borrowed: the combinator owns its quotation for the whole call.
     code: *Header,
-    /// Allocated at the first entry, probed linearly from `index % capacity`.
-    slots: ?*[capacity]?Slot = null,
+    /// Allocated at the first entry.
+    tree: ?*PlanTree = null,
 
     pub fn init(code: *Header) ResolutionPlan {
         return .{ .code = code };
     }
 
-    /// The entry for word position `index`, made on first use, or null when
-    /// the plan is full or there is no memory for it.
-    fn entry(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32) ?*PlanEntry {
-        const slots = self.slots orelse allocated: {
-            const fresh = allocator.create([capacity]?Slot) catch return null;
-            fresh.* = @splat(null);
-            self.slots = fresh;
-            break :allocated fresh;
+    /// The entry for word position `index`, made on first use.
+    fn entry(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32) error{OutOfMemory}!*PlanEntry {
+        const tree = self.tree orelse made: {
+            const fresh = try allocator.create(PlanTree);
+            fresh.* = .{ .allocator = allocator, .depth = PlanTree.depthFor(self.code.length()) };
+            self.tree = fresh;
+            break :made fresh;
         };
-        for (0..capacity) |probe| {
-            const slot = &slots[(index + probe) % capacity];
-            if (slot.*) |*held| {
-                if (held.index == index) return &held.entry;
-            } else {
-                slot.* = .{ .index = index, .entry = .{} };
-                return &slot.*.?.entry;
-            }
-        }
-        return null;
+        return tree.entry(index);
     }
 
-    pub fn retire(self: *ResolutionPlan, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        const slots = self.slots orelse return;
-        for (slots) |*slot| if (slot.*) |*held| {
-            if (held.entry.resolution) |*resolution| resolution.deinit(allocator);
-            if (held.entry.offered) |offered| releases.releaseHeader(offered.phrase);
-        };
-        allocator.destroy(slots);
-        self.slots = null;
+    /// Hands the entries to the release domain, which frees them a page or a
+    /// node per turn.
+    pub fn retire(self: *ResolutionPlan, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        const tree = self.tree orelse return;
+        self.tree = null;
+        releases.retire(tree, &tree.retirement);
+    }
+};
+
+/// A plan's entries by word position: pages of `page_len` entries under
+/// `fanout`-way nodes, as many levels as the quotation's length needs. Every
+/// node and page is allocated and cleared, a constant amount of work, by the
+/// first entry that needs it, so no step does work in proportion to the
+/// quotation, and a plan has no capacity.
+const PlanTree = struct {
+    const page_bits = 4;
+    const page_len = 1 << page_bits;
+    const fanout_bits = 6;
+    const fanout = 1 << fanout_bits;
+    /// Enough levels for any u32 position.
+    const max_depth = (32 - page_bits + fanout_bits - 1) / fanout_bits;
+    const Page = [page_len]PlanEntry;
+    /// A node one level above the pages holds pages; any higher node holds
+    /// nodes.
+    const Node = struct {
+        nodes: [fanout]?*Node = @splat(null),
+        pages: [fanout]?*Page = @splat(null),
+    };
+
+    allocator: std.mem.Allocator,
+    /// Node levels above the pages: zero when one page covers the code.
+    depth: u8,
+    root_page: ?*Page = null,
+    root_node: ?*Node = null,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    /// Retirement's descent, one node per level.
+    // SAFETY: only the first `stack_len` frames are read, each written first.
+    stack: [max_depth]struct { node: *Node, next: u8 } = undefined,
+    stack_len: u8 = 0,
+    retiring: bool = false,
+
+    fn depthFor(length: u64) u8 {
+        if (length <= page_len) return 0;
+        const bits: u8 = @intCast(64 - @clz(length - 1));
+        return @intCast((bits - page_bits + fanout_bits - 1) / fanout_bits);
+    }
+
+    fn page(self: *PlanTree, slot: *?*Page) error{OutOfMemory}!*Page {
+        if (slot.*) |held| return held;
+        const fresh = try self.allocator.create(Page);
+        fresh.* = @splat(.{});
+        slot.* = fresh;
+        return fresh;
+    }
+
+    fn node(self: *PlanTree, slot: *?*Node) error{OutOfMemory}!*Node {
+        if (slot.*) |held| return held;
+        const fresh = try self.allocator.create(Node);
+        fresh.* = .{};
+        slot.* = fresh;
+        return fresh;
+    }
+
+    fn entry(self: *PlanTree, index: u32) error{OutOfMemory}!*PlanEntry {
+        const offset = index & (page_len - 1);
+        if (self.depth == 0) return &(try self.page(&self.root_page))[offset];
+        var current = try self.node(&self.root_node);
+        var level = self.depth;
+        while (level != 1) : (level -= 1) {
+            const shift: u5 = @intCast(page_bits + fanout_bits * (level - 1));
+            current = try self.node(&current.nodes[(index >> shift) & (fanout - 1)]);
+        }
+        return &(try self.page(&current.pages[(index >> page_bits) & (fanout - 1)]))[offset];
+    }
+
+    fn retirePage(self: *PlanTree, releases: *heap.ReleaseDomain, held: *Page) void {
+        for (held) |*planned| {
+            if (planned.resolution) |*resolution| resolution.deinit(self.allocator);
+            if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
+        }
+        self.allocator.destroy(held);
+    }
+
+    /// One page or one node edge per call.
+    pub fn advanceRetirement(releases: *heap.ReleaseDomain, _: std.mem.Allocator, self: *PlanTree) bool {
+        if (!self.retiring) {
+            self.retiring = true;
+            if (self.root_page) |held| self.retirePage(releases, held);
+            if (self.root_node) |held| {
+                self.stack[0] = .{ .node = held, .next = 0 };
+                self.stack_len = 1;
+            }
+            return false;
+        }
+        if (self.stack_len == 0) {
+            self.allocator.destroy(self);
+            return true;
+        }
+        const top = &self.stack[self.stack_len - 1];
+        if (top.next == fanout) {
+            self.allocator.destroy(top.node);
+            self.stack_len -= 1;
+            return false;
+        }
+        const child = top.next;
+        top.next += 1;
+        if (self.stack_len == self.depth) {
+            if (top.node.pages[child]) |held| self.retirePage(releases, held);
+        } else if (top.node.nodes[child]) |held| {
+            self.stack[self.stack_len] = .{ .node = held, .next = 0 };
+            self.stack_len += 1;
+        }
+        return false;
     }
 };
 
