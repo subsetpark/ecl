@@ -536,9 +536,8 @@ fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, ca
 }
 
 /// Matches an offered phrase against the registry entries of its context and
-/// length. The work is bounded by the registry's shape, so it runs where the
-/// combinator applies; a pattern word whose resolution the call-site cache
-/// cannot answer is handed out to be resolved across turns.
+/// length. The work is bounded by the registry's shape and each pattern word
+/// is one slot read, so the whole match runs where the combinator applies.
 const Matcher = struct {
     candidate: Candidate,
     entries: []const u16,
@@ -672,9 +671,7 @@ const Matcher = struct {
     }
 };
 
-/// Matches as far as the call-site cache allows, settling at once when it
-/// answers every pattern word; otherwise a driver resolves the missing word
-/// and carries the match on from there.
+/// Matches the phrase, then applies the selected entry or declines.
 fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline) MachineError!void {
     var matching = matcher;
     while (true) switch (matching.step(evaluator)) {

@@ -111,14 +111,14 @@ pub const VisibleNameCursor = struct {
                     self.phase = .{ .core = self.core.nameCursor() };
                     break :result .pending;
                 };
-                const next = current.parent;
+                // A root's own names, then core's: roots have no parents.
                 const environment = current.environmentOrNull() orelse {
-                    state.current = next;
+                    state.current = null;
                     break :result .pending;
                 };
                 self.phase = .{ .direct = .{
                     .cursor = environment.nameCursor(),
-                    .after = .{ .scopes = next },
+                    .after = .core,
                 } };
                 break :result .pending;
             },

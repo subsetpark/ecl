@@ -1345,36 +1345,15 @@ const ScopeStorage = union(enum) {
 };
 pub const Scope = struct {
     allocator: std.mem.Allocator,
-    parent: ?*Scope,
     storage: ScopeStorage,
     refs: std.atomic.Value(u32) = .init(1),
     allocation: ScopeAllocation = .embedded,
-    /// The scope this scope's published literals name. Allocated on first
-    /// publication rather than at construction, so an `@attempt` body that
-    /// publishes nothing costs nothing. A module image installs its own before
-    /// the scope is reachable.
+    /// The cell this root's words and slots name. Allocated on first use, so a
+    /// root nothing links into costs nothing. A module image installs its own
+    /// before the scope is reachable.
     label_cell: std.atomic.Value(?*ScopeCell) = .init(null),
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: ?RetireCursor.State = null,
-
-    /// Whether `inner` is this scope or one nested inside it. A word's scope is
-    /// a lower bound: when the activation running it is already inside a more
-    /// specific scope on the same chain -- an `@attempt` child of the unit that
-    /// wrote the word -- that child is where it should resolve, because a
-    /// sibling defined in the same child must be visible. Resolution walks
-    /// parents, so without this a word written outside the child could never
-    /// see anything defined inside it.
-    ///
-    /// It only ever refines downward within one chain. A module image's scope
-    /// has no parent and core denotes no scope at all, so neither is ever an
-    /// ancestor of a session scope.
-    pub fn encloses(self: *Scope, inner: *Scope) bool {
-        var current: ?*Scope = inner;
-        while (current) |scope| : (current = scope.parent) {
-            if (scope == self) return true;
-        }
-        return false;
-    }
 
     /// The id of this scope's cell, or `.none` if it has never minted one.
     ///
@@ -1399,25 +1378,9 @@ pub const Scope = struct {
         state: State,
 
         const State = union(enum) {
-            /// The cell has been cleared, so no new borrow can succeed; this
-            /// waits out the ones that already did. Resumable rather than
-            /// spinning, because the release domain drives it -- a borrow is
-            /// held by a live activation on some other unit, and blocking a
-            /// worker on it would be a hang rather than a wait.
-            waiting_for_borrows: *ScopeCell,
-            parent,
             destroy,
             complete,
         };
-
-        /// The state that follows the cell clear: wait for outstanding borrows
-        /// first when there is a cell to wait on, otherwise start tearing down.
-        fn afterClear(cell: ?*ScopeCell) State {
-            if (cell) |named| {
-                if (named.borrowed()) return .{ .waiting_for_borrows = named };
-            }
-            return .parent;
-        }
 
         pub fn init(scope: *Scope) RetireCursor {
             const old = scope.refs.fetchSub(1, .release);
@@ -1436,21 +1399,11 @@ pub const Scope = struct {
             // change of meaning.
             const cleared = scope.label_cell.swap(null, .acq_rel);
             if (cleared) |cell| cell.retire();
-            return .{ .scope = scope, .state = afterClear(cleared) };
+            return .{ .scope = scope, .state = .destroy };
         }
 
         pub fn advance(self: *RetireCursor) bool {
             return switch (self.state) {
-                .waiting_for_borrows => |cell| result: {
-                    if (cell.borrowed()) break :result false;
-                    self.state = .parent;
-                    break :result false;
-                },
-                .parent => result: {
-                    if (self.scope.parent) |parent| parent.retire();
-                    self.state = .destroy;
-                    break :result false;
-                },
                 .destroy => {
                     const allocator = self.scope.allocator;
                     const allocation = self.scope.allocation;
@@ -1508,17 +1461,13 @@ pub const Scope = struct {
             };
         }
     };
-    fn direct(
-        allocator: std.mem.Allocator,
-        storage: ScopeStorage,
-        parent: ?*Scope,
-    ) Scope {
-        return .{ .allocator = allocator, .parent = parent, .storage = storage };
+    fn direct(allocator: std.mem.Allocator, storage: ScopeStorage) Scope {
+        return .{ .allocator = allocator, .storage = storage };
     }
     /// A module image's root. It carries no canonical name: the same frozen
     /// environment may execute under any number of registrations.
     pub fn moduleRoot(allocator: std.mem.Allocator, target: *Environment) Scope {
-        return direct(allocator, .{ .module_root = target }, null);
+        return direct(allocator, .{ .module_root = target });
     }
     pub fn retain(self: *Scope) void {
         const old = self.refs.fetchAdd(1, .monotonic);
@@ -1570,7 +1519,7 @@ pub const Scope = struct {
     /// silently stranding a borrow whose cell still names this scope.
     pub fn releaseTrivial(self: *Scope) void {
         std.debug.assert(self.label_cell.load(.acquire) == null);
-        std.debug.assert(self.parent == null and self.environmentOrNull() != null);
+        std.debug.assert(self.environmentOrNull() != null);
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old == 1);
         _ = self.refs.load(.acquire);
@@ -1837,10 +1786,8 @@ pub const Liveness = union(enum) {
     /// A reference was acquired for this borrow and is held for at least as
     /// long as the scope pointer is used.
     fresh_pin,
-    /// The cell names no image. A session root or an `@attempt` child scope is
-    /// owned by the activation or session performing the read and cannot be
-    /// retired underneath it, so this arm is today's read, unchanged. Those
-    /// lifetimes are deliberately outside this design.
+    /// The cell names no image: the session root, which outlives every unit
+    /// that reads it, so nothing is acquired.
     non_image,
 };
 
@@ -1849,8 +1796,8 @@ pub const ScopeCell = struct {
     scope: std.atomic.Value(?*Scope) = .init(null),
     /// The image owner this cell names, opaque here on purpose: `env` never
     /// dereferences it and holds no dependency on `modules`. Null for every
-    /// cell that names no image -- the session root, an `@attempt` child scope,
-    /// and the embedded core cell -- which is what selects `Liveness.non_image`.
+    /// cell that names no image -- the session root and the embedded core cell
+    /// -- which is what selects `Liveness.non_image`.
     ///
     /// It outlives the image, so it stays readable after retirement; that is the
     /// whole reason the borrow tests the owner rather than the scope.
@@ -1859,15 +1806,6 @@ pub const ScopeCell = struct {
     /// it has no `Scope` to point at. One embedded cell carries this instead,
     /// and a primitive or embedded-prelude literal labels against it.
     core: bool = false,
-    /// How many borrows currently hold the scope this cell names.
-    ///
-    /// The count lives here and not on the `Scope` because this cell is
-    /// immortal -- `Env`-owned, freed only at `Env` teardown -- so bumping it is
-    /// always safe, while the scope it names can be freed underneath a reader.
-    /// That is the whole trick: put the count on the metadata that outlives the
-    /// object, and a borrow needs no anchor of its own.
-    borrows: std.atomic.Value(u32) = .init(0),
-
     /// Fills in what this cell names, before its id has escaped.
     ///
     /// The owner is stored before the scope, and both before registration, so a
@@ -1886,35 +1824,6 @@ pub const ScopeCell = struct {
     /// The image owner, or null when this cell names none.
     pub fn ownerHandle(self: *const ScopeCell) ?*anyopaque {
         return self.owner.load(.acquire);
-    }
-
-    /// Acquire-then-validate: take a borrow of the named scope, or nothing.
-    ///
-    /// `RetireCursor.init` clears this cell before any teardown step, which
-    /// makes the clear the commit point and covers both interleavings. A
-    /// borrower that bumped before the clear is seen by the teardown wait and
-    /// held for. One that bumped after sees null here, drops the count, and
-    /// never dereferences -- and its bump landed on immortal memory, so nothing
-    /// was resurrected.
-    pub fn acquire(self: *ScopeCell) ?*Scope {
-        _ = self.borrows.fetchAdd(1, .acq_rel);
-        if (self.scope.load(.acquire)) |named| return named;
-        self.releaseBorrow();
-        return null;
-    }
-
-    /// Drops one borrow. The teardown wait reads this, so it must run exactly
-    /// once per successful `acquire`.
-    pub fn releaseBorrow(self: *ScopeCell) void {
-        const old = self.borrows.fetchSub(1, .acq_rel);
-        std.debug.assert(old != 0);
-    }
-
-    /// Whether any borrow still holds the named scope. Teardown waits on this
-    /// after clearing the cell, never before: clearing first is what stops new
-    /// borrows from succeeding.
-    pub fn borrowed(self: *const ScopeCell) bool {
-        return self.borrows.load(.acquire) != 0;
     }
 
     /// The borrowed scope, obtainable only against a liveness proof. The proof
@@ -2289,12 +2198,7 @@ pub const Env = enum(usize) {
         return self.privateState().core_cell.id;
     }
 
-    /// The id the words of source read in this scope carry.
-    pub fn scopeIdFor(self: *Env, scope: *Scope) error{OutOfMemory}!ScopeId {
-        return (try self.scopeCell(scope, null)).id;
-    }
-
-    /// The same, for a scope owned by a module image. `owner` is stored opaque
+    /// The id of a module image's scope cell. `owner` is stored opaque
     /// and never dereferenced here; it is what lets a borrow acquire the image
     /// before reading the scope, and what stays readable once the image is gone.
     pub fn scopeIdForOwned(
@@ -2531,7 +2435,7 @@ pub const Env = enum(usize) {
         return .{ .target = self };
     }
     pub fn sessionRoot(self: *Env, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .{ .session = &self.privateState().session }, null);
+        return Scope.direct(allocator, .{ .session = &self.privateState().session });
     }
     pub fn createSessionRoot(self: *Env, allocator: std.mem.Allocator) error{OutOfMemory}!*Scope {
         const root = try allocator.create(Scope);
@@ -2671,7 +2575,7 @@ pub const BuildingEnv = struct {
         return self.target;
     }
     pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .{ .core_build = &self.target.privateState().core }, null);
+        return Scope.direct(allocator, .{ .core_build = &self.target.privateState().core });
     }
     /// Recognizes the core's trusted definitions against their final bindings,
     /// then freezes the core. On failure the core is not frozen and the builder

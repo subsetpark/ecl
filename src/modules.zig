@@ -1960,7 +1960,7 @@ pub const OwnedImage = enum(usize) {
         // The construction owner supplies one lifetime guard. Tasks spawned
         // during construction may hold independent pins,
         // so rollback drops only this capability and the image remains alive
-        // until those tasks and their child scopes quiesce.
+        // until those tasks quiesce.
         self.borrow().release();
         self.* = .consumed;
     }

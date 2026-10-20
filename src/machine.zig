@@ -1137,42 +1137,6 @@ pub fn stringValue(
     var work = poll_api.unbounded();
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
-/// What a dispatch acquired so its resolution scope stays alive while it is
-/// read, if it had to acquire anything.
-///
-/// One union rather than two optional fields, because there is exactly one
-/// release and it must be impossible to forget half of it.
-pub const ScopeBorrow = union(enum) {
-    /// The activation already holds this scope: it is the chain the activation
-    /// is running, or an ancestor of it, which `lazy` retained on the way down.
-    /// Nothing was acquired and nothing is released.
-    activation_held,
-    /// A module image, acquired through its anchor. Unit-lifetime, because the
-    /// body keeps running against the image long after resolution ends.
-    pinned: modules.GenerationPin,
-    /// A scope belonging to some other unit, reached through a value -- a
-    /// quotation parked in durable state, applied here. Activation-lifetime,
-    /// because unlike an image pin this borrow ends when the chain walk does.
-    /// That difference is why it is not held in the unit's pin set: the unit's
-    /// teardown spins on its own root's refcount *before* releasing pins, so a
-    /// unit-held scope borrow could wait on itself, and two units borrowing
-    /// each other could wait forever. Owning it per activation makes both
-    /// unrepresentable.
-    retained: *env.ScopeCell,
-
-    pub fn deinit(self: *ScopeBorrow) void {
-        switch (self.*) {
-            .activation_held => {},
-            .pinned => |pin| {
-                var owned = pin;
-                owned.deinit();
-            },
-            .retained => |cell| cell.releaseBorrow(),
-        }
-        self.* = .activation_held;
-    }
-};
-
 const Eval = struct {
     code: *Header,
     position: union(enum) {
@@ -1188,11 +1152,6 @@ const Eval = struct {
         redispatch: u32,
     },
 
-    /// Released when this activation retires, alongside `code`. A child that
-    /// inherits this activation's scope takes its own retain rather than
-    /// sharing this one, so a tail call replacing the parent cannot leave the
-    /// survivor holding a pointer whose retain died.
-    borrowed_scope: ?*env.ScopeCell = null,
     /// Where this body's definitions land, where its references resolve, and
     /// whose privacy and durable state it runs against. One value rather than
     /// three fields, so a construction site cannot set two of them and leave
@@ -1253,27 +1212,6 @@ const Eval = struct {
     pub fn resolutionScope(self: Eval) ?*env.Scope {
         return self.site.resolution_scope;
     }
-    /// Whether a stamp names a scope on the chain this activation already
-    /// holds -- its own resolution scope or an ancestor of it.
-    ///
-    /// Ancestors count because `Scope.lazy` retains its parent, so the whole
-    /// chain above the activation is held by the activation itself. That makes
-    /// this a proof rather than an exemption, and it is what keeps the borrow
-    /// count off every ordinary dispatch: only a scope reached through a value
-    /// -- a quotation parked in durable state and applied here -- is foreign.
-    ///
-    /// Walks outward comparing never-recycled ids, dereferencing nothing this
-    /// activation does not own. Same shape as the dispatch fast path and the
-    /// idiom recognizer's gate.
-    pub fn chainHolds(self: Eval, stamp: u32) bool {
-        if (stamp == 0) return true;
-        var node: ?*env.Scope = self.site.resolution_scope;
-        while (node) |link| : (node = link.parent) {
-            if (@backingInt(link.cellId()) == stamp) return true;
-        }
-        return false;
-    }
-
     /// Whose privacy and durable state this body runs against.
     pub fn home(self: Eval) ?*modules.ModuleHome {
         return self.site.home;
@@ -1531,15 +1469,6 @@ pub const ExecutionSite = struct {
     /// from module code inherits the caller's home while resolving against its
     /// own lexical chain.
     home: ?*modules.ModuleHome,
-    /// The cell id of `resolution_scope`, recorded once on entry.
-    ///
-    /// This is the whole of the same-scope fast path: a word stamped with this
-    /// id resolves in the chain this activation is already running, so it needs
-    /// no directory walk, no cell, no owner, and no liveness proof -- the
-    /// activation itself is the proof. `.none` when the scope has no cell or
-    /// there is no resolution scope, either of which fails the compare, which
-    /// is the conservative direction.
-    resolution_scope_id: env.ScopeId = .none,
     /// Authority carried only while evaluating an embedded source module.
     /// A named module constructed by that source moves it into the immutable
     /// registration; ordinary source always carries ordinary provenance.
@@ -1551,10 +1480,6 @@ pub const ExecutionSite = struct {
     /// top level and is refused inside an `each`.
     defining: bool,
 
-    fn idOf(scope: ?*env.Scope) env.ScopeId {
-        return if (scope) |resolved| resolved.cellId() else .none;
-    }
-
     /// The base case: a unit's root activation, built from nothing.
     pub fn root(unit: *Unit) ExecutionSite {
         if (unit.root_execution_home) |home| return image(home, unit.module_access, unit.root_defining);
@@ -1563,7 +1488,6 @@ pub const ExecutionSite = struct {
             .scope = scope,
             .resolution_scope = scope,
             .home = null,
-            .resolution_scope_id = idOf(scope),
             .defining = unit.root_defining,
             .registration_provenance = if (unit.inherited.module_snapshot) |module_snapshot|
                 .{ .root_scope = module_snapshot.localScope() }
@@ -1584,14 +1508,13 @@ pub const ExecutionSite = struct {
             .scope = scope,
             .resolution_scope = scope,
             .home = home,
-            .resolution_scope_id = idOf(scope),
             .defining = defining,
             .registration_provenance = home.registrationProvenance(),
         };
     }
 
     /// A nested activation continuing the same logical execution in `scope`:
-    /// a dynamic `call`, an `@attempt` child, or a resumed qualified load.
+    /// a dynamic `call`, an `@attempt` body, or a resumed qualified load.
     /// A quotation resolves where its invoker runs, so both scopes are the one
     /// it was handed. An applied quotation may have come from any caller, so
     /// it does not inherit embedded registration trust; a resumed load sets
@@ -1613,7 +1536,6 @@ pub const ExecutionSite = struct {
             .scope = scope,
             .resolution_scope = scope,
             .home = home,
-            .resolution_scope_id = idOf(scope),
             .registration_provenance = registration_provenance,
             .defining = defining,
         };
@@ -2482,7 +2404,7 @@ pub const Unit = struct {
             pins: std.ArrayList(modules.GenerationPin),
             complete,
         };
-        // Child scopes retain this address, so it must never move while the
+        // Activations point at this address, so it must never move while the
         // unit is alive. Teardown state moves around it instead.
         root_scope: env.Scope,
         state: State,
@@ -5875,7 +5797,6 @@ pub const Machine = struct {
     /// the ordinary release. This delays one existing release but creates no
     /// additional retain/release pair.
     fn retireCompletedEval(self: *Machine, current: Eval) void {
-        if (current.borrowed_scope) |cell| cell.releaseBorrow();
         if (current.application_selection) |application_index| {
             const frame = &self.unit.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
@@ -6167,72 +6088,12 @@ pub const Machine = struct {
             .validation = .init(binding),
         });
     }
-    /// Resolves a word in the scope its text was written in, which is carried
-    /// by the occurrence rather than by the quotation containing it. A word
-    /// with no written-in scope — anything not produced by the reader, and any
-    /// word a host built — resolves in the activation's own chain, which is
-    /// what a bare token has always done.
     /// The anchor of the image the running activation holds, if it holds one.
     /// A pointer compare against a cell's owner is a complete liveness proof:
     /// the activation's pin is what keeps that image alive.
     fn runningAnchor(self: *Machine) ?*anyopaque {
         const home = self.unit.current.?.home() orelse return null;
         return modules.anchorHandle(home, self.unit.module_access);
-    }
-
-    pub const PlainLookup = union(enum) {
-        hit: Resolution,
-        /// The guard context the miss's resolution records, so that a later
-        /// lookup at this site can hit.
-        miss: struct { guard: resolution_core.GuardContext, start: ?*env.Scope },
-    };
-
-    /// Where a cacheable plain word resolves from: the running scope or an
-    /// ancestor reached through scopes that bound nothing, or core, which is
-    /// frozen before any unit runs and so never invalidates what it answered.
-    const CacheScope = struct { id: env.ScopeId, start: ?*env.Scope };
-
-    fn cacheScope(self: *Machine, stamp: u32) ?CacheScope {
-        return self.cacheScopeFor(stamp, stampedResolutionScope(self.unit.current.?.site, stamp));
-    }
-
-    /// `cacheScope` for a caller that has already found the stamped scope.
-    fn cacheScopeFor(self: *Machine, stamp: u32, stamped_scope: ?*env.Scope) ?CacheScope {
-        const core = self.unit.environment.coreScopeId();
-        if (stamp == @backingInt(core)) return .{ .id = core, .start = null };
-        const scope = stamped_scope orelse return null;
-        return .{ .id = scope.cellId(), .start = self.unit.current.?.site.resolution_scope };
-    }
-
-    /// The plain-word call-site cache for a word resolving from `cache`.
-    fn lookupPlain(self: *Machine, cached_site: ?usize, word: u32, cache: CacheScope) PlainLookup {
-        const scope_id = cache.id;
-        const lookup = self.unit.module_call_sites.lookupPlain(
-            cached_site,
-            word,
-            scope_id,
-            cache.start,
-            self.unit.environment.coreView(),
-        );
-        if (comptime root_execution_metrics_enabled) switch (lookup) {
-            .hit => self.unit.root_execution_metrics.plain_cache_hits += 1,
-            else => self.unit.root_execution_metrics.plain_cache_misses += 1,
-        };
-        return switch (lookup) {
-            .absent => .{ .miss = .{ .guard = .{ .scope_id = scope_id, .pool = null }, .start = cache.start } },
-            .warming, .stale => .{ .miss = .{ .guard = .{ .scope_id = scope_id, .pool = &self.unit.module_call_sites.guards }, .start = cache.start } },
-            .hit => |resolution| .{ .hit = resolution },
-        };
-    }
-
-    /// The same cache for a word found somewhere other than the running code,
-    /// such as inside a quotation offered to a combinator: `site` names that
-    /// quotation and the word's position in it. Null when the word's stamp is
-    /// not on the running chain in the cacheable way; it then resolves
-    /// uncached.
-    pub fn probePlain(self: *Machine, site: ErrorSite, word: value.WordRef) ?PlainLookup {
-        const cache = self.cacheScope(word.scope) orelse return null;
-        return self.lookupPlain(self.unit.module_call_sites.find(site, word.name), word.name, cache);
     }
 
     /// Records what a resolution at `site` found, for the next lookup there.
@@ -6402,7 +6263,7 @@ pub const Machine = struct {
                 self.unit.module_access,
                 cached_site,
             )) {
-                .absent, .warming => {},
+                .absent => {},
                 .stale => {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.qualified_cache_heals += 1;
@@ -6430,8 +6291,6 @@ pub const Machine = struct {
                 word.name,
                 written,
                 owned_pin,
-                null,
-                null,
             )),
         });
     }
@@ -6672,7 +6531,6 @@ pub const Machine = struct {
         } };
         var invocation = caller;
         invocation.position = .{ .invocation = caller.nextIndex() };
-        invocation.borrowed_scope = null;
         invocation.traced_word = no_word;
         if (!self.isSourceTailPosition(caller)) {
             invocation.effect_tail = null;
@@ -7381,9 +7239,7 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
     // The locals backend is reserved from every publication, so these names
-    // can only mean their core primitives. The activation must also hold the
-    // word's stamped scope: an escaped word from a retired image still needs
-    // ordinary dispatch to report that retirement.
+    // can only mean their core primitives.
     const locals = self.unit.environment.localsWords();
     const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
         prims.readLocal
@@ -7806,7 +7662,6 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 resolved.defining_scope,
                 cross_home_effect,
                 resolved.takeBorrowPin(),
-                resolved.takeBorrowedCell(),
             );
         },
         .builtin => |primitive| {
@@ -7877,7 +7732,6 @@ const DirectWordFallback = struct {
             null,
             if (self.effect) |*owned| owned.borrow().effect else null,
             if (self.pin) |*owned| owned.take() else null,
-            null,
         );
     }
     pub const ownership: heap.DriverOwnership = .fields;
@@ -7901,95 +7755,30 @@ fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) int
     return .moduleLocal(name, local);
 }
 
-const CallSiteCacheCandidate = union(enum) {
-    warming: env.ScopeId,
-    plain: struct {
-        guard: resolution_core.GuardId,
-        cell: env.BindingCellHandle,
-    },
-    qualified: struct {
-        generation: modules.GenerationGuard,
-        cell: env.BindingCellHandle,
-    },
-    local: struct {
-        scope_id: env.ScopeId,
-        cell: env.BindingCellHandle,
-    },
+/// What a qualified resolution leaves behind for its call site: the cell it
+/// found and the registration generation it was found under.
+const CallSiteCacheCandidate = struct {
+    generation: modules.GenerationGuard,
+    cell: env.BindingCellHandle,
 
-    fn isLexical(self: CallSiteCacheCandidate) bool {
-        return switch (self) {
-            .warming, .plain => true,
-            .qualified, .local => false,
-        };
-    }
     fn deinit(self: *CallSiteCacheCandidate) void {
-        switch (self.*) {
-            .warming => {},
-            .qualified => |*qualified| {
-                qualified.cell.deinit();
-                qualified.generation.deinit();
-            },
-            .local => |*local| local.cell.deinit(),
-            .plain => |*plain| plain.cell.deinit(),
-        }
+        self.cell.deinit();
+        self.generation.deinit();
         self.* = undefined;
     }
 };
 
 const CallSiteCacheLookup = union(enum) {
     absent,
-    warming,
     stale,
     hit: Resolution,
 };
 
-/// The scope carrying `stamp` when the running activation resolves there
-/// directly: the running scope itself, or an ancestor reached only through
-/// scopes with no environment. Such a scope contributes no lookup, so resolving
-/// from the running scope is resolving in that ancestor, and a guard observed
-/// from the running scope records each empty position and goes stale the
-/// moment one of them binds. Recomputed on every dispatch: `set` in a body
-/// materializes the child between one word and the next, and the answer for
-/// the next word must change with it.
-fn stampedResolutionScope(site: ExecutionSite, stamp: u32) ?*env.Scope {
-    if (stamp == 0) return null;
-    var node: ?*env.Scope = site.resolution_scope;
-    while (node) |scope| : (node = scope.parent) {
-        if (@backingInt(scope.cellId()) == stamp) return scope;
-        if (scope.environmentOrNull() != null) return null;
-    }
-    return null;
-}
-
-/// Proof that this occurrence resolves directly in the exact module root the
-/// running activation already owns, itself or through children that bound
-/// nothing. Scope and home travel together so a cache hit cannot accidentally
-/// borrow one image's cell and another registration's state authority.
-const LocalCacheContext = struct {
-    scope_id: env.ScopeId,
-    home: *modules.ModuleHome,
-
-    fn init(
-        site: ExecutionSite,
-        stamped_scope: ?*env.Scope,
-        access: *const modules.ExecutionAccess,
-    ) ?LocalCacheContext {
-        const scope = stamped_scope orelse return null;
-        if (!scope.isModuleRoot()) return null;
-        const home = site.home orelse return null;
-        if (home.scope(access) != scope) return null;
-        return .{
-            .scope_id = scope.cellId(),
-            .home = home,
-        };
-    }
-};
-
-/// A small, allocation-free lookaside indexed by the actual source call site.
-/// Each entry owns its code root and one guarded target. Two ways keep a
-/// caller's qualified site and its callee's local site from evicting each other
-/// when their hashes share a set. Capacity remains a hard memory bound;
-/// collisions lose performance only.
+/// A small, allocation-free lookaside for qualified words, indexed by the
+/// actual source call site. Each entry owns its code root and one
+/// generation-guarded target. Plain words need none: their slots answer
+/// directly. Capacity remains a hard memory bound; collisions lose
+/// performance only.
 const ModuleCallSiteCache = struct {
     const capacity = 16;
     const ways = 2;
@@ -8007,10 +7796,6 @@ const ModuleCallSiteCache = struct {
         }
     };
 
-    comptime {
-        if (capacity != resolution_core.GuardPool.capacity) @compileError("cache and guard storage must have the same bound");
-    }
-    guards: resolution_core.GuardPool = .{},
     entries: [capacity]?Entry = @splat(null),
     victims: [set_count]u1 = @splat(0),
 
@@ -8041,10 +7826,7 @@ const ModuleCallSiteCache = struct {
     ) CallSiteCacheLookup {
         const slot_index = found orelse return .absent;
         const candidate = &(self.entries[slot_index] orelse return .absent);
-        const qualified = switch (candidate.target) {
-            .qualified => |*target| target,
-            .local, .plain, .warming => return .absent,
-        };
+        const qualified = &candidate.target;
         const execution = qualified.generation.tryEnterCurrent(access) orelse {
             candidate.deinit(releases);
             self.entries[slot_index] = null;
@@ -8061,75 +7843,6 @@ const ModuleCallSiteCache = struct {
         } };
     }
 
-    fn lookupLocal(
-        self: *ModuleCallSiteCache,
-        found: ?usize,
-        context: LocalCacheContext,
-    ) CallSiteCacheLookup {
-        const slot_index = found orelse return .absent;
-        const candidate = &(self.entries[slot_index] orelse return .absent);
-        const local = switch (candidate.target) {
-            .local => |*target| target,
-            .qualified, .plain, .warming => return .absent,
-        };
-        if (local.scope_id != context.scope_id) return .absent;
-        const lease = local.cell.load();
-        return .{ .hit = .{
-            .lease = lease,
-            .execution_generation = null,
-            .home = context.home,
-            .trace_word = homeTraceWord(context.home, lease.traceWord().?),
-            .origin = moduleResolutionOrigin(context.home),
-        } };
-    }
-
-    fn lookupPlain(
-        self: *ModuleCallSiteCache,
-        found: ?usize,
-        word: u32,
-        scope_id: env.ScopeId,
-        scope: ?*env.Scope,
-        core: env.EnvironmentView,
-    ) CallSiteCacheLookup {
-        const index = found orelse return .absent;
-        const candidate = &(self.entries[index] orelse return .absent);
-        const target = switch (candidate.target) {
-            .warming => |context_id| return if (context_id == scope_id) .warming else .absent,
-            .plain => |*plain| plain,
-            .qualified, .local => return .absent,
-        };
-        const location = switch (self.guards.resolve(target.guard, scope_id, scope, core)) {
-            .absent => return .absent,
-            .stale => return .stale,
-            .hit => |location| location,
-        };
-        var lease = target.cell.load();
-        switch (location) {
-            .core => if (lease.visibility == .private) {
-                lease.deinit();
-                return .stale;
-            },
-            .scope => if (lease.traceWord() != null) {
-                lease.deinit();
-                return .stale;
-            },
-        }
-        return .{ .hit = .{
-            .lease = lease,
-            .execution_generation = null,
-            .home = null,
-            .trace_word = .plain(word),
-            .origin = switch (location) {
-                .scope => .direct,
-                .core => .core,
-            },
-            .defining_scope = switch (location) {
-                .scope => |selected| selected,
-                .core => null,
-            },
-        } };
-    }
-
     fn install(
         self: *ModuleCallSiteCache,
         releases: *heap.ReleaseDomain,
@@ -8143,21 +7856,6 @@ const ModuleCallSiteCache = struct {
             for (0..ways) |way| {
                 const index = base + way;
                 if (self.entries[index] == null) break :empty index;
-            }
-            // Broader lexical coverage must not evict the established
-            // generation and module-local specializations. Prefer a lexical
-            // victim within this same bounded set before ordinary replacement.
-            for (0..ways) |offset| {
-                const index = base + (@as(usize, self.victims[set_index]) + offset) % ways;
-                if (self.entries[index].?.target.isLexical()) {
-                    self.victims[set_index] ^= 1;
-                    break :empty index;
-                }
-            }
-            if (candidate.isLexical()) {
-                var rejected = candidate;
-                rejected.deinit();
-                return;
             }
             const victim = base + self.victims[set_index];
             self.victims[set_index] ^= 1;
@@ -8228,29 +7926,17 @@ pub const Resolution = struct {
     /// The reference the borrow acquired for this dispatch, moved out of the
     /// cursor. `scheduleWord` consumes it so no second pin is taken.
     borrow_pin: ?modules.GenerationPin = null,
-    /// The foreign scope borrowed for this dispatch, released by the activation
-    /// that reads it rather than by the unit.
-    borrowed_cell: ?*env.ScopeCell = null,
     trace_word: intern.TraceWord,
     origin: ResolutionOrigin,
-    /// The scope this binding was found in, which is therefore the chain its
-    /// own references resolve against. Null for a core-origin binding, whose
-    /// chain is core alone, and for a module-origin one, whose chain is its
-    /// image. Recording it is what makes "resolves where it was defined" hold
-    /// without exception: reading the unit's root instead was wrong for
-    /// anything defined in a child scope, such as inside one `@attempt`.
+    /// The root this binding was found in, which is therefore where its own
+    /// reflective references resolve. Null for a core-origin binding, whose
+    /// root is core, and for a module-origin one, whose root is its image.
     defining_scope: ?*env.Scope = null,
     call_site_cache: ?CallSiteCacheCandidate = null,
     /// Moves the borrow's reference out, so `deinit` will not release it.
     pub fn takeBorrowPin(self: *Resolution) ?modules.GenerationPin {
         const owned = self.borrow_pin;
         self.borrow_pin = null;
-        return owned;
-    }
-
-    pub fn takeBorrowedCell(self: *Resolution) ?*env.ScopeCell {
-        const owned = self.borrowed_cell;
-        self.borrowed_cell = null;
         return owned;
     }
 
@@ -8261,7 +7947,6 @@ pub const Resolution = struct {
         // Released only if the dispatch never scheduled a body; `scheduleWord`
         // consumes them otherwise.
         if (self.borrow_pin) |*pin| pin.deinit();
-        if (self.borrowed_cell) |cell| cell.releaseBorrow();
         self.* = undefined;
     }
 
@@ -8470,14 +8155,6 @@ pub const ResolutionCursor = struct {
     /// moved into the resolution and consumed by `scheduleWord`, which
     /// therefore does not pin again.
     borrow_pin: ?modules.GenerationPin = null,
-    /// The foreign scope this dispatch borrowed, if any. Rides here so the
-    /// activation that ends up reading the scope is the one that releases it.
-    borrowed_cell: ?*env.ScopeCell = null,
-    /// Present only when the occurrence names the running resolution scope.
-    /// The activation is the liveness proof for the observed lexical chain;
-    /// module-local candidates additionally require the exact module root.
-    local_cache_scope: ?env.ScopeId = null,
-    guard_pool: ?*resolution_core.GuardPool = null,
 
     /// A cursor for a name that genuinely means "whatever the running chain
     /// says": reflection like `which`, `see`, and `doc`, and the fallback paths
@@ -8491,7 +8168,7 @@ pub const ResolutionCursor = struct {
     /// module's own shadow was the answer. Reaching this from a dispatch path
     /// now means visibly discarding a `WordRef` for its bare id, which greps.
     pub fn initAtCurrent(evaluator: *Machine, word: u32) ResolutionCursor {
-        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null, null, null);
+        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null);
     }
 
     pub fn init(
@@ -8499,8 +8176,6 @@ pub const ResolutionCursor = struct {
         word: u32,
         written: ?*env.Scope,
         borrow_pin: ?modules.GenerationPin,
-        borrowed_cell: ?*env.ScopeCell,
-        local_cache_scope: ?resolution_core.GuardContext,
     ) ResolutionCursor {
         const spelling = intern.get(word);
         const context = if (written) |scope|
@@ -8512,9 +8187,6 @@ pub const ResolutionCursor = struct {
             evaluator.unit.current.?.site.registration_provenance;
         return .{
             .borrow_pin = borrow_pin,
-            .borrowed_cell = borrowed_cell,
-            .local_cache_scope = if (local_cache_scope) |capture| capture.scope_id else null,
-            .guard_pool = if (local_cache_scope) |capture| capture.pool else null,
             .allocator = evaluator.unit.allocator,
             .registry = evaluator.unit.inherited.registry,
             .libraries = evaluator.unit.inherited.libraries(),
@@ -8537,7 +8209,6 @@ pub const ResolutionCursor = struct {
         // Released here only when no resolution took them: a dispatch that
         // schedules a body moves them out first.
         if (self.borrow_pin) |*pin| pin.deinit();
-        if (self.borrowed_cell) |cell| cell.releaseBorrow();
         self.* = undefined;
     }
 
@@ -8545,12 +8216,6 @@ pub const ResolutionCursor = struct {
     fn takeBorrowPin(self: *ResolutionCursor) ?modules.GenerationPin {
         const owned = self.borrow_pin;
         self.borrow_pin = null;
-        return owned;
-    }
-
-    fn takeBorrowedCell(self: *ResolutionCursor) ?*env.ScopeCell {
-        const owned = self.borrowed_cell;
-        self.borrowed_cell = null;
         return owned;
     }
 
@@ -8592,47 +8257,20 @@ pub const ResolutionCursor = struct {
     fn directResult(
         self: *ResolutionCursor,
         lease: env.BindingLease,
-        captured_cell: ?env.BindingCellHandle,
         searched_scope: *env.Scope,
-        guard: resolution_core.GuardId,
     ) Resolution {
         const local = lease.traceWord();
         const home = if (local == null) null else self.homeForLocalHit(searched_scope);
-        var cell = captured_cell;
-        const cache = cache: {
-            const scope_id = self.local_cache_scope orelse {
-                if (cell) |*owned| owned.deinit();
-                break :cache null;
-            };
-            if (local == null) {
-                if (guard != .none) if (cell) |owned| {
-                    break :cache CallSiteCacheCandidate{ .plain = .{ .guard = guard, .cell = owned } };
-                };
-                if (cell) |*owned| owned.deinit();
-                break :cache CallSiteCacheCandidate{ .warming = scope_id };
-            }
-            if (!searched_scope.isModuleRoot() or searched_scope.cellId() != scope_id) {
-                if (cell) |*owned| owned.deinit();
-                break :cache null;
-            }
-            break :cache CallSiteCacheCandidate{ .local = .{
-                .scope_id = scope_id,
-                .cell = cell.?,
-            } };
-        };
         return .{
             .lease = lease,
             .execution_generation = null,
             .home = home,
             .borrow_pin = self.takeBorrowPin(),
-            .borrowed_cell = self.takeBorrowedCell(),
             .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(self.word),
             .origin = if (home) |resolved| moduleResolutionOrigin(resolved) else .direct,
             // A module-local hit resolves against its image, which the home
-            // supplies; anything else resolves against the scope it was found
-            // in.
+            // supplies; anything else resolves against the root it was found in.
             .defining_scope = if (home != null) null else searched_scope,
-            .call_site_cache = cache,
         };
     }
 
@@ -8652,10 +8290,10 @@ pub const ResolutionCursor = struct {
                 if (cell) |*owned| owned.deinit();
                 break :cache null;
             }
-            break :cache CallSiteCacheCandidate{ .qualified = .{
+            break :cache CallSiteCacheCandidate{
                 .generation = generation_lease.guard(),
                 .cell = cell.?,
-            } };
+            };
         };
         const execution_generation = generation_lease.enterExecution(self.module_access);
         const home = execution_generation.home(self.module_access);
@@ -8694,7 +8332,7 @@ pub const ResolutionCursor = struct {
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
                     } else {
-                        self.work = .{ .lexical = .init(self.core, self.scope, self.word, if (self.local_cache_scope) |scope_id| .{ .pool = self.guard_pool, .scope_id = scope_id } else null) };
+                        self.work = .{ .lexical = .init(self.core, self.scope, self.word) };
                         self.phase = .lexical;
                     }
                     break :result .pending;
@@ -8808,7 +8446,7 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unresolved = .core } };
                     };
-                    self.work = .{ .lexical = .init(self.core, null, export_name, null) };
+                    self.work = .{ .lexical = .init(self.core, null, export_name) };
                     self.phase = .lexical;
                     break :result .pending;
                 },
@@ -8821,25 +8459,17 @@ pub const ResolutionCursor = struct {
                     break :result .{ .complete = .{ .unresolved = self.plain_chain } };
                 },
                 .item => |candidate| result: {
-                    const guard = self.work.lexical.finishGuard();
                     self.work.deinit();
                     self.phase = .complete;
                     const resolved: Resolution = switch (candidate.location) {
-                        .scope => |scope| self.directResult(candidate.lease, candidate.cell, scope, guard),
+                        .scope => |scope| self.directResult(candidate.lease, scope),
                         .core => .{
                             .lease = candidate.lease,
                             .execution_generation = null,
                             .home = null,
+                            .borrow_pin = self.takeBorrowPin(),
                             .trace_word = .plain(self.word),
                             .origin = .core,
-                            .call_site_cache = cache: {
-                                if (candidate.cell) |captured| {
-                                    if (guard != .none) break :cache .{ .plain = .{ .guard = guard, .cell = captured } };
-                                    var cell = captured;
-                                    cell.deinit();
-                                }
-                                break :cache if (self.local_cache_scope) |scope_id| .{ .warming = scope_id } else null;
-                            },
                         },
                     };
                     break :result .{ .complete = .{ .resolved = resolved } };
@@ -8915,7 +8545,7 @@ pub const ShadowCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = self.takeOutput() };
                     }
-                    self.work = .{ .lexical = .init(self.core, self.scope, self.word, null) };
+                    self.work = .{ .lexical = .init(self.core, self.scope, self.word) };
                     self.phase = .lexical;
                     break :result .pending;
                 },
@@ -8970,7 +8600,6 @@ fn scheduleWord(
     defining_scope: ?*env.Scope,
     effect: ?env.Effect,
     borrow_pin: ?modules.GenerationPin,
-    borrowed_cell: ?*env.ScopeCell,
 ) MachineError!void {
     const scope = if (resolved_home) |home|
         home.scope(self.unit.module_access)
@@ -8983,14 +8612,10 @@ fn scheduleWord(
         resolved_home.?.registrationProvenance();
     // A body defines where its caller could, and no further.
     const defining = self.unit.current.?.site.defining;
-    // Each binding resolves against the chain it was defined in, with no
-    // exception. A module word resolves against its home. Anything else
-    // resolves against the scope resolution found it in, which is null for a
-    // core or prelude definition — those were published against core alone,
-    // so a session redefinition shadows one for session code without
-    // rewriting what already-evaluated definitions mean — and is the found
-    // scope itself otherwise, including a child scope such as one `@attempt`
-    // opens.
+    // A body's words carry their own slots; this is the root reflection and
+    // unlinked words resolve against. A module word's is its image; anything
+    // else's is the root it was found in, null for a core or prelude
+    // definition, which was published against core alone.
     const resolution_scope: ?*env.Scope = if (resolved_home) |generation|
         generation.scope(self.unit.module_access)
     else
@@ -9019,12 +8644,10 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .position = .{ .source = 0 },
-        .borrowed_scope = borrowed_cell,
         .site = .{
             .scope = scope,
             .resolution_scope = resolution_scope,
             .home = home,
-            .resolution_scope_id = ExecutionSite.idOf(resolution_scope),
             .defining = defining,
             .registration_provenance = registration_provenance,
         },
@@ -9584,7 +9207,7 @@ const SeedMaterializer = struct {
 
 /// What a `ConstructionDriver` opens once its body is final.
 const ConstructionTarget = union(enum) {
-    /// `@attempt`: a child scope on the enclosing chain, created at open time.
+    /// `@attempt`: a failure boundary in the invoker's scope.
     attempt,
     /// `@module`/`@defm`: the candidate image and the name it registers under.
     image: struct {
