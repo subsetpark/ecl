@@ -1800,6 +1800,17 @@ pub const ReleaseDomain = struct {
     pub const SliceRecord = struct {
         epoch: std.atomic.Value(u64) = .init(0),
         next_free: ?*SliceRecord = null,
+        /// The domain epoch this record follows.
+        source: ?*const std.atomic.Value(u64) = null,
+
+        /// Re-announces the slice at a point where it holds nothing it read
+        /// earlier, so a long-running slice delays reclamation by one step
+        /// rather than by its whole length. Stores only when the domain's
+        /// epoch has moved, which is only when something was deferred.
+        pub fn refresh(self: *SliceRecord) void {
+            const current = self.source.?.load(.acquire);
+            if (current != self.epoch.load(.monotonic)) self.epoch.store(current, .release);
+        }
     };
 
     /// A retirement waiting out the slices that began before it. The object
@@ -1951,7 +1962,7 @@ pub const ReleaseDomain = struct {
             }
             try self.slice_records.ensureUnusedCapacity(self.allocator, 1);
             const created = try self.allocator.create(SliceRecord);
-            created.* = .{};
+            created.* = .{ .source = &self.slice_epoch };
             self.slice_records.appendAssumeCapacity(created);
             break :record created;
         };

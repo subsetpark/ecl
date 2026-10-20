@@ -3094,7 +3094,7 @@ pub const Machine = struct {
     unit: *Unit,
     /// Present while this machine runs inside a slice, which lets a dispatch
     /// read a binding without taking references to it.
-    slice: ?*const heap.ReleaseDomain.SliceRecord = null,
+    slice: ?*heap.ReleaseDomain.SliceRecord = null,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -6809,6 +6809,9 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (!first_step and !self.unit.cancelled.load(.acquire) and
             self.unit.releases.evaluationBackpressured()) return .yielded;
         first_step = false;
+        // No binding read in an earlier step is still held here, so the slice
+        // can stop guarding snapshots replaced since it last announced.
+        if (self.slice) |slice| slice.refresh();
         if (self.unit.native == .task_join_cleanup) {
             const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
             if (!cleanup.complete) return .yielded;
