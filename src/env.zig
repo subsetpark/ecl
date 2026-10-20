@@ -546,6 +546,7 @@ pub const BindingCellHandle = enum(usize) {
     pub fn load(self: BindingCellHandle) BindingLease {
         return self.cell().load();
     }
+
     pub fn deinit(self: *BindingCellHandle) void {
         if (self.* == .consumed) return;
         self.cell().release();
@@ -835,6 +836,10 @@ pub const Environment = struct {
     shapes: ShapePublisher,
     shape_generation: std.atomic.Value(u64) = .init(0),
     frozen: std.atomic.Value(bool) = .init(false),
+    /// This root's name slots, by raw name id. Guarded by `writer`, so a
+    /// binding and a slot for the same name are always made consistent under
+    /// one lock. Linking a word never needs the environment unfrozen.
+    slots: std.AutoHashMapUnmanaged(u32, *Slot) = .empty,
 
     pub const TeardownCursor = struct {
         target: *Environment,
@@ -860,6 +865,13 @@ pub const Environment = struct {
             return switch (self.state) {
                 .waiting_for_readers => result: {
                     if (!self.target.shapes.quiescent()) break :result false;
+                    // The root is retiring, so no word linked to these slots
+                    // can prove it live again: drop what they hold. The slots
+                    // themselves belong to the `Env`.
+                    var slots = self.target.slots.valueIterator();
+                    while (slots.next()) |slot| slot.*.release();
+                    self.target.slots.deinit(self.target.allocator);
+                    self.target.slots = .empty;
                     const shapes = self.target.shapes.currentOwned();
                     self.target.shapes.publish(null);
                     self.state = .{ .shapes = shapes };
@@ -939,6 +951,10 @@ pub const Environment = struct {
         id: intern.NamespaceName,
         spec: BindingSpec,
         candidate_cell: ?*BindingCell,
+        /// The candidate is a slot's cell from an earlier binding of this
+        /// name. Its snapshot still holds that binding, so commit replaces it
+        /// rather than publishing it as it stands.
+        reused: bool = false,
         state: State = .snapshot,
 
         fn init(
@@ -946,6 +962,16 @@ pub const Environment = struct {
             id: intern.NamespaceName,
             spec: BindingSpec,
         ) error{OutOfMemory}!BindCursor {
+            environment.lockBlocking();
+            const kept = environment.slotCell(id);
+            environment.unlock();
+            if (kept) |cell| return .{
+                .environment = environment,
+                .id = id,
+                .spec = spec,
+                .candidate_cell = cell,
+                .reused = true,
+            };
             return .{
                 .environment = environment,
                 .id = id,
@@ -1054,6 +1080,26 @@ pub const Environment = struct {
                         break :result .pending;
                     }
                     const published_cell = self.candidate_cell.?;
+                    // A slot linked since this cursor began may already hold a
+                    // cell for the name. Publishing a second one would split
+                    // the name's identity, so start over around the slot's.
+                    if (self.environment.slots.get(@backingInt(self.id))) |slot| {
+                        if (slot.cell.load(.acquire)) |kept| if (kept != published_cell) {
+                            kept.retain();
+                            self.environment.unlock();
+                            state.built.retire(self.environment.releases);
+                            state.shape.deinit();
+                            published_cell.release();
+                            self.candidate_cell = kept;
+                            self.reused = true;
+                            self.state = .snapshot;
+                            break :result .pending;
+                        };
+                    }
+                    if (self.reused) published_cell.replace(self.environment.allocator, self.spec) catch |err| {
+                        self.environment.unlock();
+                        return err;
+                    };
                     state.built.previous = self.environment.shapes.currentOwned();
                     const next = state.built;
                     published_cell.release();
@@ -1061,6 +1107,7 @@ pub const Environment = struct {
                     _ = self.environment.shape_generation.fetchAdd(1, .acq_rel);
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
+                    self.environment.adoptSlotCell(self.id, published_cell);
                     self.environment.unlock();
                     state.shape.deinit();
                     self.state = .complete;
@@ -1070,6 +1117,42 @@ pub const Environment = struct {
             };
         }
     };
+
+    /// A retained reference to the cell a slot already holds for `id`, which
+    /// a new binding of the name must reuse. Caller holds `writer`.
+    /// A retained reference to the cell bound to raw name `name`, or null when
+    /// nothing is bound or the name is not a namespace name at all. Caller
+    /// holds `writer`, so the current shape cannot change underneath and needs
+    /// no lease; taking one would deadlock, since releasing a lease may take
+    /// `writer` to retire old shapes.
+    fn boundCellLocked(self: *Environment, name: u32) ?*BindingCell {
+        var validation = intern.NamespaceCursor.initReserved(name);
+        const binding_name = poll.drive(?intern.NamespaceName, &validation, .{}) orelse return null;
+        const shape = self.shapes.currentOwned() orelse return null;
+        var lookup = shape.names.rawLookup(binding_name);
+        const cell = poll.drive(?*BindingCell, &lookup, .{}) orelse return null;
+        cell.retain();
+        return cell;
+    }
+
+    fn slotCell(self: *Environment, id: intern.NamespaceName) ?*BindingCell {
+        const slot = self.slots.get(@backingInt(id)) orelse return null;
+        const cell = slot.cell.load(.acquire) orelse return null;
+        cell.retain();
+        return cell;
+    }
+
+    /// Points `id`'s slot, if any, at the cell just published for it and marks
+    /// it bound. Caller holds `writer`.
+    fn adoptSlotCell(self: *Environment, id: intern.NamespaceName, cell: *BindingCell) void {
+        const slot = self.slots.get(@backingInt(id)) orelse return;
+        if (slot.cell.load(.acquire) == null) {
+            cell.retain();
+            slot.cell.store(cell, .release);
+        }
+        std.debug.assert(slot.cell.load(.acquire) == cell);
+        slot.bound.store(true, .release);
+    }
 
     fn bindCursor(
         self: *Environment,
@@ -1185,6 +1268,8 @@ pub const Environment = struct {
                     _ = self.environment.shape_generation.fetchAdd(1, .acq_rel);
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
+                    if (self.environment.slots.get(@backingInt(self.id))) |slot|
+                        slot.bound.store(false, .release);
                     self.environment.unlock();
                     state.shape.deinit();
                     self.state = .complete;
@@ -1833,100 +1918,157 @@ pub const ScopeCell = struct {
     }
 };
 
-/// A three-level direct directory keyed by the 24 low bits of a `ScopeId`, the
-/// same shape and for the same reason as `spans.HeaderIndex`: a sibling
-/// consumer of a small dense id space rather than an extension of it. Pages are
-/// installed once and live for the directory's lifetime, so a reader needs no
-/// lock and lookup is three atomic loads — which is what makes it usable on the
-/// dispatch path.
-const ScopeIndex = struct {
-    const radix = 256;
-    const Leaf = struct {
-        cells: [radix]std.atomic.Value(?*ScopeCell) = @splat(.init(null)),
-    };
-    const Branch = struct {
-        leaves: [radix]std.atomic.Value(?*Leaf) = @splat(.init(null)),
-    };
-
-    mutex: std.Io.Mutex = .init,
-    next: std.atomic.Value(u32) = .init(1),
-    branches: [radix]std.atomic.Value(?*Branch) = @splat(.init(null)),
-
-    const max_id: u32 = (1 << id_bits) - 1;
-
-    fn coordinates(id: ScopeId) struct { usize, usize, usize } {
-        const raw = @backingInt(id);
-        std.debug.assert(raw != 0 and raw <= max_id);
-        return .{
-            @intCast((raw >> 16) & 0xff),
-            @intCast((raw >> 8) & 0xff),
-            @intCast(raw & 0xff),
+/// A three-level direct directory keyed by the 24 low bits of an id, the same
+/// shape and for the same reason as `spans.HeaderIndex`: a sibling consumer of
+/// a small dense id space rather than an extension of it. Pages are installed
+/// once and live for the directory's lifetime, so a reader needs no lock and
+/// lookup is three atomic loads — which is what makes it usable on the
+/// dispatch path. Ids are never reused: a stale word holds a bare id and no
+/// reference, so a reused id would let it reach an unrelated entry.
+fn Directory(comptime Id: type, comptime Entry: type) type {
+    return struct {
+        const Self = @This();
+        const radix = 256;
+        const Leaf = struct {
+            entries: [radix]std.atomic.Value(?*Entry) = @splat(.init(null)),
         };
-    }
-
-    fn get(self: *const ScopeIndex, id: ScopeId) ?*ScopeCell {
-        const branch_index, const leaf_index, const entry_index = coordinates(id);
-        const branch = self.branches[branch_index].load(.acquire) orelse return null;
-        const leaf = branch.leaves[leaf_index].load(.acquire) orelse return null;
-        return leaf.cells[entry_index].load(.acquire);
-    }
-
-    /// Issues the next id and installs the entry. Candidate pages are allocated
-    /// before the lock is taken, so no allocation happens while a publisher
-    /// holds it; a racing publisher preparing the same page loses and destroys
-    /// its unused candidate.
-    fn register(
-        self: *ScopeIndex,
-        allocator: std.mem.Allocator,
-        cell: *ScopeCell,
-    ) error{OutOfMemory}!ScopeId {
-        var branch_candidate: ?*Branch = try allocator.create(Branch);
-        branch_candidate.?.* = .{};
-        var leaf_candidate: ?*Leaf = allocator.create(Leaf) catch |err| {
-            allocator.destroy(branch_candidate.?);
-            return err;
+        const Branch = struct {
+            leaves: [radix]std.atomic.Value(?*Leaf) = @splat(.init(null)),
         };
-        leaf_candidate.?.* = .{};
-        defer {
-            if (branch_candidate) |unused| allocator.destroy(unused);
-            if (leaf_candidate) |unused| allocator.destroy(unused);
+
+        mutex: std.Io.Mutex = .init,
+        next: std.atomic.Value(u32) = .init(1),
+        branches: [radix]std.atomic.Value(?*Branch) = @splat(.init(null)),
+
+        const max_id: u32 = (1 << id_bits) - 1;
+
+        fn coordinates(id: Id) struct { usize, usize, usize } {
+            const raw = @backingInt(id);
+            std.debug.assert(raw != 0 and raw <= max_id);
+            return .{
+                @intCast((raw >> 16) & 0xff),
+                @intCast((raw >> 8) & 0xff),
+                @intCast(raw & 0xff),
+            };
         }
 
-        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const raw = self.next.load(.monotonic);
-        if (raw > max_id) return error.OutOfMemory;
-        const id: ScopeId = @fromBackingInt(@intCast(raw));
-        const branch_index, const leaf_index, const entry_index = coordinates(id);
-        const branch = self.branches[branch_index].load(.acquire) orelse installed: {
-            const chosen = branch_candidate.?;
-            branch_candidate = null;
-            self.branches[branch_index].store(chosen, .release);
-            break :installed chosen;
-        };
-        const leaf = branch.leaves[leaf_index].load(.acquire) orelse installed: {
-            const chosen = leaf_candidate.?;
-            leaf_candidate = null;
-            branch.leaves[leaf_index].store(chosen, .release);
-            break :installed chosen;
-        };
-        std.debug.assert(leaf.cells[entry_index].load(.acquire) == null);
-        leaf.cells[entry_index].store(cell, .release);
-        self.next.store(raw + 1, .monotonic);
-        // Restates what the `max_id` refusal above already guarantees. It is
-        // here so that adding a generation tag to the reserved byte cannot
-        // silently start overlapping issued indices.
-        std.debug.assert(raw >> id_bits == 0);
-        return id;
+        fn get(self: *const Self, id: Id) ?*Entry {
+            const branch_index, const leaf_index, const entry_index = coordinates(id);
+            const branch = self.branches[branch_index].load(.acquire) orelse return null;
+            const leaf = branch.leaves[leaf_index].load(.acquire) orelse return null;
+            return leaf.entries[entry_index].load(.acquire);
+        }
+
+        /// Issues the next id and installs the entry. Candidate pages are
+        /// allocated before the lock is taken, so no allocation happens while a
+        /// publisher holds it; a racing publisher preparing the same page loses
+        /// and destroys its unused candidate.
+        fn register(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            entry: *Entry,
+        ) error{OutOfMemory}!Id {
+            var branch_candidate: ?*Branch = try allocator.create(Branch);
+            branch_candidate.?.* = .{};
+            var leaf_candidate: ?*Leaf = allocator.create(Leaf) catch |err| {
+                allocator.destroy(branch_candidate.?);
+                return err;
+            };
+            leaf_candidate.?.* = .{};
+            defer {
+                if (branch_candidate) |unused| allocator.destroy(unused);
+                if (leaf_candidate) |unused| allocator.destroy(unused);
+            }
+
+            std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+            defer std.Io.Threaded.mutexUnlock(&self.mutex);
+            const raw = self.next.load(.monotonic);
+            if (raw > max_id) return error.OutOfMemory;
+            const id: Id = @fromBackingInt(@intCast(raw));
+            const branch_index, const leaf_index, const entry_index = coordinates(id);
+            const branch = self.branches[branch_index].load(.acquire) orelse installed: {
+                const chosen = branch_candidate.?;
+                branch_candidate = null;
+                self.branches[branch_index].store(chosen, .release);
+                break :installed chosen;
+            };
+            const leaf = branch.leaves[leaf_index].load(.acquire) orelse installed: {
+                const chosen = leaf_candidate.?;
+                leaf_candidate = null;
+                branch.leaves[leaf_index].store(chosen, .release);
+                break :installed chosen;
+            };
+            std.debug.assert(leaf.entries[entry_index].load(.acquire) == null);
+            leaf.entries[entry_index].store(entry, .release);
+            self.next.store(raw + 1, .monotonic);
+            // Restates what the `max_id` refusal above already guarantees. It
+            // is here so that adding a generation tag to the reserved byte
+            // cannot silently start overlapping issued indices.
+            std.debug.assert(raw >> id_bits == 0);
+            return id;
+        }
+
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            for (&self.branches) |*branch_slot| if (branch_slot.load(.acquire)) |branch| {
+                for (&branch.leaves) |*leaf_slot| if (leaf_slot.load(.acquire)) |leaf|
+                    allocator.destroy(leaf);
+                allocator.destroy(branch);
+            };
+            self.* = .{};
+        }
+    };
+}
+const ScopeIndex = Directory(ScopeId, ScopeCell);
+const SlotIndex = Directory(SlotId, Slot);
+
+/// The id a word occurrence carries: its name's slot in the root it was
+/// written in. Zero is a word linked to nothing, which only the locals
+/// backend's reserved words are.
+pub const SlotId = enum(u32) { none = 0, _ };
+
+/// One name in one root: the session, a module image, or core.
+///
+/// A word links to its slot when it is written and reads the slot each time it
+/// executes, so a definition reaches every word written in that root at its
+/// next execution. The slot shares the root's binding cell for its name: a
+/// binding made while the slot exists reuses the slot's cell, so the cell's
+/// identity never changes and a reader never races a pointer swap. Removing
+/// the name only clears `bound`.
+///
+/// Slots are owned by the `Env` for its lifetime, like scope cells, because a
+/// word reads one without a lock or a reference. What a slot references is
+/// released when its root retires, after which only a reader holding a
+/// liveness proof for the root would touch it, and none can.
+pub const Slot = struct {
+    name: u32,
+    /// The root this slot belongs to. Cells are immortal, so this is readable
+    /// whether or not the root is, and it is what a reader proves liveness
+    /// against before touching `cell`.
+    root: *ScopeCell,
+    /// The root's binding cell for `name`, adopted on first binding and held
+    /// until the root retires. Null while the name has never been bound here.
+    cell: std.atomic.Value(?*BindingCell) = .init(null),
+    /// Whether the root currently binds `name`. False after removal, when
+    /// `cell` still holds the last binding but nothing reads it.
+    bound: std.atomic.Value(bool) = .init(false),
+    /// Core's binding for `name`, the fallback when the root has none. Core is
+    /// frozen before any other root links a word, so this is fixed at link
+    /// time; core's shape holds the cell for the `Env`'s lifetime. Null for a
+    /// core slot and for a name core does not bind.
+    core: ?*BindingCell = null,
+    id: SlotId = .none,
+
+    /// The cell this slot currently yields: the root's binding, else core's.
+    /// The caller must have proven the root live.
+    pub fn current(self: *const Slot) ?*BindingCell {
+        if (self.bound.load(.acquire)) return self.cell.load(.acquire);
+        return self.core;
     }
 
-    fn deinit(self: *ScopeIndex, allocator: std.mem.Allocator) void {
-        for (&self.branches) |*slot| if (slot.load(.acquire)) |branch| {
-            for (&branch.leaves) |*leaf_slot| if (leaf_slot.load(.acquire)) |leaf|
-                allocator.destroy(leaf);
-            allocator.destroy(branch);
-        };
-        self.* = .{};
+    /// Releases the root's cell. Runs only during the root's teardown.
+    fn release(self: *Slot) void {
+        self.bound.store(false, .release);
+        if (self.cell.swap(null, .acq_rel)) |held| held.release();
     }
 };
 
@@ -1941,6 +2083,11 @@ const EnvState = struct {
     cells: std.ArrayList(*ScopeCell) = .empty,
     cells_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
+    /// Every slot this Env has issued, freed together at teardown for the
+    /// same reason as `cells`.
+    slots: std.ArrayList(*Slot) = .empty,
+    slots_mutex: std.Io.Mutex = .init,
+    slot_index: SlotIndex = .{},
     locals_words: intern.LocalsWords,
 };
 
@@ -2016,11 +2163,14 @@ pub const Env = enum(usize) {
         backing.host.drain();
         for (backing.cells.items) |cell| allocator.destroy(cell);
         backing.cells.deinit(allocator);
+        for (backing.slots.items) |owned| allocator.destroy(owned);
+        backing.slots.deinit(allocator);
         // The directory outlives nothing that reads it: `scopes.get` has exactly
         // one caller, `scopeOf`, reached only from dispatch, and execution stops
         // at `scheduler.deinit` before any teardown begins. Its pages hold
         // pointers nobody follows again.
         backing.scopes.deinit(allocator);
+        backing.slot_index.deinit(allocator);
         allocator.destroy(backing);
         self.* = .consumed;
     }
@@ -2050,6 +2200,67 @@ pub const Env = enum(usize) {
     /// It never retires: core lives for the `Env`'s lifetime.
     pub fn coreCell(self: *Env) *ScopeCell {
         return &self.privateState().core_cell;
+    }
+
+    /// The core environment, which owns core's name slots.
+    pub fn coreEnvironment(self: *Env) *Environment {
+        return &self.privateState().core;
+    }
+
+    /// The slot a word carries, or null for an unlinked word or one whose id
+    /// was never issued. A slot is never freed while the `Env` lives, so this
+    /// needs no proof; what the slot references does.
+    pub fn slot(self: *const Env, id: SlotId) ?*Slot {
+        if (id == .none) return null;
+        return self.privateState().slot_index.get(id);
+    }
+
+    /// The slot for `name` in the root `root` names, whose bindings live in
+    /// `environment`, created on first use. A new slot starts from the root's
+    /// current binding, and from core's for the fallback. Linking never
+    /// defines anything, so a frozen root links as readily as a live one.
+    pub fn linkSlot(
+        self: *Env,
+        root: *ScopeCell,
+        environment: *Environment,
+        name: u32,
+    ) error{OutOfMemory}!SlotId {
+        const backing = self.privateState();
+        const allocator = backing.host.allocator();
+        environment.lockBlocking();
+        defer environment.unlock();
+        if (environment.slots.get(name)) |existing| return existing.id;
+        try environment.slots.ensureUnusedCapacity(environment.allocator, 1);
+        const created = try allocator.create(Slot);
+        created.* = .{ .name = name, .root = root };
+        // Owned by the Env from here, like a scope cell: a failed registration
+        // below leaves a slot nothing names rather than one that leaks.
+        {
+            std.Io.Threaded.mutexLockUncancelable(&backing.slots_mutex);
+            defer std.Io.Threaded.mutexUnlock(&backing.slots_mutex);
+            backing.slots.append(allocator, created) catch |err| {
+                allocator.destroy(created);
+                return err;
+            };
+        }
+        if (environment.boundCellLocked(name)) |cell| {
+            created.cell.store(cell, .release);
+            created.bound.store(true, .release);
+        }
+        if (!root.core) {
+            // Core's shape holds its cells until the Env is torn down, so the
+            // fallback needs no reference of its own. Lock order is always a
+            // root's writer before core's: core never links into another root.
+            backing.core.lockBlocking();
+            defer backing.core.unlock();
+            if (backing.core.boundCellLocked(name)) |cell| {
+                created.core = cell;
+                cell.release();
+            }
+        }
+        created.id = try backing.slot_index.register(allocator, created);
+        environment.slots.putAssumeCapacity(name, created);
+        return created.id;
     }
 
     /// The cell for one ordinary scope, created on first use. The scope retires
@@ -2413,4 +2624,61 @@ test "env: issued scope ids leave their reserved high bits clear" {
         try std.testing.expect(raw > previous);
         previous = raw;
     }
+}
+
+test "env: a slot keeps one cell per name across binding, removal, and rebinding" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    var container = try Env.init(&host);
+    defer container.deinit();
+    const backing = container.privateState();
+    const list_api = @import("list.zig");
+
+    const one = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
+    defer releases.releaseValue(one);
+    const two = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 2 }});
+    defer releases.releaseValue(two);
+    const core_body = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 3 }});
+    defer releases.releaseValue(core_body);
+
+    const root = try container.newScopeCell(null, null);
+    const late = try intern.internNamespace("slot-late");
+    const early = try intern.internNamespace("slot-early");
+    const shared = try intern.internNamespace("slot-shared");
+
+    // Linked before any binding: unbound, with no core fallback.
+    const early_id = try container.linkSlot(root, &backing.session, intern.namespaceId(early));
+    const early_slot = container.slot(early_id).?;
+    try std.testing.expect(early_slot.current() == null);
+    try container.define(early, .{ .word = .{ .body = quotation(one.list).? } });
+    const first_cell = early_slot.current().?;
+
+    // Removal clears the slot without dropping its cell; rebinding reuses it.
+    var unbind = backing.session.unbindCursor(early);
+    defer unbind.deinit();
+    try std.testing.expect(try poll.driveFallible(bool, &unbind, .{}));
+    try std.testing.expect(early_slot.current() == null);
+    try container.define(early, .{ .word = .{ .body = quotation(two.list).? } });
+    try std.testing.expectEqual(first_cell, early_slot.current().?);
+    var lease = first_cell.load();
+    defer lease.deinit();
+    try std.testing.expectEqual(@as(i64, 2), list_api.atUnchecked(.{ .list = quotationHeader(lease.binding.word) }, 0).int);
+
+    // Linked after a binding: adopts the environment's cell.
+    try container.define(late, .{ .word = .{ .body = quotation(one.list).? } });
+    const late_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(late))).?;
+    try std.testing.expect(late_slot.current() != null);
+    try std.testing.expectEqual(late_slot.id, try container.linkSlot(root, &backing.session, intern.namespaceId(late)));
+
+    // Core is the fallback until the root shadows the name, and again after.
+    _ = try backing.core.bind(shared, BindingSpec.fromTop(.{ .word = .{ .body = quotation(core_body.list).? } }));
+    const shared_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(shared))).?;
+    const core_cell = shared_slot.current().?;
+    try container.define(shared, .{ .word = .{ .body = quotation(one.list).? } });
+    try std.testing.expect(shared_slot.current().? != core_cell);
+    var remove_shadow = backing.session.unbindCursor(shared);
+    defer remove_shadow.deinit();
+    _ = try poll.driveFallible(bool, &remove_shadow, .{});
+    try std.testing.expectEqual(core_cell, shared_slot.current().?);
 }
