@@ -103,7 +103,20 @@ const Tokenizer = struct {
         );
         self.mode = .main;
     }
-    fn advance(self: *Tokenizer, diag: *reader.Diag) (error{ OutOfMemory, Parse })!TokenizeProgress {
+    /// Runs transitions until one finishes the source or the budget is spent.
+    /// Each transition costs one unit, so a step stays bounded while the
+    /// layers above pay their dispatch once per budget, not once per byte.
+    fn advance(self: *Tokenizer, diag: *reader.Diag, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!TokenizeProgress {
+        while (work.spend()) {
+            const progress = try self.step(diag);
+            if (progress != .pending) return progress;
+        }
+        return .pending;
+    }
+
+    /// One transition: a codepoint validated, a character consumed, or a
+    /// token finished.
+    fn step(self: *Tokenizer, diag: *reader.Diag) (error{ OutOfMemory, Parse })!TokenizeProgress {
         switch (self.mode) {
             .validate => {
                 if (self.validate_index == self.source.len) {
@@ -315,7 +328,7 @@ fn snapshot(tokenizer: *const Tokenizer) LexicalCheckpoint {
 fn advanceLexical(checkpoint: LexicalCheckpoint, source: []const u8) LexicalCheckpoint {
     var diag: reader.Diag = .{};
     var tokenizer = resumed(checkpoint, source) orelse return .rejected;
-    while (true) switch (tokenizer.advance(&diag) catch return .rejected) {
+    while (true) switch (tokenizer.step(&diag) catch return .rejected) {
         .pending => {},
         .complete, .incomplete => break,
     };
@@ -329,7 +342,7 @@ fn lexicalContext(checkpoint: LexicalCheckpoint, source: []const u8) LexicalCont
     var diag: reader.Diag = .{};
     var tokenizer = resumed(checkpoint, source) orelse return .inert;
     while (tokenizer.mode == .validate or tokenizer.cursor.byteIndex() != source.len) {
-        switch (tokenizer.advance(&diag) catch return .inert) {
+        switch (tokenizer.step(&diag) catch return .inert) {
             .pending => {},
             .complete, .incomplete => break,
         }
@@ -1686,7 +1699,17 @@ const ParserCursor = struct {
         self.state = .complete;
         return .complete;
     }
-    fn advance(self: *ParserCursor) (error{ OutOfMemory, Parse })!ParseProgress {
+    /// Runs transitions until the parse ends or the budget is spent, one unit
+    /// each.
+    fn advance(self: *ParserCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ParseProgress {
+        while (work.spend()) {
+            const progress = try self.step();
+            if (progress != .pending) return progress;
+        }
+        return .pending;
+    }
+
+    fn step(self: *ParserCursor) (error{ OutOfMemory, Parse })!ParseProgress {
         return switch (self.state) {
             .scalar => self.advanceScalar(),
             .collection => |*collection| switch (try collection.advance()) {
@@ -2016,11 +2039,13 @@ pub const ReadCursor = struct {
             .retired => unreachable,
         };
     }
-    pub fn advance(self: *ReadCursor) (error{ OutOfMemory, Parse })!ReadProgress {
+    /// Tokenizing and parsing draw from `work`, one unit per transition; every
+    /// other phase is one transition per call.
+    pub fn advance(self: *ReadCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ReadProgress {
         return switch (self.state) {
             .tokenize => |*tokenizer| switch (try tokenizer: {
                 tokenizer.tokens = &self.tokens;
-                break :tokenizer tokenizer.advance(self.diag);
+                break :tokenizer tokenizer.advance(self.diag, work);
             }) {
                 .pending => .pending,
                 .incomplete => |value_incomplete| result: {
@@ -2041,7 +2066,7 @@ pub const ReadCursor = struct {
                     break :result .pending;
                 },
             },
-            .parse => |*parser| switch (try parser.cursor.advance()) {
+            .parse => |*parser| switch (try parser.cursor.advance(work)) {
                 .pending => .pending,
                 .incomplete => |value_incomplete| result: {
                     const moved = parser.*;
@@ -2211,7 +2236,11 @@ pub fn readCode(
         word_linker,
     );
     defer cursor.deinitHost();
-    return switch (try poll.driveFallible(reader.ReadResult, &cursor, .{})) {
+    const result = while (true) switch (try poll.advanceOne(&cursor)) {
+        .pending => {},
+        .complete => |read_result| break read_result,
+    };
+    return switch (result) {
         .incomplete => |incomplete| .{ .incomplete = incomplete },
         .complete => |parsed_value| .{ .complete = .{ .parsed = parsed_value, .host = host } },
     };

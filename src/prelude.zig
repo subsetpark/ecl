@@ -7,6 +7,7 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const machine = @import("machine.zig");
+const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidPrelude };
 
@@ -65,8 +66,11 @@ pub fn installSource(
             _ = release_domain.advance(machine.kernel_poll_quantum);
         host.drain();
     }
+    // The embedded prelude is a fixed, bounded input read on the installing
+    // thread before any unit exists, so no unit's turn meters it.
+    var work = poll.unbounded();
     const root_header = while (true) {
-        switch (ingestion.advance() catch |err| switch (err) {
+        switch (ingestion.advance(&work) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Parse => return error.InvalidPrelude,
             error.InvalidProvenance => @panic("archive-bound prelude reader produced foreign provenance"),

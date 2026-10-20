@@ -4670,7 +4670,7 @@ pub const Machine = struct {
                     },
                 },
                 .ingesting => |*ingestion| {
-                    switch (ingestion.advance() catch |err| switch (err) {
+                    switch (ingestion.advance(work) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Parse => return evaluator.failAtSource(
                             self.diag.text(),
