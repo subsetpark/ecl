@@ -458,9 +458,10 @@ test "long annotation traversal and reflection observe cancellation" {
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
 // The merge makes `v 'name set` observationally `v literal 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
-// a "value" is a word whose body is the literal capture `((v) first)`. Since
-// M11 made source annotations optional everywhere, the sugar synthesizes no
-// metadata at all and the equivalence is exact.
+// a "value" is a word whose body is the literal capture: `(v)`, or
+// `((v) first)` for a word `v`. Since M11 made source annotations optional
+// everywhere, the sugar synthesizes no metadata at all and the equivalence is
+// exact.
 
 test "definitions: set publishes a literal-capture word with no synthesized metadata" {
     // A constant is a word whose body is the literal capture, so referencing
@@ -488,7 +489,7 @@ test "definitions: which reports a def while see prints the set capture body" {
     try expectOk(&runtime, "3 'x set 'x which 'x see");
     try std.testing.expectEqualStrings(
         "x -> x def public\n" ++
-            "([3] first)\n",
+            "[3]\n",
         output.written(),
     );
 }
@@ -536,6 +537,30 @@ test "definitions: top-level setp fails through defp's module-root check" {
             .kind = "domain",
             .word = "defp",
         },
+    });
+}
+
+test "definitions: data-combinator applications reuse their words' bindings and still see their own definitions" {
+    // Each application runs `f` before and after defining its own `f`. The
+    // first reference resolves outside the application and is kept for the
+    // rest of the call; the second resolves in the application's own scope.
+    try support.expectStacks(&.{
+        .{ .name = "each", .source = "(10) 'f def [1 2] (pop f (20) 'f def f +) each", .expected = "[30 30]" },
+        .{ .name = "zip-with", .source = "(10) 'f def [1 2] [3 4] (pop pop f (20) 'f def f +) zip-with", .expected = "[30 30]" },
+        .{ .name = "fold", .source = "(10) 'f def [1 2] 0 (pop f + (20) 'f def f +) fold", .expected = "60" },
+        .{ .name = "scan", .source = "(10) 'f def [1 2] 0 (pop f + (20) 'f def f +) scan", .expected = "[30 60]" },
+        .{ .name = "fold1", .source = "(10) 'f def [1 2 3] (pop f + (20) 'f def f +) fold1", .expected = "61" },
+        // A kept source word and a kept builtin, across more applications
+        // than it takes the call-site cache to warm.
+        .{ .name = "source and builtin", .source = "(dup *) 'sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
+        // The binding a call keeps is the one in effect when the call began.
+        .{ .name = "next call", .source = "(1) 'k def [1 2] (pop k) each (2) 'k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
+    });
+    // A call that fails after keeping bindings releases them with the call.
+    try support.expectError(.{
+        .name = "failure after kept bindings",
+        .source = "(dup *) 'sq def [1 2 'x] (sq 1 +) each",
+        .kind = "type",
     });
 }
 
@@ -592,7 +617,7 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
     defer runtime.deinit();
     try expectOk(&runtime, "3 'x set 'x see (dup *) 'sq def 'sq see");
     try std.testing.expectEqualStrings(
-        "([3] first)\n" ++
+        "[3]\n" ++
             "(dup *)\n",
         output.written(),
     );

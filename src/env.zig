@@ -290,7 +290,6 @@ const BindingSpec = struct {
     origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
-    compiled: ?*Quotation = null,
     source: ?reader_types.SourceSlice = null,
     direct_idiom: ?DirectIdiom = null,
     fn fromTop(publication: TopPublication) BindingSpec {
@@ -337,14 +336,12 @@ const BindingSpec = struct {
         self.binding.retain();
         if (self.effect) |effect| effect.retain();
         if (self.doc) |doc| heap.incRef(documentationHeader(doc));
-        if (self.compiled) |compiled| heap.incRef(quotationHeader(compiled));
         if (self.source) |source| source.retain();
     }
     fn retire(self: BindingSpec, releases: *heap.ReleaseDomain) void {
         self.binding.retire(releases);
         if (self.effect) |effect| effect.retire(releases);
         if (self.doc) |doc| releases.releaseHeader(documentationHeader(doc));
-        if (self.compiled) |compiled| releases.releaseHeader(quotationHeader(compiled));
         if (self.source) |source| {
             var owned = source;
             owned.deinit();
@@ -402,7 +399,6 @@ pub const BindingLease = struct {
     origin: BindingOrigin,
     effect: ?ValidatedEffect,
     doc: ?*DocumentationString,
-    compiled: ?*Quotation,
     source: ?reader_types.SourceSlice,
     direct_idiom: ?DirectIdiom,
 
@@ -414,7 +410,6 @@ pub const BindingLease = struct {
             .origin = spec.origin,
             .effect = spec.effect,
             .doc = spec.doc,
-            .compiled = spec.compiled,
             .source = spec.source,
             .direct_idiom = spec.direct_idiom,
         };
@@ -429,7 +424,6 @@ pub const BindingLease = struct {
             .origin = self.origin,
             .effect = self.effect,
             .doc = self.doc,
-            .compiled = self.compiled,
             .source = self.source,
             .direct_idiom = self.direct_idiom,
         };
@@ -535,7 +529,8 @@ pub const BindingCell = struct {
 };
 
 /// An owned reference to one stable binding cell. Loading always rereads the
-/// cell's current snapshot; consumers never cache a binding payload.
+/// cell's current snapshot; the one consumer that holds a payload across
+/// executions is a data combinator's resolution plan, for the length of a call.
 pub const BindingCellHandle = enum(usize) {
     consumed = 0,
     _,

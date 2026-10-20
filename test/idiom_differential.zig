@@ -192,13 +192,6 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
     for (entry.pattern, 0..) |atom, index| {
         if (index > 0) try result.append(allocator, ' ');
         switch (atom) {
-            // The capture wrapper is spelled as the one-element list that
-            // `literal` builds at runtime — the same value either way.
-            .capture => {
-                try result.append(allocator, '(');
-                try result.appendSlice(allocator, constantFor(entry.operation, variant));
-                try result.append(allocator, ')');
-            },
             .quotation_word => |word| {
                 try result.append(allocator, '(');
                 try result.appendSlice(allocator, word.spelling);
@@ -209,7 +202,7 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                 .literal => "0",
                 .operation => entry.operation.spelling(),
                 .word => |word| word.spelling,
-                .capture, .quotation_word => unreachable,
+                .quotation_word => unreachable,
             }),
         }
     }
@@ -511,12 +504,11 @@ fn compareModes(source: []const u8, exact_errors: bool) !void {
     try std.testing.expectEqualStrings(generic_display.bytes(), automatic_display.bytes());
 }
 
-test "idioms: capture shapes preserve generic behavior" {
-    // The literal-capture shape `((v) first)` is what `literal` builds and
-    // what `partial` prefixes onto a quotation. These sources build the
-    // shape the way programs do, rather than spelling the list literally as
-    // the exhaustive harness above does, so recognition is proven against
-    // the runtime-constructed value.
+test "idioms: partial captures preserve generic behavior" {
+    // `partial` prefixes a non-word value onto its quotation as itself, so a
+    // captured constant reaches the same `constant` entries a hand-written
+    // `(3 +)` does. These sources build the phrase the way programs do, so
+    // recognition is proven against the runtime-constructed value.
     const sources = [_][]const u8{
         // Constant on the right, then the swapped (constant-left) form.
         "[1 2 3] 3 (+) partial each",
@@ -525,6 +517,8 @@ test "idioms: capture shapes preserve generic behavior" {
         // Nested spines, empties, and dict pervasion.
         "[[1 2] [3]] 10 (*) partial each",
         "[] 4 (+) partial each",
+        // A captured list is a constant too.
+        "[[1 2] [3 4]] [10 20] (+) partial each",
         // Floats must stay bit-identical, including signed zero.
         "[0.1 0.2 0.3] 0.3 (+) partial each",
         "[0.0 -0.0] -0.0 (+) partial each",
@@ -533,51 +527,29 @@ test "idioms: capture shapes preserve generic behavior" {
         "[1 2] {} (+) partial each",
         "[9223372036854775807 1] 1 (+) partial each",
         "[1 0] 0 (swap div) partial each",
+        // A captured word is quoted, so it is never a constant operand.
+        "[1 2 3] (dup) first (pop) partial each",
         // Shapes that must NOT be recognized still agree with the generic
-        // path: a multi-element wrapper, a longer phrase, and a capture whose
-        // captured element is itself a word.
-        "[1 2 3] ((3 4) first +) each",
-        "[1 2 3] ((1) first pop 7 +) each",
-        "[1 2 3] ((dup) first +) each",
-        // The pattern demands the core source binding of `first`. A session
-        // definition of `first` does not reach the `first` that `partial`
-        // writes, which is sealed to core, so both modes compute the
-        // unshadowed answer.
-        "(pop 99) 'first def [1 2 3] 3 (+) partial each",
-        "(pop 99) 'first def [1 2 3] 3 (swap -) partial each",
+        // path: a wrapper spelled by hand and a longer phrase.
+        "[1 2 3] ((3) first +) each",
+        "[1 2 3] (3 pop 7 +) each",
     };
     for (sources) |source| {
         compareModesExactly(source) catch |err| {
-            std.log.err("capture-shape differential failed for `{s}`", .{source});
+            std.log.err("partial-capture differential failed for `{s}`", .{source});
             return err;
         };
     }
 
     // A recognized capture fuses the whole `each` into one kernel run: one
-    // hit for the three elements, and `first` never executes. A rejected
-    // wrapper falls through to the generic frame machine, which then runs
-    // `first` once per element — three hits from `first`'s own direct
-    // recognition. The contrast is the proof that selection is shape-driven.
+    // hit for the three elements. A hand-written `((3) first +)` falls through
+    // to the generic frame machine, which runs `first` once per element —
+    // three hits from `first`'s own direct recognition.
     try expectHits("[1 2 3] 3 (+) partial each", 1);
     try expectHits("[1 2 3] 3 (swap -) partial each", 1);
-    try expectHits("[1 2 3] ((3 4) first +) each", 3);
-    // Shadowing `first` leaves the capture entry in play. `partial` is
-    // `(swap literal swap compose)` and `literal` is `(wrap (first) cons)`, so
-    // the `first` in the captured phrase was written in the prelude and seals
-    // to core: executing it runs core `first`, and recognition resolves it
-    // where it was written too, so it fuses exactly as without the shadow.
-    // What proves the shadow does not run there is the captured value, which
-    // `(pop 99)` would destroy, yet the result is byte-identical:
-    //
-    //   (pop 99) 'first def [1 2 3] 3 (+) partial each   =>  [4 5 6]
-    //   [1 2 3] 3 (+) partial each                       =>  [4 5 6]
-    //   (pop 99) 'first def [1 2 3] first                =>  99
-    //
-    // The third line is the control: the shadow is live, just sealed out of
-    // prelude internals, exactly as `table.where` does not become the `where`
-    // that `filter` is written against. Recognition once resolved the token
-    // from the running scope instead, saw the shadow, and declined to three
-    // per-element hits of the core `first` that then ran anyway.
+    try expectHits("[1 2 3] ((3) first +) each", 3);
+    // No `first` is written into a non-word capture, so shadowing it has
+    // nothing to reach.
     try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 1);
 }
 

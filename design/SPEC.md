@@ -639,7 +639,12 @@ Reflection operations inspect binding metadata through separate mechanisms.
 Lookup is late. A word occurrence's resolution metadata selects only a scope.
 Each execution looks up the binding in that scope; the occurrence retains no
 binding, body, value, or module generation. Replacing a binding in a mutable selected
-scope affects existing code. A module image's scope is immutable after
+scope affects existing code. The data combinators `each`, `zip-with`, `fold`,
+`fold1`, and `scan` bound this per call: a call looks up each word written in
+its quotation once, at that word's first execution in the call, and its later
+applications reuse that binding, so a replacement made while the call runs
+takes effect at its next call. An application that binds a name of its own
+looks up the words after that binding as any code does. A module image's scope is immutable after
 construction; replacing an image in a registration does not retarget words
 belonging to the former image. Attempting to resolve through a retired selected
 scope is a `'domain` error, never a fallback to another scope.
@@ -1258,8 +1263,8 @@ representations but expose the same binding model.
   plain data is legal and yields a multi-value constant word.
 - `annotation? value 'name set` binds a constant. It is sugar, defined in ecl
   as `swap literal swap def`: the value is captured with `literal`, so the
-  published body is `((value) first)`. Reference applies that body and
-  pushes exactly the captured value, quotations included — the capture is
+  published body is `(value)`, or `((value) first)` when the value is a word.
+  Reference applies that body and pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
   observationally `v literal 'name def`: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for

@@ -746,9 +746,14 @@ const IterationState = struct {
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
+    /// A data combinator's call resolves its quotation's words once; `for`
+    /// and `infra` are control, whose applications keep resolving late.
+    plan: ?heap.Owned(machine.ResolutionPlan) = null,
 
     fn application(self: *IterationState, seeded: u32) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
+        var application_value = machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
+        if (self.plan) |*plan| application_value.plan = plan.borrowMut();
+        return application_value;
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
         return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded } };
@@ -1911,8 +1916,12 @@ fn scanGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
 
 fn statelessFallback(
     comptime run: *const fn (*Machine, ?*anyopaque) MachineError!void,
-) machine.IdiomFallback {
-    return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
+) machine.FallbackSource {
+    return .{ .make_fn = struct {
+        fn make(_: ?*const anyopaque, _: *Machine) machine.IdiomFallback {
+            return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
+        }
+    }.make };
 }
 fn deinitStatelessFallback(_: *heap.ReleaseDomain, _: std.mem.Allocator, _: ?*anyopaque) void {}
 
@@ -1998,6 +2007,10 @@ fn createIteration(
         .site = evaluator.applicationSite(),
         .count = count,
         .word = evaluator.activeWordId(),
+    };
+    state.plan = switch (kind) {
+        .each, .zip_with, .fold, .scan => .init(.init(state.quotation.borrow())),
+        .for_word, .infra => null,
     };
     return state;
 }

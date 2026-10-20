@@ -691,6 +691,16 @@ Within each bounded cache set, lexical entries are evicted before generation
 or module-local entries; adding lexical coverage cannot displace those existing
 specializations at other source occurrences.
 
+A data combinator's call owns a resolution plan for its quotation: one leased
+resolution per word position, kept from that word's first plain resolution in
+the call and released with the call. Each application's activation reaches the
+plan through its application frame and uses it only while running that exact
+quotation in a scope that has bound nothing, so nested quotations, callee
+bodies, and an application that defines a name resolve as before. A resolution
+carrying a module home, generation, pin, or borrowed scope is never planned.
+The lease keeps the planned binding's snapshot alive, which is what makes a
+replacement during the call invisible to it until its next call.
+
 The reserved qualifier `core` is decided before any of that. When the
 resolution cursor splits a dotted spelling and the module segment is exactly
 `core`, it looks the binding segment up in the core environment directly and
@@ -1066,8 +1076,12 @@ reused buffer's owned root preserves its original representation until final
 publication, even when the result changes numeric kind at the same byte width.
 Sharing this cold path does not add work outside the already charged block.
 A fresh `LeafWriter` buffer aliases no input and is unread until `finish`, so a
-vector block may be computed in it before its faults are known; only a claimed
-input buffer stages a block until it is known clean.
+vector block may be computed in it before its faults are known. A claimed input
+buffer is written over its own operands: each position is stored only after its
+operands are read and, for a checked operation, after its vector is known clean,
+so the replay begins at the first faulting vector, whose operands are intact.
+Nothing else can observe a claimed input, which was solely owned and is only
+released when its operation fails.
 
 A vector block may be nominated by a fault mask that over-approximates the
 scalar fault set, such as "some lane is non-finite", tested once per block.

@@ -612,7 +612,7 @@ test "reflection: which and see expose metadata while see omits the definition w
     // literal capture rather than reconstructing the `set` spelling.
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows m.f") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "[9]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
 }
@@ -790,7 +790,7 @@ test "modules: module set and setp publish unannotated constants" {
     try expectOk(&runtime, "'m.x which 'm.x see");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "m.x -> m.x def public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- value)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([7] first)\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "[7]\n") != null);
 }
 
 test "modules: cross-home constant references cross unchecked while declared effects still bind" {

@@ -442,7 +442,7 @@ pub const PervadeCursor = struct {
                 node.operation,
                 node.left,
                 node.right,
-                self.rootCandidate(node),
+                .{ .left = self.rootCandidate(node) },
                 .{},
             )) |typed| return self.runTyped(evaluator, typed);
             const left_count: usize = if (node.left == .list) @intCast(node.left.list.length()) else 0;
@@ -1405,31 +1405,26 @@ const TypedOutput = union(enum) {
         }
     }
 
-    fn isFresh(self: *const TypedOutput) bool {
-        return switch (self.*) {
-            .fresh_bytes, .fresh_ints, .fresh_reals => true,
-            .reuse_bytes, .reuse_ints, .reuse_reals => false,
-        };
-    }
-
-    /// A fresh buffer's range, which a vector block may compute in place
-    /// before its faults are known. A reused input has none: its blocks stage
-    /// until clean, since its operands are what a replay reads.
-    fn freshRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) ?[]class.Element() {
+    /// The output's own range, which a vector loop writes directly. Nothing
+    /// reads a fresh buffer before it is published, so a block may land there
+    /// before its faults are known. A reused input's positions are its
+    /// operands until stored, so its loop stores a vector only after reading
+    /// it and, when checked, knowing it clean.
+    fn vectorRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) []class.Element() {
         return switch (class) {
             .byte => switch (self.*) {
                 .fresh_bytes => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_bytes => null,
+                .reuse_bytes => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
             },
             .integer => switch (self.*) {
                 .fresh_ints => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_ints => null,
+                .reuse_ints => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
             },
             .real => switch (self.*) {
                 .fresh_reals => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_reals => null,
+                .reuse_reals => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
             },
         };
@@ -1463,8 +1458,8 @@ const TypedOutput = union(enum) {
             .fresh_bytes => |*writer| writer.retirePartial(releases),
             .fresh_ints => |*writer| writer.retirePartial(releases),
             .fresh_reals => |*writer| writer.retirePartial(releases),
-            // An abandoned reuse leaves the input exactly as it was; the
-            // caller's reference to it is the one `root` holds.
+            // An abandoned reuse may hold stored results; the caller's
+            // reference to it is the one `root` holds, and only releases it.
             .reuse_bytes => |*adoption| adoption.abandon(),
             .reuse_ints => |*adoption| adoption.abandon(),
             .reuse_reals => |*adoption| adoption.abandon(),
@@ -1764,6 +1759,9 @@ const TypedStep = *const fn (*TypedState, support.Context) MachineError!void;
 
 const TypedDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// Installed only to resume an operation longer than the rest of its
+    /// turn, and released when it publishes.
+    pub const inline_driver = true;
 
     state: heap.Owned(TypedState),
     step: TypedStep,
@@ -1902,13 +1900,13 @@ fn exactFloatFaults(
     return faults;
 }
 
-/// The next piece of a charged range. A vector loop writing a fresh output
-/// stages nothing, so it takes the rest of the range as one block and pays
-/// its fixed per-block work once; anything staged is bounded by the staging
-/// array. Either way the piece lies inside the range already charged, which
-/// also bounds a faulted piece's exact pass and scalar replay.
-fn nextPiece(comptime vector: bool, output: *const TypedOutput, range: flat.Chunk, offset: usize) flat.Chunk {
-    if (vector and output.isFresh()) return .{ .start = range.start + offset, .end = range.end };
+/// The next piece of a charged range. A vector loop writes its output's own
+/// range and stages nothing, so it takes the rest of the range as one block and
+/// pays its fixed per-block work once; a scalar loop's staging is bounded by the
+/// staging array. Either way the piece lies inside the range already charged,
+/// which also bounds a faulted piece's exact pass and scalar replay.
+fn nextPiece(comptime vector: bool, range: flat.Chunk, offset: usize) flat.Chunk {
+    if (vector) return .{ .start = range.start + offset, .end = range.end };
     return flat.blockRange(range, offset);
 }
 
@@ -2102,13 +2100,13 @@ fn binaryStep(
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = flat.Block(out.Element()).init();
+            const placement: flat.Placement = if (state.output.reusing()) .over_operands else .fresh;
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
-                const direct = state.output.freshRange(out, piece);
-                const dest = direct orelse block.items[0..piece.len()];
-                const status: flat.CheckedStatus = switch (comptime policy) {
+                const piece = nextPiece(comptime policy.isVector(), range, offset);
+                const outcome: flat.CheckedOutcome = switch (comptime policy) {
                     .vector_infallible => blk: {
+                        const dest = state.output.vectorRange(out, piece);
                         switch (shape) {
                             .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, dest),
                             .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
@@ -2117,11 +2115,14 @@ fn binaryStep(
                         }
                         break :blk .clean;
                     },
-                    .vector_checked => switch (shape) {
-                        .leaf_leaf => Vectors.checkedBinary(checked, leftSlice(state), rightSlice(state), piece, dest),
-                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
-                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
-                        .leaf_only => unreachable,
+                    .vector_checked => blk: {
+                        const dest = state.output.vectorRange(out, piece);
+                        break :blk switch (shape) {
+                            .leaf_leaf => Vectors.checkedBinary(checked, placement, leftSlice(state), rightSlice(state), piece, dest),
+                            .leaf_scalar => Vectors.checkedBinaryScalarRight(checked, placement, leftSlice(state), right_class.unboxed(state.right.scalar), piece, dest),
+                            .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked, placement, left_class.unboxed(state.left.scalar), rightSlice(state), piece, dest),
+                            .leaf_only => unreachable,
+                        };
                     },
                     .scalar_infallible => blk: {
                         switch (shape) {
@@ -2130,23 +2131,28 @@ fn binaryStep(
                             .scalar_leaf => ScalarInfallible.binaryScalarLeft(infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
                             .leaf_only => unreachable,
                         }
+                        state.output.store(out, piece.start, block.written());
                         break :blk .clean;
                     },
-                    .scalar_checked => switch (shape) {
-                        .leaf_leaf => ScalarChecked.binary(checked_body, leftSlice(state), rightSlice(state), piece, &block),
-                        .leaf_scalar => ScalarChecked.binaryScalarRight(checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
-                        .scalar_leaf => ScalarChecked.binaryScalarLeft(checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
-                        .leaf_only => unreachable,
+                    .scalar_checked => blk: {
+                        const status = switch (shape) {
+                            .leaf_leaf => ScalarChecked.binary(checked_body, leftSlice(state), rightSlice(state), piece, &block),
+                            .leaf_scalar => ScalarChecked.binaryScalarRight(checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
+                            .scalar_leaf => ScalarChecked.binaryScalarLeft(checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                            .leaf_only => unreachable,
+                        };
+                        // A staged block stores nothing until it is clean.
+                        if (status == .faulted) break :blk .{ .faulted = piece.start };
+                        state.output.store(out, piece.start, block.written());
+                        break :blk .clean;
                     },
                 };
-                // Nothing reaches a reused input buffer until the whole block is
-                // known clean, since it still holds the operands the replay
-                // reads. A fresh buffer was written in place and is retired
-                // unpublished if the replay fails.
-                if (status == .faulted) return replayNumericBinary(state, context, piece, selectScalar(operation));
-                switch (comptime policy) {
-                    .vector_infallible, .vector_checked => if (direct == null) state.output.store(out, piece.start, dest),
-                    .scalar_infallible, .scalar_checked => state.output.store(out, piece.start, block.written()),
+                switch (outcome) {
+                    .clean => {},
+                    // The replay rescans from the first position whose
+                    // operands are still the input's; a fresh buffer holds
+                    // partial results and is retired unpublished if it fails.
+                    .faulted => |from| return replayNumericBinary(state, context, .{ .start = from, .end = piece.end }, selectScalar(operation)),
                 }
                 offset += piece.len();
             }
@@ -2196,21 +2202,14 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
-                const piece = nextPiece(comptime policy.isVector(), &state.output, range, offset);
-                const direct = state.output.freshRange(out, piece);
-                const dest = direct orelse block.items[0..piece.len()];
-                const status: flat.CheckedStatus = switch (comptime policy) {
-                    .vector_infallible => blk: {
-                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, dest);
-                        break :blk .clean;
-                    },
-                    .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
-                    .vector_checked, .scalar_infallible => unreachable,
-                };
-                if (status == .faulted) return replayNumericUnary(state, context, piece, selectUnary(operation));
+                const piece = nextPiece(comptime policy.isVector(), range, offset);
                 switch (comptime policy) {
-                    .vector_infallible => if (direct == null) state.output.store(out, piece.start, dest),
-                    .scalar_checked => state.output.store(out, piece.start, block.written()),
+                    .vector_infallible => Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, state.output.vectorRange(out, piece)),
+                    .scalar_checked => {
+                        if (Checked.unary(checked_body, operandSlice(state), piece, &block) == .faulted)
+                            return replayNumericUnary(state, context, piece, selectUnary(operation));
+                        state.output.store(out, piece.start, block.written());
+                    },
                     .vector_checked, .scalar_infallible => unreachable,
                 }
                 offset += piece.len();
@@ -2261,6 +2260,25 @@ fn acquireOperand(class: Number, item: Value) TypedOperand {
         .real => .{ .reals = heap.LeafReader(.leaf_f64).acquire(item.list) },
     };
 }
+
+/// The operand whose reference `owner` holds, read through that reference
+/// rather than a second one.
+fn takeOperand(class: Number, owner: *heap.OwnedValue) TypedOperand {
+    const item = owner.take();
+    return switch (class) {
+        .byte => .{ .bytes = heap.LeafReader(.leaf_u8).adopt(item.list) },
+        .integer => .{ .ints = heap.LeafReader(.leaf_i64).adopt(item.list) },
+        .real => .{ .reals = heap.LeafReader(.leaf_f64).adopt(item.list) },
+    };
+}
+
+/// The holders of a binary operation's operand references, when its caller
+/// owns them. A typed operand then reads through that reference instead of
+/// retaining another. The left owner is also the reuse candidate.
+const OperandOwners = struct {
+    left: ?*heap.OwnedValue = null,
+    right: ?*heap.OwnedValue = null,
+};
 
 /// Static selection binds the element classes, output width, and monomorphic
 /// step together. Preparation runs once outside the operation/type expansion;
@@ -2332,12 +2350,12 @@ const NumericBinaryPlan = opaque {
         evaluator: *Machine,
         left: Value,
         right: Value,
-        reuse_candidate: ?*heap.OwnedValue,
+        owners: OperandOwners,
         length: usize,
         report: FaultReport,
     ) error{OutOfMemory}!NestedTyped {
         const data: *const Data = @ptrCast(@alignCast(self));
-        const reuse = if (data.shape == .scalar_leaf) null else reuse_candidate;
+        const reuse = if (data.shape == .scalar_leaf) null else owners.left;
         const acquired = switch (data.out) {
             inline else => |out| try acquireOutput(evaluator, out, reuse, length),
         };
@@ -2347,10 +2365,14 @@ const NumericBinaryPlan = opaque {
                     .aliased
                 else if (data.shape == .scalar_leaf)
                     .{ .scalar = left }
+                else if (owners.left) |owner|
+                    takeOperand(data.left, owner)
                 else
                     acquireOperand(data.left, left),
                 .right = if (data.shape == .leaf_scalar)
                     .{ .scalar = right }
+                else if (owners.right) |owner|
+                    takeOperand(data.right, owner)
                 else
                     acquireOperand(data.right, right),
                 .output = acquired.output,
@@ -2367,8 +2389,8 @@ fn startTypedDriver(
     evaluator: *Machine,
     state: TypedState,
     step: TypedStep,
-) error{OutOfMemory}!bool {
-    try evaluator.startDriver(TypedDriver{ .state = .init(state), .step = step });
+) MachineError!bool {
+    try evaluator.runDriver(TypedDriver{ .state = .init(state), .step = step });
     return true;
 }
 
@@ -2517,37 +2539,6 @@ fn buildNestedTypedCharBinary(
     return try plan.prepare(evaluator, left_item, right_item, length, report);
 }
 
-fn startTypedCharBinary(
-    evaluator: *Machine,
-    operation: BinaryOp,
-    left: *heap.OwnedValue,
-    right: *heap.OwnedValue,
-    report: FaultReport,
-) MachineError!bool {
-    var typed = (try buildNestedTypedCharBinary(
-        evaluator,
-        operation,
-        left.borrow(),
-        right.borrow(),
-        report,
-    )) orelse return false;
-    switch (typed) {
-        .fixed_char => |payload| try evaluator.startDriver(FixedCharDriver{
-            .state = .init(payload.state),
-            .step = payload.step,
-        }),
-        .dynamic_char => |payload| try evaluator.startDriver(DynamicCharDriver{
-            .state = .init(payload.state),
-            .step = payload.step,
-        }),
-        .numeric => unreachable,
-    }
-    // SAFETY: startDriver consumed the selected payload's owned state; poison
-    // the tagged source so no later edit can accidentally reuse that owner.
-    typed = undefined;
-    return true;
-}
-
 fn firstFlatElement(item: Value) ?Value {
     if (item != .list or item.list.length() == 0) return null;
     return switch (item.list.kind()) {
@@ -2608,7 +2599,7 @@ fn buildNestedTypedNumericBinary(
     operation: BinaryOp,
     left_item: Value,
     right_item: Value,
-    reuse_candidate: ?*heap.OwnedValue,
+    owners: OperandOwners,
     report: FaultReport,
 ) MachineError!?NestedTyped {
     const left_leaf = leafNumber(left_item);
@@ -2628,23 +2619,25 @@ fn buildNestedTypedNumericBinary(
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
-    return try plan.prepare(evaluator, left_item, right_item, reuse_candidate, length, report);
+    return try plan.prepare(evaluator, left_item, right_item, owners, length, report);
 }
 
-/// `reuse_candidate` must own `left`, and reaches only the numeric builder:
+/// Each present owner must hold its matching operand. On success the numeric
+/// builder takes every present owner, and may adopt `owners.left` as the
+/// output. The character builder and every failure leave the owners untouched:
 /// character states have no owned root to adopt.
 fn buildNestedTypedBinary(
     evaluator: *Machine,
     operation: BinaryOp,
     left: Value,
     right: Value,
-    reuse_candidate: ?*heap.OwnedValue,
+    owners: OperandOwners,
     report: FaultReport,
 ) MachineError!?NestedTyped {
     // The builders are disjoint: numeric needs both operands numeric, and
     // character needs one character operand. The common numeric row is tried
     // first so it does not pay the character classification.
-    if (try buildNestedTypedNumericBinary(evaluator, operation, left, right, reuse_candidate, report)) |typed| return typed;
+    if (try buildNestedTypedNumericBinary(evaluator, operation, left, right, owners, report)) |typed| return typed;
     if (try buildNestedTypedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;
@@ -2673,8 +2666,10 @@ const NumericUnaryPlan = opaque {
         };
     }
 
-    /// Failure borrows the input; success transfers the acquired output and
-    /// reader into the returned state. Reader acquisition cannot fail.
+    /// Failure borrows the input. Success transfers the acquired output into
+    /// the returned state and takes `reuse` when present, whether or not its
+    /// buffer was adopted as that output; otherwise it acquires a reader, which
+    /// cannot fail.
     fn prepare(
         self: *const NumericUnaryPlan,
         evaluator: *Machine,
@@ -2689,7 +2684,12 @@ const NumericUnaryPlan = opaque {
         };
         return .{ .numeric = .{
             .state = .{
-                .left = if (acquired.aliased) .aliased else acquireOperand(data.input, operand),
+                .left = if (acquired.aliased)
+                    .aliased
+                else if (reuse) |owner|
+                    takeOperand(data.input, owner)
+                else
+                    acquireOperand(data.input, operand),
                 .right = .absent,
                 .output = acquired.output,
                 .cursor = .init(length),
@@ -2725,36 +2725,23 @@ fn startTypedBinary(
     right: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
-    if (try startTypedCharBinary(evaluator, operation, left, right, report)) return true;
-    const left_item = left.borrow();
-    const right_item = right.borrow();
-    const left_leaf = leafNumber(left_item);
-    const right_leaf = leafNumber(right_item);
-    const left_scalar = scalarNumber(left_item);
-    const right_scalar = scalarNumber(right_item);
-
-    const shape: Shape = if (left_leaf != null and right_leaf != null)
-        .leaf_leaf
-    else if (left_leaf != null and right_scalar != null)
-        .leaf_scalar
-    else if (left_scalar != null and right_leaf != null)
-        .scalar_leaf
-    else
-        return rejectUnsupportedFlatBinary(evaluator, operation, left_item, right_item, report);
-
-    const length = try conformingLength(evaluator, shape, left_item, right_item);
-    // An empty result's representation is the generic route's to choose; there
-    // is no typed work to do and no reason to fork that decision.
-    if (length == 0) return false;
-
-    const left_class = left_leaf orelse left_scalar.?;
-    const right_class = right_leaf orelse right_scalar.?;
-
-    // Mixed min/max stays on the generic route without acquiring storage.
-    const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return false;
-    const typed = try plan.prepare(evaluator, left_item, right_item, left, length, report);
-    // startDriver consumes the payload on both success and failure.
-    return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
+    // An empty result's representation is the generic route's to choose, and
+    // so is a pair no plan admits; the builder declines both.
+    const typed = (try buildNestedTypedBinary(
+        evaluator,
+        operation,
+        left.borrow(),
+        right.borrow(),
+        .{ .left = left, .right = right },
+        report,
+    )) orelse return false;
+    // runDriver consumes the payload on both success and failure.
+    try switch (typed) {
+        .numeric => |payload| evaluator.runDriver(TypedDriver{ .state = .init(payload.state), .step = payload.step }),
+        .fixed_char => |payload| evaluator.runDriver(FixedCharDriver{ .state = .init(payload.state), .step = payload.step }),
+        .dynamic_char => |payload| evaluator.runDriver(DynamicCharDriver{ .state = .init(payload.state), .step = payload.step }),
+    };
+    return true;
 }
 
 fn startTypedUnary(
@@ -2769,7 +2756,7 @@ fn startTypedUnary(
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
     const typed = try NumericUnaryPlan.select(operation, class).prepare(evaluator, item, operand, length, report);
-    // startDriver consumes the state on both success and failure.
+    // runDriver consumes the state on both success and failure.
     return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
 }
 
@@ -3086,7 +3073,7 @@ const NumericReducePlan = opaque {
     }
 
     /// Borrows the caller's values. Acquired readers and output are consumed
-    /// locally on preparation failure, and by startDriver on either outcome.
+    /// locally on preparation failure, and by runDriver on either outcome.
     /// The combinator handles empty folds/scans and singleton fold1 before
     /// entry, so cursor_start always identifies a remaining input element.
     fn start(self: *const NumericReducePlan, evaluator: *Machine, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
@@ -3124,7 +3111,7 @@ const NumericReducePlan = opaque {
             .real => state.output.?.store(.real, cursor_start, &.{seed.float}),
         };
         held_locally = false;
-        return evaluator.startDriver(TypedReduceDriver{
+        return evaluator.runDriver(TypedReduceDriver{
             .state = .init(state),
             .step = data.step,
             .consumed = consumed,

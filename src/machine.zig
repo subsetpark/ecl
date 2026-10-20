@@ -1628,6 +1628,8 @@ pub const IsolatedApplication = struct {
     site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
+    /// Where a data combinator keeps the bindings its quotation resolved.
+    plan: ?*ResolutionPlan = null,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1693,6 +1695,8 @@ const ApplicationFrame = struct {
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
+    /// Borrowed from the combinator state `context` names.
+    plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
@@ -1812,20 +1816,18 @@ comptime {
     // File-owned execution provenance carries a Session-scoped source capability.
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
-pub const IdiomRequest = union(enum) {
-    /// A trusted source word whose body was recognized when its environment
-    /// froze. Only whether this call's operands admit the entry is left.
-    direct: struct {
-        body: *Header,
-        word: u32,
-        idiom: env.DirectIdiom,
-    },
-    each,
-    zip_with,
-    fold,
-    fold1,
-    scan,
+/// A user quotation offered to a combinator, recognized where it is applied.
+pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan };
+/// A call of a trusted source word whose body was recognized when its
+/// environment froze. Only whether this call's operands admit the entry is left.
+pub const TrustedCall = struct {
+    body: *Header,
+    idiom: env.DirectIdiom,
 };
+/// What a trusted call's recognition decided. `declined` runs the body as any
+/// source word runs; `offered` stands for a combinator, whose quotation is
+/// offered with the body as its fallback.
+pub const TrustedOutcome = union(enum) { applied, declined, offered: IdiomRequest };
 pub const IdiomFallback = struct {
     /// What to do if recognition declines, carried by value. Recognition holds
     /// at most one fallback at a time and the only one with any state is a core
@@ -1977,7 +1979,22 @@ pub fn typedIdiomFallback(payload: anytype) IdiomFallback {
     target.* = payload;
     return result;
 }
-pub const PhraseRecognizer = *const fn (*Machine, IdiomRequest, IdiomFallback) MachineError!void;
+/// What to do if recognition declines, made only when something needs it: to
+/// decline, or to carry into a match that must wait. An applied match never
+/// makes one. `context` is borrowed for the synchronous call that receives the
+/// source, so the recognizer makes the fallback before it returns or not at all.
+pub const FallbackSource = struct {
+    context: ?*const anyopaque = null,
+    make_fn: *const fn (?*const anyopaque, *Machine) IdiomFallback,
+
+    pub fn make(self: FallbackSource, evaluator: *Machine) IdiomFallback {
+        return self.make_fn(self.context, evaluator);
+    }
+};
+pub const PhraseRecognizer = struct {
+    offered: *const fn (*Machine, IdiomRequest, FallbackSource) MachineError!void,
+    trusted: *const fn (*Machine, TrustedCall) MachineError!TrustedOutcome,
+};
 
 pub const ParkRequest = union(enum) {
     task: Value,
@@ -3331,6 +3348,31 @@ pub const Machine = struct {
         };
         driver.* = pending;
         self.installDriver(driver);
+    }
+
+    /// Starts a driver by running its first step where it is started, and
+    /// installs it only when that step leaves work for a later one. The step
+    /// draws on the same budget, and a failure surfaces at the same site, as
+    /// it would from the machine loop, so a driver whose work fits the rest of
+    /// the turn costs no installation and no loop round trip. A driver started
+    /// here completes or steps; it never detaches or parks, since it has not
+    /// been installed.
+    pub fn runDriver(self: *Machine, initial: anytype) MachineError!void {
+        var pending = initial;
+        if (!turn_core.mayDispatch(self.unit.kernel_budget)) return self.startDriver(pending);
+        const progress = @TypeOf(pending).advance(self, &pending) catch |err| {
+            heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending);
+            return err;
+        };
+        switch (progress) {
+            .stepped => return self.startDriver(pending),
+            .output => |item| {
+                heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending);
+                return self.pushOwned(item);
+            },
+            .completed => heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending),
+            .yielded, .reserved_output, .detached, .failed => unreachable,
+        }
     }
 
     /// Destroy a driver that may be living in the unit's inline slot. A driver
@@ -5202,8 +5244,11 @@ pub const Machine = struct {
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
     }
-    pub fn require(self: *Machine, count: usize) MachineError!void {
-        if (self.available() >= count) return;
+    pub inline fn require(self: *Machine, count: usize) MachineError!void {
+        if (self.available() < count) return self.failUnderflow(count);
+    }
+    noinline fn failUnderflow(self: *Machine, count: usize) MachineError {
+        @branchHint(.cold);
         // Underflow against the floor of a unit constructor's substack is the
         // one underflow whose cause is invisible: the values the caller meant
         // to pass are right there and unreachable. Name the isolation and the
@@ -5520,9 +5565,9 @@ pub const Machine = struct {
         };
     }
 
-    pub fn continueWithIdiom(self: *Machine, request: IdiomRequest, fallback: IdiomFallback) MachineError!void {
-        if (self.unit.inherited.phrase_recognizer) |recognize| return recognize(self, request, fallback);
-        var owned = fallback;
+    pub fn continueWithIdiom(self: *Machine, request: IdiomRequest, source: FallbackSource) MachineError!void {
+        if (self.unit.inherited.phrase_recognizer) |recognizer| return recognizer.offered(self, request, source);
+        var owned = source.make(self);
         defer owned.deinit(self.releaseDomain(), self.unit.allocator);
         return owned.run(self);
     }
@@ -5932,6 +5977,7 @@ pub const Machine = struct {
             },
             .traced_word = inherited_trace,
             .selection = .{},
+            .plan = application.plan,
         } });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
@@ -6160,11 +6206,15 @@ pub const Machine = struct {
     const CacheScope = struct { id: env.ScopeId, start: ?*env.Scope };
 
     fn cacheScope(self: *Machine, stamp: u32) ?CacheScope {
+        return self.cacheScopeFor(stamp, stampedResolutionScope(self.unit.current.?.site, stamp));
+    }
+
+    /// `cacheScope` for a caller that has already found the stamped scope.
+    fn cacheScopeFor(self: *Machine, stamp: u32, stamped_scope: ?*env.Scope) ?CacheScope {
         const core = self.unit.environment.coreScopeId();
         if (stamp == @backingInt(core)) return .{ .id = core, .start = null };
-        const site = self.unit.current.?.site;
-        const scope = stampedResolutionScope(site, stamp) orelse return null;
-        return .{ .id = scope.cellId(), .start = site.resolution_scope };
+        const scope = stamped_scope orelse return null;
+        return .{ .id = scope.cellId(), .start = self.unit.current.?.site.resolution_scope };
     }
 
     /// The plain-word call-site cache for a word resolving from `cache`.
@@ -6205,7 +6255,36 @@ pub const Machine = struct {
         self.unit.module_call_sites.install(self.releaseDomain(), site, word, candidate);
     }
 
+    /// The plan of the data combinator applying the running code, when that code
+    /// is the combinator's own quotation and this application has bound nothing.
+    fn applicationPlan(self: *Machine) ?*ResolutionPlan {
+        const current = &self.unit.current.?;
+        const index = current.application_tail orelse return null;
+        const frame = &self.unit.frames.items[@backingInt(index)];
+        const plan = switch (frame.*) {
+            .application => |*application| application.plan orelse return null,
+            else => return null,
+        };
+        if (plan.code != current.code) return null;
+        if (current.site.resolution_scope) |scope| if (scope.environmentOrNull() != null) return null;
+        return plan;
+    }
+
+    /// Keeps a plain resolution of `site` in the running data combinator's
+    /// plan, or returns null and leaves it with the caller. One that carries a
+    /// module home, generation, pin, or borrowed scope belongs to that one
+    /// dispatch and is never kept.
+    fn keepPlanned(self: *Machine, site: ?ErrorSite, resolved: Resolution) ?*Resolution {
+        const at = site orelse return null;
+        if (resolved.home != null or resolved.execution_generation != null or
+            resolved.borrow_pin != null or resolved.borrowed_cell != null) return null;
+        const plan = self.applicationPlan() orelse return null;
+        if (at.code != plan.code) return null;
+        return plan.keep(self.unit.allocator, at.index, resolved);
+    }
+
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        if (self.applicationPlan()) |plan| if (plan.find(self.unit.active_index)) |resolved| return executeResolved(self, resolved);
         const qualified_call_site = ErrorSite{
             .code = self.unit.current.?.code,
             .index = self.unit.active_index,
@@ -6256,11 +6335,12 @@ pub const Machine = struct {
         // skipped rather than merely cheapened.
         const running_site = self.unit.current.?.site;
         const stamped_scope = stampedResolutionScope(running_site, word.scope);
-        const cache_scope = self.cacheScope(word.scope);
+        const cache_scope = self.cacheScopeFor(word.scope, stamped_scope);
         var local_cache_scope: ?resolution_core.GuardContext = null;
         if (cache_scope) |cache| switch (self.lookupPlain(cached_site, word.name, cache)) {
             .miss => |miss| local_cache_scope = miss.guard,
             .hit => |resolution| {
+                if (self.keepPlanned(qualified_call_site, resolution)) |kept| return executeResolved(self, kept);
                 var resolved = resolution;
                 defer resolved.deinit(self.unit.allocator);
                 try executeResolved(self, &resolved);
@@ -7415,13 +7495,17 @@ const DispatchDriver = struct {
                 switch (outcome) {
                     .resolved => |resolution| {
                         var resolved = resolution;
-                        defer resolved.deinit(allocator);
                         if (comptime root_execution_metrics_enabled) {
                             if (resolved.execution_generation != null) {
                                 self_machine.unit.root_execution_metrics.qualified_cache_misses += 1;
                             }
                         }
                         if (call_site) |site| self_machine.cacheResolution(site, word, &resolved);
+                        if (self_machine.keepPlanned(call_site, resolved)) |kept| {
+                            try executeResolved(self_machine, kept);
+                            return .detached;
+                        }
+                        defer resolved.deinit(allocator);
                         try executeResolved(self_machine, &resolved);
                         return .detached;
                     },
@@ -7748,29 +7832,20 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             // environment froze; one that recognized nothing runs as any
             // source word does.
             const trusted = resolved.origin == .core or resolved.origin == .standard_library;
-            if (trusted) if (resolved.lease.direct_idiom) |idiom| {
-                heap.incRef(body_header);
-                const fallback: DirectWordFallback = .{
-                    .body = .init(body_header),
-                    .word = resolved.trace_word,
-                    .home = resolved.home,
-                    .effect = if (cross_home_effect) |effect|
-                        .init(RetainedEffect.init(effect))
-                    else
-                        null,
-                    .pin = if (resolved.home) |home|
-                        .init(home.pin(self.unit.module_access))
-                    else
-                        null,
-                };
-                return self.continueWithIdiom(
-                    .{ .direct = .{
-                        .body = body_header,
-                        .word = resolved.trace_word.atom(),
-                        .idiom = idiom,
-                    } },
-                    typedIdiomFallback(fallback),
-                );
+            if (trusted) if (resolved.lease.direct_idiom) |idiom| if (self.unit.inherited.phrase_recognizer) |recognizer| {
+                switch (try recognizer.trusted(self, .{ .body = body_header, .idiom = idiom })) {
+                    .applied => return,
+                    .declined => {},
+                    .offered => |request| {
+                        const body_fallback: DirectWordFallback.Source = .{
+                            .body = body_header,
+                            .word = resolved.trace_word,
+                            .home = resolved.home,
+                            .effect = cross_home_effect,
+                        };
+                        return recognizer.offered(self, request, body_fallback.source());
+                    },
+                }
             };
             try scheduleWord(
                 self,
@@ -7817,6 +7892,31 @@ const DirectWordFallback = struct {
     home: ?*modules.ModuleHome,
     effect: ?heap.Owned(RetainedEffect),
     pin: ?heap.Owned(modules.GenerationPin),
+
+    /// The trusted word's body, borrowed from its resolution until a
+    /// recognizer makes the fallback that owns it.
+    const Source = struct {
+        body: *Header,
+        word: intern.TraceWord,
+        home: ?*modules.ModuleHome,
+        effect: ?env.Effect,
+
+        fn source(self: *const Source) FallbackSource {
+            return .{ .context = self, .make_fn = make };
+        }
+
+        fn make(context: ?*const anyopaque, evaluator: *Machine) IdiomFallback {
+            const self: *const Source = @ptrCast(@alignCast(context.?));
+            heap.incRef(self.body);
+            return typedIdiomFallback(DirectWordFallback{
+                .body = .init(self.body),
+                .word = self.word,
+                .home = self.home,
+                .effect = if (self.effect) |effect| .init(RetainedEffect.init(effect)) else null,
+                .pin = if (self.home) |home| .init(home.pin(evaluator.unit.module_access)) else null,
+            });
+        }
+    };
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
         return scheduleWord(
             evaluator,
@@ -8167,6 +8267,46 @@ pub const LookupChain = enum {
             .qualified => "qualified",
             .@"module-value" => "module-value",
         };
+    }
+};
+
+/// The bindings one data-combinator call has resolved for the words of its
+/// quotation. A word's first plain resolution in the call is kept and every
+/// later application reuses it, so the call sees the bindings in effect when it
+/// began and a redefinition made meanwhile takes effect at the next call. An
+/// application whose own scope has bound a name resolves as any code does, so
+/// a definition inside the quotation is still seen by the words after it.
+pub const ResolutionPlan = struct {
+    /// Borrowed: the combinator owns its quotation for the whole call.
+    code: *Header,
+    entries: []?Resolution = &.{},
+
+    pub fn init(code: *Header) ResolutionPlan {
+        return .{ .code = code };
+    }
+
+    fn find(self: *ResolutionPlan, index: u32) ?*Resolution {
+        if (index >= self.entries.len) return null;
+        if (self.entries[index]) |*resolution| return resolution;
+        return null;
+    }
+
+    /// Takes `resolution` for `index`, or returns null and leaves it with the
+    /// caller when there is no room to keep it.
+    fn keep(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32, resolution: Resolution) ?*Resolution {
+        if (self.entries.len == 0) {
+            self.entries = allocator.alloc(?Resolution, @intCast(self.code.length())) catch return null;
+            @memset(self.entries, null);
+        }
+        std.debug.assert(self.entries[index] == null);
+        self.entries[index] = resolution;
+        return &self.entries[index].?;
+    }
+
+    pub fn retire(self: *ResolutionPlan, _: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        for (self.entries) |*entry| if (entry.*) |*resolution| resolution.deinit(allocator);
+        allocator.free(self.entries);
+        self.entries = &.{};
     }
 };
 
@@ -9056,6 +9196,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .site = continuation.site,
                         .seeded = application.seeded,
                         .provenance = application.provenance,
+                        .plan = continuation.plan,
                     }, launch, continuation.traced_word);
                     return true;
                 },
@@ -9088,6 +9229,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .traced_word = continuation.traced_word,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
+                        .plan = continuation.plan,
                     } });
                     application_selection = .{};
                     defer suspended.deinit(self.releaseDomain(), self.unit.allocator);
