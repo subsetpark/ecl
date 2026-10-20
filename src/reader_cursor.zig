@@ -767,6 +767,7 @@ const StringBuilder = struct {
         self: *StringBuilder,
         releases: *heap.ReleaseDomain,
         diag: *reader.Diag,
+        work: *poll.WorkBudget,
     ) (error{ OutOfMemory, Parse })!ScalarProgress {
         return switch (self.state) {
             .parsing => |*parsing| switch (try self.parseOne(parsing, diag)) {
@@ -848,7 +849,7 @@ const StringBuilder = struct {
                     break :result .pending;
                 },
             },
-            .spans => |*span_state| switch (try span_state.writer.advance()) {
+            .spans => |*span_state| switch (try span_state.writer.advance(work)) {
                 .pending => .pending,
                 .complete => result: {
                     const item = span_state.result;
@@ -1196,7 +1197,7 @@ const CollectionBuilder = struct {
         self.state.retire(releases, self.allocator);
         self.context.retire(releases);
     }
-    fn advance(self: *CollectionBuilder) (error{ OutOfMemory, Parse })!CollectionProgress {
+    fn advance(self: *CollectionBuilder, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!CollectionProgress {
         return switch (self.state) {
             .allocate_body => result: {
                 const body = try self.allocator.alloc(locals.SpannedValue, self.context.body.count);
@@ -1296,7 +1297,7 @@ const CollectionBuilder = struct {
                 } else scan.index += 1;
                 break :result .pending;
             },
-            .write_lowered_span => |*write| switch (try write.writer.advance()) {
+            .write_lowered_span => |*write| switch (try write.writer.advance(work)) {
                 .pending => .pending,
                 .complete => result: {
                     write.writer.deinit();
@@ -1374,7 +1375,7 @@ const CollectionBuilder = struct {
                     break :result .pending;
                 },
             },
-            .list_spans => |*span_state| switch (try span_state.writer.advance()) {
+            .list_spans => |*span_state| switch (try span_state.writer.advance(work)) {
                 .pending => .pending,
                 .complete => result: {
                     const item = span_state.result;
@@ -1566,14 +1567,14 @@ const ParserCursor = struct {
             .open_paren, .open_square, .open_dict, .close_paren, .close_square, .close_dict => unreachable,
         } };
     }
-    fn advanceScalar(self: *ParserCursor) (error{ OutOfMemory, Parse })!ParseProgress {
+    fn advanceScalar(self: *ParserCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ParseProgress {
         const scalar = switch (self.state) {
             .scalar => |*scalar| scalar,
             else => unreachable,
         };
         const progress: ScalarProgress = switch (scalar.*) {
             .atom => |*builder| try builder.advance(self.diag),
-            .string => |*builder| try builder.advance(self.releases, self.diag),
+            .string => |*builder| try builder.advance(self.releases, self.diag, work),
             .character => |*builder| try builder.advance(self.diag),
         };
         return switch (progress) {
@@ -1703,16 +1704,18 @@ const ParserCursor = struct {
     /// each.
     fn advance(self: *ParserCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ParseProgress {
         while (work.spend()) {
-            const progress = try self.step();
+            const progress = try self.step(work);
             if (progress != .pending) return progress;
         }
         return .pending;
     }
 
-    fn step(self: *ParserCursor) (error{ OutOfMemory, Parse })!ParseProgress {
+    /// One transition, already charged; bulk work inside it draws further
+    /// units from `work`.
+    fn step(self: *ParserCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ParseProgress {
         return switch (self.state) {
-            .scalar => self.advanceScalar(),
-            .collection => |*collection| switch (try collection.advance()) {
+            .scalar => self.advanceScalar(work),
+            .collection => |*collection| switch (try collection.advance(work)) {
                 .pending => .pending,
                 .complete => |form| result: {
                     collection.deinit(self.releases);
@@ -1749,8 +1752,6 @@ pub const ReadCursor = struct {
 
     const Partial = union(enum) {
         none,
-        forms: heap.OwnedValueBuffer,
-        spans: struct { forms: heap.OwnedValueBuffer, top: []Span },
         name: struct { forms: heap.OwnedValueBuffer, top: []Span, name: []u8 },
         source: struct {
             forms: heap.OwnedValueBuffer,
@@ -1762,11 +1763,6 @@ pub const ReadCursor = struct {
         fn retire(self: *Partial, allocator: std.mem.Allocator) void {
             switch (self.*) {
                 .none => {},
-                .forms => |*forms| forms.deinit(),
-                .spans => |*partial| {
-                    allocator.free(partial.top);
-                    partial.forms.deinit();
-                },
                 .name => |*partial| {
                     allocator.free(partial.name);
                     allocator.free(partial.top);
@@ -1821,37 +1817,23 @@ pub const ReadCursor = struct {
             return true;
         }
     };
+    /// The parsed program's owned copies, allocated together when the parse
+    /// ends and filled in budget-sized chunks.
     const CompleteBuild = struct {
         parser: ParserOwner,
         forms: heap.OwnedValueBuffer,
         top: []Span,
         name: []u8,
         source: []u8,
+        iterator: FormList.Iterator,
+        form_index: usize = 0,
+        name_index: usize = 0,
+        source_index: usize = 0,
     };
     const State = union(enum) {
         tokenize: Tokenizer,
         parse: ParserOwner,
-        allocate_forms: ParserOwner,
-        allocate_spans: struct { parser: ParserOwner, forms: heap.OwnedValueBuffer },
-        allocate_name: struct {
-            parser: ParserOwner,
-            forms: heap.OwnedValueBuffer,
-            top: []Span,
-        },
-        allocate_source: struct {
-            parser: ParserOwner,
-            forms: heap.OwnedValueBuffer,
-            top: []Span,
-            name: []u8,
-        },
-        copy_forms: struct {
-            build: CompleteBuild,
-            iterator: FormList.Iterator,
-            index: usize = 0,
-        },
-        copy_name: struct { build: CompleteBuild, index: usize = 0 },
-        copy_source: struct { build: CompleteBuild, index: usize = 0 },
-        finish: CompleteBuild,
+        build: CompleteBuild,
         source_consumed: struct {
             parser: ParserOwner,
             forms: heap.OwnedValueBuffer,
@@ -1913,48 +1895,14 @@ pub const ReadCursor = struct {
             .tokenize, .incomplete_tokens, .completed => {
                 self.state = .{ .retire_tokens = .none };
             },
-            .parse, .allocate_forms, .incomplete_parser => |*parser| {
+            .parse, .incomplete_parser => |*parser| {
                 const moved = parser.*;
                 self.state = .{ .retire_parser = .{
                     .parser = moved,
                     .partial = .none,
                 } };
             },
-            .allocate_spans => |*allocation| {
-                const parser = allocation.parser;
-                const forms = allocation.forms.take();
-                self.state = .{ .retire_parser = .{
-                    .parser = parser,
-                    .partial = .{ .forms = forms },
-                } };
-            },
-            .allocate_name => |*allocation| {
-                const parser = allocation.parser;
-                const forms = allocation.forms.take();
-                const top = allocation.top;
-                self.state = .{ .retire_parser = .{
-                    .parser = parser,
-                    .partial = .{ .spans = .{ .forms = forms, .top = top } },
-                } };
-            },
-            .allocate_source => |*allocation| {
-                const parser = allocation.parser;
-                const forms = allocation.forms.take();
-                const top = allocation.top;
-                const name = allocation.name;
-                self.state = .{ .retire_parser = .{
-                    .parser = parser,
-                    .partial = .{ .name = .{
-                        .forms = forms,
-                        .top = top,
-                        .name = name,
-                    } },
-                } };
-            },
-            .copy_forms => |*copy| self.beginCompleteBuildRetirement(&copy.build),
-            .copy_name => |*copy| self.beginCompleteBuildRetirement(&copy.build),
-            .copy_source => |*copy| self.beginCompleteBuildRetirement(&copy.build),
-            .finish => |*build| self.beginCompleteBuildRetirement(build),
+            .build => |*build| self.beginCompleteBuildRetirement(build),
             .source_consumed => |*consumed| {
                 const parser = consumed.parser;
                 const forms = consumed.forms.take();
@@ -1992,14 +1940,7 @@ pub const ReadCursor = struct {
         return switch (self.state) {
             .tokenize,
             .parse,
-            .allocate_forms,
-            .allocate_spans,
-            .allocate_name,
-            .allocate_source,
-            .copy_forms,
-            .copy_name,
-            .copy_source,
-            .finish,
+            .build,
             .source_consumed,
             .incomplete_tokens,
             .incomplete_parser,
@@ -2039,8 +1980,8 @@ pub const ReadCursor = struct {
             .retired => unreachable,
         };
     }
-    /// Tokenizing and parsing draw from `work`, one unit per transition; every
-    /// other phase is one transition per call.
+    /// Tokenizing, parsing, and copying the result draw from `work`, one unit
+    /// per transition, form, or byte.
     pub fn advance(self: *ReadCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ReadProgress {
         return switch (self.state) {
             .tokenize => |*tokenizer| switch (try tokenizer: {
@@ -2074,94 +2015,40 @@ pub const ReadCursor = struct {
                     break :result .{ .complete = .{ .incomplete = value_incomplete } };
                 },
                 .complete => result: {
+                    // Every owned copy is allocated in this one transition, so
+                    // a failure leaves the cursor parsed and nothing to free.
+                    const output = &parser.cursor.output.?;
+                    var forms = try heap.OwnedValueBuffer.init(self.releases, output.count);
+                    errdefer forms.deinit();
+                    const top = try self.allocator.alloc(Span, output.count);
+                    errdefer self.allocator.free(top);
+                    const name = try self.allocator.alloc(u8, self.source_name.len);
+                    errdefer self.allocator.free(name);
+                    const source = try self.allocator.alloc(u8, self.source.len);
                     const moved = parser.*;
-                    self.state = .{ .allocate_forms = moved };
-                    break :result .pending;
-                },
-            },
-            .allocate_forms => |*parser| result: {
-                const count = parser.cursor.output.?.count;
-                const forms = try heap.OwnedValueBuffer.init(self.releases, count);
-                const moved = parser.*;
-                self.state = .{ .allocate_spans = .{
-                    .parser = moved,
-                    .forms = forms,
-                } };
-                break :result .pending;
-            },
-            .allocate_spans => |*allocation| result: {
-                const top = try self.allocator.alloc(Span, allocation.forms.capacity());
-                const parser = allocation.parser;
-                const forms = allocation.forms.take();
-                self.state = .{ .allocate_name = .{
-                    .parser = parser,
-                    .forms = forms,
-                    .top = top,
-                } };
-                break :result .pending;
-            },
-            .allocate_name => |*allocation| result: {
-                const name = try self.allocator.alloc(u8, self.source_name.len);
-                const parser = allocation.parser;
-                const forms = allocation.forms.take();
-                const top = allocation.top;
-                self.state = .{ .allocate_source = .{
-                    .parser = parser,
-                    .forms = forms,
-                    .top = top,
-                    .name = name,
-                } };
-                break :result .pending;
-            },
-            .allocate_source => |*allocation| result: {
-                const source = try self.allocator.alloc(u8, self.source.len);
-                const parser = allocation.parser;
-                const forms = allocation.forms.take();
-                const top = allocation.top;
-                const name = allocation.name;
-                self.state = .{ .copy_forms = .{
-                    .build = .{
-                        .parser = parser,
+                    self.state = .{ .build = .{
+                        .parser = moved,
                         .forms = forms,
                         .top = top,
                         .name = name,
                         .source = source,
-                    },
-                    .iterator = parser.cursor.output.?.iterator(),
-                } };
-                break :result .pending;
+                        .iterator = output.iterator(),
+                    } };
+                    break :result .pending;
+                },
             },
-            .copy_forms => |*copy| if (copy.iterator.next()) |form| result: {
-                copy.build.forms.appendBorrowed(form.value);
-                copy.build.top[copy.index] = form.span;
-                copy.index += 1;
-                break :result .pending;
-            } else result: {
-                const build = copy.build;
-                self.state = .{ .copy_name = .{ .build = build } };
-                break :result .pending;
-            },
-            .copy_name => |*copy| result: {
-                if (copy.index != self.source_name.len) {
-                    copy.build.name[copy.index] = self.source_name[copy.index];
-                    copy.index += 1;
-                } else {
-                    const build = copy.build;
-                    self.state = .{ .copy_source = .{ .build = build } };
+            .build => |*build| result: {
+                // Forms one unit each, then the name and source bytes a unit a
+                // byte, as much of each as the budget pays for.
+                while (build.form_index != build.top.len) {
+                    if (!work.spend()) break :result .pending;
+                    const form = build.iterator.next().?;
+                    build.forms.appendBorrowed(form.value);
+                    build.top[build.form_index] = form.span;
+                    build.form_index += 1;
                 }
-                break :result .pending;
-            },
-            .copy_source => |*copy| result: {
-                if (copy.index != self.source.len) {
-                    copy.build.source[copy.index] = self.source[copy.index];
-                    copy.index += 1;
-                } else {
-                    const build = copy.build;
-                    self.state = .{ .finish = build };
-                }
-                break :result .pending;
-            },
-            .finish => |*build| result: {
+                if (!copyBytes(build.name, self.source_name, &build.name_index, work)) break :result .pending;
+                if (!copyBytes(build.source, self.source, &build.source_index, work)) break :result .pending;
                 const parser = build.parser;
                 const forms = build.forms.take();
                 const top = build.top;
@@ -2206,6 +2093,15 @@ pub const ReadCursor = struct {
         };
     }
 };
+
+/// Copies as much of the rest of `origin` into `destination` as `work` pays
+/// for, a unit a byte; true once every byte is copied.
+fn copyBytes(destination: []u8, origin: []const u8, index: *usize, work: *poll.WorkBudget) bool {
+    const granted = work.take(destination.len - index.*);
+    @memcpy(destination[index.*..][0..granted], origin[index.*..][0..granted]);
+    index.* += granted;
+    return index.* == destination.len;
+}
 
 pub fn read(
     host: *const heap.HostCleanup,

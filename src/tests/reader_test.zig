@@ -143,7 +143,7 @@ test "span archive rejects a substitutable provenance issuer" {
     var root = heap.OwnedValue.init(host.domain(), try materializeRoot(&archive, host.domain(), parsed.values()));
     defer root.deinit();
     var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
-    while ((try absorption.advance()) == .pending) {}
+    while ((try poll.advanceOne(&absorption)) == .pending) {}
     try std.testing.expectEqual(
         spans.SpanArchive.AbsorbCursor.ArtifactOwnership.archive_owned,
         absorption.deinit(),
@@ -181,7 +181,7 @@ test "span archive fails closed on unbound publication artifacts" {
     defer root.deinit();
 
     var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
-    while (true) switch (absorption.advance() catch |err| {
+    while (true) switch (poll.advanceOne(&absorption) catch |err| {
         try std.testing.expectEqual(error.InvalidProvenance, err);
         try std.testing.expectEqual(
             spans.SpanArchive.AbsorbCursor.ArtifactOwnership.caller_owned,
@@ -225,7 +225,7 @@ test "span archive cancellation keeps committed location storage alive" {
     while (true) {
         var before = archive.locateQuotationCursor(quotation);
         if (before.advance().complete != null) break;
-        try std.testing.expect((try absorption.advance()) == .pending);
+        try std.testing.expect((try poll.advanceOne(&absorption)) == .pending);
     }
 
     try std.testing.expect(absorption.deinit() == .archive_owned);

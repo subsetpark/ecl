@@ -1030,9 +1030,9 @@ pub const SpanArchive = enum(usize) {
             return ownership;
         }
 
-        pub fn advance(self: *AbsorbCursor) AbsorbError!AbsorbProgress {
+        pub fn advance(self: *AbsorbCursor, work: *poll.WorkBudget) AbsorbError!AbsorbProgress {
             return switch (self.phase) {
-                .spans => switch (try self.writer.advance()) {
+                .spans => switch (try self.writer.advance(work)) {
                     .pending => .pending,
                     .complete => result: {
                         self.writer.deinit();
@@ -1273,7 +1273,7 @@ pub const SpanArchive = enum(usize) {
                         break :result .pending;
                     },
                 },
-                .absorbing => |*absorbing| switch (try absorbing.absorber.advance()) {
+                .absorbing => |*absorbing| switch (try absorbing.absorber.advance(work)) {
                     .pending => .pending,
                     .complete => result: {
                         std.debug.assert(absorbing.absorber.deinit() == .archive_owned);
