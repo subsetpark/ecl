@@ -1,6 +1,8 @@
-# Tier 2 of three. Pull requests run the local Debug tier plus one complete
-# ReleaseSafe suite. Merges and manual runs add the broad per-build-type
-# matrix. Tier 3 lives in release-candidate.yml.
+# Tier 2 of three. Pull requests run the local Debug tier, one complete
+# ReleaseSafe suite, and the checks too slow or too platform-bound to run
+# locally on every change: ThreadSanitizer, the idiom differential, and the
+# core and surface allocation-failure sweeps. Merges and manual runs add the
+# broad per-build-type matrix. Tier 3 lives in release-candidate.yml.
 name: CI
 
 on:
@@ -26,8 +28,8 @@ jobs:
       run_native_negative: true
       run_repl: ${{ github.event_name != 'pull_request' }}
       run_fuzz: ${{ github.event_name != 'pull_request' }}
-      run_differential: ${{ github.event_name != 'pull_request' }}
-      run_tsan: ${{ github.event_name != 'pull_request' }}
+      run_differential: true
+      run_tsan: true
 
   release-safe:
     name: ReleaseSafe tiers
@@ -40,6 +42,38 @@ jobs:
       run_memcheck: true
       run_workers_eight: ${{ github.event_name != 'pull_request' }}
       run_performance_smoke: true
+
+  oom-compile:
+    name: Compile shared OOM artifact
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      cache_scope: oom
+      run_oom: true
+      oom_target: test-oom-compile
+
+  oom-core:
+    name: Core OOM sweep
+    if: github.event_name == 'pull_request'
+    needs: oom-compile
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      cache_scope: oom
+      run_oom: true
+      oom_target: test-oom-core
+
+  oom-surfaces:
+    name: Standard-library and host OOM surfaces
+    if: github.event_name == 'pull_request'
+    needs: oom-compile
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      cache_scope: oom
+      run_oom: true
+      oom_target: test-oom-surfaces
 
   release-fast:
     name: ReleaseFast smoke

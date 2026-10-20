@@ -75,9 +75,12 @@ tier.
 - **CI: `.github/workflows/ci.yml`.** Pull requests run the Debug precommit
   tier and one complete ReleaseSafe suite, with the public formatter, native
   SDK rejection, PTY, standalone native acceptance, and Linux Valgrind Memcheck
-  over short core, JSON, and native CLI paths. Pushes to master and manual
+  over short core, JSON, and native CLI paths. They also run TSan, the idiom
+  differential, and the core and surface OOM sweeps (the latter two as
+  parallel jobs over one shared compile), because those are the gates most
+  expensive or least portable to run locally. Pushes to master and manual
   runs add the full Debug suite, bounded fuzz campaigns, eight-worker
-  concurrency, differential, TSan, and ReleaseFast snapshots.
+  concurrency, and ReleaseFast snapshots.
   Each optimization mode owns one long-lived job so its later tiers reuse its
   Zig cache and emitted artifacts. The reusable build-type workflow also
   persists host-mounted Zig local and global caches under a key containing the
@@ -109,6 +112,13 @@ Run a single CI gate locally only when you have a specific reason to expect
 that gate to fail—a scheduler lifetime change wants `test-tsan`, a new
 allocation site in an initialized Session wants `test-oom`. Start from the
 reason before selecting the matrix.
+
+- Do not chain slice steps after `zig build test`. `test-kernels`,
+  `test-ports`, and `test-native-runtime` are filtered builds of the same test
+  root, and Zig filters are compile-time, so each one recompiles that root
+  and reruns tests `test` already ran. Likewise keep one optimization mode per
+  local run: mixing `precommit` (Debug) with `-Doptimize=safe` steps compiles
+  every large test binary twice.
 
 - The precommit tier's fast-core filter list lives in `build.zig` beside its
   measured justification. A test that costs more than about a second belongs
@@ -210,8 +220,11 @@ reason before selecting the matrix.
   interpreting *any* TSan crash: pass a filter that matches no test. If it still SEGVs, the
   binary is dying in startup and no test is involved.
 
-  Run it in the same Linux/x86_64 glibc environment used by CI; the Linux/arm64 runtime
-  may in turn fail while unmapping shadow memory under Docker Desktop. Keep the checkout
+  Prefer CI, which runs TSan natively on every pull request. Locally, run it
+  in Linux under Docker. CI uses Linux/x86_64 glibc, but on Apple silicon Docker
+  Desktop's Rosetta emulation cannot load the x86_64 Zig 0.17 compiler
+  (`rosetta error: bss_size overflow`); use QEMU emulation or the
+  Linux/arm64 image with the aarch64 compiler instead, which runs natively. Keep the checkout
   read-only and caches container-local. Copy the checkout to a writable directory inside
   the container rather than building in the read-only mount: suites that call
   `std.testing.tmpDir` create their directory under the working directory, so a read-only
@@ -221,6 +234,12 @@ reason before selecting the matrix.
   `--init` is what lets the host timeout stop the run: without it the shell is the
   container's PID 1, which ignores SIGTERM, so the run continues to completion and
   still reports 124.
+
+  For arm64, use `--platform linux/arm64`, the `zig-aarch64-linux-0.17.0`
+  tarball (sha256 `9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8`),
+  and add `llvm-18` with `TSAN_OPTIONS=external_symbolizer_path=/usr/bin/llvm-symbolizer-18`
+  so reports carry symbols. Run one TSan container at a time: two concurrent
+  builds exhaust Docker Desktop's memory and the compiler is killed.
 
   ```sh
   timeout 50m docker run --rm --init --platform linux/amd64 \
@@ -236,8 +255,9 @@ reason before selecting the matrix.
       mkdir -p /build
       tar -C /work --exclude=./.zig-cache --exclude=./zig-out --exclude=./.claude -cf - . | tar -C /build -xf -
       cd /build
-      timeout 45m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
-        --global-cache-dir /tmp/ecl-global test-tsan < /dev/null
+      # Zig 0.17 takes the global cache from the environment only.
+      ZIG_GLOBAL_CACHE_DIR=/tmp/ecl-global timeout 45m /tmp/zig/zig build \
+        --cache-dir /tmp/ecl-cache test-tsan < /dev/null
     '
   ```
 
