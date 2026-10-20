@@ -351,7 +351,12 @@ Lookup is late. A word occurrence selects only a name slot (see Bindings and
 scope). Each execution reads the slot's current binding; the occurrence retains
 no binding, body, value, or module generation. Replacing a binding in a root
 affects existing code at its next execution, including code already running
-and the quotations of combinators in progress. A module image is immutable
+and the quotations of control combinators in progress. The data combinators
+`each`, `zip-with`, `fold`, `fold1`, and `scan` are atomic under their
+bindings: a call takes the binding of each word written in its quotation once,
+at that word's first execution in the call, and its later applications reuse
+it, so a replacement made while the call runs takes effect at its next call. A
+module image is immutable
 after construction; replacing an image in a registration does not retarget
 words belonging to the former image. Executing a word whose root has retired is
 a `'domain` error, never a fallback to another root.

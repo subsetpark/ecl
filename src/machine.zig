@@ -1562,6 +1562,9 @@ pub const IsolatedApplication = struct {
     site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
+    /// Where a data combinator keeps what its call has decided for its
+    /// quotation's words.
+    plan: ?*ResolutionPlan = null,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1626,6 +1629,8 @@ const ApplicationFrame = struct {
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
+    /// Borrowed from the combinator state `context` names.
+    plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
@@ -5895,6 +5900,7 @@ pub const Machine = struct {
             },
             .traced_word = inherited_trace,
             .selection = .{},
+            .plan = application.plan,
         } });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
@@ -6119,7 +6125,8 @@ pub const Machine = struct {
     /// resolution, and returns true; returns false, leaving `out` undefined,
     /// when the slot yields nothing a plain word may run: no binding in the
     /// root or core, or only a private core one. `written` is the slot's root
-    /// scope, already proven live, or null for core. The resolution is built in
+    /// scope, already proven live, or null for core. `retain` asks for a lease
+    /// that outlives the dispatch. The resolution is built in
     /// the caller's storage because returning it by value cost a copy of the
     /// whole lease on every dispatch.
     fn slotResolution(
@@ -6128,11 +6135,14 @@ pub const Machine = struct {
         name: u32,
         written: ?*env.Scope,
         borrow_pin: *?modules.GenerationPin,
+        retain: bool,
         out: *Resolution,
     ) bool {
         const cell = slot.current() orelse return false;
         out.* = .{
-            .lease = if (self.slice) |slice| cell.borrow(slice) else cell.load(),
+            // A borrow lasts only for this dispatch; a lease kept past it
+            // holds references.
+            .lease = if (self.slice) |slice| if (retain) cell.load() else cell.borrow(slice) else cell.load(),
             .execution_generation = null,
             .home = null,
             .trace_word = .plain(name),
@@ -6243,10 +6253,31 @@ pub const Machine = struct {
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
-        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, out);
+        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, false, out);
+    }
+
+    /// The plan of the data combinator applying the running code, when that
+    /// code is the combinator's own quotation.
+    fn applicationPlan(self: *Machine) ?*ResolutionPlan {
+        const current = &self.unit.current.?;
+        const index = current.application_tail orelse return null;
+        const plan = switch (self.unit.frames.items[@backingInt(index)]) {
+            .application => |application| application.plan orelse return null,
+            else => return null,
+        };
+        return if (plan.code == current.code) plan else null;
+    }
+
+    /// The running data combinator's entry for the word executing now, made on
+    /// first use, or null when no plan applies or there is no memory for one.
+    pub fn planEntry(self: *Machine) ?*PlanEntry {
+        const plan = self.applicationPlan() orelse return null;
+        return plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        const plan_entry = self.planEntry();
+        if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
         // Bindings borrowed below stay valid until the dispatch has taken
@@ -6260,7 +6291,16 @@ pub const Machine = struct {
         const written = target.written;
         // SAFETY: read only after `slotResolution` returns true, which initializes it.
         var slot_resolution: Resolution = undefined;
-        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, &slot_resolution) else false) {
+        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, plan_entry != null, &slot_resolution) else false) {
+            // A data combinator's call keeps the binding for its later
+            // applications. One carrying a module home, generation, or pin
+            // belongs to this dispatch alone.
+            if (plan_entry) |entry| if (slot_resolution.home == null and slot_resolution.borrow_pin == null and
+                slot_resolution.execution_generation == null)
+            {
+                entry.resolution = slot_resolution;
+                return executeResolved(self, &entry.resolution.?);
+            };
             defer slot_resolution.deinit(self.unit.allocator);
             try executeResolved(self, &slot_resolution);
             return;
@@ -7941,6 +7981,62 @@ pub const LookupChain = enum {
     }
 };
 
+/// What one data-combinator call has decided for a word position of its
+/// quotation, kept for the rest of the call.
+pub const PlanEntry = struct {
+    /// The word's binding, from its first execution in the call.
+    resolution: ?Resolution = null,
+    /// For a word that offers a phrase to idiom recognition, the first phrase
+    /// it offered in the call and what recognition made of it.
+    offered: ?OfferedMatch = null,
+};
+
+/// The registry entry whose pattern an offered phrase matched, or none, with
+/// what the match captured from the phrase. Whether the entry applies still
+/// depends on each application's operands.
+pub const OfferedMatch = struct {
+    /// Retained, so a later phrase at the same address is this one.
+    phrase: *Header,
+    entry: ?u16,
+    constant: ?Value,
+    active_word: ?u32,
+    active_index: ?u32,
+};
+
+/// The decisions one data-combinator call has made for the words of its
+/// quotation. A word's binding, and the idiom match of a phrase it was
+/// offered, are decided at its first execution in the call and reused by every
+/// later application, so the call is atomic under its bindings: a replacement
+/// made while it runs takes effect at its next call.
+pub const ResolutionPlan = struct {
+    /// Borrowed: the combinator owns its quotation for the whole call.
+    code: *Header,
+    entries: []PlanEntry = &.{},
+
+    pub fn init(code: *Header) ResolutionPlan {
+        return .{ .code = code };
+    }
+
+    /// The entry for word position `index`, or null when there is no memory
+    /// for the plan, which then decides nothing.
+    fn entry(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32) ?*PlanEntry {
+        if (self.entries.len == 0) {
+            self.entries = allocator.alloc(PlanEntry, @intCast(self.code.length())) catch return null;
+            @memset(self.entries, .{});
+        }
+        return &self.entries[index];
+    }
+
+    pub fn retire(self: *ResolutionPlan, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        for (self.entries) |*planned| {
+            if (planned.resolution) |*resolution| resolution.deinit(allocator);
+            if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
+        }
+        allocator.free(self.entries);
+        self.entries = &.{};
+    }
+};
+
 pub const Resolution = struct {
     lease: env.BindingLease,
     execution_generation: ?modules.ExecutionGeneration,
@@ -8754,6 +8850,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .site = continuation.site,
                         .seeded = application.seeded,
                         .provenance = application.provenance,
+                        .plan = continuation.plan,
                     }, launch, continuation.traced_word);
                     return true;
                 },
@@ -8786,6 +8883,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .traced_word = continuation.traced_word,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
+                        .plan = continuation.plan,
                     } });
                     application_selection = .{};
                     defer suspended.deinit(self.releaseDomain(), self.unit.allocator);

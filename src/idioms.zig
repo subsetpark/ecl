@@ -438,7 +438,16 @@ pub fn tryApply(
     const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
     if (entries.len == 0) return decline.run(evaluator);
-    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline);
+    // Inside a data combinator's call the phrase's words keep their bindings,
+    // so the phrase it offered before matches the same way again.
+    const planned = evaluator.planEntry();
+    if (planned) |entry| if (entry.offered) |offered| if (offered.phrase == candidate.phrase.list)
+        return applyMatched(evaluator, candidate.phrase, offered.entry, .{
+            .constant = offered.constant,
+            .active_word = offered.active_word,
+            .active_index = offered.active_index,
+        }, decline);
+    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline, planned);
 }
 
 /// What an offered match runs if it declines: still the caller's source while
@@ -547,8 +556,10 @@ const Matcher = struct {
     expected: ?env.PrimitiveImpl = null,
     expected_binding: BindingKind = .builtin,
 
-    /// A pattern word to resolve; `cache` is where its answer is recorded.
-    const Step = union(enum) { progressed, done: ?RegistryEntry };
+    /// The registry index of the entry whose pattern the phrase matched, or
+    /// null once every entry has been rejected. Whether it applies is the
+    /// caller's to decide against the operands.
+    const Step = union(enum) { progressed, done: ?u16 };
 
     fn phraseSite(self: *const Matcher) machine.ErrorSite {
         return .{ .code = self.candidate.phrase.list, .index = @intCast(self.atom_index) };
@@ -610,7 +621,7 @@ const Matcher = struct {
         if (self.entry_index == self.entries.len) return .{ .done = null };
         const entry = registry[self.entries[self.entry_index]];
         if (self.atom_index == entry.pattern.len)
-            return .{ .done = if (canApplyEntry(evaluator, entry)) entry else null };
+            return .{ .done = self.entries[self.entry_index] };
         const actual = list.atUnchecked(self.candidate.phrase, self.atom_index);
         switch (entry.pattern[self.atom_index]) {
             .constant => {
@@ -676,16 +687,36 @@ const Matcher = struct {
 };
 
 /// Matches the phrase, then applies the selected entry or declines.
-fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline) MachineError!void {
+/// Matches the phrase, records the match in the running data combinator's
+/// plan when it has room, then applies the matched entry or declines.
+fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline, planned: ?*machine.PlanEntry) MachineError!void {
     var matching = matcher;
-    while (true) switch (matching.step(evaluator)) {
+    const matched = while (true) switch (matching.step(evaluator)) {
         .progressed => {},
-        .done => |entry| {
-            const selected = entry orelse return decline.run(evaluator);
-            decline.discard(evaluator);
-            return applySelected(evaluator, matching.candidate.phrase, selected, matching.capture);
-        },
+        .done => |entry| break entry,
     };
+    if (planned) |entry| if (entry.offered == null) {
+        const phrase = matching.candidate.phrase;
+        heap.retainValue(phrase);
+        entry.offered = .{
+            .phrase = phrase.list,
+            .entry = matched,
+            .constant = matching.capture.constant,
+            .active_word = matching.capture.active_word,
+            .active_index = matching.capture.active_index,
+        };
+    };
+    return applyMatched(evaluator, matching.candidate.phrase, matched, matching.capture, decline);
+}
+
+/// Applies a matched entry when this application's operands admit it, and
+/// declines otherwise.
+fn applyMatched(evaluator: *Machine, phrase: Value, matched: ?u16, capture: Capture, decline: Decline) MachineError!void {
+    const index = matched orelse return decline.run(evaluator);
+    const selected = registry[index];
+    if (!canApplyEntry(evaluator, selected)) return decline.run(evaluator);
+    decline.discard(evaluator);
+    return applySelected(evaluator, phrase, selected, capture);
 }
 
 fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {

@@ -601,7 +601,18 @@ retires. Binding and removal are constant-time under the root's writer lock.
 Enumeration and lookup by name read the table without a lock; enumeration is
 not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
 cell's current payload, so a redefinition reaches every existing occurrence at
-its next execution, including combinator bodies already running.
+its next execution, including control-combinator bodies already running.
+
+A data combinator's call owns a plan for its quotation, one entry per position,
+reached through the application frame and used only while that exact quotation
+is the running code. An entry keeps the word's resolution from its first
+execution in the call, with a lease that holds references, and, for a word that
+offers a phrase to recognition, the retained phrase and the registry entry its
+pattern matched. Later applications reuse both and still check the matched
+entry against their own operands. A resolution carrying a module home,
+generation, or pin is never kept. Definitions are refused inside
+applications, so only another unit can replace a binding mid-call, and the
+plan's lease keeps the replaced snapshot alive until the call ends.
 
 A binding payload is one closed choice:
 
