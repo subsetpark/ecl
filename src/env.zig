@@ -1242,7 +1242,6 @@ const ScopeStorage = union(enum) {
     session: *Environment,
     core_build: *Environment,
     module_root: *Environment,
-    isolated,
 };
 pub const Scope = struct {
     allocator: std.mem.Allocator,
@@ -1250,8 +1249,6 @@ pub const Scope = struct {
     storage: ScopeStorage,
     refs: std.atomic.Value(u32) = .init(1),
     allocation: ScopeAllocation = .embedded,
-    isolated_environment: std.atomic.Value(?*Environment) = .init(null),
-    publication_lock: std.Io.Mutex = .init,
     /// The scope this scope's published literals name. Allocated on first
     /// publication rather than at construction, so an `@attempt` body that
     /// publishes nothing costs nothing. A module image installs its own before
@@ -1297,13 +1294,6 @@ pub const Scope = struct {
         return self.storage == .module_root;
     }
 
-    /// Whether definitions may land here: the session, core while it is being
-    /// built, or a module image. Combinator applications, `@attempt` bodies,
-    /// and tasks run in isolated scopes, where definitions are refused.
-    pub fn isRoot(self: *const Scope) bool {
-        return self.storage != .isolated;
-    }
-
     pub const RetireCursor = struct {
         scope: *Scope,
         state: State,
@@ -1315,10 +1305,6 @@ pub const Scope = struct {
             /// held by a live activation on some other unit, and blocking a
             /// worker on it would be a hang rather than a wait.
             waiting_for_borrows: *ScopeCell,
-            environment: struct {
-                target: *Environment,
-                cursor: Environment.TeardownCursor,
-            },
             parent,
             destroy,
             complete,
@@ -1326,25 +1312,11 @@ pub const Scope = struct {
 
         /// The state that follows the cell clear: wait for outstanding borrows
         /// first when there is a cell to wait on, otherwise start tearing down.
-        fn afterClear(scope: *Scope, cell: ?*ScopeCell) State {
+        fn afterClear(cell: ?*ScopeCell) State {
             if (cell) |named| {
                 if (named.borrowed()) return .{ .waiting_for_borrows = named };
             }
-            return startTeardown(scope);
-        }
-
-        fn startTeardown(scope: *Scope) State {
-            const target = if (scope.storage == .isolated)
-                scope.isolated_environment.load(.acquire)
-            else
-                null;
-            return if (target) |environment|
-                .{ .environment = .{
-                    .target = environment,
-                    .cursor = .init(environment),
-                } }
-            else
-                .parent;
+            return .parent;
         }
 
         pub fn init(scope: *Scope) RetireCursor {
@@ -1364,20 +1336,13 @@ pub const Scope = struct {
             // change of meaning.
             const cleared = scope.label_cell.swap(null, .acq_rel);
             if (cleared) |cell| cell.retire();
-            return .{ .scope = scope, .state = afterClear(scope, cleared) };
+            return .{ .scope = scope, .state = afterClear(cleared) };
         }
 
         pub fn advance(self: *RetireCursor) bool {
             return switch (self.state) {
                 .waiting_for_borrows => |cell| result: {
                     if (cell.borrowed()) break :result false;
-                    self.state = startTeardown(self.scope);
-                    break :result false;
-                },
-                .environment => |*environment| result: {
-                    if (!environment.cursor.advance()) break :result false;
-                    self.scope.isolated_environment.store(null, .release);
-                    self.scope.allocator.destroy(environment.target);
                     self.state = .parent;
                     break :result false;
                 },
@@ -1455,27 +1420,6 @@ pub const Scope = struct {
     pub fn moduleRoot(allocator: std.mem.Allocator, target: *Environment) Scope {
         return direct(allocator, .{ .module_root = target }, null);
     }
-    pub fn lazy(allocator: std.mem.Allocator, parent: *Scope) Scope {
-        parent.retain();
-        return .{ .allocator = allocator, .parent = parent, .storage = .isolated };
-    }
-    pub fn createLazy(allocator: std.mem.Allocator, parent: *Scope) error{OutOfMemory}!*Scope {
-        const result = try allocator.create(Scope);
-        result.* = lazy(allocator, parent);
-        result.allocation = .heap;
-        return result;
-    }
-    /// True when nothing has bound in this scope and nobody but its own frame
-    /// refers to it. Such a scope carries no state at all: it is pure identity
-    /// over its parent, so one is interchangeable with another over the same
-    /// parent. Isolation still holds, because a scope that has bound anything
-    /// has materialized its environment and fails this test.
-    pub fn reusableAsChildOf(self: *const Scope, parent: *const Scope) bool {
-        if (self.storage != .isolated) return false;
-        if (self.parent != parent) return false;
-        if (self.isolated_environment.load(.acquire) != null) return false;
-        return self.refs.load(.acquire) == 1;
-    }
     pub fn retain(self: *Scope) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
@@ -1485,7 +1429,6 @@ pub const Scope = struct {
             .session => |target| .init(target),
             .core_build => |target| .init(target),
             .module_root => |target| .init(target),
-            .isolated => if (self.isolated_environment.load(.acquire)) |target| .init(target) else null,
         };
     }
     fn releaseDomain(self: *const Scope) *heap.ReleaseDomain {
@@ -1493,7 +1436,6 @@ pub const Scope = struct {
             .session => |target| target.releases,
             .core_build => |target| target.releases,
             .module_root => |target| target.releases,
-            .isolated => self.parent.?.releaseDomain(),
         };
     }
     pub fn retireCursor(self: *Scope) RetireCursor {
@@ -1529,26 +1471,15 @@ pub const Scope = struct {
     pub fn releaseTrivial(self: *Scope) void {
         std.debug.assert(self.label_cell.load(.acquire) == null);
         std.debug.assert(self.parent == null and self.environmentOrNull() != null);
-        std.debug.assert(self.storage != .isolated);
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old == 1);
         _ = self.refs.load(.acquire);
     }
-    fn writableEnvironment(self: *Scope) error{OutOfMemory}!*Environment {
+    fn writableEnvironment(self: *Scope) *Environment {
         return switch (self.storage) {
             .session => |target| target,
             .core_build => |target| target,
             .module_root => |target| target,
-            .isolated => blk: {
-                if (self.isolated_environment.load(.acquire)) |target| break :blk target;
-                std.Io.Threaded.mutexLockUncancelable(&self.publication_lock);
-                defer std.Io.Threaded.mutexUnlock(&self.publication_lock);
-                if (self.isolated_environment.load(.acquire)) |target| break :blk target;
-                const created = try self.allocator.create(Environment);
-                created.* = Environment.init(self.allocator, self.releaseDomain());
-                self.isolated_environment.store(created, .release);
-                break :blk created;
-            },
         };
     }
     /// One word definition, in the shape both publication kinds accept.
@@ -1583,9 +1514,8 @@ pub const Scope = struct {
     };
 
     /// Removes only this scope's direct binding. An absent local binding is a
-    /// successful no-op, including for an unmaterialized child scope; parent
-    /// and core bindings are observation-only from here and may become visible
-    /// again only after a local shadow is removed.
+    /// successful no-op; core bindings are observation-only from here and
+    /// become visible again once a local shadow is removed.
     pub fn unpublishWordCursor(
         self: *Scope,
         name: intern.NamespaceName,
@@ -1594,7 +1524,6 @@ pub const Scope = struct {
             .session => |environment| environment,
             .core_build => |environment| environment,
             .module_root => |environment| environment,
-            .isolated => self.isolated_environment.load(.acquire) orelse return .absent,
         };
         return .{ .environment = target.unbindCursor(name) };
     }
@@ -1638,14 +1567,12 @@ pub const Scope = struct {
     /// bodies here used to be for.
     pub fn publisher(self: *Scope) ScopePublisher {
         return switch (self.storage) {
-            .session, .core_build, .isolated => .{ .top = .{ .scope = self } },
+            .session, .core_build => .{ .top = .{ .scope = self } },
             .module_root => |target| .{ .module = .init(target) },
         };
     }
 };
-/// Authority to publish top-level bindings into one scope. It materializes an
-/// isolated scope's environment on first publication, so issuing one allocates
-/// nothing.
+/// Authority to publish top-level bindings into one scope.
 pub const TopPublisher = struct {
     scope: *Scope,
 
@@ -1654,7 +1581,7 @@ pub const TopPublisher = struct {
         name: intern.NamespaceName,
         publication: TopPublication,
     ) BindError!*BindingCell {
-        return (try self.scope.writableEnvironment()).bind(name, BindingSpec.fromTop(publication));
+        return self.scope.writableEnvironment().bind(name, BindingSpec.fromTop(publication));
     }
 
     pub fn cursor(
@@ -1662,7 +1589,7 @@ pub const TopPublisher = struct {
         name: intern.NamespaceName,
         publication: TopPublication,
     ) error{OutOfMemory}!Environment.BindCursor {
-        return (try self.scope.writableEnvironment()).bindCursor(
+        return self.scope.writableEnvironment().bindCursor(
             name,
             BindingSpec.fromTop(publication),
         );

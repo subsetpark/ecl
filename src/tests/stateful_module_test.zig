@@ -724,8 +724,8 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
             // Session remains live; shutdown is not the cleanup mechanism.
             " [1] (((dup without) within) 'peek def) 'settler @defm" ++
             " settler.peek pop 'settler unmodule";
-        const small = "[1] 2 take (pop " ++ cancellation_cycle ++ ") for";
-        const large = "[1] 8 take (pop " ++ cancellation_cycle ++ ") for";
+        const small = "2 (" ++ cancellation_cycle ++ ") times";
+        const large = "8 (" ++ cancellation_cycle ++ ") times";
         try expectStack(&runtime, small, "");
         const before_small = counting.total_requested_bytes;
         try expectStack(&runtime, small, "");

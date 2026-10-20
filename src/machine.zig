@@ -1360,7 +1360,7 @@ const ModuleBoundary = struct {
     }
 };
 const BoundaryMode = union(enum) {
-    attempt: *env.Scope,
+    attempt,
     module: ModuleBoundary,
     state: OwnedApplication,
 };
@@ -1380,9 +1380,7 @@ const Boundary = struct {
     ) void {
         switch (self.mode) {
             .module => |boundary| boundary.deinit(),
-            .attempt => |scope| {
-                scope.retire();
-            },
+            .attempt => {},
             .state => |owned| {
                 var application = owned;
                 application.retire(releases, allocator);
@@ -1546,6 +1544,12 @@ pub const ExecutionSite = struct {
     /// A named module constructed by that source moves it into the immutable
     /// registration; ordinary source always carries ordinary provenance.
     registration_provenance: modules.RegistrationProvenance = .ordinary,
+    /// Whether definitions may land in `scope`. True at root level: top-level
+    /// code, a module construction body, and anything they call inline.
+    /// Combinator applications, `@attempt` bodies, and tasks clear it, and
+    /// everything they call inherits that, so a helper that defines works at
+    /// top level and is refused inside an `each`.
+    defining: bool,
 
     fn idOf(scope: ?*env.Scope) env.ScopeId {
         return if (scope) |resolved| resolved.cellId() else .none;
@@ -1553,13 +1557,14 @@ pub const ExecutionSite = struct {
 
     /// The base case: a unit's root activation, built from nothing.
     pub fn root(unit: *Unit) ExecutionSite {
-        if (unit.root_execution_home) |home| return image(home, unit.module_access);
+        if (unit.root_execution_home) |home| return image(home, unit.module_access, unit.root_defining);
         const scope = unit.lexicalScope();
         return .{
             .scope = scope,
             .resolution_scope = scope,
             .home = null,
             .resolution_scope_id = idOf(scope),
+            .defining = unit.root_defining,
             .registration_provenance = if (unit.inherited.module_snapshot) |module_snapshot|
                 .{ .root_scope = module_snapshot.localScope() }
             else
@@ -1572,6 +1577,7 @@ pub const ExecutionSite = struct {
     pub fn image(
         home: *modules.ModuleHome,
         access: *const modules.ExecutionAccess,
+        defining: bool,
     ) ExecutionSite {
         const scope = home.scope(access);
         return .{
@@ -1579,6 +1585,7 @@ pub const ExecutionSite = struct {
             .resolution_scope = scope,
             .home = home,
             .resolution_scope_id = idOf(scope),
+            .defining = defining,
             .registration_provenance = home.registrationProvenance(),
         };
     }
@@ -1590,7 +1597,7 @@ pub const ExecutionSite = struct {
     /// it does not inherit embedded registration trust; a resumed load sets
     /// the provenance it registers under itself.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return resumed(scope, invoker.home(), invoker.site.registration_provenance.applied());
+        return resumed(scope, invoker.home(), invoker.site.registration_provenance.applied(), invoker.site.defining);
     }
 
     /// An application resuming in `scope` under its launch home. The only
@@ -1600,6 +1607,7 @@ pub const ExecutionSite = struct {
         scope: *env.Scope,
         home: ?*modules.ModuleHome,
         registration_provenance: modules.RegistrationProvenance,
+        defining: bool,
     ) ExecutionSite {
         return .{
             .scope = scope,
@@ -1607,6 +1615,7 @@ pub const ExecutionSite = struct {
             .home = home,
             .resolution_scope_id = idOf(scope),
             .registration_provenance = registration_provenance,
+            .defining = defining,
         };
     }
 };
@@ -1619,6 +1628,9 @@ pub const ApplicationSite = struct {
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     registration_provenance: modules.RegistrationProvenance,
+    /// The launching activation's `defining`. An isolated launch clears it
+    /// for the body regardless; an inline one passes it through.
+    defining: bool,
 };
 pub const IsolatedApplication = struct {
     quotation: *Header,
@@ -1682,7 +1694,6 @@ pub fn typedApplication(
 const ApplicationMode = union(enum) {
     in_place: StackWindow,
     isolated: struct {
-        child: *env.Scope,
         previous_base: StackWindow,
     },
 };
@@ -1701,10 +1712,7 @@ const ApplicationFrame = struct {
         var selection = self.selection;
         selection.deinit(releases);
         switch (self.mode) {
-            .in_place => {},
-            .isolated => |isolated| {
-                isolated.child.retire();
-            },
+            .in_place, .isolated => {},
         }
         self.deinit_fn(releases, allocator, self.context);
     }
@@ -2611,6 +2619,9 @@ pub const Unit = struct {
     /// For a child unit, the `@` word that constructed it.
     constructor: UnitConstructor = .spawn,
     execution_scope: ?*env.Scope = null,
+    /// Whether this unit's root activation may define. False for a task,
+    /// which runs in its spawner's scope without being a root of its own.
+    root_defining: bool = true,
     /// Protected invocation may start this child at one selected registered
     /// module generation. The Unit lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
@@ -2640,12 +2651,6 @@ pub const Unit = struct {
     /// being free — only the allocation does.
     driver_slot: [driver_slot_len]u8 align(driver_slot_align),
     driver_slot_busy: bool = false,
-    /// One parked isolated application scope. A combinator retires the scope
-    /// for element N and immediately builds one for element N+1 over the same
-    /// parent; when the retired one never bound anything it is indistinguishable
-    /// from the new one, so it is kept here instead of being freed and
-    /// reallocated per element.
-    spare_scope: ?*env.Scope = null,
     /// Locals. The declared names live here for the length of the
     /// quotation body that introduced them, never on the operand stack, so a
     /// body's declared stack effect describes its operands alone and an
@@ -3086,18 +3091,6 @@ pub const Unit = struct {
         return @intFromPtr(driver) == @intFromPtr(&self.driver_slot);
     }
 
-    /// Drops any parked application scope. A parked scope holds a reference on
-    /// its parent, so keeping one across a scheduler turn would pin whatever
-    /// that parent belongs to -- a module generation another task is waiting to
-    /// see reclaimed, for instance. The parking is an optimization within one
-    /// slice and must not outlive it.
-    pub fn dropSpareScope(self: *Unit) void {
-        if (self.spare_scope) |spare| {
-            self.spare_scope = null;
-            spare.retire();
-        }
-    }
-
     fn releaseInlineDriver(self: *Unit) void {
         std.debug.assert(self.driver_slot_busy);
         self.driver_slot_busy = false;
@@ -3135,7 +3128,6 @@ pub const Unit = struct {
         }
         for (self.locals.items) |item| self.releases.releaseValue(item);
         self.locals.deinit(self.allocator);
-        if (self.spare_scope) |spare| spare.retire();
         self.lifetime.deinit(self.releases, self.allocator);
         self.* = undefined;
     }
@@ -3233,7 +3225,7 @@ pub const Machine = struct {
     /// combinator application, an `@attempt`, or a task, which are not roots.
     pub fn definitionScope(self: *Machine) MachineError!*env.Scope {
         const scope = self.currentScope();
-        if (!scope.isRoot()) return self.fail(
+        if (!self.unit.current.?.site.defining) return self.fail(
             .domain,
             "definitions are legal only at root level, not inside a combinator application, @attempt, or task",
         );
@@ -3292,6 +3284,7 @@ pub const Machine = struct {
             // A combinator applies a quotation value, which may have come from
             // any caller, so embedded trust stays with the embedded code.
             .registration_provenance = current.site.registration_provenance.applied(),
+            .defining = current.site.defining,
         };
     }
     fn installDriver(self: *Machine, context: anytype) void {
@@ -5909,32 +5902,6 @@ pub const Machine = struct {
     /// Hands back an isolated application scope. One that never bound and is
     /// unshared is parked for the next application over the same parent rather
     /// than retired; anything else takes the ordinary path.
-    fn releaseApplicationScope(self: *Machine, scope: *env.Scope) void {
-        if (self.unit.spare_scope == null and scope.parent != null and
-            scope.reusableAsChildOf(scope.parent.?))
-        {
-            self.unit.spare_scope = scope;
-            return;
-        }
-        scope.retire();
-    }
-
-    /// The parked scope if it belongs under `parent`, otherwise a fresh one.
-    /// A parked scope that belongs elsewhere is retired rather than kept: it
-    /// pins its own parent alive, and the next application is the evidence
-    /// that nothing is iterating over it any more.
-    fn acquireApplicationScope(self: *Machine, parent: *env.Scope) error{OutOfMemory}!*env.Scope {
-        if (self.unit.spare_scope) |spare| {
-            if (spare.reusableAsChildOf(parent)) {
-                self.unit.spare_scope = null;
-                return spare;
-            }
-            self.unit.spare_scope = null;
-            spare.retire();
-        }
-        return env.Scope.createLazy(self.unit.allocator, parent);
-    }
-
     fn beginApplication(
         self: *Machine,
         application: IsolatedApplication,
@@ -5954,20 +5921,10 @@ pub const Machine = struct {
             },
         };
         const select_initial = application.provenance != .boundary;
-        var child: ?*env.Scope = null;
-        if (launch == .isolated) {
-            child = self.acquireApplicationScope(application.site.parent_scope) catch {
-                application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
-                return error.OutOfMemory;
-            };
-        }
         var inherited_trace = inherited orelse no_word;
         if (self.unit.current != null) {
             std.debug.assert(inherited == null);
             inherited_trace = self.suspendCurrent() catch {
-                if (child) |scope| {
-                    scope.retire();
-                }
                 application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
                 return error.OutOfMemory;
             };
@@ -5981,7 +5938,6 @@ pub const Machine = struct {
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = .{
-                    .child = child.?,
                     .previous_base = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.stack_base)))),
                 } },
             },
@@ -6002,10 +5958,13 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = application.quotation,
             .position = .{ .source = 0 },
+            // An isolated body runs in its caller's scope but is not a root,
+            // so nothing it calls may define there.
             .site = .resumed(
-                child orelse application.site.parent_scope,
+                application.site.parent_scope,
                 application.site.home,
                 application.site.registration_provenance,
+                launch == .in_place and application.site.defining,
             ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
@@ -6144,7 +6103,7 @@ pub const Machine = struct {
         body_header: *Header,
     ) MachineError!void {
         const home = candidate.executionHome(self.unit.module_access);
-        var site = ExecutionSite.image(home, self.unit.module_access);
+        var site = ExecutionSite.image(home, self.unit.module_access, true);
         site.registration_provenance = provenance;
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(body_header);
@@ -6584,7 +6543,7 @@ pub const Machine = struct {
         var owned = owned_application;
         const application = owned.borrow();
         const word = self.unit.active_word;
-        const site = ExecutionSite.image(self.currentHome().?, self.unit.module_access);
+        const site = ExecutionSite.image(self.currentHome().?, self.unit.module_access, false);
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             owned.retire(self.releaseDomain(), self.unit.allocator);
@@ -6639,25 +6598,22 @@ pub const Machine = struct {
     /// Opens one `@attempt` boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure.
     fn openAttempt(self: *Machine, body: *Header) error{OutOfMemory}!void {
-        const parent_scope = self.unit.current.?.scope();
         const invoker = self.unit.current.?;
         const word = self.unit.active_word;
-        const child = env.Scope.createLazy(self.unit.allocator, parent_scope) catch {
-            self.releaseDomain().releaseHeader(body);
-            return error.OutOfMemory;
-        };
         _ = self.suspendCurrent() catch {
-            child.retire();
             self.releaseDomain().releaseHeader(body);
             return error.OutOfMemory;
         };
         if (self.unit.frames.items.len >= max_frame_count) {
-            child.retire();
             self.releaseDomain().releaseHeader(body);
             return error.OutOfMemory;
         }
+        // The body runs in its invoker's scope but is not a root: nothing it
+        // calls may define, so a failure has no definitions to discard.
+        var site = ExecutionSite.inheriting(invoker, invoker.scope());
+        site.defining = false;
         try self.openBoundary(
-            .{ .attempt = child },
+            .attempt,
             @intCast(self.unit.stack.items.len),
             word,
             body,
@@ -6665,7 +6621,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = body,
             .position = .{ .source = 0 },
-            .site = .inheriting(invoker, child),
+            .site = site,
             .traced_word = no_word,
         };
     }
@@ -6957,7 +6913,6 @@ pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     // before it draws.
     unit.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
     var evaluator = Machine{ .unit = unit };
-    defer unit.dropSpareScope();
     const status = loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
@@ -9080,6 +9035,8 @@ fn scheduleWord(
         self.unit.current.?.site.registration_provenance
     else
         resolved_home.?.registrationProvenance();
+    // A body defines where its caller could, and no further.
+    const defining = self.unit.current.?.site.defining;
     // Each binding resolves against the chain it was defined in, with no
     // exception. A module word resolves against its home. Anything else
     // resolves against the scope resolution found it in, which is null for a
@@ -9122,6 +9079,7 @@ fn scheduleWord(
             .resolution_scope = resolution_scope,
             .home = home,
             .resolution_scope_id = ExecutionSite.idOf(resolution_scope),
+            .defining = defining,
             .registration_provenance = registration_provenance,
         },
         .traced_word = word,
@@ -9177,7 +9135,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
                     const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(self.unit.stack_base))));
-                    self.releaseApplicationScope(isolated.child);
                     self.unit.stack_base = isolated.previous_base.base();
                     break :blk .{ .isolated, window };
                 },
