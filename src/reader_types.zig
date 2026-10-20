@@ -246,8 +246,7 @@ pub const SpanTable = struct {
                     // The caller paid for this transition, which copies at
                     // least one span; the budget pays for the rest.
                     const owned = self.owned.?;
-                    const remaining = owned.len - self.index;
-                    const granted = @min(remaining, 1) + work.take(remaining -| 1);
+                    const granted = work.chunk(owned.len - self.index);
                     const chunk = owned[self.index..][0..granted];
                     if (self.uniform) |span| @memset(chunk, span) else @memcpy(chunk, self.source[self.index..][0..granted]);
                     self.index += granted;
