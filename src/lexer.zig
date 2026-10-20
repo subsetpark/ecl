@@ -56,6 +56,17 @@ pub const Classification = union(enum) {
     out_of_range: NumberKind,
 };
 
+/// The codepoint that starts already-validated UTF-8, and its byte length.
+pub fn decodeValidated(bytes: []const u8) struct { u21, u3 } {
+    const first = bytes[0];
+    if (first < 0x80) return .{ first, 1 };
+    const length = std.unicode.utf8ByteSequenceLength(first) catch
+        @panic("validated UTF-8 reached an invalid start byte");
+    const codepoint = std.unicode.utf8Decode(bytes[0..length]) catch
+        @panic("validated UTF-8 reached an invalid sequence");
+    return .{ codepoint, length };
+}
+
 /// Cursor positions count Unicode scalar values, matching the language's
 /// codepoint semantics. Construct only after `utf8ValidateSlice` succeeds.
 pub const Cursor = struct {
@@ -82,16 +93,12 @@ pub const Cursor = struct {
 
     pub fn peek(self: *const Cursor) ?u21 {
         if (self.atEnd()) return null;
-        const length = std.unicode.utf8ByteSequenceLength(self.source[self.index]) catch
-            @panic("validated UTF-8 cursor reached an invalid start byte");
-        return std.unicode.utf8Decode(self.source[self.index..][0..length]) catch
-            @panic("validated UTF-8 cursor reached an invalid sequence");
+        return decodeValidated(self.source[self.index..])[0];
     }
 
     pub fn bump(self: *Cursor) ?u21 {
-        const codepoint = self.peek() orelse return null;
-        const length = std.unicode.utf8ByteSequenceLength(self.source[self.index]) catch
-            @panic("validated UTF-8 cursor reached an invalid start byte");
+        if (self.atEnd()) return null;
+        const codepoint, const length = decodeValidated(self.source[self.index..]);
         self.index += length;
         if (codepoint == '\n') {
             self.line += 1;

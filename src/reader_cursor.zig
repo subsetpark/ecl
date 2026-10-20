@@ -48,6 +48,9 @@ const Token = struct {
 const SourceProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
 const TokenizeProgress = SourceProgress;
 const Mode = enum { validate, main, comment, atom, string, character, character_unicode, complete };
+/// The most ASCII bytes one validation transition passes.
+const ascii_run = 64;
+
 const Tokenizer = struct {
     source: []const u8,
     tokens: ?*TokenList,
@@ -121,6 +124,15 @@ const Tokenizer = struct {
             .validate => {
                 if (self.validate_index == self.source.len) {
                     self.mode = self.resume_mode;
+                    return .pending;
+                }
+                // ASCII needs no decoding, so one transition passes a run of
+                // it, at most `ascii_run` bytes; anything else is checked one
+                // sequence at a time.
+                if (self.source[self.validate_index] < 0x80) {
+                    const end = @min(self.source.len, self.validate_index + ascii_run);
+                    while (self.validate_index != end and self.source[self.validate_index] < 0x80)
+                        self.validate_index += 1;
                     return .pending;
                 }
                 const length = std.unicode.utf8ByteSequenceLength(self.source[self.validate_index]) catch {
@@ -567,9 +579,8 @@ const StringBuilder = struct {
         },
     };
     const Parsing = struct {
-        index: usize = 0,
-        line: u32,
-        col: u32,
+        /// Over the token's body, positioned in source coordinates.
+        cursor: lexer.Cursor,
         codepoints: CodepointList,
         char_spans: SpanList,
         unicode: Unicode = .ordinary,
@@ -664,8 +675,7 @@ const StringBuilder = struct {
             .provenance_namespace = provenance_namespace,
             .word_linker = word_linker,
             .state = .{ .parsing = .{
-                .line = token.span.line,
-                .col = token.span.col + 1,
+                .cursor = .{ .source = token.bytes, .line = token.span.line, .col = token.span.col + 1 },
                 .codepoints = .init(allocator),
                 .char_spans = .init(allocator),
             } },
@@ -676,18 +686,6 @@ const StringBuilder = struct {
     }
     fn retire(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
         self.state.retire(releases, self.allocator);
-    }
-    fn bump(self: *StringBuilder, parsing: *Parsing) u21 {
-        const length = std.unicode.utf8ByteSequenceLength(self.token.bytes[parsing.index]) catch
-            @panic("validated string token contains an invalid UTF-8 start byte");
-        const codepoint = std.unicode.utf8Decode(self.token.bytes[parsing.index..][0..length]) catch
-            @panic("validated string token contains invalid UTF-8");
-        parsing.index += length;
-        if (codepoint == '\n') {
-            parsing.line += 1;
-            parsing.col = 1;
-        } else parsing.col += 1;
-        return codepoint;
     }
     fn append(parsing: *Parsing, codepoint: u32, span: Span) error{OutOfMemory}!void {
         try parsing.codepoints.append(codepoint);
@@ -706,11 +704,11 @@ const StringBuilder = struct {
     ) (error{ OutOfMemory, Parse })!StringParseProgress {
         switch (parsing.unicode) {
             .escape => |*unicode| {
-                if (parsing.index == self.token.bytes.len) {
+                if (parsing.cursor.atEnd()) {
                     diag.set(unicode.span, "unclosed Unicode escape; expected `}`");
                     return error.Parse;
                 }
-                const codepoint = self.bump(parsing);
+                const codepoint = parsing.cursor.bump().?;
                 if (codepoint == '}') {
                     if (unicode.digits == 0 or unicode.digits > 6 or
                         unicode.value > 0x10ffff or
@@ -736,25 +734,25 @@ const StringBuilder = struct {
             },
             .ordinary => {},
         }
-        if (parsing.index == self.token.bytes.len) return .complete;
-        const span: Span = .{ .line = parsing.line, .col = parsing.col };
-        const next = self.bump(parsing);
+        if (parsing.cursor.atEnd()) return .complete;
+        const span = parsing.cursor.span();
+        const next = parsing.cursor.bump().?;
         if (next != '\\') {
             try append(parsing, next, span);
             return .pending;
         }
-        if (parsing.index == self.token.bytes.len) {
+        if (parsing.cursor.atEnd()) {
             diag.set(self.token.span, "unclosed string escape");
             return error.Parse;
         }
-        const escaped = self.bump(parsing);
+        const escaped = parsing.cursor.bump().?;
         const codepoint: u32 = switch (escaped) {
             '\\' => '\\',
             '"' => '"',
             'n' => '\n',
             't' => '\t',
-            'u' => if (parsing.index != self.token.bytes.len and self.token.bytes[parsing.index] == '{') {
-                _ = self.bump(parsing);
+            'u' => if (parsing.cursor.peek() == '{') {
+                _ = parsing.cursor.bump().?;
                 parsing.unicode = .{ .escape = .{ .span = span } };
                 return .pending;
             } else return self.failUnknown(diag, escaped, span),
