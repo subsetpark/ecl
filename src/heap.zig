@@ -1792,24 +1792,38 @@ pub const ReleaseDomain = struct {
         wake_fn: *const fn (*anyopaque, WakeReason) void,
     };
 
-    /// One running slice of execution. A slice may read an object published
-    /// for slice readers through a plain load, holding no reference, because
-    /// the object's retirement waits for every slice that might have read it:
-    /// `epoch` is the domain's epoch when the slice began, or zero between
-    /// slices. A slice must not keep such a pointer past its own end.
+    /// One running slice of execution: epoch-based reclamation's per-thread
+    /// record, in the read-side-critical-section form (Fraser's EBR; the
+    /// generic flavor of userspace RCU). Inside a read section, between
+    /// `beginRead` and `endRead`, the slice may read an object published for
+    /// slice readers through a plain load, holding no reference; `epoch` is
+    /// the domain's epoch when the outermost section began, or zero outside
+    /// one. An object deferred at epoch `t` is released once no record shows
+    /// a nonzero epoch below `t`. A slice that is not reading never delays
+    /// reclamation; one descheduled inside a section delays it until it runs
+    /// again, which is the scheme's known limit.
     pub const SliceRecord = struct {
         epoch: std.atomic.Value(u64) = .init(0),
         next_free: ?*SliceRecord = null,
-        /// The domain epoch this record follows.
+        /// The domain epoch this record announces.
         source: ?*const std.atomic.Value(u64) = null,
+        /// Nested read sections; only the owning slice touches it.
+        depth: u32 = 0,
 
-        /// Re-announces the slice at a point where it holds nothing it read
-        /// earlier, so a long-running slice delays reclamation by one step
-        /// rather than by its whole length. Stores only when the domain's
-        /// epoch has moved, which is only when something was deferred.
-        pub fn refresh(self: *SliceRecord) void {
-            const current = self.source.?.load(.acquire);
-            if (current != self.epoch.load(.monotonic)) self.epoch.store(current, .release);
+        pub fn beginRead(self: *SliceRecord) void {
+            self.depth += 1;
+            if (self.depth != 1) return;
+            // Announced before the section reads anything. A deferral whose
+            // epoch this load does not reach unpublished its object first, so
+            // the section can never load it; one it reaches waits for the
+            // section to end.
+            self.epoch.store(self.source.?.load(.seq_cst), .seq_cst);
+        }
+
+        pub fn endRead(self: *SliceRecord) void {
+            std.debug.assert(self.depth != 0);
+            self.depth -= 1;
+            if (self.depth == 0) self.epoch.store(0, .release);
         }
     };
 
@@ -1844,6 +1858,9 @@ pub const ReleaseDomain = struct {
     slice_epoch: std.atomic.Value(u64) = .init(1),
     slice_records: std.ArrayList(*SliceRecord) = .empty,
     free_slice_records: ?*SliceRecord = null,
+    /// Records checked out by running slices. A running slice's epoch is zero
+    /// between read sections, so only this count says a record is in use.
+    running_slices: usize = 0,
     deferred: ?*Deferred = null,
     queue_mutex: std.Io.Mutex = .init,
     claim_released: std.Io.Condition = .init,
@@ -1955,6 +1972,8 @@ pub const ReleaseDomain = struct {
         const record = record: {
             std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
             defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+            self.running_slices += 1;
+            errdefer self.running_slices -= 1;
             if (self.free_slice_records) |free| {
                 self.free_slice_records = free.next_free;
                 free.next_free = null;
@@ -1966,19 +1985,17 @@ pub const ReleaseDomain = struct {
             self.slice_records.appendAssumeCapacity(created);
             break :record created;
         };
-        // Announced before the slice reads anything. A retirement whose epoch
-        // this read does not reach was deferred after its object stopped being
-        // published, so the slice can never load that object; one it does reach
-        // waits for this slice to end.
-        record.epoch.store(self.slice_epoch.load(.seq_cst), .seq_cst);
+        std.debug.assert(record.depth == 0 and record.epoch.load(.monotonic) == 0);
         return record;
     }
 
     /// Ends a slice and releases every deferred retirement no slice still
     /// guards.
     pub fn exitSlice(self: *ReleaseDomain, record: *SliceRecord) void {
+        std.debug.assert(record.depth == 0);
         record.epoch.store(0, .seq_cst);
         std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
+        self.running_slices -= 1;
         record.next_free = self.free_slice_records;
         self.free_slice_records = record;
         const ready = self.collectDeferredLocked();
@@ -2269,13 +2286,9 @@ pub const ReleaseDomain = struct {
             while (!self.advance(65_536)) {}
             std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
             defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-            var all_idle = true;
-            for (self.slice_records.items) |record| {
-                if (record.epoch.load(.seq_cst) != 0) all_idle = false;
-            }
-            // A running slice still guards what remains; it is released when
-            // that slice exits, not here.
-            if (!all_idle) return;
+            // A running slice may still read what remains, and owns its record;
+            // both are released when that slice exits, not here.
+            if (self.running_slices != 0) return;
             if (self.deferred != null) continue;
             for (self.slice_records.items) |record| self.allocator.destroy(record);
             self.slice_records.deinit(self.allocator);

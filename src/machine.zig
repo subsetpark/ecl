@@ -3093,8 +3093,17 @@ pub fn PathActionDriver(
 pub const Machine = struct {
     unit: *Unit,
     /// Present while this machine runs inside a slice, which lets a dispatch
-    /// read a binding without taking references to it.
+    /// read a binding without taking references to it, inside a read section.
     slice: ?*heap.ReleaseDomain.SliceRecord = null,
+
+    /// Opens a binding read section: until the matching `endBindingRead`,
+    /// bindings this slice borrows stay valid. Nests.
+    pub fn beginBindingRead(self: *Machine) void {
+        if (self.slice) |slice| slice.beginRead();
+    }
+    pub fn endBindingRead(self: *Machine) void {
+        if (self.slice) |slice| slice.endRead();
+    }
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -6240,6 +6249,10 @@ pub const Machine = struct {
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
+        // Bindings borrowed below stay valid until the dispatch has taken
+        // whatever it keeps: a scheduled body, an effect, a native call.
+        self.beginBindingRead();
+        defer self.endBindingRead();
         var borrow_pin: ?modules.GenerationPin = null;
         errdefer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
@@ -6809,9 +6822,6 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (!first_step and !self.unit.cancelled.load(.acquire) and
             self.unit.releases.evaluationBackpressured()) return .yielded;
         first_step = false;
-        // No binding read in an earlier step is still held here, so the slice
-        // can stop guarding snapshots replaced since it last announced.
-        if (self.slice) |slice| slice.refresh();
         if (self.unit.native == .task_join_cleanup) {
             const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
             if (!cleanup.complete) return .yielded;

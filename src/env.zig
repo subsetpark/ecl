@@ -547,12 +547,13 @@ pub const BindingCell = struct {
         return result;
     }
 
-    /// The current binding for a reader inside a slice: one load, no reader
-    /// count and no references. Valid until the slice ends, because a
-    /// replaced snapshot retires only after every slice that began before its
-    /// replacement has ended. The lease owns nothing; anything kept past the
+    /// The current binding for a reader inside a slice's read section: one
+    /// load, no reader count and no references. Valid until the section ends,
+    /// because a replaced snapshot retires only after every section that began
+    /// before its replacement has ended. The lease owns nothing; anything kept past the
     /// dispatch must be retained on its own, as a scheduled body already is.
-    pub fn borrow(self: *BindingCell, _: *const heap.ReleaseDomain.SliceRecord) BindingLease {
+    pub fn borrow(self: *BindingCell, slice: *const heap.ReleaseDomain.SliceRecord) BindingLease {
+        std.debug.assert(slice.depth != 0);
         const snapshot = self.publisher.current.load(.seq_cst).?;
         var result = BindingLease.fromSpec(snapshot.spec, self.releases);
         result.owned = false;
