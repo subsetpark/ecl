@@ -143,7 +143,7 @@ test "span archive rejects a substitutable provenance issuer" {
     var root = heap.OwnedValue.init(host.domain(), try materializeRoot(&archive, host.domain(), parsed.values()));
     defer root.deinit();
     var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
-    while ((try absorption.advance()) == .pending) {}
+    while ((try poll.advanceOne(&absorption)) == .pending) {}
     try std.testing.expectEqual(
         spans.SpanArchive.AbsorbCursor.ArtifactOwnership.archive_owned,
         absorption.deinit(),
@@ -181,7 +181,7 @@ test "span archive fails closed on unbound publication artifacts" {
     defer root.deinit();
 
     var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
-    while (true) switch (absorption.advance() catch |err| {
+    while (true) switch (poll.advanceOne(&absorption) catch |err| {
         try std.testing.expectEqual(error.InvalidProvenance, err);
         try std.testing.expectEqual(
             spans.SpanArchive.AbsorbCursor.ArtifactOwnership.caller_owned,
@@ -225,7 +225,7 @@ test "span archive cancellation keeps committed location storage alive" {
     while (true) {
         var before = archive.locateQuotationCursor(quotation);
         if (before.advance().complete != null) break;
-        try std.testing.expect((try absorption.advance()) == .pending);
+        try std.testing.expect((try poll.advanceOne(&absorption)) == .pending);
     }
 
     try std.testing.expect(absorption.deinit() == .archive_owned);
@@ -263,6 +263,12 @@ fn repeatedSource(
     return source;
 }
 
+/// One reader transition, so a step count is a transition count.
+fn advanceOne(cursor: *reader.ReadCursor) !reader.ReadProgress {
+    var work: poll.WorkBudget = .init(1);
+    return cursor.advance(&work);
+}
+
 fn expectReadNeedsSteps(source: []const u8, minimum: usize) !void {
     var diag: lexer.Diag = .{};
     var host = heap.HostOwner.init(std.testing.allocator);
@@ -270,8 +276,8 @@ fn expectReadNeedsSteps(source: []const u8, minimum: usize) !void {
     defer host.cleanup().drain();
     var cursor = reader.ReadCursor.init(std.testing.allocator, releases, "<reader-yield>", source, &diag);
     defer retireReadCursor(&cursor, releases);
-    for (0..minimum) |_| try std.testing.expect((try cursor.advance()) == .pending);
-    while (true) switch (try cursor.advance()) {
+    for (0..minimum) |_| try std.testing.expect((try advanceOne(&cursor)) == .pending);
+    while (true) switch (try advanceOne(&cursor)) {
         .pending => {},
         .complete => |result| {
             var parsed = switch (result) {
@@ -484,10 +490,10 @@ test "reader bounds long classification and post-growth materialization" {
     defer host.cleanup().drain();
     var cursor = reader.ReadCursor.init(allocator, releases, "<task-marker>", task_marker, &diag);
     defer retireReadCursor(&cursor, releases);
-    for (0..task_marker.len * 2) |_| try std.testing.expect((try cursor.advance()) == .pending);
+    for (0..task_marker.len * 2) |_| try std.testing.expect((try advanceOne(&cursor)) == .pending);
     var rejected = false;
     while (!rejected) {
-        const progress = cursor.advance() catch |err| {
+        const progress = advanceOne(&cursor) catch |err| {
             try std.testing.expectEqual(error.Parse, err);
             rejected = true;
             continue;
@@ -507,9 +513,9 @@ test "reader bounds long classification and post-growth materialization" {
     );
     defer retireReadCursor(&port_cursor, releases);
     for (0..port_marker.len * 2) |_|
-        try std.testing.expect((try port_cursor.advance()) == .pending);
+        try std.testing.expect((try advanceOne(&port_cursor)) == .pending);
     while (true) {
-        const progress = port_cursor.advance() catch |err| {
+        const progress = advanceOne(&port_cursor) catch |err| {
             try std.testing.expectEqual(error.Parse, err);
             try std.testing.expect(std.mem.indexOf(u8, port_diag.text(), "port display markers") != null);
             break;

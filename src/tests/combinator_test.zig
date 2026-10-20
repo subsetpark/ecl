@@ -205,6 +205,48 @@ test "combinators: contracts and conformability are structural errors" {
     });
 }
 
+/// A body of 1,200 forms, deep enough for plan entries two node levels below
+/// the root.
+const deep_plan_source = source: {
+    @setEvalBranchQuota(10_000);
+    var text: []const u8 = "[1] (";
+    for (0..600) |_| text = text ++ "1 + ";
+    break :source text ++ ") each";
+};
+
+test "combinators: finite iterations keep their words' bindings and still check each application" {
+    // A call decides each word's binding, and the idiom match of a phrase a
+    // word offers, at that word's first execution and reuses them for the
+    // rest of the call. What depends on an application's operands is still
+    // decided per application.
+    try support.expectStacks(&.{
+        .{ .name = "source and builtin", .source = "(dup *) 'sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
+        .{ .name = "zip-with fold scan", .source = "[1 2] [3 4] (+ 1 +) zip-with [1 2 3] 0 (+) fold [1 2 3] 0 (+) scan", .expected = "[5 7] 6 [1 3 6]" },
+        .{ .name = "for and infra", .source = "(dup *) 'sq def [1 2 3] (sq pop) for [1 2 3] (sq swap sq) infra", .expected = "[1 9 4]" },
+        // The binding a call keeps is the one in effect when the call began.
+        .{ .name = "next call", .source = "(1) 'k def [1 2] (pop k) each (2) 'k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
+        .{ .name = "next infra call", .source = "(1) 'k def [1 2] (pop k) infra (2) 'k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
+        // A kept match still meets each row's operand classes.
+        .{ .name = "kept match across classes", .source = "[[1 2 3] [4.5 5.5] [7]] ((+) fold1) each", .expected = "(6 10.0 7)" },
+        // A body longer than one page of plan entries is planned throughout.
+        .{ .name = "long body", .source = "[1 2] (1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + ) each", .expected = "[21 22]" },
+        .{ .name = "deep body", .source = deep_plan_source, .expected = "[601]" },
+        // A word `execute` dispatches runs at `execute`'s position and takes
+        // none of its plan entry.
+        .{ .name = "dispatched word", .source = "[1 2 3] (dup (+) first execute) each", .expected = "[2 4 6]" },
+        // A different phrase offered at the same word is matched afresh.
+        .{ .name = "fresh phrase", .source = "[[1 2 3] [2 3 4]] [(+) (*)] (fold1) zip-with", .expected = "[6 24]" },
+    });
+    try support.expectErrors(&.{
+        // A call that fails after keeping bindings releases them with the call.
+        .{ .name = "failure after kept bindings", .source = "(dup *) 'sq def [1 2 'x] (sq 1 +) each", .kind = "type", .word = "*" },
+        .{ .name = "for failure after kept bindings", .source = "(dup *) 'sq def [1 2 'x] (sq pop) for", .kind = "type", .word = "*" },
+        // An application whose operands the kept match does not admit declines
+        // to the generic definition, which reports its own error.
+        .{ .name = "kept match declined", .source = "[[1 2 3] [] [4]] ((+) fold1) each", .kind = "domain", .word = "first" },
+    });
+}
+
 test "combinators: definitions inside an application are refused" {
     // Applications run at their caller's level but are not roots, so nothing
     // they do can add a name for later code to resolve.

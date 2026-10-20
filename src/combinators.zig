@@ -746,9 +746,13 @@ const IterationState = struct {
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
+    /// An iteration over a finite collection is atomic under its bindings.
+    plan: ?heap.Owned(machine.ResolutionPlan) = null,
 
     fn application(self: *IterationState, seeded: u32) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
+        var application_value = machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
+        if (self.plan) |*plan| application_value.plan = plan.borrowMut();
+        return application_value;
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
         return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded } };
@@ -2003,6 +2007,7 @@ fn createIteration(
         .count = count,
         .word = evaluator.activeWordId(),
     };
+    state.plan = .init(.init(state.quotation.borrow()));
     return state;
 }
 

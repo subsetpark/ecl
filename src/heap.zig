@@ -2214,6 +2214,13 @@ pub const ReleaseDomain = struct {
         std.Io.Threaded.mutexLockUncancelable(&self.queue_mutex);
         while (self.execution == .claimed)
             self.claim_released.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.queue_mutex);
+        // Nothing is queued, so there is no turn to take: every enqueue moves
+        // `.empty` to `.available` under this mutex. Polling an idle domain
+        // then costs one lock instead of a claim, a second lock, and a wake.
+        if (self.execution == .empty) {
+            std.Io.Threaded.mutexUnlock(&self.queue_mutex);
+            return true;
+        }
         self.execution = .claimed;
         std.Io.Threaded.mutexUnlock(&self.queue_mutex);
         const owned: *ExecutionClaim = @ptrCast(self);

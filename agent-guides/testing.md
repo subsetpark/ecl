@@ -271,7 +271,7 @@ reason before selecting the matrix.
   and release production leases while real writers publish and the same domain reclaims.
   Assert stable observable values and, after delayed readers release and retirement
   settles, memory bounded independently of update count. Run that path under TSan and
-  retain a counting-allocator delayed-reader property covering Shape and Directory
+  retain a counting-allocator delayed-reader property covering Directory
   histories, alias churn, and distinct-module publication.
 - Keep gameplan proof traceability exact while executing an active gameplan: every
   `testMap` row names exactly one existing test in its declared file and exactly one

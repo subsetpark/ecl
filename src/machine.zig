@@ -1562,6 +1562,9 @@ pub const IsolatedApplication = struct {
     site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
+    /// Where a finite iteration keeps what its call has decided for its
+    /// quotation's words.
+    plan: ?*ResolutionPlan = null,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1626,6 +1629,8 @@ const ApplicationFrame = struct {
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
+    /// Borrowed from the combinator state `context` names.
+    plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
@@ -4665,7 +4670,7 @@ pub const Machine = struct {
                     },
                 },
                 .ingesting => |*ingestion| {
-                    switch (ingestion.advance() catch |err| switch (err) {
+                    switch (ingestion.advance(work) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Parse => return evaluator.failAtSource(
                             self.diag.text(),
@@ -5895,6 +5900,7 @@ pub const Machine = struct {
             },
             .traced_word = inherited_trace,
             .selection = .{},
+            .plan = application.plan,
         } });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
@@ -6115,52 +6121,56 @@ pub const Machine = struct {
         self.unit.module_call_sites.install(self.releaseDomain(), site, word, candidate);
     }
 
-    /// What the word's slot yields, as a dispatch-ready resolution, or null
+    /// Initializes `out` with what the word's slot yields, as a dispatch-ready
+    /// resolution, and returns true; returns false, leaving `out` undefined,
     /// when the slot yields nothing a plain word may run: no binding in the
     /// root or core, or only a private core one. `written` is the slot's root
-    /// scope, already proven live, or null for core.
+    /// scope, already proven live, or null for core. `retain` asks for a lease
+    /// that outlives the dispatch. The resolution is built in
+    /// the caller's storage because returning it by value cost a copy of the
+    /// whole lease on every dispatch.
     fn slotResolution(
         self: *Machine,
         slot: *const env.Slot,
         name: u32,
         written: ?*env.Scope,
         borrow_pin: *?modules.GenerationPin,
-    ) ?Resolution {
-        const cell = slot.current() orelse return null;
-        var lease = if (self.slice) |slice| cell.borrow(slice) else cell.load();
+        retain: bool,
+        out: *Resolution,
+    ) bool {
+        const cell = slot.current() orelse return false;
+        out.* = .{
+            // A borrow lasts only for this dispatch; a lease kept past it
+            // holds references.
+            .lease = if (self.slice) |slice| if (retain) cell.load() else cell.borrow(slice) else cell.load(),
+            .execution_generation = null,
+            .home = null,
+            .trace_word = .plain(name),
+            .origin = .core,
+        };
         if (written == null or cell == slot.coreCell()) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
-            if (lease.visibility == .private) {
-                lease.deinit();
-                return null;
+            if (out.lease.visibility == .private) {
+                out.lease.deinit();
+                return false;
             }
-            const pin = borrow_pin.*;
-            borrow_pin.* = null;
-            return .{
-                .lease = lease,
-                .execution_generation = null,
-                .home = null,
-                .borrow_pin = pin,
-                .trace_word = .plain(name),
-                .origin = .core,
-            };
-        }
-        const local = lease.traceWord();
-        const home = if (local == null) null else self.homeForSlot(written.?);
-        const pin = borrow_pin.*;
-        borrow_pin.* = null;
-        return .{
-            .lease = lease,
-            .execution_generation = null,
-            .home = home,
-            .borrow_pin = pin,
-            .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(name),
-            .origin = if (home) |resolved| moduleResolutionOrigin(resolved) else .direct,
+        } else {
             // A module-local binding resolves against its image, which the
             // home supplies; anything else against the root it was found in.
-            .defining_scope = if (home != null) null else written,
-        };
+            const local = out.lease.traceWord();
+            if (if (local == null) null else self.homeForSlot(written.?)) |home| {
+                out.home = home;
+                out.trace_word = homeTraceWord(home, local.?);
+                out.origin = moduleResolutionOrigin(home);
+            } else {
+                out.origin = .direct;
+                out.defining_scope = written;
+            }
+        }
+        out.borrow_pin = borrow_pin.*;
+        borrow_pin.* = null;
+        return true;
     }
 
     /// The home a module-local binding in `image` runs under: the running
@@ -6234,19 +6244,51 @@ pub const Machine = struct {
         return self.fail(.domain, "the scope this word was written in has retired");
     }
 
-    /// A plain word for idiom recognition: what its slot yields, or null when
-    /// that is nothing a plain word may run. Recognition only ever declines,
+    /// A plain word for idiom recognition: initializes `out` with what its
+    /// slot yields, or returns false when that is nothing a plain word may run. Recognition only ever declines,
     /// so this never records a failure: an unlinked word, or one whose root
     /// has retired, is simply not a match, and generic execution reports it.
-    pub fn peekSlotWord(self: *Machine, word: value.WordRef) ?Resolution {
-        if (word.slot == 0) return null;
+    pub fn peekSlotWord(self: *Machine, word: value.WordRef, out: *Resolution) bool {
+        if (word.slot == 0) return false;
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
-        const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return null;
-        return self.slotResolution(target.slot orelse return null, word.name, target.written, &borrow_pin);
+        const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
+        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, false, out);
+    }
+
+    /// The plan of the finite iteration applying the running code, when that
+    /// code is the combinator's own quotation.
+    fn applicationPlan(self: *Machine) ?*ResolutionPlan {
+        const current = &self.unit.current.?;
+        const index = current.application_tail orelse return null;
+        const plan = switch (self.unit.frames.items[@backingInt(index)]) {
+            .application => |application| application.plan orelse return null,
+            else => return null,
+        };
+        return if (plan.code == current.code) plan else null;
+    }
+
+    /// The running finite iteration's entry for the position executing now,
+    /// made on first use, or null when no plan applies.
+    pub fn planEntry(self: *Machine) error{OutOfMemory}!?*PlanEntry {
+        const plan = self.applicationPlan() orelse return null;
+        return try plan.entry(self.unit.allocator, self.unit.active_index);
+    }
+
+    /// The entry for `word` when it is the form at the executing position. A
+    /// word a primitive dispatches, as `execute` does, runs at that
+    /// primitive's position and takes no entry: the position's binding is the
+    /// primitive's.
+    fn planEntryFor(self: *Machine, word: value.WordRef) error{OutOfMemory}!?*PlanEntry {
+        const plan = self.applicationPlan() orelse return null;
+        const form = list.atUnchecked(.{ .list = plan.code }, self.unit.active_index);
+        if (form != .word or form.word.name != word.name or form.word.slot != word.slot) return null;
+        return try plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        const plan_entry = try self.planEntryFor(word);
+        if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
         // Bindings borrowed below stay valid until the dispatch has taken
@@ -6258,10 +6300,20 @@ pub const Machine = struct {
         const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
             return self.failRetiredWord(word.name);
         const written = target.written;
-        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin) else null) |resolution| {
-            var resolved = resolution;
-            defer resolved.deinit(self.unit.allocator);
-            try executeResolved(self, &resolved);
+        // SAFETY: read only after `slotResolution` returns true, which initializes it.
+        var slot_resolution: Resolution = undefined;
+        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, plan_entry != null, &slot_resolution) else false) {
+            // A finite iteration's call keeps the binding for its later
+            // applications. One carrying a module home, generation, or pin
+            // belongs to this dispatch alone.
+            if (plan_entry) |entry| if (slot_resolution.home == null and slot_resolution.borrow_pin == null and
+                slot_resolution.execution_generation == null)
+            {
+                entry.resolution = slot_resolution;
+                return executeResolved(self, &entry.resolution.?);
+            };
+            defer slot_resolution.deinit(self.unit.allocator);
+            try executeResolved(self, &slot_resolution);
             return;
         }
 
@@ -7940,6 +7992,173 @@ pub const LookupChain = enum {
     }
 };
 
+/// What one finite-iteration call has decided for a word position of its
+/// quotation, kept for the rest of the call.
+pub const PlanEntry = struct {
+    /// The word's binding, from its first execution in the call.
+    resolution: ?Resolution = null,
+    /// For a word that offers a phrase to idiom recognition, the first phrase
+    /// it offered in the call and what recognition made of it.
+    offered: ?OfferedMatch = null,
+};
+
+/// The registry entry whose pattern an offered phrase matched, or none, with
+/// what the match captured from the phrase. Whether the entry applies still
+/// depends on each application's operands.
+pub const OfferedMatch = struct {
+    /// Which recognition the phrase was offered to: a dispatched word at one
+    /// position may offer the same phrase to a different one.
+    request: IdiomRequest,
+    /// Retained, so a later phrase at the same address is this one.
+    phrase: *Header,
+    entry: ?u16,
+    constant: ?Value,
+    active_word: ?u32,
+    active_index: ?u32,
+};
+
+/// The decisions one finite-iteration call has made for the words of its
+/// quotation. A word's binding, and the idiom match of a phrase it was
+/// offered, are decided at its first execution in the call and reused by every
+/// later application, so the call is atomic under its bindings: a replacement
+/// made while it runs takes effect at its next call.
+pub const ResolutionPlan = struct {
+    /// Borrowed: the combinator owns its quotation for the whole call.
+    code: *Header,
+    /// Allocated at the first entry.
+    tree: ?*PlanTree = null,
+
+    pub fn init(code: *Header) ResolutionPlan {
+        return .{ .code = code };
+    }
+
+    /// The entry for word position `index`, made on first use.
+    fn entry(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32) error{OutOfMemory}!*PlanEntry {
+        const tree = self.tree orelse made: {
+            const fresh = try allocator.create(PlanTree);
+            fresh.* = .{ .allocator = allocator, .depth = PlanTree.depthFor(self.code.length()) };
+            self.tree = fresh;
+            break :made fresh;
+        };
+        return tree.entry(index);
+    }
+
+    /// Hands the entries to the release domain, which frees them a page or a
+    /// node per turn.
+    pub fn retire(self: *ResolutionPlan, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        const tree = self.tree orelse return;
+        self.tree = null;
+        releases.retire(tree, &tree.retirement);
+    }
+};
+
+/// A plan's entries by word position: pages of `page_len` entries under
+/// `fanout`-way nodes, as many levels as the quotation's length needs. Every
+/// node and page is allocated and cleared, a constant amount of work, by the
+/// first entry that needs it, so no step does work in proportion to the
+/// quotation, and a plan has no capacity.
+const PlanTree = struct {
+    const page_bits = 4;
+    const page_len = 1 << page_bits;
+    const fanout_bits = 6;
+    const fanout = 1 << fanout_bits;
+    /// Enough levels for any u32 position.
+    const max_depth = (32 - page_bits + fanout_bits - 1) / fanout_bits;
+    const Page = [page_len]PlanEntry;
+    /// A node one level above the pages holds pages; any higher node holds
+    /// nodes.
+    const Node = struct {
+        nodes: [fanout]?*Node = @splat(null),
+        pages: [fanout]?*Page = @splat(null),
+    };
+
+    allocator: std.mem.Allocator,
+    /// Node levels above the pages: zero when one page covers the code.
+    depth: u8,
+    root_page: ?*Page = null,
+    root_node: ?*Node = null,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    /// Retirement's descent, one node per level.
+    // SAFETY: only the first `stack_len` frames are read, each written first.
+    stack: [max_depth]struct { node: *Node, next: u8 } = undefined,
+    stack_len: u8 = 0,
+    retiring: bool = false,
+
+    fn depthFor(length: u64) u8 {
+        if (length <= page_len) return 0;
+        const bits: u8 = @intCast(64 - @clz(length - 1));
+        return @intCast((bits - page_bits + fanout_bits - 1) / fanout_bits);
+    }
+
+    fn page(self: *PlanTree, slot: *?*Page) error{OutOfMemory}!*Page {
+        if (slot.*) |held| return held;
+        const fresh = try self.allocator.create(Page);
+        fresh.* = @splat(.{});
+        slot.* = fresh;
+        return fresh;
+    }
+
+    fn node(self: *PlanTree, slot: *?*Node) error{OutOfMemory}!*Node {
+        if (slot.*) |held| return held;
+        const fresh = try self.allocator.create(Node);
+        fresh.* = .{};
+        slot.* = fresh;
+        return fresh;
+    }
+
+    fn entry(self: *PlanTree, index: u32) error{OutOfMemory}!*PlanEntry {
+        const offset = index & (page_len - 1);
+        if (self.depth == 0) return &(try self.page(&self.root_page))[offset];
+        var current = try self.node(&self.root_node);
+        var level = self.depth;
+        while (level != 1) : (level -= 1) {
+            const shift: u5 = @intCast(page_bits + fanout_bits * (level - 1));
+            current = try self.node(&current.nodes[(index >> shift) & (fanout - 1)]);
+        }
+        return &(try self.page(&current.pages[(index >> page_bits) & (fanout - 1)]))[offset];
+    }
+
+    fn retirePage(self: *PlanTree, releases: *heap.ReleaseDomain, held: *Page) void {
+        for (held) |*planned| {
+            if (planned.resolution) |*resolution| resolution.deinit(self.allocator);
+            if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
+        }
+        self.allocator.destroy(held);
+    }
+
+    /// One page or one node edge per call.
+    pub fn advanceRetirement(releases: *heap.ReleaseDomain, _: std.mem.Allocator, self: *PlanTree) bool {
+        if (!self.retiring) {
+            self.retiring = true;
+            if (self.root_page) |held| self.retirePage(releases, held);
+            if (self.root_node) |held| {
+                self.stack[0] = .{ .node = held, .next = 0 };
+                self.stack_len = 1;
+            }
+            return false;
+        }
+        if (self.stack_len == 0) {
+            self.allocator.destroy(self);
+            return true;
+        }
+        const top = &self.stack[self.stack_len - 1];
+        if (top.next == fanout) {
+            self.allocator.destroy(top.node);
+            self.stack_len -= 1;
+            return false;
+        }
+        const child = top.next;
+        top.next += 1;
+        if (self.stack_len == self.depth) {
+            if (top.node.pages[child]) |held| self.retirePage(releases, held);
+        } else if (top.node.nodes[child]) |held| {
+            self.stack[self.stack_len] = .{ .node = held, .next = 0 };
+            self.stack_len += 1;
+        }
+        return false;
+    }
+};
+
 pub const Resolution = struct {
     lease: env.BindingLease,
     execution_generation: ?modules.ExecutionGeneration,
@@ -8753,6 +8972,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .site = continuation.site,
                         .seeded = application.seeded,
                         .provenance = application.provenance,
+                        .plan = continuation.plan,
                     }, launch, continuation.traced_word);
                     return true;
                 },
@@ -8785,6 +9005,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .traced_word = continuation.traced_word,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
+                        .plan = continuation.plan,
                     } });
                     application_selection = .{};
                     defer suspended.deinit(self.releaseDomain(), self.unit.allocator);

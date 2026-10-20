@@ -1030,9 +1030,9 @@ pub const SpanArchive = enum(usize) {
             return ownership;
         }
 
-        pub fn advance(self: *AbsorbCursor) AbsorbError!AbsorbProgress {
+        pub fn advance(self: *AbsorbCursor, work: *poll.WorkBudget) AbsorbError!AbsorbProgress {
             return switch (self.phase) {
-                .spans => switch (try self.writer.advance()) {
+                .spans => switch (try self.writer.advance(work)) {
                     .pending => .pending,
                     .complete => result: {
                         self.writer.deinit();
@@ -1223,9 +1223,9 @@ pub const SpanArchive = enum(usize) {
         /// Performs one bounded ingestion operation. Completion means the
         /// archive owns the returned root and all temporary parsed ownership
         /// has already entered bounded retirement.
-        fn advance(self: *SourceIngestBacking) SourceIngestError!SourceIngestProgress {
+        fn advance(self: *SourceIngestBacking, work: *poll.WorkBudget) SourceIngestError!SourceIngestProgress {
             return switch (self.state) {
-                .reading => |cursor| switch (try cursor.advance()) {
+                .reading => |cursor| switch (try cursor.advance(work)) {
                     .pending => .pending,
                     .complete => |read_result| result: {
                         self.state = .{ .retiring_reader = .{
@@ -1273,7 +1273,7 @@ pub const SpanArchive = enum(usize) {
                         break :result .pending;
                     },
                 },
-                .absorbing => |*absorbing| switch (try absorbing.absorber.advance()) {
+                .absorbing => |*absorbing| switch (try absorbing.absorber.advance(work)) {
                     .pending => .pending,
                     .complete => result: {
                         std.debug.assert(absorbing.absorber.deinit() == .archive_owned);
@@ -1375,9 +1375,11 @@ pub const SpanArchive = enum(usize) {
             self.* = .consumed;
             return moved;
         }
-        pub fn advance(self: *SourceIngestCursor) SourceIngestError!SourceIngestProgress {
+        /// Reading draws from `work` one unit per transition; every other
+        /// phase is one transition per call.
+        pub fn advance(self: *SourceIngestCursor, work: *poll.WorkBudget) SourceIngestError!SourceIngestProgress {
             const state = self.backing();
-            const progress = try state.advance();
+            const progress = try state.advance(work);
             if (progress == .complete) {
                 const storage_allocator = state.archive.allocator();
                 storage_allocator.destroy(state);
@@ -1531,7 +1533,8 @@ const ArchiveFixture = struct {
             while (!ingestion.advanceRetirement())
                 _ = self.owner.domain().advance(256);
         }
-        while (true) switch (try ingestion.advance()) {
+        var work = poll.testing.budget(std.math.maxInt(usize));
+        while (true) switch (try ingestion.advance(&work)) {
             .pending => _ = self.owner.domain().advance(256),
             .complete => |result| return switch (result) {
                 .complete => |header| header,
@@ -1609,7 +1612,8 @@ fn sourceIngestAllocationProbe(allocator: std.mem.Allocator) !void {
         while (!ingestion.advanceRetirement())
             _ = host.domain().advance(256);
     }
-    while (true) switch (try ingestion.advance()) {
+    var work = poll.testing.budget(std.math.maxInt(usize));
+    while (true) switch (try ingestion.advance(&work)) {
         .pending => _ = host.domain().advance(256),
         .complete => |result| switch (result) {
             .complete => return,
@@ -1649,7 +1653,8 @@ test "spans: public source ingestion handle relocates between advances" {
     var advances: usize = 0;
     const root = while (true) : (advances += 1) {
         ingestion = ingestion.take();
-        switch (try ingestion.advance()) {
+        var work: poll.WorkBudget = .init(1);
+        switch (try ingestion.advance(&work)) {
             .pending => _ = fixture.owner.domain().advance(256),
             .complete => |result| switch (result) {
                 .complete => |header| break header,
@@ -1674,7 +1679,8 @@ test "spans: public source ingestion handle relocates between advances" {
         };
     }
     abandoned = abandoned.take();
-    try std.testing.expect((try abandoned.advance()) == .pending);
+    var one: poll.WorkBudget = .init(1);
+    try std.testing.expect((try abandoned.advance(&one)) == .pending);
     while (true) {
         abandoned = abandoned.take();
         if (abandoned.advanceRetirement()) break;

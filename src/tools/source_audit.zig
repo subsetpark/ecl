@@ -865,10 +865,10 @@ const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler
 /// hold the blocking constructors and setup paths that use it today, each
 /// reviewed for a bounded input; a new use elsewhere needs the same review.
 const unbounded_allowance_users = [_][]const u8{
-    "dict.zig",          "doc.zig",  "equal.zig",   "inert_data.zig",
-    "kernel_random.zig", "list.zig", "machine.zig", "modules.zig",
-    "native_module.zig", "poll.zig", "print.zig",   "session.zig",
-    "task_prims.zig",
+    "dict.zig",          "doc.zig",        "equal.zig",   "inert_data.zig",
+    "kernel_random.zig", "list.zig",       "machine.zig", "modules.zig",
+    "native_module.zig", "poll.zig",       "prelude.zig", "print.zig",
+    "session.zig",       "task_prims.zig",
 };
 
 /// The kernel quantum is the length of a unit's turn. Code that meters its

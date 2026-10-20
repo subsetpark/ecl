@@ -43,6 +43,12 @@ pub const WorkBudget = struct {
         return true;
     }
 
+    /// For a transition its caller already paid one unit for: at least one of
+    /// `remaining` items, and as many more as this budget can pay for.
+    pub fn chunk(self: *WorkBudget, remaining: usize) usize {
+        return @min(remaining, 1) + self.take(remaining -| 1);
+    }
+
     /// Charges the largest slice of `wanted` this budget can still pay for.
     pub fn take(self: *WorkBudget, wanted: usize) usize {
         const granted = @min(wanted, self.remaining);

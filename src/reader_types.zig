@@ -181,7 +181,6 @@ pub const SpanTable = struct {
         container_span: ?Span = null,
         owned: ?[]Span = null,
         index: usize = 0,
-        initializing_buckets: bool = false,
         phase: enum { allocate, copy, buckets, insert, complete } = .allocate,
 
         pub fn init(
@@ -230,7 +229,9 @@ pub const SpanTable = struct {
             if (self.owned) |owned| if (owned.len != 0) self.allocator.free(owned);
             self.* = undefined;
         }
-        pub fn advance(self: *PutCursor) error{OutOfMemory}!PutProgress {
+        /// Each call is one paid transition; copying spans takes further units
+        /// from `work`, one a span.
+        pub fn advance(self: *PutCursor, work: *poll.WorkBudget) error{OutOfMemory}!PutProgress {
             return switch (self.phase) {
                 .allocate => result: {
                     const count = if (self.uniform != null)
@@ -242,26 +243,23 @@ pub const SpanTable = struct {
                     break :result .pending;
                 },
                 .copy => result: {
-                    if (self.index != self.owned.?.len) {
-                        self.owned.?[self.index] = self.uniform orelse self.source[self.index];
-                        self.index += 1;
-                    } else {
-                        self.index = 0;
-                        self.phase = .buckets;
-                    }
+                    // The caller paid for this transition, which copies at
+                    // least one span; the budget pays for the rest.
+                    const owned = self.owned.?;
+                    const granted = work.chunk(owned.len - self.index);
+                    const chunk = owned[self.index..][0..granted];
+                    if (self.uniform) |span| @memset(chunk, span) else @memcpy(chunk, self.source[self.index..][0..granted]);
+                    self.index += granted;
+                    if (self.index == owned.len) self.phase = .buckets;
                     break :result .pending;
                 },
                 .buckets => result: {
+                    // A fixed-size table, cleared in one transition.
                     if (self.table.buckets.len == 0) {
                         self.table.buckets = try self.allocator.alloc(?*Entry, bucket_count);
-                        self.initializing_buckets = true;
+                        @memset(self.table.buckets, null);
                     }
-                    if (!self.initializing_buckets) {
-                        self.phase = .insert;
-                    } else if (self.index != self.table.buckets.len) {
-                        self.table.buckets[self.index] = null;
-                        self.index += 1;
-                    } else self.phase = .insert;
+                    self.phase = .insert;
                     break :result .pending;
                 },
                 .insert => result: {

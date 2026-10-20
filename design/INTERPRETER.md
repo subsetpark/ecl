@@ -590,13 +590,36 @@ defined links to an empty slot that a later definition fills.
 
 ### Lookup is late and definitions are stable publication points
 
-Each environment publishes an immutable name-to-cell shape. A binding cell is
-stable, while its immutable payload snapshot may be replaced. A slot shares its
-root's cell for its name: a binding made while the slot exists reuses the
-slot's cell, so the cell's identity never changes, and removing the name only
-clears the slot's bound flag. Executing a word reads its slot and loads the
+An environment is its root's slot table: one slot per name the root has bound
+or a word in it has linked, made on first need and kept until the root
+retires. A binding cell is stable, while its immutable payload snapshot may be
+replaced. A name's first binding gives its slot a cell and every later binding,
+including one after removal, replaces that cell's payload, so the cell's
+identity never changes; removing the name only clears the slot's bound flag,
+and the cell keeps its last payload until the name is bound again or the root
+retires. Binding and removal are constant-time under the root's writer lock.
+Enumeration and lookup by name read the table without a lock; enumeration is
+not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
 cell's current payload, so a redefinition reaches every existing occurrence at
-its next execution, including combinator bodies already running.
+its next execution, including open-ended loop bodies already running.
+
+A finite iteration's call owns a plan for its quotation, reached through the
+application frame and used only while that exact quotation is the running
+code. Its entries are paged by word position under fixed-fanout nodes, as
+many levels as the quotation's length needs; each node and page is allocated
+and cleared by the first entry that needs it, and a retired plan is freed a
+node or page per release-domain turn, so no step does work in proportion to
+the quotation. An entry keeps the word's resolution from its first
+execution in the call, with a lease that holds references, and, for a word that
+offers a phrase to recognition, the retained phrase and the registry entry its
+pattern matched. Later applications reuse both and still check the matched
+entry against their own operands. An entry is used only when the dispatched
+word is the form at the executing position, so a word a primitive dispatches
+at that position resolves as usual. A resolution carrying a module home,
+generation, or pin is never kept, so qualified and module-homed words stay
+late-bound through the call-site path, and a module the same unit registers
+mid-call reaches the call's later applications. The plan's lease keeps a
+replaced snapshot alive until the call ends.
 
 A binding payload is one closed choice:
 
@@ -1495,7 +1518,7 @@ outside those locks.
 Readers pair every immutable pointer with evidence that its allocation remains
 alive:
 
-- a binding or shape lease;
+- a binding lease, or a counted name or lookup cursor;
 - a directory or generation lease;
 - a module generation pin;
 - the running activation's own image, or a pin taken on a slot's image root
