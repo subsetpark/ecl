@@ -746,8 +746,7 @@ const IterationState = struct {
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
-    /// A data combinator's call is atomic under its bindings; `for` and
-    /// `infra` are control, whose applications keep binding late.
+    /// An iteration over a finite collection is atomic under its bindings.
     plan: ?heap.Owned(machine.ResolutionPlan) = null,
 
     fn application(self: *IterationState, seeded: u32) Application {
@@ -2008,10 +2007,7 @@ fn createIteration(
         .count = count,
         .word = evaluator.activeWordId(),
     };
-    state.plan = switch (kind) {
-        .each, .zip_with, .fold, .scan => .init(.init(state.quotation.borrow())),
-        .for_word, .infra => null,
-    };
+    state.plan = .init(.init(state.quotation.borrow()));
     return state;
 }
 

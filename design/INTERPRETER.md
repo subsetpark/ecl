@@ -601,9 +601,9 @@ retires. Binding and removal are constant-time under the root's writer lock.
 Enumeration and lookup by name read the table without a lock; enumeration is
 not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
 cell's current payload, so a redefinition reaches every existing occurrence at
-its next execution, including control-combinator bodies already running.
+its next execution, including open-ended loop bodies already running.
 
-A data combinator's call owns a plan for its quotation, one entry per position,
+A finite iteration's call owns a plan for its quotation, one entry per position,
 reached through the application frame and used only while that exact quotation
 is the running code. An entry keeps the word's resolution from its first
 execution in the call, with a lease that holds references, and, for a word that

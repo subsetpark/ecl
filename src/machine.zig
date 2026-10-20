@@ -1562,7 +1562,7 @@ pub const IsolatedApplication = struct {
     site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
-    /// Where a data combinator keeps what its call has decided for its
+    /// Where a finite iteration keeps what its call has decided for its
     /// quotation's words.
     plan: ?*ResolutionPlan = null,
 };
@@ -6256,7 +6256,7 @@ pub const Machine = struct {
         return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, false, out);
     }
 
-    /// The plan of the data combinator applying the running code, when that
+    /// The plan of the finite iteration applying the running code, when that
     /// code is the combinator's own quotation.
     fn applicationPlan(self: *Machine) ?*ResolutionPlan {
         const current = &self.unit.current.?;
@@ -6268,7 +6268,7 @@ pub const Machine = struct {
         return if (plan.code == current.code) plan else null;
     }
 
-    /// The running data combinator's entry for the word executing now, made on
+    /// The running finite iteration's entry for the word executing now, made on
     /// first use, or null when no plan applies or there is no memory for one.
     pub fn planEntry(self: *Machine) ?*PlanEntry {
         const plan = self.applicationPlan() orelse return null;
@@ -6292,7 +6292,7 @@ pub const Machine = struct {
         // SAFETY: read only after `slotResolution` returns true, which initializes it.
         var slot_resolution: Resolution = undefined;
         if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, plan_entry != null, &slot_resolution) else false) {
-            // A data combinator's call keeps the binding for its later
+            // A finite iteration's call keeps the binding for its later
             // applications. One carrying a module home, generation, or pin
             // belongs to this dispatch alone.
             if (plan_entry) |entry| if (slot_resolution.home == null and slot_resolution.borrow_pin == null and
@@ -7981,7 +7981,7 @@ pub const LookupChain = enum {
     }
 };
 
-/// What one data-combinator call has decided for a word position of its
+/// What one finite-iteration call has decided for a word position of its
 /// quotation, kept for the rest of the call.
 pub const PlanEntry = struct {
     /// The word's binding, from its first execution in the call.
@@ -8003,7 +8003,7 @@ pub const OfferedMatch = struct {
     active_index: ?u32,
 };
 
-/// The decisions one data-combinator call has made for the words of its
+/// The decisions one finite-iteration call has made for the words of its
 /// quotation. A word's binding, and the idiom match of a phrase it was
 /// offered, are decided at its first execution in the call and reused by every
 /// later application, so the call is atomic under its bindings: a replacement

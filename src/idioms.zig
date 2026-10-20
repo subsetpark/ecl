@@ -438,7 +438,7 @@ pub fn tryApply(
     const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
     if (entries.len == 0) return decline.run(evaluator);
-    // Inside a data combinator's call the phrase's words keep their bindings,
+    // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
     const planned = evaluator.planEntry();
     if (planned) |entry| if (entry.offered) |offered| if (offered.phrase == candidate.phrase.list)
@@ -687,7 +687,7 @@ const Matcher = struct {
 };
 
 /// Matches the phrase, then applies the selected entry or declines.
-/// Matches the phrase, records the match in the running data combinator's
+/// Matches the phrase, records the match in the running finite iteration's
 /// plan when it has room, then applies the matched entry or declines.
 fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline, planned: ?*machine.PlanEntry) MachineError!void {
     var matching = matcher;
