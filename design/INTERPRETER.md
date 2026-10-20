@@ -609,10 +609,13 @@ is the running code. An entry keeps the word's resolution from its first
 execution in the call, with a lease that holds references, and, for a word that
 offers a phrase to recognition, the retained phrase and the registry entry its
 pattern matched. Later applications reuse both and still check the matched
-entry against their own operands. A resolution carrying a module home,
-generation, or pin is never kept. Definitions are refused inside
-applications, so only another unit can replace a binding mid-call, and the
-plan's lease keeps the replaced snapshot alive until the call ends.
+entry against their own operands. An entry is used only when the dispatched
+word is the form at the executing position, so a word a primitive dispatches
+at that position resolves as usual. A resolution carrying a module home,
+generation, or pin is never kept, so qualified and module-homed words stay
+late-bound through the call-site path, and a module the same unit registers
+mid-call reaches the call's later applications. The plan's lease keeps a
+replaced snapshot alive until the call ends.
 
 A binding payload is one closed choice:
 

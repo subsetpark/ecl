@@ -441,13 +441,13 @@ pub fn tryApply(
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
     const planned = evaluator.planEntry();
-    if (planned) |entry| if (entry.offered) |offered| if (offered.phrase == candidate.phrase.list)
+    if (planned) |entry| if (entry.offered) |offered| if (offered.request == request and offered.phrase == candidate.phrase.list)
         return applyMatched(evaluator, candidate.phrase, offered.entry, .{
             .constant = offered.constant,
             .active_word = offered.active_word,
             .active_index = offered.active_index,
         }, decline);
-    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline, planned);
+    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline, request, planned);
 }
 
 /// What an offered match runs if it declines: still the caller's source while
@@ -689,7 +689,13 @@ const Matcher = struct {
 /// Matches the phrase, then applies the selected entry or declines.
 /// Matches the phrase, records the match in the running finite iteration's
 /// plan when it has room, then applies the matched entry or declines.
-fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline, planned: ?*machine.PlanEntry) MachineError!void {
+fn matchOffered(
+    evaluator: *Machine,
+    matcher: Matcher,
+    decline: Decline,
+    request: machine.IdiomRequest,
+    planned: ?*machine.PlanEntry,
+) MachineError!void {
     var matching = matcher;
     const matched = while (true) switch (matching.step(evaluator)) {
         .progressed => {},
@@ -699,6 +705,7 @@ fn matchOffered(evaluator: *Machine, matcher: Matcher, decline: Decline, planned
         const phrase = matching.candidate.phrase;
         heap.retainValue(phrase);
         entry.offered = .{
+            .request = request,
             .phrase = phrase.list,
             .entry = matched,
             .constant = matching.capture.constant,

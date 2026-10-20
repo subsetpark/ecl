@@ -6268,15 +6268,27 @@ pub const Machine = struct {
         return if (plan.code == current.code) plan else null;
     }
 
-    /// The running finite iteration's entry for the word executing now, made on
-    /// first use, or null when no plan applies or there is no memory for one.
+    /// The running finite iteration's entry for the position executing now,
+    /// made on first use, or null when no plan applies or there is no memory
+    /// for one.
     pub fn planEntry(self: *Machine) ?*PlanEntry {
         const plan = self.applicationPlan() orelse return null;
         return plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
+    /// The entry for `word` when it is the form at the executing position. A
+    /// word a primitive dispatches, as `execute` does, runs at that
+    /// primitive's position and takes no entry: the position's binding is the
+    /// primitive's.
+    fn planEntryFor(self: *Machine, word: value.WordRef) ?*PlanEntry {
+        const plan = self.applicationPlan() orelse return null;
+        const form = list.atUnchecked(.{ .list = plan.code }, self.unit.active_index);
+        if (form != .word or form.word.name != word.name or form.word.slot != word.slot) return null;
+        return plan.entry(self.unit.allocator, self.unit.active_index);
+    }
+
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
-        const plan_entry = self.planEntry();
+        const plan_entry = self.planEntryFor(word);
         if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
@@ -7995,6 +8007,9 @@ pub const PlanEntry = struct {
 /// what the match captured from the phrase. Whether the entry applies still
 /// depends on each application's operands.
 pub const OfferedMatch = struct {
+    /// Which recognition the phrase was offered to: a dispatched word at one
+    /// position may offer the same phrase to a different one.
+    request: IdiomRequest,
     /// Retained, so a later phrase at the same address is this one.
     phrase: *Header,
     entry: ?u16,

@@ -1141,11 +1141,16 @@ const CollectionBuilder = struct {
                 },
             },
             .scan_lowered_spans => |*scan| result: {
-                // Skips non-list forms a unit each; a failed allocation below
-                // leaves the scan state owning the output.
+                // Skips non-list forms a unit each, the first on this paid
+                // transition; a failed allocation below leaves the scan state
+                // owning the output.
                 const forms = scan.output.forms;
-                var allowance = work.chunk(forms.len - scan.index);
-                while (allowance != 0 and forms[scan.index].value != .list) : (allowance -= 1) scan.index += 1;
+                var paid = true;
+                while (scan.index != forms.len and forms[scan.index].value != .list) {
+                    if (!paid and !work.spend()) break;
+                    paid = false;
+                    scan.index += 1;
+                }
                 if (scan.index == forms.len) {
                     try self.gatherElements(.{ .lowered = .{ .output = scan.output } }, forms.len);
                     break :result .pending;

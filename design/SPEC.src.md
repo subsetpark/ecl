@@ -353,11 +353,13 @@ no binding, body, value, or module generation. Replacing a binding in a root
 affects existing code at its next execution, including code already running
 and the bodies of open-ended loops such as `times`, `while`, and `linrec` in
 progress. The combinators that iterate over a finite collection (`each`,
-`zip-with`, `for`, `fold`, `fold1`, `scan`, and `infra`) are atomic under their
-bindings instead: a call takes the binding of each word written in its
-quotation once, at that word's first execution in the call, and its later
-applications reuse it, so a replacement made while the call runs takes effect
-at its next call. A
+`zip-with`, `for`, `fold`, `fold1`, `scan`, and `infra`) are atomic under the
+bindings of plain words instead: a call takes the binding of each plain word
+written in its quotation once, at that word's first execution in the call, and
+its later applications reuse it, so a replacement made while the call runs
+takes effect at its next call. Qualified words, words written in a module
+image, and words dispatched by `execute` are looked up at each execution, so a
+module registered during the call is seen by its later applications. A
 module image is immutable
 after construction; replacing an image in a registration does not retarget
 words belonging to the former image. Executing a word whose root has retired is

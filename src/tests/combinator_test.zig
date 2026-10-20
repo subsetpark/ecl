@@ -219,6 +219,9 @@ test "combinators: finite iterations keep their words' bindings and still check 
         .{ .name = "next infra call", .source = "(1) 'k def [1 2] (pop k) infra (2) 'k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
         // A kept match still meets each row's operand classes.
         .{ .name = "kept match across classes", .source = "[[1 2 3] [4.5 5.5] [7]] ((+) fold1) each", .expected = "(6 10.0 7)" },
+        // A word `execute` dispatches runs at `execute`'s position and takes
+        // none of its plan entry.
+        .{ .name = "dispatched word", .source = "[1 2 3] (dup (+) first execute) each", .expected = "[2 4 6]" },
         // A different phrase offered at the same word is matched afresh.
         .{ .name = "fresh phrase", .source = "[[1 2 3] [2 3 4]] [(+) (*)] (fold1) zip-with", .expected = "[6 24]" },
     });
