@@ -2622,7 +2622,9 @@ fn buildNestedTypedNumericBinary(
     return try plan.prepare(evaluator, left_item, right_item, owners, length, report);
 }
 
-/// `reuse_candidate` must own `left`, and reaches only the numeric builder:
+/// Each present owner must hold its matching operand. On success the numeric
+/// builder takes every present owner, and may adopt `owners.left` as the
+/// output. The character builder and every failure leave the owners untouched:
 /// character states have no owned root to adopt.
 fn buildNestedTypedBinary(
     evaluator: *Machine,
@@ -2664,8 +2666,10 @@ const NumericUnaryPlan = opaque {
         };
     }
 
-    /// Failure borrows the input; success transfers the acquired output and
-    /// reader into the returned state. Reader acquisition cannot fail.
+    /// Failure borrows the input. Success transfers the acquired output into
+    /// the returned state and takes `reuse` when present, whether or not its
+    /// buffer was adopted as that output; otherwise it acquires a reader, which
+    /// cannot fail.
     fn prepare(
         self: *const NumericUnaryPlan,
         evaluator: *Machine,
@@ -2752,7 +2756,7 @@ fn startTypedUnary(
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
     const typed = try NumericUnaryPlan.select(operation, class).prepare(evaluator, item, operand, length, report);
-    // startDriver consumes the state on both success and failure.
+    // runDriver consumes the state on both success and failure.
     return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
 }
 
@@ -3069,7 +3073,7 @@ const NumericReducePlan = opaque {
     }
 
     /// Borrows the caller's values. Acquired readers and output are consumed
-    /// locally on preparation failure, and by startDriver on either outcome.
+    /// locally on preparation failure, and by runDriver on either outcome.
     /// The combinator handles empty folds/scans and singleton fold1 before
     /// entry, so cursor_start always identifies a remaining input element.
     fn start(self: *const NumericReducePlan, evaluator: *Machine, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
