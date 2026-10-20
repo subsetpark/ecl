@@ -8024,31 +8024,50 @@ pub const OfferedMatch = struct {
 /// later application, so the call is atomic under its bindings: a replacement
 /// made while it runs takes effect at its next call.
 pub const ResolutionPlan = struct {
+    /// Word positions one plan holds entries for. A position past that resolves
+    /// as any word does, which is always correct, and keeps making, probing,
+    /// and retiring a plan constant work whatever the quotation's length.
+    const capacity = 16;
+    const Slot = struct { index: u32, entry: PlanEntry };
+
     /// Borrowed: the combinator owns its quotation for the whole call.
     code: *Header,
-    entries: []PlanEntry = &.{},
+    /// Allocated at the first entry, probed linearly from `index % capacity`.
+    slots: ?*[capacity]?Slot = null,
 
     pub fn init(code: *Header) ResolutionPlan {
         return .{ .code = code };
     }
 
-    /// The entry for word position `index`, or null when there is no memory
-    /// for the plan, which then decides nothing.
+    /// The entry for word position `index`, made on first use, or null when
+    /// the plan is full or there is no memory for it.
     fn entry(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32) ?*PlanEntry {
-        if (self.entries.len == 0) {
-            self.entries = allocator.alloc(PlanEntry, @intCast(self.code.length())) catch return null;
-            @memset(self.entries, .{});
+        const slots = self.slots orelse allocated: {
+            const fresh = allocator.create([capacity]?Slot) catch return null;
+            fresh.* = @splat(null);
+            self.slots = fresh;
+            break :allocated fresh;
+        };
+        for (0..capacity) |probe| {
+            const slot = &slots[(index + probe) % capacity];
+            if (slot.*) |*held| {
+                if (held.index == index) return &held.entry;
+            } else {
+                slot.* = .{ .index = index, .entry = .{} };
+                return &slot.*.?.entry;
+            }
         }
-        return &self.entries[index];
+        return null;
     }
 
     pub fn retire(self: *ResolutionPlan, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.entries) |*planned| {
-            if (planned.resolution) |*resolution| resolution.deinit(allocator);
-            if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
-        }
-        allocator.free(self.entries);
-        self.entries = &.{};
+        const slots = self.slots orelse return;
+        for (slots) |*slot| if (slot.*) |*held| {
+            if (held.entry.resolution) |*resolution| resolution.deinit(allocator);
+            if (held.entry.offered) |offered| releases.releaseHeader(offered.phrase);
+        };
+        allocator.destroy(slots);
+        self.slots = null;
     }
 };
 
