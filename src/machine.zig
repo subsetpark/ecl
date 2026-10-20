@@ -1640,8 +1640,6 @@ pub const IsolatedApplication = struct {
     site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
-    /// Where a data combinator keeps the bindings its quotation resolved.
-    plan: ?*ResolutionPlan = null,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1706,8 +1704,6 @@ const ApplicationFrame = struct {
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
     provenance_nonce: ?ApplicationProvenanceNonce = null,
-    /// Borrowed from the combinator state `context` names.
-    plan: ?*ResolutionPlan = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
@@ -3221,6 +3217,28 @@ pub const Machine = struct {
     pub fn currentScope(self: *const Machine) *env.Scope {
         return self.unit.current.?.scope();
     }
+    /// Links words written into `scope`, a root, to its name slots. An image's
+    /// cell carries its owner anchor, so a word that escapes the image proves
+    /// the image live before reading its slot.
+    pub fn rootLinker(self: *Machine, scope: *env.Scope) error{OutOfMemory}!value.WordLinker {
+        const owner: ?*anyopaque = if (scope.isModuleRoot())
+            modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.unit.module_access)
+        else
+            null;
+        return self.unit.environment.linker(try self.unit.environment.scopeCell(scope, owner));
+    }
+    /// The word `name` linked to its slot in the running activation's root, as
+    /// a word built at run time on that activation's behalf is.
+    pub fn linkedWord(self: *Machine, name: u32) error{OutOfMemory}!value.WordRef {
+        const linker = try self.rootLinker(self.currentScope());
+        return .{ .name = name, .slot = try linker.link(name) };
+    }
+    /// The word `name` linked to its core slot, as a word the implementation
+    /// builds for itself is: it means core's binding wherever it runs.
+    pub fn coreWord(self: *Machine, name: u32) error{OutOfMemory}!value.WordRef {
+        const linker = self.unit.environment.linker(self.unit.environment.coreCell());
+        return .{ .name = name, .slot = try linker.link(name) };
+    }
     /// The root a definition, removal, or import writes. Refused inside a
     /// combinator application, an `@attempt`, or a task, which are not roots.
     pub fn definitionScope(self: *Machine) MachineError!*env.Scope {
@@ -4677,7 +4695,7 @@ pub const Machine = struct {
                 self.text.borrow().sourceName(),
                 self.text.borrow().source(),
                 &self.diag,
-                @backingInt(try evaluator.unit.environment.scopeIdFor(evaluator.unit.lexicalScope())),
+                try evaluator.rootLinker(evaluator.unit.lexicalScope()),
             );
             self.state = .{ .ingesting = ingestion };
         }
@@ -5565,6 +5583,7 @@ pub const Machine = struct {
             .recognizer = recognizer,
             .core = self.unit.environment.coreView(),
             .core_scope = self.unit.environment.coreScopeId(),
+            .slots = self.unit.environment.slotDirectory(),
         };
     }
 
@@ -5943,7 +5962,6 @@ pub const Machine = struct {
             },
             .traced_word = inherited_trace,
             .selection = .{},
-            .plan = application.plan,
         } });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
@@ -6064,12 +6082,12 @@ pub const Machine = struct {
                 // unchanged runtime body keeps its existing word scopes, so it
                 // never creates an attribution-only directory cell.
                 const home = candidate.executionHome(self.unit.module_access);
-                const stamp_scope = try self.unit.environment.scopeIdForOwned(
+                const image_cell = try self.unit.environment.scopeCell(
                     home.scope(self.unit.module_access),
                     modules.anchorHandle(home, self.unit.module_access),
                 );
                 var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-                    admission.?.begin(@backingInt(stamp_scope)),
+                    admission.?.begin(self.unit.environment.linker(image_cell)),
                 );
                 admission = null;
                 defer cursor.deinit(self.releaseDomain(), self.allocator());
@@ -6224,36 +6242,155 @@ pub const Machine = struct {
         self.unit.module_call_sites.install(self.releaseDomain(), site, word, candidate);
     }
 
-    /// The plan of the data combinator applying the running code, when that code
-    /// is the combinator's own quotation and this application has bound nothing.
-    fn applicationPlan(self: *Machine) ?*ResolutionPlan {
-        const current = &self.unit.current.?;
-        const index = current.application_tail orelse return null;
-        const frame = &self.unit.frames.items[@backingInt(index)];
-        const plan = switch (frame.*) {
-            .application => |*application| application.plan orelse return null,
-            else => return null,
+    /// What the word's slot yields, as a dispatch-ready resolution, or null
+    /// when the slot yields nothing a plain word may run: no binding in the
+    /// root or core, or only a private core one. `written` is the slot's root
+    /// scope, already proven live, or null for core.
+    fn slotResolution(
+        self: *Machine,
+        slot: *const env.Slot,
+        name: u32,
+        written: ?*env.Scope,
+        borrow_pin: *?modules.GenerationPin,
+    ) ?Resolution {
+        const cell = slot.current() orelse return null;
+        var lease = cell.load();
+        if (written == null or cell == slot.coreCell()) {
+            // Core alone is the chain, and a private core binding is not
+            // reachable by a plain word.
+            if (lease.visibility == .private) {
+                lease.deinit();
+                return null;
+            }
+            const pin = borrow_pin.*;
+            borrow_pin.* = null;
+            return .{
+                .lease = lease,
+                .execution_generation = null,
+                .home = null,
+                .borrow_pin = pin,
+                .trace_word = .plain(name),
+                .origin = .core,
+            };
+        }
+        const local = lease.traceWord();
+        const home = if (local == null) null else self.homeForSlot(written.?);
+        const pin = borrow_pin.*;
+        borrow_pin.* = null;
+        return .{
+            .lease = lease,
+            .execution_generation = null,
+            .home = home,
+            .borrow_pin = pin,
+            .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(name),
+            .origin = if (home) |resolved| moduleResolutionOrigin(resolved) else .direct,
+            // A module-local binding resolves against its image, which the
+            // home supplies; anything else against the root it was found in.
+            .defining_scope = if (home != null) null else written,
         };
-        if (plan.code != current.code) return null;
-        if (current.site.resolution_scope) |scope| if (scope.environmentOrNull() != null) return null;
-        return plan;
     }
 
-    /// Keeps a plain resolution of `site` in the running data combinator's
-    /// plan, or returns null and leaves it with the caller. One that carries a
-    /// module home, generation, pin, or borrowed scope belongs to that one
-    /// dispatch and is never kept.
-    fn keepPlanned(self: *Machine, site: ?ErrorSite, resolved: Resolution) ?*Resolution {
-        const at = site orelse return null;
-        if (resolved.home != null or resolved.execution_generation != null or
-            resolved.borrow_pin != null or resolved.borrowed_cell != null) return null;
-        const plan = self.applicationPlan() orelse return null;
-        if (at.code != plan.code) return null;
-        return plan.keep(self.unit.allocator, at.index, resolved);
+    /// The home a module-local binding in `image` runs under: the running
+    /// home when it is the same image, so `within` keeps targeting the
+    /// registration the call came through, and the image's own
+    /// registration-less home otherwise. The caller has already proven the
+    /// image live, so nothing is acquired here.
+    fn homeForSlot(self: *Machine, image: *env.Scope) ?*modules.ModuleHome {
+        const current_home = self.unit.current.?.home();
+        const image_home = modules.homeForModuleRootScope(image) orelse return current_home;
+        if (current_home) |running| {
+            if (modules.sameImage(running, image_home, self.unit.module_access)) return running;
+        }
+        return image_home;
+    }
+
+    const SlotTarget = struct {
+        /// Null when the root holds no slot for the name.
+        slot: ?*const env.Slot,
+        /// The slot's root scope, proven live; null for core.
+        written: ?*env.Scope,
+    };
+
+    /// Finds a linked word's slot and proves its root live for this dispatch,
+    /// or returns `error.Retired` when the root is gone, which is a definite
+    /// failure and never a fallback that would change what the word means. An
+    /// image root is held by the running activation or pinned here, and the
+    /// pin is handed back for the dispatch to consume.
+    fn locateSlot(
+        self: *Machine,
+        raw: u32,
+        name: u32,
+        borrow_pin: *?modules.GenerationPin,
+    ) error{Retired}!SlotTarget {
+        switch (env.wordTarget(raw)) {
+            .unlinked => unreachable,
+            .slot => |id| {
+                const slot = self.unit.environment.slot(id) orelse return error.Retired;
+                const root = slot.rootCell();
+                if (root.core) return .{ .slot = slot, .written = null };
+                return .{ .slot = slot, .written = try self.proveRoot(root, borrow_pin) };
+            },
+            .image => |scope_id| {
+                const root = switch (self.unit.environment.scopeOf(scope_id)) {
+                    .cell => |cell| cell,
+                    .unscoped, .core, .retired => return error.Retired,
+                };
+                const scope = try self.proveRoot(root, borrow_pin);
+                return .{ .slot = self.unit.environment.imageSlot(scope, name), .written = scope };
+            },
+        }
+    }
+
+    fn proveRoot(
+        self: *Machine,
+        root: *env.ScopeCell,
+        borrow_pin: *?modules.GenerationPin,
+    ) error{Retired}!*env.Scope {
+        const proof: env.Liveness = if (root.ownerHandle()) |owner| held: {
+            if (self.runningAnchor()) |running| {
+                if (running == owner) break :held .activation_held;
+            }
+            borrow_pin.* = modules.tryPinAnchor(owner, self.unit.module_access) orelse return error.Retired;
+            break :held .fresh_pin;
+        } else .non_image;
+        return root.scopeUnder(proof) orelse error.Retired;
+    }
+
+    fn failRetiredWord(self: *Machine, name: u32) MachineError {
+        self.unit.active_word = .plain(name);
+        return self.fail(.domain, "the scope this word was written in has retired");
+    }
+
+    /// A plain word for idiom recognition: what its slot yields, or null when
+    /// that is nothing a plain word may run. Recognition only ever declines,
+    /// so this never records a failure: an unlinked word, or one whose root
+    /// has retired, is simply not a match, and generic execution reports it.
+    pub fn peekSlotWord(self: *Machine, word: value.WordRef) ?Resolution {
+        if (word.slot == 0) return null;
+        var borrow_pin: ?modules.GenerationPin = null;
+        defer if (borrow_pin) |*owned| owned.deinit();
+        const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return null;
+        return self.slotResolution(target.slot orelse return null, word.name, target.written, &borrow_pin);
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
-        if (self.applicationPlan()) |plan| if (plan.find(self.unit.active_index)) |resolved| return executeResolved(self, resolved);
+        // A word built at run time without a slot links where it executes.
+        const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
+        var borrow_pin: ?modules.GenerationPin = null;
+        errdefer if (borrow_pin) |*owned| owned.deinit();
+        const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
+            return self.failRetiredWord(word.name);
+        const written = target.written;
+        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin) else null) |resolution| {
+            var resolved = resolution;
+            defer resolved.deinit(self.unit.allocator);
+            try executeResolved(self, &resolved);
+            return;
+        }
+
+        // The slot yields nothing: a qualified name, one awaiting autoload, or
+        // an undefined word. Those resolve through the cursor, whose qualified
+        // results are cached per call site.
         const qualified_call_site = ErrorSite{
             .code = self.unit.current.?.code,
             .index = self.unit.active_index,
@@ -6273,6 +6410,8 @@ pub const Machine = struct {
                 .hit => |resolution| {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.qualified_cache_hits += 1;
+                    if (borrow_pin) |*owned| owned.deinit();
+                    borrow_pin = null;
                     var resolved = resolution;
                     defer resolved.deinit(self.unit.allocator);
                     try executeResolved(self, &resolved);
@@ -6280,159 +6419,9 @@ pub const Machine = struct {
                 },
             }
         }
-        // Acquired only on the `fresh_pin` arm, and handed to the cursor so the
-        // pin taken here is the one `scheduleWord` consumes.
-        var borrow_pin: ?modules.GenerationPin = null;
-        errdefer if (borrow_pin) |*owned| owned.deinit();
-        // Held by the activation this dispatch enters. Unlike
-        // an image pin, a scope borrow ends when the chain walk does.
-        var borrowed_cell: ?*env.ScopeCell = null;
-        errdefer if (borrowed_cell) |cell| cell.releaseBorrow();
-
-        // Is this occurrence stamped with a scope the activation resolves in
-        // directly? That is the running scope itself, or an ancestor the
-        // running scope reaches through scopes that bound nothing: a
-        // combinator body runs in such a child, and the words in it carry the
-        // stamp of the scope that read them. Straight-line code resolving in
-        // its own chain is the overwhelming common case and needs no proof
-        // beyond the activation that is already running it.
-        //
-        // This generalizes the activation-held arm from anchors to scope ids:
-        // where that compare covered a foreign word in the same image, this
-        // covers the word's scope being the running chain outright, so the
-        // directory walk, the cell, the owner load, and `encloses` are all
-        // skipped rather than merely cheapened.
-        const running_site = self.unit.current.?.site;
-        const stamped_scope = stampedResolutionScope(running_site, word.scope);
-        const cache_scope = self.cacheScopeFor(word.scope, stamped_scope);
-        var local_cache_scope: ?resolution_core.GuardContext = null;
-        if (cache_scope) |cache| switch (self.lookupPlain(cached_site, word.name, cache)) {
-            .miss => |miss| local_cache_scope = miss.guard,
-            .hit => |resolution| {
-                if (self.keepPlanned(qualified_call_site, resolution)) |kept| return executeResolved(self, kept);
-                var resolved = resolution;
-                defer resolved.deinit(self.unit.allocator);
-                try executeResolved(self, &resolved);
-                return;
-            },
-        };
-        const local_context = LocalCacheContext.init(running_site, stamped_scope, self.unit.module_access);
-        if (local_context) |context| {
-            switch (self.unit.module_call_sites.lookupLocal(
-                cached_site,
-                context,
-            )) {
-                .absent => {
-                    if (comptime root_execution_metrics_enabled)
-                        self.unit.root_execution_metrics.local_cache_misses += 1;
-                },
-                .stale, .warming => unreachable,
-                .hit => |resolution| {
-                    if (comptime root_execution_metrics_enabled)
-                        self.unit.root_execution_metrics.local_cache_hits += 1;
-                    var resolved = resolution;
-                    defer resolved.deinit(self.unit.allocator);
-                    try executeResolved(self, &resolved);
-                    return;
-                },
-            }
-        }
-        if (cache_scope) |cache| {
-            self.unit.active_word = .plain(word.name);
-            try self.startDriver(DispatchDriver{
-                .word = word.name,
-                .call_site = qualified_call_site,
-                .resolution = .init(.init(
-                    self,
-                    word.name,
-                    cache.start,
-                    null,
-                    // The activation already holds this chain, and core
-                    // outlives every unit, so the fast path acquires nothing
-                    // -- that is the point of it.
-                    null,
-                    local_cache_scope,
-                )),
-            });
-            return;
-        }
-
-        const written: ?*env.Scope = switch (self.unit.environment.scopeOf(@fromBackingInt(@intCast(word.scope)))) {
-            .unscoped => self.unit.current.?.resolutionScope(),
-            // Core is a terminal phase that no scope denotes.
-            .core => null,
-            .cell => |cell| refined: {
-                // Liveness before dereference, in three arms and no more. The
-                // order matters: the cheap proof is tried first because a module
-                // body executing its own words is the common case, and it costs
-                // one pointer compare and no atomic.
-                const proof: env.Liveness = if (cell.ownerHandle()) |owner| held: {
-                    if (self.runningAnchor()) |running| {
-                        if (running == owner) break :held .activation_held;
-                    }
-                    borrow_pin = modules.tryPinAnchor(owner, self.unit.module_access) orelse {
-                        // The image reached its last release. Definite, never a
-                        // fallback: a fallback would change what the word means.
-                        self.unit.active_word = .plain(word.name);
-                        return self.fail(
-                            .domain,
-                            "the scope this word was written in has retired",
-                        );
-                    };
-                    break :held .fresh_pin;
-                } else if (self.unit.current.?.chainHolds(word.scope)) blk: {
-                    // Ours already: the activation holds this chain, so there is
-                    // nothing to acquire and nothing to release.
-                    break :blk .non_image;
-                } else foreign: {
-                    // A scope belonging to some other unit, reached through a
-                    // value. Acquire-then-validate on the cell, whose memory is
-                    // immortal, rather than a retain on the scope, whose memory
-                    // is not -- a `fetchAdd` there would be the very
-                    // retain-after-load this design exists to remove.
-                    if (cell.acquire() == null) {
-                        self.unit.active_word = .plain(word.name);
-                        return self.fail(
-                            .domain,
-                            "the scope this word was written in has retired",
-                        );
-                    }
-                    borrowed_cell = cell;
-                    break :foreign .non_image;
-                };
-
-                const written_scope = cell.scopeUnder(proof) orelse {
-                    self.unit.active_word = .plain(word.name);
-                    return self.fail(
-                        .domain,
-                        "the scope this word was written in has retired",
-                    );
-                };
-                // The word's scope is a lower bound; an activation already
-                // inside a descendant of it resolves there instead.
-                const running = self.unit.current.?.resolutionScope();
-                break :refined if (running != null and written_scope.encloses(running.?))
-                    running
-                else
-                    written_scope;
-            },
-            // A fallback here would change what the word means, so the failure
-            // is definite instead. The traced word is set first: this failure
-            // belongs to the word being dispatched and must replace whichever
-            // word was traced before it.
-            .retired => {
-                self.unit.active_word = .plain(word.name);
-                return self.fail(
-                    .domain,
-                    "the scope this word was written in has retired",
-                );
-            },
-        };
         self.unit.active_word = .plain(word.name);
         const owned_pin = borrow_pin;
         borrow_pin = null;
-        const owned_cell = borrowed_cell;
-        borrowed_cell = null;
         try self.startDriver(DispatchDriver{
             .word = word.name,
             .call_site = qualified_call_site,
@@ -6441,8 +6430,8 @@ pub const Machine = struct {
                 word.name,
                 written,
                 owned_pin,
-                owned_cell,
-                local_cache_scope,
+                null,
+                null,
             )),
         });
     }
@@ -7404,9 +7393,10 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         prims.unbindLocals
     else
         null;
+    // Locals lowering emits the backend words unlinked; a linked one is
+    // ordinary text and dispatches through its slot like any word.
     if (backend) |primitive| {
-        if (self.unit.current.?.chainHolds(word.scope))
-            return invokeBuiltin(self, .plain(word.name), primitive);
+        if (word.slot == 0) return invokeBuiltin(self, .plain(word.name), primitive);
     }
     try self.executeWord(word);
 }
@@ -7466,10 +7456,6 @@ const DispatchDriver = struct {
                             }
                         }
                         if (call_site) |site| self_machine.cacheResolution(site, word, &resolved);
-                        if (self_machine.keepPlanned(call_site, resolved)) |kept| {
-                            try executeResolved(self_machine, kept);
-                            return .detached;
-                        }
                         defer resolved.deinit(allocator);
                         try executeResolved(self_machine, &resolved);
                         return .detached;
@@ -8232,46 +8218,6 @@ pub const LookupChain = enum {
             .qualified => "qualified",
             .@"module-value" => "module-value",
         };
-    }
-};
-
-/// The bindings one data-combinator call has resolved for the words of its
-/// quotation. A word's first plain resolution in the call is kept and every
-/// later application reuses it, so the call sees the bindings in effect when it
-/// began and a redefinition made meanwhile takes effect at the next call. An
-/// application whose own scope has bound a name resolves as any code does, so
-/// a definition inside the quotation is still seen by the words after it.
-pub const ResolutionPlan = struct {
-    /// Borrowed: the combinator owns its quotation for the whole call.
-    code: *Header,
-    entries: []?Resolution = &.{},
-
-    pub fn init(code: *Header) ResolutionPlan {
-        return .{ .code = code };
-    }
-
-    fn find(self: *ResolutionPlan, index: u32) ?*Resolution {
-        if (index >= self.entries.len) return null;
-        if (self.entries[index]) |*resolution| return resolution;
-        return null;
-    }
-
-    /// Takes `resolution` for `index`, or returns null and leaves it with the
-    /// caller when there is no room to keep it.
-    fn keep(self: *ResolutionPlan, allocator: std.mem.Allocator, index: u32, resolution: Resolution) ?*Resolution {
-        if (self.entries.len == 0) {
-            self.entries = allocator.alloc(?Resolution, @intCast(self.code.length())) catch return null;
-            @memset(self.entries, null);
-        }
-        std.debug.assert(self.entries[index] == null);
-        self.entries[index] = resolution;
-        return &self.entries[index].?;
-    }
-
-    pub fn retire(self: *ResolutionPlan, _: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.entries) |*entry| if (entry.*) |*resolution| resolution.deinit(allocator);
-        allocator.free(self.entries);
-        self.entries = &.{};
     }
 };
 
@@ -9163,7 +9109,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .site = continuation.site,
                         .seeded = application.seeded,
                         .provenance = application.provenance,
-                        .plan = continuation.plan,
                     }, launch, continuation.traced_word);
                     return true;
                 },
@@ -9196,7 +9141,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                         .traced_word = continuation.traced_word,
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
-                        .plan = continuation.plan,
                     } });
                     application_selection = .{};
                     defer suspended.deinit(self.releaseDomain(), self.unit.allocator);

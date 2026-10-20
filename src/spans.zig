@@ -451,7 +451,7 @@ pub const SpanArchiveOwner = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) reader.Error!reader.ReadResult {
         const backing = self.privateState();
         return reader.readCode(
@@ -460,7 +460,7 @@ pub const SpanArchiveOwner = enum(usize) {
             source,
             diag,
             backing.runtime.identity_issuer.constructionNamespace(),
-            word_scope,
+            word_linker,
         );
     }
 
@@ -530,7 +530,7 @@ pub const SpanArchive = enum(usize) {
     pub const AdmittedConstructionBody = opaque {
         pub fn begin(
             self: *AdmittedConstructionBody,
-            scope: u32,
+            linker: value.WordLinker,
         ) RescopeCursor {
             const backing = admittedConstructionBacking(self);
             const archive = backing.archive;
@@ -541,7 +541,7 @@ pub const SpanArchive = enum(usize) {
                 .archive = archive,
                 .source = .init(source),
                 .root_projection = projection,
-                .scope = scope,
+                .linker = linker,
             };
         }
 
@@ -699,7 +699,8 @@ pub const SpanArchive = enum(usize) {
         archive: SpanArchive,
         source: heap.Owned(*value.ListHandle),
         root_projection: IndexedSpan,
-        scope: u32,
+        /// Links each word to its slot in the image the body is becoming.
+        linker: value.WordLinker,
         frames: std.ArrayList(Frame) = .empty,
         started: bool = false,
 
@@ -861,7 +862,7 @@ pub const SpanArchive = enum(usize) {
                 // The one rewrite: a word occurrence inside this body's text
                 // names the image the body is becoming.
                 .word => |reference| return .{
-                    .word = .{ .name = reference.name, .scope = self.scope },
+                    .word = .{ .name = reference.name, .slot = try self.linker.link(reference.name) },
                 },
                 .list => |nested| {
                     if (nested.kind() != .generic_spine) break :shared;
@@ -957,7 +958,7 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) reader.ReadCursor {
         return .initCode(
             self.allocator(),
@@ -966,7 +967,7 @@ pub const SpanArchive = enum(usize) {
             source,
             diag,
             self.provenanceNamespace(),
-            word_scope,
+            word_linker,
         );
     }
 
@@ -1198,10 +1199,10 @@ pub const SpanArchive = enum(usize) {
             source_name: []const u8,
             source: []const u8,
             diag: *reader.Diag,
-            word_scope: u32,
+            word_linker: value.WordLinker,
         ) error{OutOfMemory}!SourceIngestBacking {
             const cursor = try archive.allocator().create(reader.ReadCursor);
-            cursor.* = archive.readCursor(source_name, source, diag, word_scope);
+            cursor.* = archive.readCursor(source_name, source, diag, word_linker);
             return .{
                 .archive = archive,
                 .state = .{ .reading = cursor },
@@ -1400,11 +1401,11 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        word_scope: u32,
+        word_linker: value.WordLinker,
     ) error{OutOfMemory}!SourceIngestCursor {
         const backing = try self.allocator().create(SourceIngestBacking);
         errdefer self.allocator().destroy(backing);
-        backing.* = try .init(self, source_name, source, diag, word_scope);
+        backing.* = try .init(self, source_name, source, diag, word_linker);
         return .fromBacking(backing);
     }
 
@@ -1524,7 +1525,7 @@ const ArchiveFixture = struct {
             "spans-test.ecl",
             source,
             &diag,
-            0,
+            .unlinked,
         );
         defer {
             while (!ingestion.advanceRetirement())
@@ -1570,14 +1571,19 @@ fn prepareForTest(
     return fixture.archive.prepareConstructionBody(&body);
 }
 
+/// Links every word to the same slot, `context[0]`.
+fn constantLink(context: [2]usize, _: u32) error{OutOfMemory}!u32 {
+    return @intCast(context[0]);
+}
+
 fn admittedForTest(
     fixture: *ArchiveFixture,
     header: *value.ListHandle,
-    scope: u32,
+    slot: u32,
 ) !SpanArchive.RescopeCursor {
     const prepared = try prepareForTest(fixture, header);
     return switch (prepared) {
-        .admitted => |admitted| admitted.begin(scope),
+        .admitted => |admitted| admitted.begin(.{ .context = .{ slot, 0 }, .link_fn = constantLink }),
         .unchanged => |owned| {
             var body = owned;
             body.deinit(heap.hostDomain(fixture.owner.cleanup()), fixture.archive.allocator());
@@ -1597,7 +1603,7 @@ fn sourceIngestAllocationProbe(allocator: std.mem.Allocator) !void {
         "spans-ingest-oom.ecl",
         "(1) 'one def",
         &diag,
-        0,
+        .unlinked,
     );
     defer {
         while (!ingestion.advanceRetirement())
@@ -1629,7 +1635,7 @@ test "spans: public source ingestion handle relocates between advances" {
         "spans-relocated-ingest.ecl",
         "(1) 'one def",
         &diag,
-        0,
+        .unlinked,
     );
     var live = true;
     defer {
@@ -1657,7 +1663,7 @@ test "spans: public source ingestion handle relocates between advances" {
         "spans-relocated-abandon.ecl",
         "(2) 'two def",
         &diag,
-        0,
+        .unlinked,
     );
     var abandoned_live = true;
     defer {
@@ -1771,10 +1777,10 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
         const item = list.atUnchecked(.{ .list = copy }, index);
         if (item != .word) continue;
         words += 1;
-        try std.testing.expectEqual(@as(u32, 7), item.word.scope);
+        try std.testing.expectEqual(@as(u32, 7), item.word.slot);
         try std.testing.expectEqual(
             @as(u32, 0),
-            list.atUnchecked(.{ .list = root }, index).word.scope,
+            list.atUnchecked(.{ .list = root }, index).word.slot,
         );
     }
     try std.testing.expect(words != 0);

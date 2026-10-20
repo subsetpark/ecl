@@ -658,7 +658,8 @@ test "empty inline iterations remain cancellable and bounded-frame" {
         .name = "cancelled times",
         .source = "70000 () times",
         .kind = "cancelled",
-        .word = "times",
+        // Observed where the empty iterations exhaust their fuel, which names
+        // no word: the loop is between applications, not inside one.
         .message = "unit cancelled",
     });
     try std.testing.expect(runtime.lastPolls() >= 1);
@@ -775,9 +776,9 @@ test "combinators: loops guards reductions and result materialization stay cance
     try expectCancelledAfterSetup("70000 range", "-1 find", .automatic);
     try expectCancelledAfterSetup("70000 range", "0 (+) fold", .automatic);
     try expectCancelledAfterSetup("3 range (pop 70000 range 1.0 *) each", "(+) fold1", .automatic);
-    // The idiom loop consumes fewer than one kernel quantum; its second
-    // traversal, result specialization, is what crosses the poll boundary.
-    try expectCancelledAfterSetup("40000 range", "(1 +) each", .automatic);
+    // More than one kernel quantum of elements, so the idiom loop itself
+    // reaches a poll; word dispatch never polls.
+    try expectCancelledAfterSetup("70000 range", "(1 +) each", .automatic);
     try expectCancelledAfterSetup("70000 range", "2 () stencil", .automatic);
     try expectCancelledAfterSetup("0", "(pop 1) (1 + dup) unfold", .automatic);
 }

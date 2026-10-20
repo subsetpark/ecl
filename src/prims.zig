@@ -506,7 +506,8 @@ fn wordWord(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (item.borrow() != .symbol) return evaluator.typeError("a symbol");
-    try evaluator.pushOwned(.{ .word = .{ .name = item.borrow().symbol } });
+    // A word built here means what it would had it been written here.
+    try evaluator.pushOwned(.{ .word = try evaluator.linkedWord(item.borrow().symbol) });
 }
 
 fn symbolWord(evaluator: *Machine) MachineError!void {

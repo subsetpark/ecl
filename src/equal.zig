@@ -698,9 +698,9 @@ fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
 // single key, which is only sound while a re-scoped key hashes and compares
 // identically. Break that and this test fails rather than the sharing silently
 // producing a dict whose hashes do not match its keys.
-test "identity: a word's scope changes neither equality nor hash" {
-    const written_at_session: Value = .{ .word = .{ .name = 7, .scope = 0 } };
-    const written_in_module: Value = .{ .word = .{ .name = 7, .scope = 42 } };
+test "identity: a word's slot changes neither equality nor hash" {
+    const written_at_session: Value = .{ .word = .{ .name = 7, .slot = 0 } };
+    const written_in_module: Value = .{ .word = .{ .name = 7, .slot = 42 } };
     try std.testing.expectEqual(
         @as(?bool, true),
         matchWithoutStructure(written_at_session, written_in_module),
@@ -711,7 +711,7 @@ test "identity: a word's scope changes neither equality nor hash" {
     );
     // And a different name still differs, so the invariance is about scope
     // alone rather than about words comparing equal to each other.
-    const other_name: Value = .{ .word = .{ .name = 8, .scope = 42 } };
+    const other_name: Value = .{ .word = .{ .name = 8, .slot = 42 } };
     try std.testing.expectEqual(
         @as(?bool, false),
         matchWithoutStructure(written_at_session, other_name),

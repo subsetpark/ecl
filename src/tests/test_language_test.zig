@@ -229,10 +229,13 @@ test "testing: large test catalogs remain cancellable" {
     try source.appendSlice(std.testing.allocator, ") 'large.catalog @defm");
     try expectOk(&runtime, source.items);
 
+    // Walking the catalog repeatedly crosses a kernel quantum, which is where
+    // a listing must poll; one listing of 300 entries is well inside one.
     runtime.requestCancellation();
-    try expectErrContains(&runtime, "tests", "unit cancelled");
+    try expectErrContains(&runtime, "300 (tests pop) times", "unit cancelled");
     try std.testing.expect(runtime.lastPolls() >= 1);
     runtime.clearCancellation();
     try expectOk(&runtime, "tests len 300 = {'kind 'user} assert");
+    try expectOk(&runtime, "300 (tests pop) times");
     try std.testing.expect(runtime.lastPolls() > 1);
 }

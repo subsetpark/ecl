@@ -252,22 +252,37 @@ pub const FrozenLookup = struct {
     core: ?*const Environment,
     own_scope: u32,
     core_scope: u32,
+    /// Where a word's slot is found, so its root can be compared.
+    slots: *const SlotIndex,
 
     pub const Hit = struct {
         lease: BindingLease,
         in_core: bool,
     };
 
-    /// Whether a word written with `stamp` resolves in this chain. A word with
-    /// no written-in scope resolves wherever it is invoked, so nothing about
-    /// it is a property of the definition.
-    pub fn admits(self: FrozenLookup, stamp: u32) bool {
+    /// The root id of the slot a word carries, or zero for an unlinked word.
+    fn rootOf(self: FrozenLookup, slot_id: u32) u32 {
+        return switch (wordTarget(slot_id)) {
+            .unlinked => 0,
+            .image => |scope| @backingInt(scope),
+            .slot => |id| found: {
+                const found = self.slots.get(id) orelse break :found 0;
+                break :found @backingInt(found.rootCell().id);
+            },
+        };
+    }
+
+    /// Whether a word linked to `slot_id` resolves in this chain: its slot
+    /// belongs to this environment or to core.
+    pub fn admits(self: FrozenLookup, slot_id: u32) bool {
+        const stamp = self.rootOf(slot_id);
         return stamp != 0 and (stamp == self.own_scope or stamp == self.core_scope);
     }
 
-    /// Resolves `name` written with `stamp`: a core stamp in core alone, the
-    /// environment's own stamp there first and then in core.
-    pub fn resolve(self: FrozenLookup, stamp: u32, name: u32) ?Hit {
+    /// Resolves `name` linked to `slot_id`: a core slot in core alone, the
+    /// environment's own slot there first and then in core.
+    pub fn resolve(self: FrozenLookup, slot_id: u32, name: u32) ?Hit {
+        const stamp = self.rootOf(slot_id);
         const core = self.core orelse self.own;
         if (self.core != null and stamp == self.own_scope) {
             if (lookupFrozen(self.own, name)) |lease| return .{ .lease = lease, .in_core = false };
@@ -839,7 +854,10 @@ pub const Environment = struct {
     /// This root's name slots, by raw name id. Guarded by `writer`, so a
     /// binding and a slot for the same name are always made consistent under
     /// one lock. Linking a word never needs the environment unfrozen.
-    slots: std.AutoHashMapUnmanaged(u32, *Slot) = .empty,
+    slots: SlotTable = .{},
+    /// Whether this root's slots are its own, freed when it retires: true for
+    /// a module image, whose slots no directory id reaches.
+    owns_slots: bool = false,
 
     pub const TeardownCursor = struct {
         target: *Environment,
@@ -868,10 +886,7 @@ pub const Environment = struct {
                     // The root is retiring, so no word linked to these slots
                     // can prove it live again: drop what they hold. The slots
                     // themselves belong to the `Env`.
-                    var slots = self.target.slots.valueIterator();
-                    while (slots.next()) |slot| slot.*.release();
-                    self.target.slots.deinit(self.target.allocator);
-                    self.target.slots = .empty;
+                    self.target.slots.retireAll(self.target.allocator, self.target.owns_slots);
                     const shapes = self.target.shapes.currentOwned();
                     self.target.shapes.publish(null);
                     self.state = .{ .shapes = shapes };
@@ -1725,6 +1740,7 @@ pub const ModulePublisher = enum(usize) {
             .core = selected.core.target(),
             .own_scope = @backingInt(own_scope),
             .core_scope = @backingInt(selected.core_scope),
+            .slots = selected.slots,
         }, selected.recognizer);
         environment.freeze();
     }
@@ -1736,6 +1752,7 @@ pub const ModuleRecognition = struct {
     recognizer: FreezeRecognizer,
     core: EnvironmentView,
     core_scope: ScopeId,
+    slots: *const SlotIndex,
 };
 
 /// Which publication one scope accepts. Exactly one arm exists per scope.
@@ -2024,7 +2041,29 @@ const SlotIndex = Directory(SlotId, Slot);
 /// The id a word occurrence carries: its name's slot in the root it was
 /// written in. Zero is a word linked to nothing, which only the locals
 /// backend's reserved words are.
+///
+/// A word written in a module image carries the image's `ScopeId` with
+/// `image_root_flag` set instead, and finds its slot by name in the image's
+/// table. Images come and go, so giving each of their slots a directory id,
+/// which is never reused, would grow the directory with every module churned;
+/// the image's own scope id already names it, and its name is in the word.
 pub const SlotId = enum(u32) { none = 0, _ };
+pub const image_root_flag: u32 = 1 << 31;
+
+/// What a word's slot field names.
+pub const WordTarget = union(enum) {
+    unlinked,
+    /// A session or core slot, by directory id.
+    slot: SlotId,
+    /// A module image root; the slot is found by name once the image is proven
+    /// live.
+    image: ScopeId,
+};
+pub fn wordTarget(raw: u32) WordTarget {
+    if (raw == 0) return .unlinked;
+    if (raw & image_root_flag != 0) return .{ .image = @fromBackingInt(raw & ~image_root_flag) };
+    return .{ .slot = @fromBackingInt(raw) };
+}
 
 /// One name in one root: the session, a module image, or core.
 ///
@@ -2035,40 +2074,110 @@ pub const SlotId = enum(u32) { none = 0, _ };
 /// identity never changes and a reader never races a pointer swap. Removing
 /// the name only clears `bound`.
 ///
-/// Slots are owned by the `Env` for its lifetime, like scope cells, because a
-/// word reads one without a lock or a reference. What a slot references is
-/// released when its root retires, after which only a reader holding a
-/// liveness proof for the root would touch it, and none can.
+/// A session or core slot is found through the directory by id, before
+/// anything proves its root live, so it is owned by the `Env` for its whole
+/// lifetime. A module image's slot is found only by name in the image's own
+/// table, after the image is proven live, so it is freed with the image.
 pub const Slot = struct {
-    name: u32,
-    /// The root this slot belongs to. Cells are immortal, so this is readable
+    id: std.atomic.Value(u32) = .init(0),
+    name: std.atomic.Value(u32) = .init(0),
+    /// The root this slot belongs to. Cells are immortal, so it is readable
     /// whether or not the root is, and it is what a reader proves liveness
     /// against before touching `cell`.
-    root: *ScopeCell,
-    /// The root's binding cell for `name`, adopted on first binding and held
+    root: std.atomic.Value(?*ScopeCell) = .init(null),
+    /// The root's binding cell for the name, adopted on first binding and held
     /// until the root retires. Null while the name has never been bound here.
     cell: std.atomic.Value(?*BindingCell) = .init(null),
-    /// Whether the root currently binds `name`. False after removal, when
+    /// Whether the root currently binds the name. False after removal, when
     /// `cell` still holds the last binding but nothing reads it.
     bound: std.atomic.Value(bool) = .init(false),
-    /// Core's binding for `name`, the fallback when the root has none. Core is
-    /// frozen before any other root links a word, so this is fixed at link
+    /// Core's binding for the name, the fallback when the root has none. Core
+    /// is frozen before any other root links a word, so this is fixed at link
     /// time; core's shape holds the cell for the `Env`'s lifetime. Null for a
     /// core slot and for a name core does not bind.
-    core: ?*BindingCell = null,
-    id: SlotId = .none,
+    core: std.atomic.Value(?*BindingCell) = .init(null),
+    /// The next slot in the same bucket of its root's table.
+    next_in_root: std.atomic.Value(?*Slot) = .init(null),
+
+    pub fn nameId(self: *const Slot) u32 {
+        return self.name.load(.monotonic);
+    }
+    pub fn rootCell(self: *const Slot) *ScopeCell {
+        return self.root.load(.monotonic).?;
+    }
+    pub fn coreCell(self: *const Slot) ?*BindingCell {
+        return self.core.load(.monotonic);
+    }
 
     /// The cell this slot currently yields: the root's binding, else core's.
     /// The caller must have proven the root live.
     pub fn current(self: *const Slot) ?*BindingCell {
         if (self.bound.load(.acquire)) return self.cell.load(.acquire);
-        return self.core;
+        return self.core.load(.monotonic);
     }
 
-    /// Releases the root's cell. Runs only during the root's teardown.
-    fn release(self: *Slot) void {
+    /// Drops what the slot holds. Runs only during the root's teardown, when
+    /// no reader can prove the root live.
+    fn retire(self: *Slot) void {
         self.bound.store(false, .release);
         if (self.cell.swap(null, .acq_rel)) |held| held.release();
+        self.core.store(null, .monotonic);
+    }
+};
+
+/// One root's slots by name: a bucket array chained through the slots, sized
+/// once when the root first links and never rehashed, so no link pays for a
+/// resize. Guarded by the root's `writer`. Linking alone uses it; dispatch
+/// reaches a slot through its id.
+const SlotTable = struct {
+    const Bucket = std.atomic.Value(?*Slot);
+    /// Published once, before any slot is put; readers that find it null
+    /// find nothing.
+    buckets: std.atomic.Value(?[*]Bucket) = .init(null),
+    len: usize = 0,
+
+    fn bucket(len: usize, name: u32) usize {
+        const mixed = @as(u64, name) *% 0x9E3779B97F4A7C15;
+        return @intCast((mixed >> 32) % len);
+    }
+    /// Safe without `writer`: a put publishes a fully initialized slot with a
+    /// release store, and nothing is removed until the root retires, when no
+    /// reader can prove it live.
+    fn get(self: *const SlotTable, name: u32) ?*Slot {
+        const buckets = self.buckets.load(.acquire) orelse return null;
+        var cursor = buckets[bucket(self.len, name)].load(.acquire);
+        while (cursor) |slot| : (cursor = slot.next_in_root.load(.acquire)) {
+            if (slot.nameId() == name) return slot;
+        }
+        return null;
+    }
+    fn reserve(self: *SlotTable, allocator: std.mem.Allocator, count: usize) error{OutOfMemory}!void {
+        if (self.buckets.load(.monotonic) != null) return;
+        const buckets = try allocator.alloc(Bucket, count);
+        for (buckets) |*head| head.* = .init(null);
+        self.len = count;
+        self.buckets.store(buckets.ptr, .release);
+    }
+    fn put(self: *SlotTable, slot: *Slot) void {
+        const buckets = self.buckets.load(.monotonic).?;
+        const head = &buckets[bucket(self.len, slot.nameId())];
+        slot.next_in_root.store(head.load(.monotonic), .monotonic);
+        head.store(slot, .release);
+    }
+    /// Retires every slot, freeing those the table owns, then frees the buckets.
+    fn retireAll(self: *SlotTable, allocator: std.mem.Allocator, owned: bool) void {
+        const buckets = self.buckets.load(.acquire) orelse return;
+        for (buckets[0..self.len]) |*head| {
+            var cursor = head.load(.acquire);
+            while (cursor) |slot| {
+                cursor = slot.next_in_root.load(.acquire);
+                slot.next_in_root.store(null, .monotonic);
+                slot.retire();
+                if (owned) allocator.destroy(slot);
+            }
+        }
+        allocator.free(buckets[0..self.len]);
+        self.* = .{};
     }
 };
 
@@ -2207,6 +2316,31 @@ pub const Env = enum(usize) {
         return &self.privateState().core;
     }
 
+    /// The directory freeze-time recognition resolves a word's slot through.
+    pub fn slotDirectory(self: *const Env) *const SlotIndex {
+        return &self.privateState().slot_index;
+    }
+
+    /// Links words to their names' slots in the root `root` names. The root
+    /// must outlive every use of the linker: the reader or construction that
+    /// holds it runs inside that root.
+    pub fn linker(self: *Env, root: *ScopeCell) value.WordLinker {
+        return .{
+            .context = .{ @backingInt(self.*), @intFromPtr(root) },
+            .link_fn = linkFromContext,
+        };
+    }
+
+    fn linkFromContext(context: [2]usize, name: u32) error{OutOfMemory}!u32 {
+        var handle: Env = @fromBackingInt(context[0]);
+        const root: *ScopeCell = @ptrFromInt(context[1]);
+        const environment = if (root.core)
+            &handle.privateState().core
+        else
+            root.scope.load(.acquire).?.writableEnvironment();
+        return @backingInt(try handle.linkSlot(root, environment, name));
+    }
+
     /// The slot a word carries, or null for an unlinked word or one whose id
     /// was never issued. A slot is never freed while the `Env` lives, so this
     /// needs no proof; what the slot references does.
@@ -2229,20 +2363,39 @@ pub const Env = enum(usize) {
         const allocator = backing.host.allocator();
         environment.lockBlocking();
         defer environment.unlock();
-        if (environment.slots.get(name)) |existing| return existing.id;
-        try environment.slots.ensureUnusedCapacity(environment.allocator, 1);
-        const created = try allocator.create(Slot);
-        created.* = .{ .name = name, .root = root };
-        // Owned by the Env from here, like a scope cell: a failed registration
-        // below leaves a slot nothing names rather than one that leaks.
-        {
+        const image = root.ownerHandle() != null;
+        if (environment.slots.get(name)) |existing| return if (image)
+            @fromBackingInt(image_root_flag | @backingInt(root.id))
+        else
+            @fromBackingInt(existing.id.load(.monotonic));
+        // A module image links few names; the session and core link many.
+        try environment.slots.reserve(environment.allocator, if (image) 64 else 1024);
+        const created = if (image) owned: {
+            environment.owns_slots = true;
+            const fresh = try environment.allocator.create(Slot);
+            fresh.* = .{};
+            break :owned fresh;
+        } else shared: {
+            const fresh = try allocator.create(Slot);
+            fresh.* = .{};
+            // Owned by the Env from here: the directory reaches this slot
+            // without a reference, so it outlives every word that could.
             std.Io.Threaded.mutexLockUncancelable(&backing.slots_mutex);
             defer std.Io.Threaded.mutexUnlock(&backing.slots_mutex);
-            backing.slots.append(allocator, created) catch |err| {
-                allocator.destroy(created);
+            backing.slots.append(allocator, fresh) catch |err| {
+                allocator.destroy(fresh);
                 return err;
             };
-        }
+            break :shared fresh;
+        };
+        // The id first, so failure leaves the slot holding nothing. An image's
+        // slots take no directory id; words name the image instead.
+        const id: SlotId = if (image)
+            @fromBackingInt(image_root_flag | @backingInt(root.id))
+        else
+            try backing.slot_index.register(allocator, created);
+        created.name.store(name, .monotonic);
+        created.root.store(root, .monotonic);
         if (environment.boundCellLocked(name)) |cell| {
             created.cell.store(cell, .release);
             created.bound.store(true, .release);
@@ -2254,15 +2407,23 @@ pub const Env = enum(usize) {
             backing.core.lockBlocking();
             defer backing.core.unlock();
             if (backing.core.boundCellLocked(name)) |cell| {
-                created.core = cell;
+                created.core.store(cell, .monotonic);
                 cell.release();
             }
         }
-        created.id = try backing.slot_index.register(allocator, created);
-        environment.slots.putAssumeCapacity(name, created);
-        return created.id;
+        created.id.store(@backingInt(id), .release);
+        environment.slots.put(created);
+        return id;
     }
 
+    /// The slot for `name` in `image`, a module root the caller has proven
+    /// live, or null when no word in it named `name`.
+    pub fn imageSlot(_: *const Env, image: *Scope, name: u32) ?*Slot {
+        return switch (image.storage) {
+            .module_root => |environment| environment.slots.get(name),
+            .session, .core_build => null,
+        };
+    }
     /// The cell for one ordinary scope, created on first use. The scope retires
     /// it when its own refcount drops, before any teardown step.
     pub fn scopeCell(
@@ -2523,6 +2684,7 @@ pub const BuildingEnv = struct {
             .core = null,
             .own_scope = core_scope,
             .core_scope = core_scope,
+            .slots = &self.target.privateState().slot_index,
         }, selected);
         core.freeze();
         // SAFETY: Finishing consumes the builder; invalidation catches reuse
@@ -2669,7 +2831,7 @@ test "env: a slot keeps one cell per name across binding, removal, and rebinding
     try container.define(late, .{ .word = .{ .body = quotation(one.list).? } });
     const late_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(late))).?;
     try std.testing.expect(late_slot.current() != null);
-    try std.testing.expectEqual(late_slot.id, try container.linkSlot(root, &backing.session, intern.namespaceId(late)));
+    try std.testing.expectEqual(late_slot.id.load(.monotonic), @backingInt(try container.linkSlot(root, &backing.session, intern.namespaceId(late))));
 
     // Core is the fallback until the root shadows the name, and again after.
     _ = try backing.core.bind(shared, BindingSpec.fromTop(.{ .word = .{ .body = quotation(core_body.list).? } }));

@@ -53,12 +53,12 @@ pub fn installSource(
     var archive = archive_owner.view();
     var diag: reader.Diag = .{};
     // Core alone is the chain for a primitive or an embedded prelude
-    // definition, so every word this text contains carries the core scope.
+    // definition, so every word this text contains links to a core slot.
     var ingestion = try archive.sourceIngestCursor(
         source_name,
         source,
         &diag,
-        @backingInt(environment.coreScopeId()),
+        environment.linker(environment.coreCell()),
     );
     defer {
         while (!ingestion.advanceRetirement())
