@@ -883,6 +883,33 @@ test "typed kernels: typed reduce-groups matches the boxed route across budget b
     try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1 2] []] 'sum reduce-groups");
 }
 
+// Typed `del` marks a mask from a typed index leaf, checking each granted run
+// of indices at once, and compacts the kept elements; one scalar position
+// copies the two slices around it. Both cross a budget boundary here.
+test "typed kernels: typed del matches the boxed route across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+    for ([_][]const u8{
+        "dup len 2 / floor range 2 * del 0 (+) fold",
+        "dup len 1 - del 0 (+) fold",
+        "70000 del 0 (+) fold",
+        "0 del 0 (+) fold",
+        "dup len range dup reverse cat del len",
+        "[5 5 70000 3] del 0 (+) fold",
+        "dup len range dup len 1 - -1 put del",
+        "dup len range dup 1 over len put del",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

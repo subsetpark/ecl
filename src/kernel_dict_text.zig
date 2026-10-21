@@ -933,6 +933,12 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
         },
         .list => {
             if (key.borrow() == .list) {
+                const selection: ?DelSelection = switch (key.borrow().list.kind()) {
+                    .leaf_u8 => .{ .bytes = heap.LeafReader(.leaf_u8).acquire(key.borrow().list) },
+                    .leaf_i64 => .{ .ints = heap.LeafReader(.leaf_i64).acquire(key.borrow().list) },
+                    else => null,
+                };
+                if (selection) |typed| if (try startTypedDel(evaluator, collection.borrow(), typed)) return;
                 const count: usize = @intCast(collection.borrow().list.length());
                 const removed = try evaluator.allocator().alloc(bool, count);
                 var removed_owned_locally = true;
@@ -959,6 +965,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
                 return evaluator.fail(.domain, "del index is out of bounds");
             const count: usize = @intCast(collection.borrow().list.length());
             if (index >= count) return evaluator.fail(.domain, "del index is out of bounds");
+            if (try startTypedDel(evaluator, collection.borrow(), .{ .one = index })) return;
             const values = try evaluator.allocator().alloc(Value, count - 1);
             try evaluator.startDriver(ListDelDriver{
                 .collection = .init(collection.take()),
@@ -1060,6 +1067,147 @@ const PervasiveDelDriver = struct {
         return .stepped;
     }
 };
+
+/// The positions a typed `del` removes: one validated index, or a flat typed
+/// index leaf whose entries are validated as they are marked.
+const DelSelection = union(enum) {
+    one: usize,
+    bytes: heap.LeafReader(.leaf_u8),
+    ints: heap.LeafReader(.leaf_i64),
+
+    pub fn retire(self: *DelSelection, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            .one => {},
+            .bytes => |*reader| reader.release(releases),
+            .ints => |*reader| reader.release(releases),
+        }
+    }
+};
+
+/// `del` from a typed leaf: mark the selected positions in a mask, checking
+/// each granted run of indices at once, then compact the kept elements into a
+/// typed result. One scalar position needs no mask: the result is the two
+/// slices around it. Every phase takes a granted range per transition.
+fn TypedDelDriver(comptime kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        source: heap.Owned(heap.LeafReader(kind)),
+        selection: heap.Owned(DelSelection),
+        removed: ?heap.Owned([]bool) = null,
+        writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
+        phase: enum { initialize, mark, copy } = .initialize,
+        position: usize = 0,
+        removed_count: usize = 0,
+        destination: usize = 0,
+
+        fn mark(self: *Self, evaluator: *Machine, comptime Index: type, indices: []const Index) MachineError!void {
+            const removed = self.removed.?.borrow();
+            const run = indices[self.position..][0..evaluator.workBudget().take(indices.len - self.position)];
+            if (kernel_flat.firstIndexFault(Index, run, removed.len)) |fault| return switch (fault.kind) {
+                .negative => evaluator.fail(.domain, "del index is negative"),
+                .out_of_bounds => evaluator.fail(.domain, "del index is out of bounds"),
+            };
+            for (run) |index| {
+                const slot = &removed[@intCast(index)];
+                self.removed_count += @intFromBool(!slot.*);
+                slot.* = true;
+            }
+            self.position += run.len;
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            const source = self.source.borrow().slice();
+            while (!work.exhausted()) switch (self.phase) {
+                .initialize => {
+                    if (self.selection.borrow() == .one) {
+                        self.removed_count = 1;
+                        self.phase = .copy;
+                        continue;
+                    }
+                    if (self.removed == null) self.removed = .init(try evaluator.allocator().alloc(bool, source.len));
+                    const removed = self.removed.?.borrow();
+                    const granted = work.take(removed.len - self.position);
+                    @memset(removed[self.position..][0..granted], false);
+                    self.position += granted;
+                    if (self.position != removed.len) continue;
+                    self.position = 0;
+                    self.phase = .mark;
+                },
+                .mark => {
+                    const length = switch (self.selection.borrowMut().*) {
+                        .one => unreachable,
+                        .bytes => |*reader| length: {
+                            try self.mark(evaluator, u8, reader.slice());
+                            break :length reader.len();
+                        },
+                        .ints => |*reader| length: {
+                            try self.mark(evaluator, i64, reader.slice());
+                            break :length reader.len();
+                        },
+                    };
+                    if (self.position != length) continue;
+                    self.position = 0;
+                    self.phase = .copy;
+                },
+                .copy => {
+                    if (self.writer == null) self.writer = .init(try heap.LeafWriter(kind).init(
+                        evaluator.allocator(),
+                        source.len - self.removed_count,
+                    ));
+                    const writer = self.writer.?.borrowMut();
+                    const end = self.position + work.take(source.len - self.position);
+                    switch (self.selection.borrow()) {
+                        .one => |removed_index| {
+                            const left_end = @min(end, removed_index);
+                            if (self.position < left_end)
+                                writer.writeRange(self.position, source[self.position..left_end]);
+                            const right_start = @max(self.position, removed_index + 1);
+                            if (right_start < end)
+                                writer.writeRange(right_start - 1, source[right_start..end]);
+                        },
+                        .bytes, .ints => {
+                            const removed = self.removed.?.borrow();
+                            const out = writer.unpublishedRange(0, writer.len());
+                            for (source[self.position..end], removed[self.position..end]) |item, gone| {
+                                if (gone) continue;
+                                out[self.destination] = item;
+                                self.destination += 1;
+                            }
+                        },
+                    }
+                    self.position = end;
+                    if (self.position != source.len) continue;
+                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.selection.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    return .{ .output = writer.finish() };
+                },
+            };
+            return .stepped;
+        }
+    };
+}
+
+/// Starts the typed `del` for a typed leaf collection and a validated scalar
+/// position or a flat typed index leaf; false for any other shape.
+fn startTypedDel(evaluator: *Machine, collection: Value, selection: DelSelection) MachineError!bool {
+    var held = selection;
+    const kind = collection.list.kind();
+    inline for (put_leaf_kinds) |candidate| {
+        if (kind == candidate) {
+            try evaluator.startDriver(TypedDelDriver(candidate){
+                .source = .init(heap.LeafReader(candidate).acquire(collection.list)),
+                .selection = .init(held),
+            });
+            return true;
+        }
+    }
+    held.retire(evaluator.releaseDomain());
+    return false;
+}
 
 const ListDelDriver = struct {
     /// One list rebuilt without an indexed element, then it publishes.
