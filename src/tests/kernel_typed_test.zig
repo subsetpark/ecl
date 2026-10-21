@@ -834,6 +834,26 @@ test "typed kernels: tabled membership matches the pairwise route across numeric
     try expectParity(&runtime, .{ .floats = &.{ -0.0, 2.0, 2.5 } }, "[0 2 3] swap in?");
 }
 
+// A typed leaf groups by its elements' match keys in one bulk pass; offsets,
+// cursors, and the scatter run in granted ranges for every input. Both cross
+// a budget boundary here, with many groups and with zeros of either sign.
+test "typed kernels: typed group matches the boxed route across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 70001)) - 35000;
+    try expectParity(&runtime, .{ .ints = numbers }, "group dict.size");
+    try expectParity(&runtime, .{ .ints = numbers }, "group dict.vals (len) each 0 (+) fold");
+    try expectParity(&runtime, .{ .ints = numbers }, "group dict.keys 40 take");
+    try expectParity(&runtime, .{ .ints = numbers }, "group 3 at");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 1.5, 0.0, -0.0 } }, "group");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

@@ -620,6 +620,38 @@ fn numberEqual(a: Value, b: Value) bool {
     };
 }
 
+/// A leaf element's identity under whole-value matching, as a hashable key.
+/// Numbers match by mathematical value across int and float, so a float that
+/// equals an int keys as that int; any other float keys by its bits, which
+/// `==` agrees with because floats exclude NaN. Codepoints and symbols key as
+/// themselves; callers never compare across those domains.
+pub const LeafMatchKey = struct {
+    class: enum(u8) { empty, integer, real, other },
+    bits: u64,
+
+    pub fn of(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) LeafMatchKey {
+        return switch (kind) {
+            .leaf_u8 => .{ .class = .integer, .bits = item },
+            .leaf_i64 => .{ .class = .integer, .bits = @bitCast(item) },
+            .leaf_f64 => if (std.math.isFinite(item) and @trunc(item) == item and
+                item >= -9_223_372_036_854_775_808.0 and item < 9_223_372_036_854_775_808.0)
+                .{ .class = .integer, .bits = @bitCast(@as(i64, @intFromFloat(item))) }
+            else
+                .{ .class = .real, .bits = @bitCast(item) },
+            .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => .{ .class = .other, .bits = item },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        };
+    }
+
+    pub fn eql(self: LeafMatchKey, other: LeafMatchKey) bool {
+        return self.class == other.class and self.bits == other.bits;
+    }
+
+    pub fn hash(self: LeafMatchKey) u64 {
+        return (self.bits ^ @backingInt(self.class)) *% 0x9E37_79B9_7F4A_7C15;
+    }
+};
+
 /// Exact identity between the two numeric storage widths. Typed leaf kernels
 /// use this same rule instead of rounding an integer through `f64` or growing a
 /// second notion of numeric equality beside structural `match?`.

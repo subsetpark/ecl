@@ -842,7 +842,10 @@ const GroupDriver = struct {
     offsets: ?heap.Owned([]usize) = null,
     cursors: ?heap.Owned([]usize) = null,
     indices: ?heap.Owned([]i64) = null,
-    phase: enum { validate, allocate, initialize, hash, scan, key, offsets, cursors, scatter, groups, dictionary } = .validate,
+    phase: enum { validate, allocate, initialize, hash, scan, key, typed_assign, offsets, cursors, scatter, groups, dictionary } = .validate,
+    /// A single typed leaf is grouped by its elements' match keys in one bulk
+    /// pass, with no boxed reads, hash cursors, or per-cell matching.
+    typed: bool = false,
     item_index: usize = 0,
     key_count: usize = 0,
     candidate: usize = 0,
@@ -879,6 +882,49 @@ const GroupDriver = struct {
         const source = self.collection.borrow();
         return list.atUnchecked(if (self.columns) list.atUnchecked(source, column) else source, row);
     }
+    /// One typed leaf element as the scalar value it stands for.
+    fn leafValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
+        return switch (kind) {
+            .leaf_u8, .leaf_i64 => .{ .int = item },
+            .leaf_f64 => .{ .float = item },
+            .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
+            .leaf_symbol => .{ .symbol = item },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        };
+    }
+
+    /// Assigns `rows` of a typed leaf to groups. The open-addressed `slots`
+    /// hold group numbers plus one; a group's key is its first row's element.
+    fn assignTyped(self: *GroupDriver, comptime kind: value.HeapKind, rows: usize, releases: *heap.ReleaseDomain) void {
+        var reader = heap.LeafReader(kind).acquire(self.collection.borrow().list);
+        defer reader.release(releases);
+        const items = reader.slice();
+        const slots = self.slots.?.borrow();
+        const mask = slots.len - 1;
+        const key_rows = self.key_rows.?.borrow();
+        const assignments = self.assignments.?.borrow();
+        const frequencies = self.frequencies.?.borrow();
+        for (self.item_index..self.item_index + rows) |row| {
+            const key = equal.LeafMatchKey.of(kind, items[row]);
+            var slot: usize = @intCast(key.hash() >> 32 & mask);
+            const group = while (slots[slot] != 0) : (slot = (slot + 1) & mask) {
+                const existing = slots[slot] - 1;
+                if (equal.LeafMatchKey.of(kind, items[key_rows[existing]]).eql(key)) break existing;
+            } else fresh: {
+                const fresh = self.key_count;
+                self.keys.?.borrow()[fresh] = leafValue(kind, items[row]);
+                key_rows[fresh] = row;
+                frequencies[fresh] = 0;
+                slots[slot] = fresh + 1;
+                self.key_count += 1;
+                break :fresh fresh;
+            };
+            assignments[row] = group;
+            frequencies[group] += 1;
+        }
+        self.item_index += rows;
+    }
+
     fn assigned(self: *GroupDriver, group: usize) void {
         self.assignments.?.borrow()[self.item_index] = group;
         self.frequencies.?.borrow()[group] += 1;
@@ -896,6 +942,7 @@ const GroupDriver = struct {
                 const source = self.collection.borrow();
                 if (!self.columns) {
                     self.row_count = @intCast(source.list.length());
+                    self.typed = source.list.kind() != .generic_spine;
                     self.phase = .allocate;
                     continue;
                 }
@@ -917,12 +964,24 @@ const GroupDriver = struct {
                 const slots = self.slots.?.borrow();
                 if (self.index == slots.len) {
                     self.index = 0;
-                    self.phase = .hash;
+                    self.phase = if (self.typed) .typed_assign else .hash;
                     continue;
                 }
-                slots[self.index] = 0;
-                self.index += 1;
-                _ = work.spend();
+                const granted = work.take(slots.len - self.index);
+                @memset(slots[self.index..][0..granted], 0);
+                self.index += granted;
+            },
+            .typed_assign => {
+                if (self.item_index == self.row_count) {
+                    self.phase = .offsets;
+                    self.index = 0;
+                    continue;
+                }
+                const rows = work.take(self.row_count - self.item_index);
+                switch (self.collection.borrow().list.kind()) {
+                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| self.assignTyped(kind, rows, evaluator.releaseDomain()),
+                    .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+                }
             },
             .hash => {
                 if (self.item_index == self.row_count) {
@@ -1025,10 +1084,11 @@ const GroupDriver = struct {
                     self.index = 0;
                     continue;
                 }
-                self.offsets.?.borrow()[self.index + 1] =
-                    self.offsets.?.borrow()[self.index] + self.frequencies.?.borrow()[self.index];
-                self.index += 1;
-                _ = work.spend();
+                const offsets = self.offsets.?.borrow();
+                const frequencies = self.frequencies.?.borrow();
+                const end = self.index + work.take(self.key_count - self.index);
+                while (self.index != end) : (self.index += 1)
+                    offsets[self.index + 1] = offsets[self.index] + frequencies[self.index];
             },
             .cursors => {
                 if (self.index == self.key_count) {
@@ -1036,9 +1096,12 @@ const GroupDriver = struct {
                     self.index = 0;
                     continue;
                 }
-                self.cursors.?.borrow()[self.index] = self.offsets.?.borrow()[self.index];
-                self.index += 1;
-                _ = work.spend();
+                const granted = work.take(self.key_count - self.index);
+                @memcpy(
+                    self.cursors.?.borrow()[self.index..][0..granted],
+                    self.offsets.?.borrow()[self.index..][0..granted],
+                );
+                self.index += granted;
             },
             .scatter => {
                 if (self.index == self.assignments.?.borrow().len) {
@@ -1046,11 +1109,15 @@ const GroupDriver = struct {
                     self.index = 0;
                     continue;
                 }
-                const group_index = self.assignments.?.borrow()[self.index];
-                self.indices.?.borrow()[self.cursors.?.borrow()[group_index]] = @intCast(self.index);
-                self.cursors.?.borrow()[group_index] += 1;
-                self.index += 1;
-                _ = work.spend();
+                const assignments = self.assignments.?.borrow();
+                const indices = self.indices.?.borrow();
+                const cursors = self.cursors.?.borrow();
+                const end = self.index + work.take(assignments.len - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    const group_index = assignments[self.index];
+                    indices[cursors[group_index]] = @intCast(self.index);
+                    cursors[group_index] += 1;
+                }
             },
             .groups => {
                 if (self.index == self.key_count) {
