@@ -73,7 +73,6 @@ test "typed kernels: block-checked float reductions report the scalar route's fa
         .{ .values = &.{ 1.0e308, 1.0e308 } },
         .{ .values = &.{inf} },
         .{ .values = &.{ inf, -inf } },
-        .{ .values = &.{std.math.nan(f64)} },
         .{ .values = &.{ 0.0, inf } },
         .{ .values = &.{ 1.0e200, 1.0e200 } },
     };
@@ -1142,22 +1141,16 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
         }
     }
 
-    // NaN is not comparable in the scalar authority. A vector fault mask must
-    // therefore replay and report the first NaN's logical index.
+    // No operand is NaN, so float comparison and selection are infallible:
+    // infinities and signed zeros among ordinary lanes order exactly as the
+    // scalar authority orders them.
     @memset(left_real, 1.5);
-    const nan_position = flat.block_size + 1;
-    const later_nan_position = flat.block_size + 3;
-    left_real[nan_position] = std.math.nan(f64);
-    left_real[later_nan_position] = std.math.nan(f64);
-    inline for ([_][]const u8{ "<", "min" }) |word| {
+    left_real[flat.block_size + 1] = std.math.inf(f64);
+    left_real[flat.block_size + 3] = -std.math.inf(f64);
+    left_real[2] = -0.0;
+    inline for ([_][]const u8{ "<", "=", "min", "max" }) |word| {
         try expectParity(&runtime, .{ .floats = left_real }, "2.0 " ++ word);
-        const input = try buildFloats(.specialized, left_real);
-        const rendered = try outcome(&runtime, &.{input}, "2.0 " ++ word);
-        defer allocator.free(rendered);
-        var expected_index: [64]u8 = undefined;
-        const needle = try std.fmt.bufPrint(&expected_index, "'index {d}", .{nan_position});
-        try std.testing.expect(std.mem.indexOf(u8, rendered, needle) != null);
-        try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'type") != null);
+        try expectParity(&runtime, .{ .floats = left_real }, "0.0 " ++ word);
     }
 }
 
@@ -1222,13 +1215,8 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
     // or produced by overflow or division by zero, is a value, and the vector
     // mask must not flag it. Only a NaN result faults.
     const inf = std.math.inf(f64);
-    const nan = std.math.nan(f64);
     const Case = struct { special: f64, source: []const u8, kind: ?[]const u8 };
     const cases = [_]Case{
-        .{ .special = nan, .source = "2.0 +", .kind = "domain" },
-        .{ .special = nan, .source = "2.0 swap -", .kind = "domain" },
-        .{ .special = nan, .source = "2.0 *", .kind = "domain" },
-        .{ .special = nan, .source = "2.0 /", .kind = "domain" },
         .{ .special = inf, .source = "2.0 +", .kind = null },
         .{ .special = -inf, .source = "2.0 *", .kind = null },
         .{ .special = inf, .source = "2.0 swap /", .kind = null },
@@ -1258,20 +1246,9 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         }
     }
 
-    // Operations that cannot produce NaN from ordinary values still reject a
-    // NaN a host handed in, rather than publishing it.
-    for ([_][]const u8{ "neg", "abs", "sqrt", "2.0 atan2", "2.0 swap atan2" }) |source| {
-        for ([_]usize{ 0, flat.block_size, length - 1 }) |position| {
-            @memset(left, 1.5);
-            left[position] = nan;
-            try expectParity(&runtime, .{ .floats = left }, source);
-            try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, source, "domain", position);
-        }
-    }
-
     // An infinity in a block does not fault, so a NaN later in the same block
-    // must still be the one reported. The last pair sits wholly in the final
-    // scalar tail.
+    // must still be the one reported: `inf * 1` is a value, `inf * 0` is not.
+    // The last pair sits wholly in the final scalar tail.
     for ([_][2]usize{
         .{ 0, 9 },
         .{ 1, flat.block_size - 1 },
@@ -1279,11 +1256,19 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         .{ flat.block_size * 2, length - 1 },
     }) |positions| {
         @memset(left, 1.5);
+        @memset(right, 2.0);
         left[positions[0]] = inf;
-        left[positions[1]] = nan;
-        try expectParity(&runtime, .{ .floats = left }, "2.0 *");
-        try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, "2.0 *", "domain", positions[1]);
-        try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, left), "2.0 *");
+        right[positions[0]] = 1.0;
+        left[positions[1]] = inf;
+        right[positions[1]] = 0.0;
+        try expectParity(&runtime, .{ .float_pair = .{ .left = left, .right = right } }, "*");
+        try expectFaultAt(
+            &runtime,
+            &.{ try buildFloats(.specialized, left), try buildFloats(.specialized, right) },
+            "*",
+            "domain",
+            positions[1],
+        );
     }
 
     // A zero divisor broadcast from the right is a signed infinity in every

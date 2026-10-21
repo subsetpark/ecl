@@ -237,7 +237,9 @@ pub const Builder = opaque {
         try self.state().charge(.{ .nodes = 1, .bytes = 8 });
         self.state().pushOwned(.{ .int = item });
     }
+    /// ECL has no NaN value, so a NaN is invalid like a non-scalar codepoint.
     pub fn float(self: *Builder, item: f64) Error!void {
+        if (std.math.isNan(item)) return error.InvalidValue;
         try self.state().requireIdle();
         try self.state().requireSlot();
         try self.state().charge(.{ .nodes = 1, .bytes = 8 });
