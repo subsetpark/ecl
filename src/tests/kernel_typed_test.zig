@@ -929,6 +929,33 @@ test "typed kernels: typed stencil windows match the profiled route across budge
     try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 2.5 } }, "2 () stencil");
 }
 
+// `split` searches a granted run of start positions per transition, sized by
+// the separator's length, so a long text with sparse or long separators
+// resumes mid-search; leftmost non-overlapping matches are unchanged.
+test "typed kernels: split finds leftmost separators across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // Expected outputs are the per-codepoint scan's, recorded before the
+    // search changed; split has no boxed route to compare against.
+    for ([_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "\"x\" 70000 str.repeat \",\" cat \"y\" 70000 str.repeat cat \",\" split (len) each", .expected = "[70000 70000]" },
+        .{ .source = "\"ab\" 40000 str.repeat \"abx\" cat dup cat \"abx\" split (len) each", .expected = "[80000 80000 0]" },
+        .{ .source = "\"aaa\" 30000 str.repeat \"aa\" split len", .expected = "45001" },
+        .{ .source = "\"λ,\" 40000 str.repeat \",\" split len", .expected = "40001" },
+        .{ .source = "\"x\" 70000 str.repeat \"x\" 69000 str.repeat split (len) each", .expected = "[0 1000]" },
+    }) |case| {
+        const rendered = try outcome(&runtime, &.{}, case.source);
+        defer allocator.free(rendered);
+        std.testing.expectEqualStrings(case.expected, std.mem.trimEnd(u8, rendered, "\n")) catch |err| {
+            std.log.err("split case `{s}`", .{case.source});
+            return err;
+        };
+        try clearStack(&runtime);
+    }
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

@@ -1489,7 +1489,6 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         phase: enum { scan, profile_part, fill_part, materialize_result } = .scan,
         cursor: usize = 0,
         start: usize = 0,
-        match_index: usize = 0,
         empty_part_index: usize = 0,
         scan_complete: bool = false,
         part_start: usize = 0,
@@ -1498,6 +1497,13 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         part_max_codepoint: u32 = 0,
         part_writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
         result_materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+        fn matchesAt(text: anytype, separator: anytype, start: usize) bool {
+            for (separator, text[start..][0..separator.len]) |expected, actual| {
+                if (@as(u32, expected) != @as(u32, actual)) return false;
+            }
+            return true;
+        }
 
         fn beginPart(self: *Self, start: usize, end: usize) void {
             self.part_start = start;
@@ -1541,22 +1547,25 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                         self.beginPart(self.start, text_len);
                         continue;
                     }
-                    if (@as(u32, text_slice[self.cursor + self.match_index]) ==
-                        @as(u32, separator_slice[self.match_index]))
-                    {
-                        self.match_index += 1;
-                        if (self.match_index == separator_len) {
-                            const match_start = self.cursor;
-                            self.cursor += separator_len;
-                            self.match_index = 0;
-                            self.beginPart(self.start, match_start);
-                            self.start = self.cursor;
-                        }
-                    } else {
-                        self.cursor += 1;
-                        self.match_index = 0;
+                    // Try the start positions the budget pays for. A position
+                    // costs up to one comparison per separator codepoint, and
+                    // only the positions actually tried are charged.
+                    const positions = @min(
+                        text_len - separator_len + 1 - self.cursor,
+                        @max(1, work.remaining / separator_len),
+                    );
+                    const first = self.cursor;
+                    const end = self.cursor + positions;
+                    const found = while (self.cursor != end) : (self.cursor += 1) {
+                        if (matchesAt(text_slice, separator_slice, self.cursor)) break self.cursor;
+                    } else null;
+                    const tried = (if (found) |match_start| match_start + 1 else end) - first;
+                    _ = work.take(tried * separator_len);
+                    if (found) |match_start| {
+                        self.cursor = match_start + separator_len;
+                        self.beginPart(self.start, match_start);
+                        self.start = self.cursor;
                     }
-                    _ = work.spend();
                 },
                 .profile_part => {
                     const part_len = self.part_end - self.part_start;
