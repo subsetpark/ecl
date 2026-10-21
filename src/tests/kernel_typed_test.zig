@@ -854,6 +854,35 @@ test "typed kernels: typed group matches the boxed route across budget boundarie
     try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 1.5, 0.0, -0.0 } }, "group");
 }
 
+// `reduce-groups` over typed numeric values and typed index groups reduces in
+// granted runs. A group longer than one step's budget resumes mid-group, and a
+// bad index after an overflowing element still reports the overflow first.
+test "typed kernels: typed reduce-groups matches the boxed route across budget boundaries and fault order" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 1001)) - 500;
+    for ([_][]const u8{
+        "dup 7 mod group dict.vals 'sum reduce-groups",
+        "dup 7 mod group dict.vals 'count reduce-groups",
+        "dup 7 mod group dict.vals 'min reduce-groups",
+        "dup 7 mod group dict.vals 'max reduce-groups",
+        "dup len range 1 wrap 'sum reduce-groups",
+        "dup len range 5 + 1 wrap 'count reduce-groups",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 1 5]] 'sum reduce-groups");
+    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 5 1]] 'sum reduce-groups");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1] [1 0] [2 2]] 'min reduce-groups");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1 2] []] 'sum reduce-groups");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

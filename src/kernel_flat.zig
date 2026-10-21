@@ -688,11 +688,14 @@ pub fn blockRange(range: Chunk, offset: usize) Chunk {
     return .{ .start = start, .end = end };
 }
 
-/// Why an index cannot select from a collection.
-pub const IndexFault = enum { negative, out_of_bounds };
+/// Why an index cannot select from a collection, and where it is.
+pub const IndexFault = struct {
+    kind: enum { negative, out_of_bounds },
+    position: usize,
+};
 
 /// The fault of the first index in `indices` that is negative or not below
-/// `count`, or null when every index selects. Read as unsigned, a negative
+/// `count`, with its position in `indices`, or null when every index selects. Read as unsigned, a negative
 /// index is also past `count`, so the common case is one vector compare per
 /// lane group folded into a flag; only a flagged slice is rescanned in order,
 /// so the reported fault is the first one a sequential check would meet. A
@@ -719,9 +722,9 @@ pub fn firstIndexFault(comptime Index: type, indices: []const Index, count: usiz
     var flagged = @reduce(.Or, outside) != 0;
     for (indices[offset..]) |index| flagged = flagged or @as(Lane, @bitCast(index)) >= limit;
     if (!flagged) return null;
-    for (indices) |index| {
-        if (index < 0) return .negative;
-        if (@as(Lane, @bitCast(index)) >= limit) return .out_of_bounds;
+    for (indices, 0..) |index, position| {
+        if (index < 0) return .{ .kind = .negative, .position = position };
+        if (@as(Lane, @bitCast(index)) >= limit) return .{ .kind = .out_of_bounds, .position = position };
     }
     unreachable;
 }

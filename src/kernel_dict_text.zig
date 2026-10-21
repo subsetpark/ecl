@@ -624,7 +624,7 @@ fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: valu
                     }
                     const granted = work.take(indices.len - self.position);
                     const selected = indices[self.position..][0..granted];
-                    if (kernel_flat.firstIndexFault(Index, selected, self.count)) |fault| return switch (fault) {
+                    if (kernel_flat.firstIndexFault(Index, selected, self.count)) |fault| return switch (fault.kind) {
                         .negative => evaluator.fail(.domain, "put index is negative"),
                         .out_of_bounds => evaluator.fail(.domain, "put index is out of bounds"),
                     };

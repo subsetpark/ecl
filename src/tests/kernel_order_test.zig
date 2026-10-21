@@ -28,7 +28,7 @@ test "order: grouped reducers preserve selector order and validate errors" {
             "[4 2.5 9] [[0 1] [2]] 'min reduce-groups " ++
             "[\"a\" \"λ\" \"😀\"] [[2 0 1]] 'max reduce-groups " ++
             "[1e16 -1e16 1.0] [[0 1 2] [0 2 1]] 'sum reduce-groups",
-        "(70 0) (3 0) (2.5 9) (\"😀\") (1.0 0.0)",
+        "[70 0] [3 0] (2.5 9) (\"😀\") [1.0 0.0]",
     );
     try helper.expectErrors(&.{
         .{ .name = "negative index", .source = "[1] [[-1]] 'count reduce-groups", .kind = "domain", .word = "reduce-groups" },
@@ -46,7 +46,7 @@ test "order: aggregate symbols have fixed meaning while quotations resolve norma
     try helper.expectStack(
         "(pop 999) 'sum def {\"v\" [1 2]} [] " ++
             "[[\"fixed\" \"v\" 'sum] [\"quoted\" \"v\" (sum)]] table.aggregate",
-        "{\"fixed\" (3) \"quoted\" [999]}",
+        "{\"fixed\" [3] \"quoted\" [999]}",
     );
 }
 

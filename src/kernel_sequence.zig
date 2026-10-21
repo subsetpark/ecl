@@ -2263,7 +2263,7 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
                     },
                     .gather => {
                         const indices = self.indices.?.borrow().slice()[range.start..range.end];
-                        if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault) {
+                        if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
                             .negative => context.fail(.domain, "at index is negative"),
                             .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
                         };
