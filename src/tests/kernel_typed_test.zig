@@ -673,6 +673,48 @@ test "typed kernels: a flat operation of length n needs at most ceil(n over budg
     }
 }
 
+// `where` validates typed counts a block at a time and rescans only a failing
+// block, so a bad count in the first, a middle, or the last block — or past a
+// budget boundary — must report the generic route's kind, message, and index.
+// Runs longer than one step's budget resume inside the run, and a long mask
+// stays within bounded safe points.
+test "typed kernels: where reports the first bad count and resumes runs across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const length = quantum + flat.block_size + 3;
+    const numbers = try allocator.alloc(i64, length);
+    defer allocator.free(numbers);
+    for ([_]usize{ 0, flat.block_size - 1, flat.block_size, flat.block_size + 1, quantum - 1, quantum, length - 1 }) |bad| {
+        for (numbers, 0..) |*item, index| item.* = @intCast(index % 2);
+        numbers[bad] = -1;
+        try expectParity(&runtime, .{ .ints = numbers }, "where len");
+        // A count too large to sum in a block takes the exact rescan, which
+        // still reaches the negative count after it.
+        if (bad == 0) continue;
+        numbers[bad / 2] = std.math.maxInt(i64);
+        try expectParity(&runtime, .{ .ints = numbers }, "where len");
+    }
+
+    for ([_][]const i64{
+        &.{ 0, quantum * 2 + 5, 1 },
+        &.{ quantum - 1, 0, 0, 2, quantum + 1 },
+        &.{ 1, 0, 0, 0 },
+        &.{ 0, 0, 0 },
+    }) |counts| {
+        try expectParity(&runtime, .{ .ints = counts }, "where");
+    }
+
+    for (numbers, 0..) |*item, index| item.* = @intCast(index % 3 % 2);
+    const input = try buildInts(.specialized, numbers);
+    const rendered = try outcome(&runtime, &.{input}, "where len");
+    defer allocator.free(rendered);
+    try std.testing.expect(runtime.lastPolls() <= 2 * length / quantum + 8);
+}
+
 // A fault in the first, a middle, or the final block reports the first failing
 // logical index with the scalar path's kind, message, and data — proven by
 // comparing the whole rendered error dict against the generic route, and by

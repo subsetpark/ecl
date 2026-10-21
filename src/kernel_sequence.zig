@@ -383,10 +383,14 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
 
 /// Counts, then fills. The result is an exact-size index vector whose element
 /// type is known before the first store, so the fill writes `leaf_i64` storage
-/// directly; a run of equal indices is one bounded fill rather than a loop.
+/// directly.
 ///
-/// A typed count list is read through a pinned typed slice. A boxed one keeps
-/// the bounded per-element read, which is its registry classification.
+/// A typed count list is read through a pinned typed slice and validated a
+/// block at a time; only a block that fails is rescanned element by element, to
+/// report the first failing position. A boxed one keeps the bounded
+/// per-element read, which is its registry classification. Both share one
+/// fill loop, and both charge the budget once per granted range rather than
+/// once per element.
 const WhereDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     counts: heap.Owned(Value),
@@ -396,13 +400,121 @@ const WhereDriver = struct {
     writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
     reader: ?heap.Owned(heap.LeafReader(.leaf_i64)) = null,
     destination: usize = 0,
+    /// What remains of the run at `index` when a step's budget ran out inside it.
     repetition: usize = 0,
 
-    /// The count at one position: from the pinned typed slice when the input is
-    /// a typed leaf, through the bounded boxed read otherwise.
-    fn countAt(self: *const WhereDriver, index: usize) Value {
-        if (self.reader) |*pinned| return .{ .int = pinned.borrow().slice()[index] };
-        return list.atUnchecked(self.counts.borrow(), index);
+    /// Counts already validated by the counting pass, read without boxing.
+    const TypedCounts = struct {
+        items: []const i64,
+        fn at(self: TypedCounts, index: usize) usize {
+            return @intCast(self.items[index]);
+        }
+    };
+    const BoxedCounts = struct {
+        items: Value,
+        fn at(self: BoxedCounts, index: usize) usize {
+            return @intCast(list.atUnchecked(self.items, index).int);
+        }
+    };
+
+    /// The sum of one block of typed counts, or null when the block holds a
+    /// count that is negative or too large to sum without a checked add. Every
+    /// count below 2^55 keeps a block's sum below 2^63, so one `or` decides both.
+    fn blockSum(counts: []const i64) ?usize {
+        std.debug.assert(counts.len <= kernel_flat.block_size);
+        var bits: i64 = 0;
+        var sum: i64 = 0;
+        for (counts) |item| {
+            bits |= item;
+            sum +%= item;
+        }
+        if (bits >> 55 != 0) return null;
+        return std.math.cast(usize, sum);
+    }
+
+    /// Validates and adds the count at `index`: the exact per-element check,
+    /// which reports the first failing position.
+    fn countOne(self: *WhereDriver, evaluator: *Machine, item: Value) MachineError!void {
+        if (item != .int) return evaluator.failAtIndex(
+            .type,
+            "where expected integer counts",
+            self.index,
+        );
+        if (item.int < 0) return evaluator.failAtIndex(
+            .domain,
+            "where counts must be non-negative",
+            self.index,
+        );
+        const repetitions = std.math.cast(usize, item.int) orelse
+            return evaluator.failAtIndex(
+                .overflow,
+                "where count exceeds addressable size",
+                self.index,
+            );
+        self.total = std.math.add(usize, self.total, repetitions) catch
+            return evaluator.fail(.overflow, "where result is too large");
+        self.index += 1;
+    }
+
+    /// Counts one granted range of a typed list, a block at a time.
+    fn countTyped(self: *WhereDriver, evaluator: *Machine, counts: []const i64) MachineError!void {
+        var offset: usize = 0;
+        while (offset != counts.len) {
+            const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
+            offset += block.len;
+            if (blockSum(block)) |sum| {
+                if (std.math.add(usize, self.total, sum)) |total| {
+                    self.total = total;
+                    self.index += block.len;
+                    continue;
+                } else |_| {}
+            }
+            for (block) |item| try self.countOne(evaluator, .{ .int = item });
+        }
+    }
+
+    /// Writes as much of the result as `work` pays for: one unit per count
+    /// read, or per element written when a count is above one. A count of zero
+    /// or one stores its index unconditionally and advances by the count, so a
+    /// mask fills without a branch on its contents; the store a zero leaves
+    /// behind lies inside the result and is overwritten by the next index.
+    fn fill(self: *WhereDriver, work: *poll.WorkBudget, counts: anytype) void {
+        const out = self.writer.?.borrowMut().unpublishedRange(
+            self.destination,
+            self.total - self.destination,
+        );
+        const limit = work.remaining;
+        var spent: usize = 0;
+        var written: usize = 0;
+        var index = self.index;
+        if (self.repetition != 0) {
+            const run = @min(self.repetition, limit);
+            @memset(out[0..run], @intCast(index));
+            written = run;
+            spent = run;
+            self.repetition -= run;
+            if (self.repetition == 0) index += 1;
+        }
+        while (self.repetition == 0 and written != out.len and spent != limit) : (index += 1) {
+            const repetitions = counts.at(index);
+            out[written] = @intCast(index);
+            if (repetitions <= 1) {
+                written += repetitions;
+                spent += 1;
+                continue;
+            }
+            const run = @min(repetitions, limit - spent);
+            @memset(out[written..][0..run], @intCast(index));
+            written += run;
+            spent += run;
+            if (run != repetitions) {
+                self.repetition = repetitions - run;
+                break;
+            }
+        }
+        _ = work.take(spent);
+        self.index = index;
+        self.destination += written;
     }
 
     pub fn advance(evaluator: *Machine, self: *WhereDriver) MachineError!machine.WorkProgress {
@@ -412,6 +524,9 @@ const WhereDriver = struct {
         while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
+                    // Every index the fill stores is below `count`.
+                    if (count != 0 and std.math.cast(i64, count - 1) == null)
+                        return evaluator.fail(.overflow, "where index exceeds integer range");
                     self.writer = .init(try heap.LeafWriter(.leaf_i64).init(
                         evaluator.allocator(),
                         self.total,
@@ -420,50 +535,24 @@ const WhereDriver = struct {
                     self.phase = .fill;
                     continue;
                 }
-                const item = self.countAt(self.index);
-                if (item != .int) return evaluator.failAtIndex(
-                    .type,
-                    "where expected integer counts",
-                    self.index,
-                );
-                if (item.int < 0) return evaluator.failAtIndex(
-                    .domain,
-                    "where counts must be non-negative",
-                    self.index,
-                );
-                const repetitions = std.math.cast(usize, item.int) orelse
-                    return evaluator.failAtIndex(
-                        .overflow,
-                        "where count exceeds addressable size",
-                        self.index,
-                    );
-                self.total = std.math.add(usize, self.total, repetitions) catch
-                    return evaluator.fail(.overflow, "where result is too large");
-                self.index += 1;
-                _ = work.spend();
+                if (self.reader) |*pinned| {
+                    const granted = work.take(count - self.index);
+                    try self.countTyped(evaluator, pinned.borrow().slice()[self.index..][0..granted]);
+                } else {
+                    try self.countOne(evaluator, list.atUnchecked(self.counts.borrow(), self.index));
+                    _ = work.spend();
+                }
             },
             .fill => {
-                if (self.index == count) {
+                // Counts after the last nonzero one contribute nothing.
+                if (self.destination == self.total) {
                     self.phase = .materialize;
                     continue;
                 }
-                if (self.repetition == 0) {
-                    self.repetition = @intCast(self.countAt(self.index).int);
-                    if (self.repetition == 0) {
-                        self.index += 1;
-                        _ = work.spend();
-                        continue;
-                    }
-                }
-                const element = std.math.cast(i64, self.index) orelse
-                    return evaluator.fail(.overflow, "where index exceeds integer range");
-                // One run of equal indices is one bounded fill, charged for the
-                // elements it actually wrote.
-                const run = work.take(self.repetition);
-                self.writer.?.borrowMut().fillRange(self.destination, run, element);
-                self.destination += run;
-                self.repetition -= run;
-                if (self.repetition == 0) self.index += 1;
+                if (self.reader) |*pinned|
+                    self.fill(work, TypedCounts{ .items = pinned.borrow().slice() })
+                else
+                    self.fill(work, BoxedCounts{ .items = self.counts.borrow() });
             },
             .materialize => {
                 if (self.reader) |*pinned| pinned.deinit(evaluator.releaseDomain(), evaluator.allocator());
