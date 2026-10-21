@@ -77,7 +77,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "seeded attempts tasks and modules",
             .source = "[] (42) @attempt [2 3] (+) @attempt " ++
-                "[2 3] (+) @spawn task.await [2 0] (/) @attempt result.ok? " ++
+                "[2 3] (+) @spawn task.await [0 0] (/) @attempt result.ok? " ++
                 "[2 3] (+) @attempt [2 3] (+) @spawn task.await match? " ++
                 "[4 5] (+ 'sum set) 'seeded @defm seeded.sum",
             .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",

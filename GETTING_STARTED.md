@@ -207,8 +207,8 @@ observe unit behaviour is through the REPL, where every line forms a unit:
 ```
 ecl> 4 5
 4 5
-ecl> 6 7 0 /
-{'kind 'domain 'msg "kernel arithmetic is outside its domain" 'word '/ 'trace ['/] 'data {'source "<repl>" 'line 1 'col 7}}
+ecl> 6 7 0 div
+{'kind 'domain 'msg "kernel arithmetic is outside its domain" 'word 'div 'trace ['div] 'data {'source "<repl>" 'line 1 'col 7}}
 ecl>
 4 5
 ecl>
@@ -229,13 +229,13 @@ value to the calling stack. The simplest way to construct a unit is with
 `@attempt`:
 
 ```
-ecl> [] (7 0 /) @attempt
+ecl> [] (7 0 div) @attempt
 {
   'err {
     'kind 'domain
     'msg "kernel arithmetic is outside its domain"
-    'word '/
-    'trace ['/]
+    'word 'div
+    'trace ['div]
     'data {'source "<repl>" 'line 1 'col 9}
   }
 }
@@ -260,13 +260,13 @@ seeded stack:
 
 ```
 7
-ecl> wrap (0 /) @attempt
+ecl> wrap (0 div) @attempt
 {
   'err {
     'kind 'domain
     'msg "kernel arithmetic is outside its domain"
-    'word '/
-    'trace ['/]
+    'word 'div
+    'trace ['div]
     'data {'source "<repl>" 'line 1 'col 9}
   }
 }

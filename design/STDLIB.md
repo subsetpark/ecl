@@ -106,8 +106,9 @@ overflow is `'overflow`.
 Integer overflow is `'overflow`.
 
 ### /
-`( x y -- z )` — **Pervasive.** Float division. Division by zero is
-`'domain`.
+`( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero
+number over zero is an infinity signed by both operands, and `0 0 /` is
+`'domain` (NaN).
 
 ### <
 `( x y -- bool )` — **Pervasive.** Ascending comparison, producing 0/1
@@ -819,8 +820,8 @@ in the calling session.
 
 ### log
 `( x -- y )` — **Pervasive.** Natural logarithm; float transcendental.
-Edges follow the Numbers rules: `0 log` is `'overflow` (non-finite from
-finite), `-1 log` is `'domain` (NaN).
+Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `'domain`
+(NaN).
 
 ### match?
 `( left right -- bool )` — Whole-value structural equality; **not**

@@ -1528,17 +1528,17 @@ test "source-defined failures retain provenance after their unit" {
     defer runtime_inputs5.deinit();
     var session = try Session.init(allocator, &.{}, runtime_inputs5.inputs(.{}), .default, .evaluate);
     defer session.deinit();
-    try std.testing.expect((try session.runUnit("defs.ecl", "(1 0 /) 'boom def")) == .ok);
+    try std.testing.expect((try session.runUnit("defs.ecl", "(1 0 div) 'boom def")) == .ok);
     const error_value = (try session.runUnit("call.ecl", "boom")).err;
     defer session.release(error_value);
     const rendered = try printer.toOwnedString(allocator, error_value);
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"defs.ecl\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "'word '/") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "'trace ['/ 'boom]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "'word 'div") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "'trace ['div 'boom]") != null);
     const runtime_error = (try session.runUnit(
         "assembled.ecl",
-        "1 0 (/) cons cons call",
+        "1 0 (div) cons cons call",
     )).err;
     defer session.release(runtime_error);
     const runtime_rendered = try printer.toOwnedString(allocator, runtime_error);

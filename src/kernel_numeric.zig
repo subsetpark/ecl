@@ -874,7 +874,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
         .not_word => .{ .int = @intFromBool(!(try boolean(operand))) },
         .neg => switch (operand) {
             .int => |integer| .{ .int = std.math.sub(i64, 0, integer) catch return error.Overflow },
-            .float => |number| try checkedFloat(-number, !std.math.isFinite(number)),
+            .float => |number| .{ .float = -number },
             .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
         },
         .abs => switch (operand) {
@@ -882,18 +882,18 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 error.Overflow
             else
                 .{ .int = if (integer < 0) -integer else integer },
-            .float => |number| try checkedFloat(@abs(number), !std.math.isFinite(number)),
+            .float => |number| .{ .float = @abs(number) },
             .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
         },
         .sqrt => switch (operand) {
             .int => |integer| if (integer < 0)
                 error.Domain
             else
-                try checkedFloat(@sqrt(@as(f64, @floatFromInt(integer))), false),
+                .{ .float = @sqrt(@as(f64, @floatFromInt(integer))) },
             .float => |number| if (number < 0.0)
                 error.Domain
             else
-                try checkedFloat(@sqrt(number), !std.math.isFinite(number)),
+                .{ .float = @sqrt(number) },
             .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
         },
         .floor, .ceil, .round => switch (operand) {
@@ -982,15 +982,14 @@ fn numericBinary(left: Value, right: Value, operation: BinaryOp) ScalarError!Val
         .mul => a * b,
         else => unreachable,
     };
-    return checkedFloat(result, !std.math.isFinite(a) or !std.math.isFinite(b));
+    return checkedFloat(result);
 }
 
+/// Float division under IEEE rules: a nonzero numerator over zero is an
+/// infinity signed by both operands, and `0 0 /` is NaN, so `'domain`.
 fn divide(left: Value, right: Value) ScalarError!Value {
     if (!left.isNumber() or !right.isNumber()) return error.Type;
-    const a = asFloat(left);
-    const b = asFloat(right);
-    if (b == 0.0) return error.Domain;
-    return checkedFloat(a / b, !std.math.isFinite(a) or !std.math.isFinite(b));
+    return checkedFloat(asFloat(left) / asFloat(right));
 }
 
 fn integerDivision(left: Value, right: Value, remainder: bool) ScalarError!Value {
@@ -1007,17 +1006,12 @@ fn power(left: Value, right: Value) ScalarError!Value {
     if (!left.isNumber() or !right.isNumber()) return error.Type;
     const a = asFloat(left);
     const b = asFloat(right);
-    return checkedFloat(std.math.pow(f64, a, b), !std.math.isFinite(a) or !std.math.isFinite(b));
+    return checkedFloat(std.math.pow(f64, a, b));
 }
 
 fn atan2(left: Value, right: Value) ScalarError!Value {
     if (!left.isNumber() or !right.isNumber()) return error.Type;
-    const y = asFloat(left);
-    const x = asFloat(right);
-    return checkedFloat(
-        std.math.atan2(y, x),
-        !std.math.isFinite(y) or !std.math.isFinite(x),
-    );
+    return .{ .float = std.math.atan2(asFloat(left), asFloat(right)) };
 }
 
 fn transcendental(operation: UnaryOp, operand: Value) ScalarError!Value {
@@ -1030,7 +1024,7 @@ fn transcendental(operation: UnaryOp, operand: Value) ScalarError!Value {
         .cos => @cos(number),
         .neg, .abs, .sqrt, .floor, .ceil, .round, .not_word, .bnot => unreachable,
     };
-    return checkedFloat(result, !std.math.isFinite(number));
+    return checkedFloat(result);
 }
 
 fn minMax(left: Value, right: Value, choose_min: bool) ScalarError!Value {
@@ -1071,9 +1065,10 @@ fn offsetChar(codepoint: u32, offset: i64) ScalarError!Value {
     return .{ .char = result };
 }
 
-fn checkedFloat(result: f64, propagating: bool) ScalarError!Value {
+/// Floats follow IEEE 754, so overflow, poles, and division by zero give an
+/// infinity; only a NaN result, which ECL has no value for, is `'domain`.
+fn checkedFloat(result: f64) ScalarError!Value {
     if (std.math.isNan(result)) return error.Domain;
-    if (std.math.isInf(result) and !propagating) return error.Overflow;
     return .{ .float = result };
 }
 
@@ -1363,6 +1358,8 @@ fn binaryLoopPolicy(
 
 fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPolicy {
     if (operand == .integer and operation == .bnot) return .vector_infallible;
+    // A float's negation or magnitude is never NaN, so it cannot fault.
+    if (operand == .real and (operation == .neg or operation == .abs)) return .vector_infallible;
     return .scalar_checked;
 }
 
@@ -1903,25 +1900,6 @@ noinline fn replayCharacterBinary(left: *const FlatScalarOperand, right: *const 
     unreachable;
 }
 
-/// The lanes `numericBinary` or `divide` would reject, given that at least one
-/// result lane is non-finite. `checkedFloat` makes NaN a domain fault and an
-/// infinity an overflow unless an operand was already non-finite; `divide`
-/// rejects either signed zero before dividing.
-fn exactFloatFaults(
-    comptime operation: BinaryOp,
-    comptime lanes: comptime_int,
-    a: @Vector(lanes, f64),
-    b: @Vector(lanes, f64),
-    result: @Vector(lanes, f64),
-) @Vector(lanes, bool) {
-    @branchHint(.cold);
-    const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
-    const propagating = !(@abs(a) < inf) | !(@abs(b) < inf);
-    var faults = (result != result) | ((@abs(result) == inf) & !propagating);
-    if (operation == .div) faults = faults | (b == @as(@Vector(lanes, f64), @splat(0.0)));
-    return faults;
-}
-
 /// The next piece of a charged range. A vector loop writes its output's own
 /// range and stages nothing, so it takes the rest of the range as one block and
 /// pays its fixed per-block work once; a scalar loop's staging is bounded by the
@@ -2026,11 +2004,6 @@ fn binaryStep(
                 else => unreachable,
             };
         }
-
-        fn finite(result: @Vector(lanes, f64)) @Vector(lanes, bool) {
-            const inf: @Vector(lanes, f64) = @splat(std.math.inf(f64));
-            return @abs(result) < inf;
-        }
     };
     const checked_vector_body = struct {
         fn run(
@@ -2050,14 +2023,11 @@ fn binaryStep(
             if (left_class == .real and right_class == .real and
                 (operation == .add or operation == .sub or operation == .mul or operation == .div))
             {
-                // Every fault has a non-finite result, including division by
-                // either signed zero, so non-finite lanes cover the faults. They
-                // over-approximate them, since a non-finite operand propagates
-                // without faulting; `exact_vector_faults` settles a nominated
-                // block. Strict float mode keeps each lane's bits identical to
-                // the scalar operation, with no contraction.
+                // The only fault is a NaN result, exactly `checkedFloat`'s.
+                // Strict float mode keeps each lane's bits identical to the
+                // scalar operation, with no contraction.
                 const result = real_lanes.arithmetic(a, b);
-                return .{ .values = result, .faults = Vectors.mask(!real_lanes.finite(result)) };
+                return .{ .values = result, .faults = Vectors.mask(result != result) };
             }
             const nan = (a != a) | (b != b);
             const ones: @Vector(lanes, i64) = @splat(1);
@@ -2078,30 +2048,8 @@ fn binaryStep(
             };
         }
     }.run;
-    // Exactly the scalar authority's fault set, not a superset: a faulted block
-    // replays through `numericBinary` or `divide`, and a lane the scalar accepts
-    // would leave that replay with nothing to report. Only float arithmetic's
-    // mask over-approximates, so every other body is already exact.
-    const exact_vector_faults = struct {
-        fn run(
-            a: @Vector(lanes, left_class.Element()),
-            b: @Vector(lanes, right_class.Element()),
-        ) @Vector(lanes, bool) {
-            if (left_class == .real and right_class == .real and
-                (operation == .add or operation == .sub or operation == .mul or operation == .div))
-            {
-                const result = real_lanes.arithmetic(a, b);
-                const clean: @Vector(lanes, bool) = @splat(false);
-                if (@reduce(.And, real_lanes.finite(result))) return clean;
-                return exactFloatFaults(operation, lanes, a, b, result);
-            }
-            const none: @TypeOf(checked_vector_body(a, b).faults) = @splat(0);
-            return checked_vector_body(a, b).faults != none;
-        }
-    }.run;
     const checked: Vectors.Checked = .{
         .vector = checked_vector_body,
-        .exact = exact_vector_faults,
         .scalar = checked_body,
     };
     return struct {
@@ -2193,7 +2141,9 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
         fn run(a: operand_class.Element()) out.Element() {
             return switch (operation) {
                 .bnot => ~a,
-                .not_word, .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
+                .neg => -a,
+                .abs => @abs(a),
+                .not_word, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
             };
         }
     }.run;
@@ -2207,7 +2157,9 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
         fn run(a: @Vector(lanes, operand_class.Element())) @Vector(lanes, out.Element()) {
             return switch (operation) {
                 .bnot => ~a,
-                .not_word, .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
+                .neg => -a,
+                .abs => @abs(a),
+                .not_word, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
             };
         }
     }.run;
@@ -2969,11 +2921,11 @@ fn reduceStep(
             };
         }
 
-        /// Float `+`, `-`, and `*` cannot leave a non-finite value: NaN is
-        /// sticky, and an infinity stays infinite or becomes NaN. A block whose
-        /// unchecked result is finite therefore had no faulting step, so it
-        /// pays one test instead of one per element. Anything else, including a
-        /// legitimate infinity, replays the block through the checked scalar.
+        /// Float `+`, `-`, and `*` fault only on a NaN result, and NaN is
+        /// sticky through them. A block whose unchecked result is not NaN
+        /// therefore had no faulting step, so it pays one test instead of one
+        /// per element; infinities pass through. A NaN block replays through
+        /// the checked scalar to report the fault where it happened.
         const unchecked = accumulator_class == .real and
             (operation == .add or operation == .sub or operation == .mul);
 
@@ -2992,7 +2944,7 @@ fn reduceStep(
                 };
                 if (scan) block.items[index - piece.start] = accumulator;
             }
-            if (!std.math.isFinite(accumulator)) return false;
+            if (std.math.isNan(accumulator)) return false;
             store(state, accumulator);
             if (scan) block.len = piece.len();
             return true;

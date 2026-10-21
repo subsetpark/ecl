@@ -376,7 +376,7 @@ test "concurrency: a failing sibling cancels peers mid-construction" {
     // than fail it.
     const failure = switch (try runtime.runUnit(
         "concurrency.ecl",
-        "[0 1 2 3] [] ((0 =) (1 0 /) (30000 range (29999 (pop) times) @attempt pop 1) if) @each",
+        "[0 1 2 3] [] ((0 =) (1 0 div) (30000 range (29999 (pop) times) @attempt pop 1) if) @each",
     )) {
         .err => |item| item,
         .ok, .incomplete => return error.ExpectedLanguageError,

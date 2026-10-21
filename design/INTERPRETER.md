@@ -1094,10 +1094,9 @@ so the replay begins at the first faulting vector, whose operands are intact.
 Nothing else can observe a claimed input, which was solely owned and is only
 released when its operation fails.
 
-A vector block may be nominated by a fault mask that over-approximates the
-scalar fault set, such as "some lane is non-finite", tested once per block.
-A nominated block is declared faulted only if the exact mask agrees, so a
-replay always finds the fault it is sent for.
+A vector block's fault mask is exactly the scalar fault set, tested once per
+block, so a replay always finds the fault it is sent for. Float arithmetic can
+keep it exact cheaply because its only fault is a NaN result.
 
 Scalar broadcasting reads a repeated operand in stride-zero style, avoiding an
 array of copies. SIMD is permitted only behind a closed policy whose scalar

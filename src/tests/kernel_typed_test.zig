@@ -1218,8 +1218,9 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
     try expectParity(&runtime, .{ .floats = &zeroes }, "-1.0 /");
 
     // One exceptional lane among ordinary ones. `kind == null` is a case the
-    // scalar authority accepts: an infinite operand propagates rather than
-    // overflowing, and the vector mask must not flag it.
+    // scalar authority accepts: an infinity, whether propagated from an operand
+    // or produced by overflow or division by zero, is a value, and the vector
+    // mask must not flag it. Only a NaN result faults.
     const inf = std.math.inf(f64);
     const nan = std.math.nan(f64);
     const Case = struct { special: f64, source: []const u8, kind: ?[]const u8 };
@@ -1233,12 +1234,15 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         .{ .special = inf, .source = "2.0 swap /", .kind = null },
         .{ .special = inf, .source = "inf -", .kind = "domain" },
         .{ .special = 0.0, .source = "inf *", .kind = "domain" },
-        .{ .special = 1.0e308, .source = "1.0e308 +", .kind = "overflow" },
-        .{ .special = -1.0e308, .source = "1.0e308 swap -", .kind = "overflow" },
-        .{ .special = 1.0e308, .source = "10.0 *", .kind = "overflow" },
-        .{ .special = 1.0e-308, .source = "1.0e308 swap /", .kind = "overflow" },
-        .{ .special = 0.0, .source = "1.0 swap /", .kind = "domain" },
-        .{ .special = -0.0, .source = "1.0 swap /", .kind = "domain" },
+        .{ .special = 1.0e308, .source = "1.0e308 +", .kind = null },
+        .{ .special = -1.0e308, .source = "1.0e308 swap -", .kind = null },
+        .{ .special = 1.0e308, .source = "10.0 *", .kind = null },
+        .{ .special = 1.0e-308, .source = "1.0e308 swap /", .kind = null },
+        .{ .special = 0.0, .source = "1.0 swap /", .kind = null },
+        .{ .special = -0.0, .source = "1.0 swap /", .kind = null },
+        .{ .special = 0.0, .source = "0.0 swap /", .kind = "domain" },
+        .{ .special = -0.0, .source = "0.0 swap /", .kind = "domain" },
+        .{ .special = inf, .source = "inf swap /", .kind = "domain" },
     };
     for (cases) |case| {
         for ([_]usize{ 0, 1, flat.block_size - 1, flat.block_size, length - 1 }) |position| {
@@ -1254,9 +1258,9 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         }
     }
 
-    // A propagating infinity nominates its block for the exact pass without
-    // faulting, so a genuine fault later in the same block must still be the
-    // one reported. The last pair sits wholly in the final scalar tail.
+    // An infinity in a block does not fault, so a NaN later in the same block
+    // must still be the one reported. The last pair sits wholly in the final
+    // scalar tail.
     for ([_][2]usize{
         .{ 0, 9 },
         .{ 1, flat.block_size - 1 },
@@ -1271,16 +1275,15 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, left), "2.0 *");
     }
 
-    // A zero divisor broadcast from the right faults at the first lane.
+    // A zero divisor broadcast from the right is a signed infinity in every
+    // lane, bit for bit as the scalar divides.
     @memset(left, 1.5);
+    left[1] = -1.5;
     inline for ([_][]const u8{ "0.0 /", "-0.0 /" }) |source| {
         try expectParity(&runtime, .{ .floats = left }, source);
-        try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, source, "domain", 0);
-        try expectFaultRetainsInput(&runtime, try buildFloats(.specialized, left), source);
     }
 
-    // An infinite dividend over a signed zero yields a propagating infinity,
-    // so only the divisor test itself can report the lane.
+    // An infinite dividend over a signed zero is an infinity, not a fault.
     for ([_]f64{ 0.0, -0.0 }) |zero| {
         for ([_]usize{ 0, 1, flat.block_size, length - 1 }) |position| {
             @memset(left, 1.5);
@@ -1288,27 +1291,21 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
             left[position] = std.math.copysign(inf, zero);
             right[position] = zero;
             try expectParity(&runtime, .{ .float_pair = .{ .left = left, .right = right } }, "/");
-            try expectFaultAt(
-                &runtime,
-                &.{ try buildFloats(.specialized, left), try buildFloats(.specialized, right) },
-                "/",
-                "domain",
-                position,
-            );
         }
     }
 
-    // Leaf by leaf: the fault lane comes from the right operand.
-    @memset(left, 1.0e308);
+    // Leaf by leaf: the fault lane comes from the right operand, an infinity
+    // meeting its negation.
+    @memset(left, inf);
     for ([_]usize{ 0, flat.block_size, length - 1 }) |position| {
         @memset(right, 1.0);
-        right[position] = 1.0e308;
+        right[position] = -inf;
         try expectParity(&runtime, .{ .float_pair = .{ .left = left, .right = right } }, "+");
         try expectFaultAt(
             &runtime,
             &.{ try buildFloats(.specialized, left), try buildFloats(.specialized, right) },
             "+",
-            "overflow",
+            "domain",
             position,
         );
     }
@@ -1342,10 +1339,10 @@ test "typed kernels: adopted outputs report the first fault after storing earlie
 
     // A recognized vector fold: the second step takes over the first step's
     // result as its output. Faults land in the first vector, the second
-    // element, the middle of a block, and the scalar tail. In the carried
-    // case an infinity from an input reaches the accumulator first: its
-    // vector is suspect but exactly clean, so it is stored in place and the
-    // later overflow is still the one reported.
+    // element, the middle of a block, and the scalar tail. Each fault is an
+    // infinity meeting its negation. In the carried case an infinity from an
+    // input reaches the accumulator first: it does not fault, so its vector is
+    // stored in place and the later NaN is still the one reported.
     const row_a = try allocator.alloc(f64, length);
     defer allocator.free(row_a);
     const row_b = try allocator.alloc(f64, length);
@@ -1361,9 +1358,9 @@ test "typed kernels: adopted outputs report the first fault after storing earlie
                 b.* = base * 2.0;
                 c.* = -base;
             }
-            row_a[position] = 1.0e308;
+            row_a[position] = std.math.inf(f64);
             row_b[position] = 0.0;
-            row_c[position] = 1.0e308;
+            row_c[position] = -std.math.inf(f64);
             if (carried) row_b[2] = std.math.inf(f64);
             var rows = [_]value.Value{
                 try buildFloats(.specialized, row_a),
@@ -1376,7 +1373,7 @@ test "typed kernels: adopted outputs report the first fault after storing earlie
             const spine = try list.fromValues(allocator, &rows);
             const rendered = try outcome(&runtime, &.{spine}, "(+) fold1");
             defer allocator.free(rendered);
-            std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'overflow") != null and
+            std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'domain") != null and
                 std.mem.indexOf(u8, rendered, position_needle) != null) catch |err| {
                 std.log.err("fold fault at {d} (carried {}) reported: {s}", .{ position, carried, rendered });
                 return err;

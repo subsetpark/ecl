@@ -14,7 +14,7 @@ const cases = [_]Case{
     .{ .name = "+", .source = "[1 2] 3 +" },
     .{ .name = "-", .source = "\\c \\a -" },
     .{ .name = "*", .source = "[[1 2] [3]] 10 *" },
-    .{ .name = "/", .source = "1 0 /" },
+    .{ .name = "/", .source = "0 0 /" },
     .{ .name = "div", .source = "7 3 div" },
     .{ .name = "mod", .source = "7 3 mod" },
     .{ .name = "pow", .source = "2 3 pow" },
@@ -228,7 +228,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== / ===
-        \\source: 1 0 /
+        \\source: 0 0 /
         \\exit: 1
         \\stdout:
         \\<empty>

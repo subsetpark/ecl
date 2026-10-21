@@ -62,16 +62,25 @@ test "numeric: transcendental non-finite edges" {
             .expected = "inf 0.0",
         },
         .{
+            .name = "finite operands reach infinity at poles and on overflow",
+            .source = "0 log 1000 exp 0 -1 pow 1e308 10 *",
+            .expected = "-inf inf inf inf",
+        },
+        .{
+            .name = "float division by either zero is a signed infinity",
+            .source = "1 0 / 1 -0.0 / -1 0 /",
+            .expected = "inf -inf -inf",
+        },
+        .{
             .name = "transcendental leaf pervasion",
             .source = "[0 0] exp [0 0] [1 1] atan2",
             .expected = "[1.0 1.0] [0.0 0.0]",
         },
     });
     try helper.expectErrors(&.{
-        .{ .name = "log zero overflows", .source = "0 log", .kind = "overflow", .word = "log" },
         .{ .name = "log negative is outside the domain", .source = "-1 log", .kind = "domain", .word = "log" },
         .{ .name = "sin infinity is outside the domain", .source = "inf sin", .kind = "domain", .word = "sin" },
-        .{ .name = "finite exp cannot produce infinity", .source = "1000 exp", .kind = "overflow", .word = "exp" },
+        .{ .name = "zero over zero is outside the domain", .source = "0 0 /", .kind = "domain", .word = "/" },
         .{
             .name = "pervasive log reports the failing index",
             .source = "[1 -1] log",
@@ -133,16 +142,16 @@ test "numeric: fault blocks report first index before aliased stores" {
             .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
         },
         .{
-            .name = "float division by zero in a second block",
-            .source = "300 range 1.0 * 256 - 1.0 swap /",
+            .name = "float zero over zero in a second block",
+            .source = "300 range 1.0 * 256 - dup /",
             .kind = "domain",
             .word = "/",
             .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
         },
         .{
-            .name = "finite float addition overflows",
-            .source = "[1.0 1.0e308 1.0e308] 1.0e308 +",
-            .kind = "overflow",
+            .name = "an overflow's infinity meets its negation in a later lane",
+            .source = "[1.0 1.0e308 2.0] [1.0 10.0 1.0] * dup neg +",
+            .kind = "domain",
             .word = "+",
             .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
         },
@@ -167,8 +176,8 @@ test "numeric: aliased fault replay retains source representation across retags"
         },
         .{
             .name = "integer input reused for float output",
-            .source = "[0 9223372036854775807] 1024 pow",
-            .kind = "overflow",
+            .source = "[4 -8] 0.5 pow",
+            .kind = "domain",
             .word = "pow",
             .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
         },
