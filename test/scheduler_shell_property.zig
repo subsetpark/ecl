@@ -95,7 +95,12 @@ fn runShellScenario(encoded: u16) !void {
             // Load the observer before spawning finite competitors. A cold
             // qualified lookup can park the parent while both children finish;
             // await-any then correctly chooses the lowest terminal index,
-            // which says nothing about cooperative fairness.
+            // which says nothing about cooperative fairness. The spawns then
+            // run inside a task: with one worker, that task holds the worker
+            // until it parks in await-any, so no competitor can start before
+            // the short task exists. Spawned from the root thread instead, an
+            // OS preemption between two spawns let the long competitor finish
+            // first, and the one-worker assertion failed under load.
             try source_buffer.writer.writeAll("'task ('await-any) import ");
         },
         else => {},
@@ -146,24 +151,24 @@ fn runShellScenario(encoded: u16) !void {
         },
         .kernel_fairness => {
             try source_buffer.writer.writeAll(
-                "[] ([1] 100000 take sum) @spawn pop " ++
+                "[] ([] ([1] 100000 take sum) @spawn pop " ++
                     "[] ([1] 100000 take sum) @spawn " ++
-                    "[] (7) @spawn pair task.await-any pop",
+                    "[] (7) @spawn pair task.await-any pop) @spawn task.await 'ok at first",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
         .result_fairness => {
             try source_buffer.writer.writeAll(
-                "[] ([1] 200000 take call) @spawn " ++
-                    "[] (7) @spawn pair task.await-any pop",
+                "[] ([] ([1] 200000 take call) @spawn " ++
+                    "[] (7) @spawn pair task.await-any pop) @spawn task.await 'ok at first",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
         .raise_fairness => {
             try source_buffer.writer.writeAll(
                 "['x] 200000 take 'trace-value set " ++
-                    "[] ([] ('kind 'custom 'trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
-                    "[] (7) @spawn pair task.await-any pop",
+                    "[] ([] ([] ('kind 'custom 'trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
+                    "[] (7) @spawn pair task.await-any pop) @spawn task.await 'ok at first",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
@@ -215,8 +220,8 @@ fn runShellScenario(encoded: u16) !void {
         },
         .infra_fairness => {
             try source_buffer.writer.writeAll(
-                "[] ([1] 200000 take () infra len) @spawn " ++
-                    "[] (7) @spawn pair task.await-any pop",
+                "[] ([] ([1] 200000 take () infra len) @spawn " ++
+                    "[] (7) @spawn pair task.await-any pop) @spawn task.await 'ok at first",
             );
             try expected_buffer.writer.writeAll("1\n");
         },
