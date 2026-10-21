@@ -705,6 +705,37 @@ test "typed kernels: copy shapes resume across budget boundaries and report the 
     }
 }
 
+// `raze` copies same-class leaf children straight into a typed result, widening
+// narrower children, and keeps the profiled route for everything else; a child
+// longer than one step's budget resumes inside the child.
+test "typed kernels: raze of leaf children matches the profiled route across classes and budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ 3, quantum + 1 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+        for ([_][]const u8{
+            "dup reverse pair raze 0 (+) fold",
+            "dup 3 take swap pair raze 0 (+) fold",
+            "[1 2] swap pair raze 0 (+) fold",
+            "dup 0 take pair raze",
+            "dup 2.5 + pair raze 0 (+) fold",
+            "3 take 1 pair raze",
+        }) |source| {
+            try expectParity(&runtime, .{ .ints = numbers }, source);
+        }
+    }
+    const ascii = [_]u32{ 'a', 'b', 'a' };
+    try expectParity(&runtime, .{ .codepoints = &ascii }, "\"λ🙂\" pair raze");
+    try expectParity(&runtime, .{ .codepoints = &ascii }, "dup pair raze");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5 } }, "dup pair raze");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

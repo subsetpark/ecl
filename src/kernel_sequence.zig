@@ -1128,16 +1128,100 @@ fn razePrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(RazeDriver{ .collection = .init(collection.take()) });
 }
 
+/// The element class a raze's typed result is chosen from.
+const RazeClass = enum { none, ints, floats, chars, symbols, boxed };
+
+fn razeClass(kind: value.HeapKind) RazeClass {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64 => .ints,
+        .leaf_f64 => .floats,
+        .leaf_char1, .leaf_char2, .leaf_char4 => .chars,
+        .leaf_symbol => .symbols,
+        .generic_spine, .dict, .task, .module, .port, .reserved_mask => .boxed,
+    };
+}
+
+/// The typed result buffer, held so a cancelled raze retires it.
+const RazeOutput = struct {
+    builder: heap.AnyListBuilder,
+    pub fn retire(self: *RazeOutput, releases: *heap.ReleaseDomain) void {
+        self.builder.retirePartial(releases);
+    }
+};
+
+/// Flattens one level. When every non-empty child is a typed leaf of one
+/// element class, each child's slice is copied, widened where narrower,
+/// straight into a typed result as wide as the widest child. Otherwise the
+/// children are read into boxed values and the result is profiled.
 const RazeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     collection: heap.Owned(Value),
-    phase: enum { count, fill, materialize } = .count,
+    phase: enum { count, fill, typed_fill, materialize } = .count,
     index: usize = 0,
     child_index: usize = 0,
     total: usize = 0,
+    class: RazeClass = .none,
+    widest: value.HeapKind = .leaf_u8,
     values: ?heap.Owned([]Value) = null,
+    output: ?heap.Owned(RazeOutput) = null,
     destination: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    fn classify(self: *RazeDriver, item: Value) void {
+        if (item != .list) {
+            self.class = .boxed;
+            return;
+        }
+        if (item.list.length() == 0 or self.class == .boxed) return;
+        const kind = item.list.kind();
+        const class = razeClass(kind);
+        if (self.class == .none) {
+            self.class = class;
+            self.widest = kind;
+        } else if (self.class != class) {
+            self.class = .boxed;
+        } else if (elementBits(kind) > elementBits(self.widest)) {
+            self.widest = kind;
+        }
+    }
+
+    fn elementBits(kind: value.HeapKind) usize {
+        return switch (kind) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |leaf| @bitSizeOf(heap.LeafElement(leaf)),
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        };
+    }
+
+    /// Whether every `Source` element coerces to `Out` unchanged. The class
+    /// check already keeps floats, symbols, and codepoints apart at run time;
+    /// this only decides which pairs need code.
+    fn widens(comptime Source: type, comptime Out: type) bool {
+        if (Source == Out) return true;
+        const from = @typeInfo(Source);
+        const to = @typeInfo(Out);
+        if (from != .int or to != .int) return false;
+        return to.int.bits > from.int.bits and
+            (to.int.signedness == .signed or from.int.signedness == .unsigned);
+    }
+
+    /// Copies `out.len` elements of `child`, starting at `from`, into `out`.
+    fn copyChild(comptime Out: type, out: []Out, child: *heap.ListHandle, from: usize, releases: *heap.ReleaseDomain) void {
+        switch (child.kind()) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+                const Source = heap.LeafElement(kind);
+                if (comptime !widens(Source, Out)) unreachable;
+                var reader = heap.LeafReader(kind).acquire(child);
+                defer reader.release(releases);
+                const source = reader.slice()[from..][0..out.len];
+                if (Source == Out) {
+                    @memcpy(out, source);
+                } else for (out, source) |*slot, item| {
+                    slot.* = item;
+                }
+            },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        }
+    }
 
     pub fn advance(evaluator: *Machine, self: *RazeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1146,17 +1230,56 @@ const RazeDriver = struct {
         while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
-                    self.values = .init(try evaluator.allocator().alloc(Value, self.total));
                     self.index = 0;
+                    if (self.class != .none and self.class != .boxed) {
+                        self.output = .init(.{ .builder = try heap.AnyListBuilder.init(
+                            evaluator.allocator(),
+                            self.widest,
+                            self.total,
+                            self.total,
+                        ) });
+                        self.phase = .typed_fill;
+                        continue;
+                    }
+                    self.values = .init(try evaluator.allocator().alloc(Value, self.total));
                     self.phase = .fill;
                     continue;
                 }
                 const item = list.atUnchecked(self.collection.borrow(), self.index);
+                self.classify(item);
                 const contribution: usize = if (item == .list) @intCast(item.list.length()) else 1;
                 self.total = std.math.add(usize, self.total, contribution) catch
                     return evaluator.fail(.overflow, "raze result is too large");
                 self.index += 1;
                 _ = work.spend();
+            },
+            .typed_fill => {
+                if (self.index == count) {
+                    var output = self.output.?.take();
+                    self.output = null;
+                    return .{ .output = .{ .list = output.builder.finish() } };
+                }
+                const child = list.atUnchecked(self.collection.borrow(), self.index).list;
+                const length: usize = @intCast(child.length());
+                if (self.child_index == length) {
+                    self.child_index = 0;
+                    self.index += 1;
+                    _ = work.spend();
+                    continue;
+                }
+                const run = work.take(length - self.child_index);
+                switch (self.output.?.borrowMut().builder) {
+                    .generic => unreachable,
+                    inline else => |*builder| copyChild(
+                        @TypeOf(builder.items()[0]),
+                        builder.items()[self.destination..][0..run],
+                        child,
+                        self.child_index,
+                        evaluator.releaseDomain(),
+                    ),
+                }
+                self.destination += run;
+                self.child_index += run;
             },
             .fill => {
                 if (self.index == count) {
