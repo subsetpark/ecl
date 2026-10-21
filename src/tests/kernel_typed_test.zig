@@ -781,6 +781,31 @@ test "typed kernels: grade and sort keep the stable permutation across runs merg
     try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "sort");
 }
 
+// A recognized `each` or `zip-with` over a boxed spine arms one cursor per
+// element and runs elements until the step's budget is spent, so a spine
+// longer than the budget resumes between elements and inside a nested row.
+test "typed kernels: recognized each over a boxed spine resumes between elements across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @intCast(index % 1000);
+    for ([_][]const u8{
+        "(1 +) each 0 (+) fold",
+        "(neg) each 0 (+) fold",
+        "(2 swap -) each 0 (+) fold",
+        "dup (*) zip-with 0 (+) fold",
+        "dup len 1 - 9223372036854775807 put (1 +) each",
+        "(pop [1 2]) each (1 +) each raze 0 (+) fold",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

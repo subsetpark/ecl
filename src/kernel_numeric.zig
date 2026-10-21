@@ -299,18 +299,48 @@ pub const PervadeCursor = struct {
         left: Value,
         right: Value,
     ) error{OutOfMemory}!PervadeCursor {
+        var cursor = initIdle(releases, allocator);
+        cursor.rearmBinary(operation, left, right);
+        return cursor;
+    }
+
+    /// A cursor with no operation yet. A caller pervading many independent
+    /// operands arms one cursor in place for each, rather than building and
+    /// moving a cursor, whose frame stack holds its first frame inline, per
+    /// operand.
+    pub fn initIdle(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) PervadeCursor {
         return .{
             .releases = releases,
             .allocator = allocator,
             .frames = poll.ChunkStack(Frame).init(allocator),
-            .root_child = .{ .binary = .{
-                .operation = operation,
-                .left = left,
-                .right = right,
-                .depth = 0,
-                .logical_index = null,
-            } },
         };
+    }
+
+    /// Starts an operation on a cursor that is idle or whose last operation
+    /// completed. The operands are borrowed, as for `initBinary`.
+    pub fn rearmBinary(self: *PervadeCursor, operation: BinaryOp, left: Value, right: Value) void {
+        self.assertIdle();
+        self.root_child = .{ .binary = .{
+            .operation = operation,
+            .left = left,
+            .right = right,
+            .depth = 0,
+            .logical_index = null,
+        } };
+    }
+
+    pub fn rearmUnary(self: *PervadeCursor, operation: UnaryOp, operand: Value) void {
+        self.assertIdle();
+        self.root_child = .{ .unary = .{
+            .operation = operation,
+            .operand = operand,
+            .depth = 0,
+            .logical_index = null,
+        } };
+    }
+
+    fn assertIdle(self: *const PervadeCursor) void {
+        std.debug.assert(self.frames.isEmpty() and self.last == null and self.root == null and self.root_child == null);
     }
 
     /// Like `initBinary`, but consumes `left`: the cursor owns it on success
@@ -336,17 +366,9 @@ pub const PervadeCursor = struct {
         operation: UnaryOp,
         operand: Value,
     ) error{OutOfMemory}!PervadeCursor {
-        return .{
-            .releases = releases,
-            .allocator = allocator,
-            .frames = poll.ChunkStack(Frame).init(allocator),
-            .root_child = .{ .unary = .{
-                .operation = operation,
-                .operand = operand,
-                .depth = 0,
-                .logical_index = null,
-            } },
-        };
+        var cursor = initIdle(releases, allocator);
+        cursor.rearmUnary(operation, operand);
+        return cursor;
     }
 
     pub fn deinit(self: *PervadeCursor) void {
