@@ -231,8 +231,9 @@ const Cell = struct {
             self.changed.broadcast(blockingIo());
             std.Io.Threaded.mutexUnlock(&self.mutex);
         }
-        var scratch: Accounting = .{ .parent = self.allocator, .limit = self.service.limits.scratch_bytes };
-        self.exchange(scratch.allocator()) catch |err| return if (scratch.exhausted)
+        var shield: CancelShield = .{ .parent = self.allocator, .io = self.service.io };
+        var scratch: Accounting = .{ .parent = shield.allocator(), .limit = self.service.limits.scratch_bytes };
+        self.exchange(shield.allocator(), scratch.allocator()) catch |err| return if (scratch.exhausted)
             .overflow
         else switch (err) {
             error.OutOfMemory => .out_of_memory,
@@ -241,7 +242,9 @@ const Cell = struct {
         };
         return null;
     }
-    fn exchange(self: *Cell, scratch: std.mem.Allocator) !void {
+    /// `owned` allocates what outlives the exchange (response fields), `scratch`
+    /// what does not; both run with cancelation blocked (see `CancelShield`).
+    fn exchange(self: *Cell, owned: std.mem.Allocator, scratch: std.mem.Allocator) !void {
         const limits = self.service.limits;
         const response = &self.phase.active;
         var uri = std.Uri.parse(response.request.url) catch return error.InvalidUrl;
@@ -293,11 +296,11 @@ const Cell = struct {
                 header_fields += 1;
                 if (header_fields > limits.header_fields) return error.Overflow;
                 if (redirect) continue;
-                const name = try self.allocator.dupe(u8, field.name);
-                errdefer self.allocator.free(name);
-                const text = try self.allocator.dupe(u8, field.value);
-                errdefer self.allocator.free(text);
-                try response.fields.append(self.allocator, .{ .name = name, .value = text });
+                const name = try owned.dupe(u8, field.name);
+                errdefer owned.free(name);
+                const text = try owned.dupe(u8, field.value);
+                errdefer owned.free(text);
+                try response.fields.append(owned, .{ .name = name, .value = text });
             }
             const next_uri: ?std.Uri = if (redirect) blk: {
                 if (redirects == 3) return error.TooManyHttpRedirects;
@@ -433,6 +436,45 @@ const CountedReader = struct {
         const count = try self.upstream.stream(writer, limit.min(.limited(remaining)));
         self.count.* += count;
         return count;
+    }
+};
+/// Runs every allocator call of the cancelable exchange task with cancelation
+/// blocked, so an allocation is never a cancelation point. Under Zig 0.17 on
+/// macOS, a safety-checked allocator's stack-trace capture takes a cancelable
+/// debug-info lock and discards the `error.Canceled` it may return, which
+/// acknowledges a pending cancelation and leaves every later syscall of the
+/// task uncancelable; a request blocked on a stalled peer then never returns.
+/// With cancelation blocked, the request stays pending until the task's next
+/// real syscall observes it.
+const CancelShield = struct {
+    parent: std.mem.Allocator,
+    io: std.Io,
+    fn allocator(self: *CancelShield) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CancelShield = @ptrCast(@alignCast(raw));
+        const previous = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(previous);
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+    fn resize(raw: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *CancelShield = @ptrCast(@alignCast(raw));
+        const previous = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(previous);
+        return self.parent.rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(raw: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *CancelShield = @ptrCast(@alignCast(raw));
+        const previous = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(previous);
+        return self.parent.rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(raw: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *CancelShield = @ptrCast(@alignCast(raw));
+        const previous = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(previous);
+        self.parent.rawFree(bytes, alignment, ra);
     }
 };
 /// Backend-local accounting preserves the allocator's OOM distinction. No
