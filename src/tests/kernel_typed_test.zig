@@ -910,6 +910,25 @@ test "typed kernels: typed del matches the boxed route across budget boundaries"
     }
 }
 
+// A typed stencil input copies each window's slice into a window of its own
+// representation in granted runs, so a window wider than one step's budget
+// resumes mid-window.
+test "typed kernels: typed stencil windows match the profiled route across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum + 5);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+    try expectParity(&runtime, .{ .ints = numbers }, "65537 (sum) stencil");
+    try expectParity(&runtime, .{ .ints = numbers }, "65540 (dup len swap last pair) stencil");
+    try expectParity(&runtime, .{ .ints = numbers[0..9] }, "3 () stencil");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 2.5 } }, "2 () stencil");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.
