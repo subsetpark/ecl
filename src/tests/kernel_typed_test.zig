@@ -806,6 +806,34 @@ test "typed kernels: recognized each over a boxed spine resumes between elements
     }
 }
 
+// Leaf-needle membership tables the distinct needles, scans the haystack once
+// (stopping when every needle is found), and writes the mask from the table.
+// Each phase crosses a budget boundary here; the reference route compares
+// pairwise, so one side of each case stays short.
+test "typed kernels: tabled membership matches the pairwise route across numeric classes and budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 101)) - 50;
+    for ([_][]const u8{
+        "[3 -7 200 3] in? 0 (+) fold",
+        "[3.0 -7.5 0.0] in? 0 (+) fold",
+        "dup 25 take 1 + swap in?",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+    for (numbers, 0..) |*item, index| item.* = @intCast(index);
+    try expectParity(&runtime, .{ .ints = numbers }, "[5 70000 140000 131074] swap in?");
+    try expectParity(&runtime, .{ .ints = numbers }, "[0 1 2] swap in?");
+    try expectParity(&runtime, .{ .floats = &.{ -0.0, 2.0, 2.5 } }, "[0 2 3] in?");
+    try expectParity(&runtime, .{ .floats = &.{ -0.0, 2.0, 2.5 } }, "[0 2 3] swap in?");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

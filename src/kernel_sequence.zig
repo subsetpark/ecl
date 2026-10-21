@@ -789,6 +789,84 @@ fn ScalarMembershipDriver(comptime haystack_kind: value.HeapKind) type {
     };
 }
 
+/// A leaf element's identity under whole-value matching, as a hashable key.
+/// Numbers match by mathematical value across int and float, so a float that
+/// equals an int keys as that int; any other float keys by its bits, which
+/// `==` agrees with because floats exclude NaN. Codepoints and symbols key as
+/// themselves; membership never compares across those domains.
+const MatchKey = struct {
+    class: enum(u8) { empty, integer, real, other },
+    bits: u64,
+
+    fn of(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) MatchKey {
+        return switch (kind) {
+            .leaf_u8 => .{ .class = .integer, .bits = item },
+            .leaf_i64 => .{ .class = .integer, .bits = @bitCast(item) },
+            .leaf_f64 => if (std.math.isFinite(item) and @trunc(item) == item and
+                item >= -9_223_372_036_854_775_808.0 and item < 9_223_372_036_854_775_808.0)
+                .{ .class = .integer, .bits = @bitCast(@as(i64, @intFromFloat(item))) }
+            else
+                .{ .class = .real, .bits = @bitCast(item) },
+            .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => .{ .class = .other, .bits = item },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        };
+    }
+
+    fn eql(self: MatchKey, other: MatchKey) bool {
+        return self.class == other.class and self.bits == other.bits;
+    }
+
+    fn hash(self: MatchKey) u64 {
+        return (self.bits ^ @backingInt(self.class)) *% 0x9E37_79B9_7F4A_7C15;
+    }
+};
+
+/// The distinct needles of a membership test, open-addressed, each marked once
+/// the haystack is seen to hold it.
+const NeedleTable = struct {
+    const Slot = struct { key: MatchKey, found: bool };
+    slots: []Slot,
+    unfound: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, needles: usize) error{OutOfMemory}!NeedleTable {
+        const capacity = std.math.ceilPowerOfTwo(usize, @max(8, needles * 2)) catch return error.OutOfMemory;
+        const slots = try allocator.alloc(Slot, capacity);
+        for (slots) |*slot| slot.* = .{ .key = .{ .class = .empty, .bits = 0 }, .found = false };
+        return .{ .slots = slots };
+    }
+
+    pub fn retire(self: *NeedleTable, _: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        allocator.free(self.slots);
+    }
+
+    /// The slot holding `key`, or the empty slot where it belongs.
+    fn find(self: *const NeedleTable, key: MatchKey) *Slot {
+        const mask = self.slots.len - 1;
+        var index: usize = @intCast(key.hash() >> 32 & mask);
+        while (self.slots[index].key.class != .empty and !self.slots[index].key.eql(key)) index = (index + 1) & mask;
+        return &self.slots[index];
+    }
+
+    fn insert(self: *NeedleTable, key: MatchKey) void {
+        const slot = self.find(key);
+        if (slot.key.class != .empty) return;
+        slot.key = key;
+        self.unfound += 1;
+    }
+
+    fn mark(self: *NeedleTable, key: MatchKey) void {
+        const slot = self.find(key);
+        if (slot.key.class == .empty or slot.found) return;
+        slot.found = true;
+        self.unfound -= 1;
+    }
+};
+
+/// Membership of every needle of a flat leaf in a flat haystack, in O(needles
+/// + haystack): the needles' distinct keys are tabled, one pass over the
+/// haystack marks the keys it holds and stops once every key is marked, and
+/// the mask is written from the table. A disjoint leaf domain or an empty
+/// haystack is a fill of zeros.
 fn LeafMembershipDriver(
     comptime needle_kind: value.HeapKind,
     comptime haystack_kind: value.HeapKind,
@@ -801,61 +879,59 @@ fn LeafMembershipDriver(
         needles: heap.Owned(heap.LeafReader(needle_kind)),
         haystack: heap.Owned(heap.LeafReader(haystack_kind)),
         writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
-        cursor: kernel_flat.FlatCursor,
-        needle_index: usize = 0,
+        table: heap.Owned(NeedleTable),
+        phase: enum { table, scan, write } = .table,
+        position: usize = 0,
 
         fn finish(self: *Self, evaluator: *Machine) machine.WorkProgress {
             self.needles.deinit(evaluator.releaseDomain(), evaluator.allocator());
             self.haystack.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.table.deinit(evaluator.releaseDomain(), evaluator.allocator());
             return .{ .output = self.writer.borrowMut().finish() };
         }
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
             const needles = self.needles.borrow().slice();
             const candidates = self.haystack.borrow().slice();
-
-            // A disjoint leaf domain, or an empty haystack, is a typed fill.
-            // It is still chunked by the needle count so a large mask cannot
-            // bypass cancellation merely because no comparisons are needed.
-            if (!compatible or candidates.len == 0) {
-                if (try self.cursor.nextRange(context)) |range| {
-                    self.writer.borrowMut().fillRange(range.start, range.len(), 0);
-                }
-                if (!self.cursor.complete()) return .stepped;
-                return self.finish(evaluator);
-            }
-
-            // Spend one unit-wide fuel interval across as many short searches
-            // as fit. A long haystack is one charged range; a short one does
-            // not force one scheduler handoff per needle.
-            var first = true;
-            while (first or context.remaining() != 0) {
-                first = false;
-                const range = (try self.cursor.nextRange(context)).?;
-                var found = false;
-                for (candidates[range.start..range.end]) |candidate| {
-                    if (typedElementsMatch(
-                        needle_kind,
-                        haystack_kind,
-                        needles[self.needle_index],
-                        candidate,
-                    )) {
-                        found = true;
-                        break;
+            const table = self.table.borrowMut();
+            while (!work.exhausted()) switch (self.phase) {
+                .table => {
+                    if (!compatible or candidates.len == 0) {
+                        self.phase = .write;
+                        continue;
                     }
-                }
-                if (found or self.cursor.complete()) {
-                    self.writer.borrowMut().fillRange(
-                        self.needle_index,
-                        1,
-                        @intFromBool(found),
-                    );
-                    self.needle_index += 1;
-                    if (self.needle_index == needles.len) return self.finish(evaluator);
-                    self.cursor = kernel_flat.FlatCursor.init(candidates.len);
-                }
-            }
+                    const granted = work.take(needles.len - self.position);
+                    for (needles[self.position..][0..granted]) |needle| table.insert(MatchKey.of(needle_kind, needle));
+                    self.position += granted;
+                    if (self.position != needles.len) continue;
+                    self.position = 0;
+                    self.phase = .scan;
+                },
+                .scan => {
+                    const granted = work.take(candidates.len - self.position);
+                    for (candidates[self.position..][0..granted]) |candidate| {
+                        table.mark(MatchKey.of(haystack_kind, candidate));
+                        if (table.unfound == 0) break;
+                    }
+                    self.position = if (table.unfound == 0) candidates.len else self.position + granted;
+                    if (self.position != candidates.len) continue;
+                    self.position = 0;
+                    self.phase = .write;
+                },
+                .write => {
+                    const granted = work.take(needles.len - self.position);
+                    const out = self.writer.borrowMut().unpublishedRange(self.position, granted);
+                    if (!compatible or candidates.len == 0) {
+                        @memset(out, 0);
+                    } else for (out, needles[self.position..][0..granted]) |*slot, needle| {
+                        slot.* = @intFromBool(table.find(MatchKey.of(needle_kind, needle)).found);
+                    }
+                    self.position += granted;
+                    if (self.position == needles.len) return self.finish(evaluator);
+                },
+            };
             return .stepped;
         }
     };
@@ -900,12 +976,13 @@ fn startTypedMembership(evaluator: *Machine, needle: Value, haystack: Value) Mac
                 );
                 var held_locally = true;
                 errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
-                const candidate_count: usize = @intCast(haystack.list.length());
+                var table = try NeedleTable.init(evaluator.allocator(), @intCast(needle.list.length()));
+                errdefer if (held_locally) table.retire(evaluator.releaseDomain(), evaluator.allocator());
                 const driver = Driver{
                     .needles = .init(heap.LeafReader(candidate_needle).acquire(needle.list)),
                     .haystack = .init(heap.LeafReader(candidate_haystack).acquire(haystack.list)),
                     .writer = .init(writer),
-                    .cursor = kernel_flat.FlatCursor.init(if (membershipKindsCompatible(candidate_needle, candidate_haystack) and candidate_count != 0) candidate_count else @intCast(needle.list.length())),
+                    .table = .init(table),
                 };
                 held_locally = false;
                 try evaluator.startDriver(driver);
