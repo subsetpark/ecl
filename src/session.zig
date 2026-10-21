@@ -302,6 +302,17 @@ pub const LocalPreloadProgress = union(enum) {
 /// Movable opaque handle for heap-stable runtime state. Mutable environment
 /// and registry authority stays behind this handle so every publication turn
 /// is coupled to retirement settlement.
+const is_test = @import("builtin").is_test;
+
+/// What a test-only operation is outside a test build: a value with no call
+/// syntax, so any use fails to compile.
+const TestOnlyOperation = struct {};
+
+/// The operation itself in a test build; `TestOnlyOperation` in any other.
+fn testOnly(comptime function: anytype) if (is_test) @TypeOf(function) else TestOnlyOperation {
+    return if (is_test) function else .{};
+}
+
 pub const Session = enum(usize) {
     consumed = 0,
     _,
@@ -635,7 +646,7 @@ pub const Session = enum(usize) {
     /// Resolve one already validated module name through the ordinary loader
     /// without invoking an export. Errors stay reified so the CLI can report
     /// the same language diagnostic an ordinary qualified lookup would.
-    pub fn loadModule(
+    fn loadModule(
         self: *Session,
         name: intern.ModuleName,
     ) error{OutOfMemory}!UnitOutcome {
@@ -755,7 +766,7 @@ pub const Session = enum(usize) {
         defer releaseDisplayBlocks(allocator, &blocks);
         return .fromOwned(allocator, try printer.toOwnedStackDisplayString(allocator, blocks.items));
     }
-    pub fn renderValue(self: *const Session, item: Value) error{OutOfMemory}!RenderedText {
+    fn renderValueForTest(self: *const Session, item: Value) error{OutOfMemory}!RenderedText {
         const allocator = self.coreState().allocator();
         return .fromOwned(allocator, try printer.toOwnedString(allocator, item));
     }
@@ -850,9 +861,6 @@ pub const Session = enum(usize) {
         for (embedded_ids) |slot| if (slot) |id| try found.append(id);
         return materializeCompletion(core.allocator(), &found, null);
     }
-    pub fn writeOutput(self: *Session, bytes: []const u8) error{WriteFailed}!void {
-        return self.coreState().console.writeOutput(bytes, false);
-    }
     /// Capabilities the REPL editor is given. It never receives the Session,
     /// the console, a writer, or a byte slice it could turn into a control
     /// sequence; the operations it can perform are the ones on these types.
@@ -871,10 +879,10 @@ pub const Session = enum(usize) {
     pub fn release(self: *Session, item: Value) void {
         self.coreState().releaseDomain().releaseValue(item);
     }
-    pub fn stackItems(self: *const Session) []const Value {
+    fn stackItemsForTest(self: *const Session) []const Value {
         return self.coreState().stack.items;
     }
-    pub fn pushBorrowed(self: *Session, item: Value) error{OutOfMemory}!void {
+    fn pushBorrowedForTest(self: *Session, item: Value) error{OutOfMemory}!void {
         const core = self.coreState();
         heap.retainValue(item);
         core.stack.append(core.allocator(), item) catch |err| {
@@ -882,20 +890,20 @@ pub const Session = enum(usize) {
             return err;
         };
     }
-    pub fn pushOwned(self: *Session, item: Value) error{OutOfMemory}!void {
+    fn pushOwnedForTest(self: *Session, item: Value) error{OutOfMemory}!void {
         const core = self.coreState();
         core.stack.append(core.allocator(), item) catch |err| {
             core.releaseDomain().releaseValue(item);
             return err;
         };
     }
-    pub fn requestCancellation(self: *Session) void {
+    fn requestCancellationForTest(self: *Session) void {
         self.coreState().cancelled.store(true, .release);
     }
-    pub fn clearCancellation(self: *Session) void {
+    fn clearCancellationForTest(self: *Session) void {
         self.coreState().cancelled.store(false, .release);
     }
-    pub fn setIdiomMode(self: *Session, mode: machine.IdiomMode) void {
+    fn setIdiomModeForTest(self: *Session, mode: machine.IdiomMode) void {
         self.coreState().idiom_mode = mode;
     }
     pub fn setNativeDiagnostics(self: *Session, enabled: bool) void {
@@ -904,13 +912,13 @@ pub const Session = enum(usize) {
     pub fn requestedExit(self: *const Session) ?u8 {
         return self.coreState().requested_exit;
     }
-    pub fn lastMaxFrames(self: *const Session) usize {
+    fn lastMaxFramesForTest(self: *const Session) usize {
         return self.coreState().last_max_frames;
     }
     pub fn lastPolls(self: *const Session) u64 {
         return self.coreState().last_polls;
     }
-    pub fn lastIdiomHits(self: *const Session) u64 {
+    fn lastIdiomHitsForTest(self: *const Session) u64 {
         return self.coreState().last_idiom_hits;
     }
     pub fn writeOutputLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
@@ -919,7 +927,7 @@ pub const Session = enum(usize) {
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeDiagnostics(bytes, true);
     }
-    pub fn define(
+    fn defineForTest(
         self: *Session,
         name: intern.NamespaceName,
         publication: env.TopPublication,
@@ -929,13 +937,13 @@ pub const Session = enum(usize) {
         defer mutation_turn.deinit();
         return core.environment.define(name, publication);
     }
-    pub fn schedulerWorkerThreadCount(self: *const Session) usize {
+    fn schedulerWorkerThreadCountForTest(self: *const Session) usize {
         return self.coreState().scheduler.workerThreadCount();
     }
-    pub fn schedulerTimerThreadCount(self: *const Session) usize {
+    fn schedulerTimerThreadCountForTest(self: *const Session) usize {
         return self.coreState().scheduler.timerThreadCount();
     }
-    pub fn schedulerTimerEntryCount(self: *Session) usize {
+    fn schedulerTimerEntryCountForTest(self: *Session) usize {
         return self.coreState().scheduler.timerEntryCount();
     }
     /// Advance a `manual` monotonic clock by whole milliseconds. Pending
@@ -944,12 +952,30 @@ pub const Session = enum(usize) {
     /// once those wakes deliver; observe delivery through `task.await`. Refused for
     /// a host clock, and with `Overflow` — the clock unchanged — when the sum
     /// would leave the clock's range.
-    pub fn advanceManualClock(
+    fn advanceManualClockForTest(
         self: *Session,
         milliseconds: u64,
     ) error{ HostClock, Overflow }!void {
         return self.coreState().scheduler.advanceManualClock(milliseconds);
     }
+
+    // Test-only controls and observations: each exists in a test build and is a
+    // compile error anywhere else, so the application cannot inject values into
+    // or steer a running Session from outside.
+    pub const renderValue = testOnly(renderValueForTest);
+    pub const stackItems = testOnly(stackItemsForTest);
+    pub const pushBorrowed = testOnly(pushBorrowedForTest);
+    pub const pushOwned = testOnly(pushOwnedForTest);
+    pub const requestCancellation = testOnly(requestCancellationForTest);
+    pub const clearCancellation = testOnly(clearCancellationForTest);
+    pub const setIdiomMode = testOnly(setIdiomModeForTest);
+    pub const lastMaxFrames = testOnly(lastMaxFramesForTest);
+    pub const lastIdiomHits = testOnly(lastIdiomHitsForTest);
+    pub const define = testOnly(defineForTest);
+    pub const schedulerWorkerThreadCount = testOnly(schedulerWorkerThreadCountForTest);
+    pub const schedulerTimerThreadCount = testOnly(schedulerTimerThreadCountForTest);
+    pub const schedulerTimerEntryCount = testOnly(schedulerTimerEntryCountForTest);
+    pub const advanceManualClock = testOnly(advanceManualClockForTest);
 };
 
 /// Observation surface present only in a separately compiled counter artifact.
