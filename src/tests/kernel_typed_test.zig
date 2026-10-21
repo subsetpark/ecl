@@ -1258,6 +1258,17 @@ test "typed kernels: checked float vector arithmetic matches the scalar fault co
         }
     }
 
+    // Operations that cannot produce NaN from ordinary values still reject a
+    // NaN a host handed in, rather than publishing it.
+    for ([_][]const u8{ "neg", "abs", "sqrt", "2.0 atan2", "2.0 swap atan2" }) |source| {
+        for ([_]usize{ 0, flat.block_size, length - 1 }) |position| {
+            @memset(left, 1.5);
+            left[position] = nan;
+            try expectParity(&runtime, .{ .floats = left }, source);
+            try expectFaultAt(&runtime, &.{try buildFloats(.specialized, left)}, source, "domain", position);
+        }
+    }
+
     // An infinity in a block does not fault, so a NaN later in the same block
     // must still be the one reported. The last pair sits wholly in the final
     // scalar tail.

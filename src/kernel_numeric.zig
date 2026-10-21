@@ -874,7 +874,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
         .not_word => .{ .int = @intFromBool(!(try boolean(operand))) },
         .neg => switch (operand) {
             .int => |integer| .{ .int = std.math.sub(i64, 0, integer) catch return error.Overflow },
-            .float => |number| .{ .float = -number },
+            .float => |number| try checkedFloat(-number),
             .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
         },
         .abs => switch (operand) {
@@ -882,7 +882,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 error.Overflow
             else
                 .{ .int = if (integer < 0) -integer else integer },
-            .float => |number| .{ .float = @abs(number) },
+            .float => |number| try checkedFloat(@abs(number)),
             .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
         },
         .sqrt => switch (operand) {
@@ -893,7 +893,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
             .float => |number| if (number < 0.0)
                 error.Domain
             else
-                .{ .float = @sqrt(number) },
+                try checkedFloat(@sqrt(number)),
             .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
         },
         .floor, .ceil, .round => switch (operand) {
@@ -1011,7 +1011,7 @@ fn power(left: Value, right: Value) ScalarError!Value {
 
 fn atan2(left: Value, right: Value) ScalarError!Value {
     if (!left.isNumber() or !right.isNumber()) return error.Type;
-    return .{ .float = std.math.atan2(asFloat(left), asFloat(right)) };
+    return checkedFloat(std.math.atan2(asFloat(left), asFloat(right)));
 }
 
 fn transcendental(operation: UnaryOp, operand: Value) ScalarError!Value {
@@ -1067,6 +1067,8 @@ fn offsetChar(codepoint: u32, offset: i64) ScalarError!Value {
 
 /// Floats follow IEEE 754, so overflow, poles, and division by zero give an
 /// infinity; only a NaN result, which ECL has no value for, is `'domain`.
+/// Every float result passes through here, including ones that cannot become
+/// NaN from ordinary values, because a host may still hand a NaN operand in.
 fn checkedFloat(result: f64) ScalarError!Value {
     if (std.math.isNan(result)) return error.Domain;
     return .{ .float = result };
@@ -1358,8 +1360,6 @@ fn binaryLoopPolicy(
 
 fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPolicy {
     if (operand == .integer and operation == .bnot) return .vector_infallible;
-    // A float's negation or magnitude is never NaN, so it cannot fault.
-    if (operand == .real and (operation == .neg or operation == .abs)) return .vector_infallible;
     return .scalar_checked;
 }
 
@@ -2141,9 +2141,7 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
         fn run(a: operand_class.Element()) out.Element() {
             return switch (operation) {
                 .bnot => ~a,
-                .neg => -a,
-                .abs => @abs(a),
-                .not_word, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
+                .not_word, .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
             };
         }
     }.run;
@@ -2157,9 +2155,7 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
         fn run(a: @Vector(lanes, operand_class.Element())) @Vector(lanes, out.Element()) {
             return switch (operation) {
                 .bnot => ~a,
-                .neg => -a,
-                .abs => @abs(a),
-                .not_word, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
+                .not_word, .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
             };
         }
     }.run;
