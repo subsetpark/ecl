@@ -759,6 +759,28 @@ test "typed kernels: hashed distinct keeps first occurrences under leaf equality
     try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0 } }, "distinct");
 }
 
+// Typed `grade` sorts (key, position) pairs: insertion-sorted runs, then merge
+// passes that resume mid-merge across budget boundaries. Heavy duplicates
+// make stability observable in the permutation itself.
+test "typed kernels: grade and sort keep the stable permutation across runs merges and budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ 15, 16, 17, 33, quantum * 2 + 3 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 1009)) - 500;
+        try expectParity(&runtime, .{ .ints = numbers }, "grade dup len range * 0 (+) fold");
+        try expectParity(&runtime, .{ .ints = numbers }, "sort 1 drop 0 (+) fold");
+        try expectParity(&runtime, .{ .ints = numbers }, "reverse grade 25 take");
+    }
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "grade");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "sort");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.
