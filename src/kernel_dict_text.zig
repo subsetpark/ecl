@@ -239,6 +239,7 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
         },
         .list => {
             if (key.borrow() == .list) {
+                if (try startTypedVectorPut(evaluator, &collection, key.borrow(), new_value.borrow())) return;
                 const count: usize = @intCast(collection.borrow().list.length());
                 const values = try evaluator.allocator().alloc(Value, count);
                 var actions = poll.ChunkStack(PutAction).init(evaluator.allocator());
@@ -512,6 +513,241 @@ fn startTypedListPut(
         }
     }
     unreachable;
+}
+
+/// What a typed vector put stores: one atom at every selected position, or a
+/// conforming leaf read in the collection's representation. A byte leaf widens
+/// losslessly into an integer collection, since literal and profiled integer
+/// lists are bytes whenever they can be.
+fn VectorReplacement(comptime kind: value.HeapKind) type {
+    return union(enum) {
+        const Self = @This();
+        atom: heap.LeafElement(kind),
+        same: heap.LeafReader(kind),
+        bytes: heap.LeafReader(.leaf_u8),
+
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .atom => {},
+                .same => |*reader| reader.release(releases),
+                .bytes => |*reader| reader.release(releases),
+            }
+        }
+    };
+}
+
+/// The result buffer: a fresh copy, or the collection itself when this put
+/// holds its only reference. Indices are validated before the first store, so
+/// a reused collection is never left half-replaced by a failing put.
+fn VectorPutOutput(comptime kind: value.HeapKind) type {
+    return union(enum) {
+        const Self = @This();
+        fresh: struct { writer: heap.LeafWriter(kind), source: heap.LeafReader(kind) },
+        /// `root` is the collection's reference; publishing republishes that
+        /// same list, so the reference becomes the result's.
+        reuse: struct { adoption: heap.UniqueLeafAdoption(kind), root: Value },
+
+        fn items(self: *Self, count: usize) []heap.LeafElement(kind) {
+            return switch (self.*) {
+                .fresh => |*fresh| fresh.writer.unpublishedRange(0, count),
+                .reuse => |*reuse| reuse.adoption.inPlaceRange(0, count),
+            };
+        }
+
+        fn finish(self: *Self, releases: *heap.ReleaseDomain) Value {
+            switch (self.*) {
+                .fresh => |*fresh| {
+                    fresh.source.release(releases);
+                    return fresh.writer.finish();
+                },
+                .reuse => |*reuse| return reuse.adoption.finish(),
+            }
+        }
+
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .fresh => |*fresh| {
+                    fresh.writer.retirePartial(releases);
+                    fresh.source.release(releases);
+                },
+                .reuse => |*reuse| {
+                    reuse.adoption.abandon();
+                    releases.releaseValue(reuse.root);
+                },
+            }
+        }
+    };
+}
+
+/// `put` with a flat typed index vector into a typed leaf: validate every
+/// index, copy the collection unless it is reused, then scatter. Each phase
+/// takes a granted range per transition. Validation checks a block's bounds
+/// at once and rescans only a failing block, so the first bad index in
+/// selector order decides the error, as on the pervasive path.
+fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    const Index = heap.LeafElement(index_kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        indices: heap.Owned(heap.LeafReader(index_kind)),
+        replacement: heap.Owned(VectorReplacement(kind)),
+        output: heap.Owned(VectorPutOutput(kind)),
+        count: usize,
+        phase: enum { validate, copy, scatter } = .validate,
+        position: usize = 0,
+
+        /// Fails with the first index in `block` that is negative or past the
+        /// collection, if any.
+        fn validate(evaluator: *Machine, block: []const Index, count: usize) MachineError!void {
+            var low: Index = 0;
+            var high: Index = 0;
+            for (block) |index| {
+                low = @min(low, index);
+                high = @max(high, index);
+            }
+            if (low >= 0 and high >= 0 and @as(u64, @intCast(high)) < count) return;
+            for (block) |index| {
+                if (index < 0) return evaluator.fail(.domain, "put index is negative");
+                if (@as(u64, @intCast(index)) >= count)
+                    return evaluator.fail(.domain, "put index is out of bounds");
+            }
+        }
+
+        fn scatter(out: []Element, indices: []const Index, offset: usize, replacement: VectorReplacement(kind)) void {
+            switch (replacement) {
+                .atom => |item| for (indices) |index| {
+                    out[@intCast(index)] = item;
+                },
+                .same => |reader| for (indices, reader.slice()[offset..][0..indices.len]) |index, item| {
+                    out[@intCast(index)] = item;
+                },
+                .bytes => |reader| if (kind == .leaf_i64) {
+                    for (indices, reader.slice()[offset..][0..indices.len]) |index, item| out[@intCast(index)] = item;
+                } else unreachable,
+            }
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            const indices = self.indices.borrow().slice();
+            while (!work.exhausted()) switch (self.phase) {
+                .validate => {
+                    if (self.position == indices.len) {
+                        self.position = 0;
+                        self.phase = if (self.output.borrow() == .fresh) .copy else .scatter;
+                        continue;
+                    }
+                    const granted = work.take(indices.len - self.position);
+                    var offset: usize = 0;
+                    while (offset != granted) {
+                        const block = indices[self.position + offset ..][0..@min(kernel_flat.block_size, granted - offset)];
+                        try validate(evaluator, block, self.count);
+                        offset += block.len;
+                    }
+                    self.position += granted;
+                },
+                .copy => {
+                    if (self.position == self.count) {
+                        self.position = 0;
+                        self.phase = .scatter;
+                        continue;
+                    }
+                    const fresh = &self.output.borrowMut().fresh;
+                    const granted = work.take(self.count - self.position);
+                    fresh.writer.writeRange(self.position, fresh.source.slice()[self.position..][0..granted]);
+                    self.position += granted;
+                },
+                .scatter => {
+                    if (self.position == indices.len) {
+                        self.indices.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.replacement.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        var output = self.output.take();
+                        return .{ .output = output.finish(evaluator.releaseDomain()) };
+                    }
+                    const granted = work.take(indices.len - self.position);
+                    scatter(
+                        self.output.borrowMut().items(self.count),
+                        indices[self.position..][0..granted],
+                        self.position,
+                        self.replacement.borrow(),
+                    );
+                    self.position += granted;
+                },
+            };
+            return .stepped;
+        }
+    };
+}
+
+/// Starts the typed vector put when the collection is a typed leaf, the
+/// selector a flat byte or integer leaf, and the replacement an atom of the
+/// collection's class or a conforming leaf that needs no widening of the
+/// result. Anything else, including a mismatched replacement length, returns
+/// false and takes the pervasive path, which owns those errors.
+fn startTypedVectorPut(
+    evaluator: *Machine,
+    collection: *heap.OwnedValue,
+    selector: Value,
+    replacement: Value,
+) MachineError!bool {
+    const kind = collection.borrow().list.kind();
+    const index_kind = selector.list.kind();
+    if (index_kind != .leaf_u8 and index_kind != .leaf_i64) return false;
+    const selected: usize = @intCast(selector.list.length());
+    if (replacement == .list and replacement.list.length() != selected) return false;
+    inline for (put_leaf_kinds) |candidate| {
+        if (kind == candidate) {
+            const Replacement = VectorReplacement(candidate);
+            const typed_replacement: Replacement = switch (replacement) {
+                .list => |items| if (items.kind() == candidate)
+                    .{ .same = heap.LeafReader(candidate).acquire(items) }
+                else if (candidate == .leaf_i64 and items.kind() == .leaf_u8)
+                    .{ .bytes = heap.LeafReader(.leaf_u8).acquire(items) }
+                else
+                    return false,
+                else => .{ .atom = typedReplacement(candidate, replacement) orelse return false },
+            };
+            inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
+                if (index_kind == candidate_index) {
+                    return startTypedVectorPutDriver(candidate, candidate_index, evaluator, collection, selector, typed_replacement);
+                }
+            }
+            unreachable;
+        }
+    }
+    return false;
+}
+
+fn startTypedVectorPutDriver(
+    comptime kind: value.HeapKind,
+    comptime index_kind: value.HeapKind,
+    evaluator: *Machine,
+    collection: *heap.OwnedValue,
+    selector: Value,
+    replacement: VectorReplacement(kind),
+) MachineError!bool {
+    var held_replacement = replacement;
+    var replacement_held = true;
+    errdefer if (replacement_held) held_replacement.retire(evaluator.releaseDomain());
+    const count: usize = @intCast(collection.borrow().list.length());
+    const output: VectorPutOutput(kind) = if (heap.UniqueLeafAdoption(kind).claim(collection.borrow().list, count)) |claim|
+        .{ .reuse = .{ .adoption = claim, .root = collection.take() } }
+    else
+        .{ .fresh = .{
+            .writer = try heap.LeafWriter(kind).init(evaluator.allocator(), count),
+            .source = heap.LeafReader(kind).acquire(collection.borrow().list),
+        } };
+    replacement_held = false;
+    try evaluator.startDriver(TypedVectorPutDriver(kind, index_kind){
+        .indices = .init(heap.LeafReader(index_kind).acquire(selector.list)),
+        .replacement = .init(held_replacement),
+        .output = .init(output),
+        .count = count,
+    });
+    return true;
 }
 
 const ListPutDriver = struct {

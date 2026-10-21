@@ -715,6 +715,45 @@ test "typed kernels: where reports the first bad count and resumes runs across b
     try std.testing.expect(runtime.lastPolls() <= 2 * length / quantum + 8);
 }
 
+// `put` with a flat typed index vector into a typed leaf validates every index
+// before its first store, copies a shared collection and reuses a unique one.
+// Parity against the boxed collection covers atoms, conforming replacements
+// of the same and of the byte representation, repeated indices, every
+// fallback that widens the result, and a bad index in the first, a middle, or
+// the last block of a collection longer than one step's budget.
+test "typed kernels: vector put matches the pervasive route across blocks reuse and fallbacks" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ 3, flat.block_size + 1, quantum + 3 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+        for ([_][]const u8{
+            "dup len 2 / floor range 2 * 7 put 0 (+) fold",
+            "dup dup len 2 / floor range 2 * 7 put swap pop 0 (+) fold",
+            "dup len range dup 3 * over len mod put 0 (+) fold",
+            "dup len range dup reverse put 0 (+) fold",
+            "[0 0 1] [5 6 7] put 3 take",
+            "[0 1] [5 6.5] put 3 take",
+            "[0 2] 2.5 put 3 take",
+            "[0 1] [5 6 7] put",
+            "dup len range 1 put 0 (+) fold",
+            "[0 -1] 5 put",
+            "dup len range dup len 2 / floor -1 put 5 put",
+            "dup len range dup len 1 - -1 put 5 put",
+            "dup len range dup 1 over len put 5 put",
+        }) |source| {
+            try expectParity(&runtime, .{ .ints = numbers }, source);
+        }
+    }
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5, 3.5 } }, "[2 0] 9.5 put");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5, 3.5 } }, "[2 0] 9 put");
+}
+
 // A fault in the first, a middle, or the final block reports the first failing
 // logical index with the scalar path's kind, message, and data — proven by
 // comparing the whole rendered error dict against the generic route, and by
