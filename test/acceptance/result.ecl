@@ -21,7 +21,7 @@ import
 [] ok (42) and-then io.pp
 {'kind 'io 'msg "boom"} err (+) and-then io.pp
 [2 3] ok (+) and-then (10 *) and-then io.pp
-[2 0] ok (/) and-then err? io.pp
+[2 0] ok (div) and-then err? io.pp
 
 # Failure transformation leaves a success alone.
 {'kind 'io} err (pop {'kind 'domain 'msg "mapped"}) map-err io.pp

@@ -28,7 +28,7 @@
   [] result.ok (42) result.and-then {'ok [42]} equal
   {'kind 'io 'msg "boom"} result.err (+) result.and-then
   {'err {'kind 'io 'msg "boom"}} equal
-  [2 0] result.ok (/) result.and-then result.err? 1 equal
+  [2 0] result.ok (div) result.and-then result.err? 1 equal
   [2 3] result.ok (+) result.and-then (10 *) result.and-then
   {'ok [50]} equal
   {'kind 'io} result.err (pop {'kind 'domain}) result.map-err

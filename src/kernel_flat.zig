@@ -335,9 +335,9 @@ pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: ty
     };
 }
 
-/// One vector result and a lane mask covering its faults. A checked body's
-/// mask may over-approximate, so the hot loop can test it once per block; the
-/// paired exact mask decides whether a nominated block really faulted.
+/// One vector result and a lane mask of exactly the lanes the scalar body
+/// rejects, so the hot loop can test it once per block and a flagged block's
+/// scalar replay is certain to find its fault.
 ///
 /// The mask is all-ones or zero per lane in an integer as wide as `MaskLane`,
 /// the shape a vector compare produces. A `@Vector(lanes, bool)` crossing the
@@ -380,13 +380,11 @@ pub fn VectorFamily(
         }
         const Fault = error{Fault};
 
-        /// The three bodies of a checked operation. `vector` may report a
-        /// superset of the faulting lanes; `exact` reports precisely the lanes
-        /// `scalar` rejects, because a block declared faulted is replayed
+        /// The two bodies of a checked operation. `vector` masks exactly the
+        /// lanes `scalar` rejects, because a block declared faulted is replayed
         /// through the scalar authority, which must then find its fault.
         pub const Checked = struct {
             vector: fn (LeftVector, RightVector) Masked,
-            exact: fn (LeftVector, RightVector) FaultMask,
             scalar: fn (Left, Right) Fault!Out,
         };
 
@@ -476,12 +474,10 @@ pub fn VectorFamily(
             }
         }
 
-        /// Into a fresh output, accumulates the possibly over-approximate fault
-        /// masks across the whole range and reduces them once, instead of
-        /// reducing and branching on every vector. Only a nominated range pays
-        /// a second, exact pass, which keeps `.faulted` meaning a real scalar
-        /// fault. Over its operands, a vector is stored only once known clean,
-        /// so a fault leaves the input intact from that vector on.
+        /// Into a fresh output, accumulates the fault masks across the whole
+        /// range and reduces them once, instead of reducing and branching on
+        /// every vector. Over its operands, a vector is stored only once known
+        /// clean, so a fault leaves the input intact from that vector on.
         fn checkedRange(
             comptime placement: Placement,
             comptime body: Checked,
@@ -514,12 +510,7 @@ pub fn VectorFamily(
                 const a, const b = source.scalars(index);
                 dest[index - range.start] = body.scalar(a, b) catch return .{ .faulted = range.start };
             }
-            if (@reduce(.Or, suspect) == 0) return .clean;
-            for (0..vectors) |vector| {
-                const a, const b = source.vectors(range.start + vector * lanes);
-                if (@reduce(.Or, body.exact(a, b))) return .{ .faulted = range.start };
-            }
-            return .clean;
+            return if (@reduce(.Or, suspect) == 0) .clean else .{ .faulted = range.start };
         }
 
         /// Vectors computed before one mask test over a buffer written in
@@ -535,18 +526,19 @@ pub fn VectorFamily(
             for (0..groups) |group| {
                 const base = group * group_width;
                 var values: [over_operands_group]OutVector = undefined;
+                var faults: [over_operands_group]LaneMask = undefined;
                 var suspect: LaneMask = @splat(0);
                 inline for (0..over_operands_group) |member| {
                     const a, const b = source.vectors(range.start + base + member * lanes);
                     const result = body.vector(a, b);
                     values[member] = result.values;
+                    faults[member] = result.faults;
                     suspect |= result.faults;
                 }
                 if (@reduce(.Or, suspect) != 0) {
                     for (0..over_operands_group) |member| {
                         const offset = base + member * lanes;
-                        const a, const b = source.vectors(range.start + offset);
-                        if (@reduce(.Or, body.exact(a, b))) return .{ .faulted = range.start + offset };
+                        if (@reduce(.Or, faults[member]) != 0) return .{ .faulted = range.start + offset };
                         storeVector(dest, offset, values[member]);
                     }
                     continue;
@@ -557,8 +549,7 @@ pub fn VectorFamily(
                 const offset = vector * lanes;
                 const a, const b = source.vectors(range.start + offset);
                 const result = body.vector(a, b);
-                if (@reduce(.Or, result.faults) != 0 and @reduce(.Or, body.exact(a, b)))
-                    return .{ .faulted = range.start + offset };
+                if (@reduce(.Or, result.faults) != 0) return .{ .faulted = range.start + offset };
                 storeVector(dest, offset, result.values);
             }
             for (vector_end..range.end) |index| {

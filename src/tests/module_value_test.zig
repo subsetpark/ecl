@@ -213,13 +213,13 @@ test "module registration: @defm is construction followed by registration" {
     const combined_failure = try renderFailure(
         &runtime,
         &left,
-        "[] ((1 0 /) call ((2) 'v def)) 'ghost-combined @defm",
+        "[] ((1 0 div) call ((2) 'v def)) 'ghost-combined @defm",
     );
     try std.testing.expect(std.mem.indexOf(u8, combined_failure, "'kind 'domain") != null);
     const composed_failure = try renderFailure(
         &runtime,
         &right,
-        "[] ((1 0 /) call ((2) 'v def)) @module 'ghost-composed register",
+        "[] ((1 0 div) call ((2) 'v def)) @module 'ghost-composed register",
     );
     try std.testing.expectEqualStrings(combined_failure, composed_failure);
     try expectEmptyStack(&runtime);
@@ -344,7 +344,7 @@ test "module registration: failures leave prior registrations atomic and ownersh
     defer runtime.deinit();
 
     // A failing construction body publishes neither a value nor a name.
-    try expectErrorContains(&runtime, "[] ((1 0 /) call) @module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "[] ((1 0 div) call) @module", &.{"'kind 'domain"});
     try expectEmptyStack(&runtime);
 
     // A failing registration leaves the prior directory entry, generation, and

@@ -574,7 +574,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try std.testing.expect((try execute(&runtime, "7 [] (1 0 /) @attempt")) == null);
+    try std.testing.expect((try execute(&runtime, "7 [] (1 0 div) @attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     const err_key = try intern.intern("err");
     try std.testing.expect((try dict.symbolField(

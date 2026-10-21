@@ -798,13 +798,13 @@ traverse an outer list of whole keys without descending into those keys.
 
 - Arithmetic on int64 that overflows is an `'overflow` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
-- `/` is float division. `div` is checked integer division. Division by zero is
-  `'domain`.
-- `inf` and `-inf` are values and propagate through arithmetic IEEE-style when
-  an *operand* is non-finite. Producing a non-finite result from finite inputs
-  is `'overflow` (e.g. `0 log`, float overflow). Any operation whose IEEE
-  result would be NaN is `'domain` (e.g. `-1 log`, `inf -inf +`). NaN therefore
-  never exists.
+- `/` is float division. `div` is checked integer division; its division by
+  zero is `'domain`.
+- Float arithmetic follows IEEE 754, so a finite computation may produce
+  `inf` or `-inf`: overflow (`1e308 10 *`), poles (`0 log` is `-inf`), and
+  division of a nonzero number by zero (`1 0 /` is `inf`, `1 -0.0 /` is
+  `-inf`). Any operation whose IEEE result would be NaN is `'domain` (e.g.
+  `-1 log`, `0 0 /`, `inf -inf +`). NaN therefore never exists.
 - `floor`, `ceil`, and `round` return int64 (`'overflow` when the result
   exceeds the range): their results are indices and mask material, and int-ness
   keeps integer pipelines integer. `pow` returns float.

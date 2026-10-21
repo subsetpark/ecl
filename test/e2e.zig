@@ -884,7 +884,7 @@ test "e2e: cancellation timeout and @each agree at one and eight workers" {
 }
 
 test "runtime errors are dicts on stderr" {
-    var result = try run(&.{ build_options.ecl_exe, "1 0 /" });
+    var result = try run(&.{ build_options.ecl_exe, "0 0 /" });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 1,
