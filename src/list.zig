@@ -213,22 +213,31 @@ pub const ValueMaterializer = struct {
         work: *poll.WorkBudget,
     ) error{OutOfMemory}!MaterializeResult {
         std.debug.assert(self.phase != .complete);
+        // Both passes take a granted run per transition and charge one unit per
+        // element they actually visit: profiling usually settles on `mixed` at
+        // the first element of a nested list, and must not bill the rest.
         while (!work.exhausted()) switch (self.phase) {
             .profile => {
-                if (self.index == self.values().len) {
+                const items = self.values();
+                if (self.index == items.len) {
                     if (try self.beginFill()) |result| return .{ .complete = result };
                     continue;
                 }
-                std.debug.assert(work.spend());
-                self.profileOne(self.values()[self.index]);
-                self.index += 1;
-                if (self.item_profile.kind == .mixed) self.index = self.values().len;
+                const run = items[self.index..][0..@min(items.len - self.index, work.remaining)];
+                var profile = self.item_profile;
+                var visited: usize = 0;
+                while (visited != run.len and profile.kind != .mixed) : (visited += 1)
+                    profile = profileNext(profile, run[visited], self.index + visited == 0);
+                _ = work.take(visited);
+                self.item_profile = profile;
+                self.index = if (profile.kind == .mixed) items.len else self.index + visited;
             },
             .fill => {
-                if (self.index == self.values().len) return self.finish();
-                std.debug.assert(work.spend());
-                self.builder.?.writeValue(self.index, self.values()[self.index]);
-                self.index += 1;
+                const items = self.values();
+                if (self.index == items.len) return self.finish();
+                const granted = work.take(items.len - self.index);
+                self.builder.?.writeValues(self.index, items[self.index..][0..granted]);
+                self.index += granted;
             },
             .complete => unreachable,
         };
@@ -238,43 +247,42 @@ pub const ValueMaterializer = struct {
         if (self.phase == .fill and self.index == self.values().len) return self.finish();
         return .pending;
     }
-    fn profileOne(self: *ValueMaterializer, item: Value) void {
-        if (self.index == 0) {
-            self.item_profile = switch (item) {
-                .int => |integer| .{
-                    .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int,
-                },
-                .float => .{ .kind = .all_float },
-                .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
-                .symbol => .{ .kind = .all_symbol },
-                .word, .list, .dict, .task, .module, .port => .{ .kind = .mixed },
-            };
-            return;
-        }
-        switch (self.item_profile.kind) {
+    fn profileNext(current: Profile, item: Value, first: bool) Profile {
+        if (first) return switch (item) {
+            .int => |integer| .{
+                .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int,
+            },
+            .float => .{ .kind = .all_float },
+            .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
+            .symbol => .{ .kind = .all_symbol },
+            .word, .list, .dict, .task, .module, .port => .{ .kind = .mixed },
+        };
+        var profile = current;
+        switch (profile.kind) {
             .empty => unreachable,
             .all_byte => {
                 if (item == .int) {
                     if (item.int < 0 or item.int > std.math.maxInt(u8))
-                        self.item_profile.kind = .all_int;
-                } else self.item_profile.kind = .mixed;
+                        profile.kind = .all_int;
+                } else profile.kind = .mixed;
             },
             .all_int => {
-                if (item != .int) self.item_profile.kind = .mixed;
+                if (item != .int) profile.kind = .mixed;
             },
             .all_float => {
-                if (item != .float) self.item_profile.kind = .mixed;
+                if (item != .float) profile.kind = .mixed;
             },
             .all_char => {
                 if (item == .char) {
-                    self.item_profile.max_codepoint = @max(self.item_profile.max_codepoint, item.char);
-                } else self.item_profile.kind = .mixed;
+                    profile.max_codepoint = @max(profile.max_codepoint, item.char);
+                } else profile.kind = .mixed;
             },
             .all_symbol => {
-                if (item != .symbol) self.item_profile.kind = .mixed;
+                if (item != .symbol) profile.kind = .mixed;
             },
             .mixed => {},
         }
+        return profile;
     }
     fn beginFill(self: *ValueMaterializer) error{OutOfMemory}!?Value {
         if (self.source == .owned and (self.item_profile.kind == .mixed or self.item_profile.kind == .empty)) {
