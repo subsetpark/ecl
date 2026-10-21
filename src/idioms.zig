@@ -913,27 +913,34 @@ const PervadeEachDriver = struct {
         });
     }
 
+    /// Elements run one after another within a step until the budget is spent,
+    /// through one cursor armed in place for each.
     pub fn advance(evaluator: *Machine, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.index != self.results.borrow().capacity()) {
-            if (self.cursor == null) self.cursor = .init(try self.startCursor(
-                evaluator.releaseDomain(),
-                evaluator.allocator(),
-            ));
-            switch (try self.cursor.?.borrowMut().advance(evaluator, evaluator.workBudget())) {
+        const work = evaluator.workBudget();
+        const count = self.results.borrow().capacity();
+        while (self.index != count) {
+            if (self.cursor == null) {
+                self.cursor = .init(numeric.PervadeCursor.initIdle(evaluator.releaseDomain(), evaluator.allocator()));
+                self.arm(self.cursor.?.borrowMut());
+            }
+            switch (try self.cursor.?.borrowMut().advance(evaluator, work)) {
                 .pending => return .stepped,
                 .complete => |result| {
-                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.cursor = null;
                     self.results.borrowMut().appendOwned(result);
                     self.index += 1;
-                    return .stepped;
+                    if (self.index != count) self.arm(self.cursor.?.borrowMut());
                 },
             }
         }
+        if (self.cursor) |*cursor| {
+            cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.cursor = null;
+        }
         if (self.materializer == null)
             self.materializer = .init(.init(evaluator.allocator(), self.results.borrow().values()));
-        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+        if (work.exhausted()) return .stepped;
+        return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
             .complete => |result| completed: {
                 popRelease(evaluator, self.consumed);
@@ -942,36 +949,24 @@ const PervadeEachDriver = struct {
         };
     }
 
-    fn startCursor(
-        self: *PervadeEachDriver,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) error{OutOfMemory}!numeric.PervadeCursor {
-        return switch (self.mode) {
-            .unary => |operation| .initUnary(
-                releases,
-                allocator,
-                operation,
-                list.atUnchecked(self.left, self.index),
-            ),
-            .constant => |constant| blk: {
+    /// Arms `cursor` with the operation on the element at `index`.
+    fn arm(self: *const PervadeEachDriver, cursor: *numeric.PervadeCursor) void {
+        switch (self.mode) {
+            .unary => |operation| cursor.rearmUnary(operation, list.atUnchecked(self.left, self.index)),
+            .constant => |constant| {
                 const item = list.atUnchecked(self.left, self.index);
-                break :blk .initBinary(
-                    releases,
-                    allocator,
+                cursor.rearmBinary(
                     constant.operation,
                     if (constant.left) constant.value else item,
                     if (constant.left) item else constant.value,
                 );
             },
-            .zip_with => |zip_with| .initBinary(
-                releases,
-                allocator,
+            .zip_with => |zip_with| cursor.rearmBinary(
                 zip_with.operation,
                 if (zip_with.left_list) list.atUnchecked(self.left, self.index) else self.left,
                 if (zip_with.right_list) list.atUnchecked(self.right.?, self.index) else self.right.?,
             ),
-        };
+        }
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

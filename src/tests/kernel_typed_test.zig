@@ -673,6 +673,370 @@ test "typed kernels: a flat operation of length n needs at most ceil(n over budg
     }
 }
 
+// Typed copies write each granted range straight into the result, so a range
+// that ends mid-shape — inside the left operand of a concatenation, partway
+// round a cycle, or across a gather block holding a bad index — must resume
+// exactly where the previous step stopped.
+test "typed kernels: copy shapes resume across budget boundaries and report the first bad gather index" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ quantum - 1, quantum + 1, quantum * 2 + 3 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+        for ([_][]const u8{
+            "dup cat 0 (+) fold",
+            "dup 3 take swap cat 0 (+) fold",
+            "dup 3 take cat 0 (+) fold",
+            "reverse 0 (+) fold",
+            "dup len 3 * 1 + take 0 (+) fold",
+            "5 drop -70000 take 0 (+) fold",
+            "dup len range reverse at 0 (+) fold",
+            "dup len range dup len 1 - -1 put at",
+            "dup len range dup 300 over len put at",
+            "dup len range dup 1 -1 put dup len 1 - over len put at",
+        }) |source| {
+            try expectParity(&runtime, .{ .ints = numbers }, source);
+        }
+    }
+}
+
+// `raze` copies same-class leaf children straight into a typed result, widening
+// narrower children, and keeps the profiled route for everything else; a child
+// longer than one step's budget resumes inside the child.
+test "typed kernels: raze of leaf children matches the profiled route across classes and budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ 3, quantum + 1 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+        for ([_][]const u8{
+            "dup reverse pair raze 0 (+) fold",
+            "dup 3 take swap pair raze 0 (+) fold",
+            "[1 2] swap pair raze 0 (+) fold",
+            "dup 0 take pair raze",
+            "dup 2.5 + pair raze 0 (+) fold",
+            "3 take 1 pair raze",
+        }) |source| {
+            try expectParity(&runtime, .{ .ints = numbers }, source);
+        }
+    }
+    const ascii = [_]u32{ 'a', 'b', 'a' };
+    try expectParity(&runtime, .{ .codepoints = &ascii }, "\"λ🙂\" pair raze");
+    try expectParity(&runtime, .{ .codepoints = &ascii }, "dup pair raze");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5 } }, "dup pair raze");
+}
+
+// `distinct` hashes in one pass under the leaf's own equality: first
+// occurrences in input order, zeros of either sign meeting at the first one
+// seen, and a pass longer than one step's budget resuming mid-table.
+test "typed kernels: hashed distinct keeps first occurrences under leaf equality across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    // The generic reference compares pairwise, so the long input keeps few
+    // distinct values and the many-valued input stays short.
+    const length = quantum * 2 + 5;
+    const numbers = try allocator.alloc(i64, length);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 301)) - 150;
+    try expectParity(&runtime, .{ .ints = numbers }, "distinct");
+    for (numbers[0..5000], 0..) |*item, index| item.* = @intCast((index * 7919) % 5003);
+    try expectParity(&runtime, .{ .ints = numbers[0..5000] }, "distinct");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 0.0, 1.5, 2.5, 0.0 } }, "distinct");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0 } }, "distinct");
+}
+
+// Typed `grade` sorts (key, position) pairs: insertion-sorted runs, then merge
+// passes that resume mid-merge across budget boundaries. Heavy duplicates
+// make stability observable in the permutation itself.
+test "typed kernels: grade and sort keep the stable permutation across runs merges and budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ 15, 16, 17, 33, quantum * 2 + 3 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 1009)) - 500;
+        try expectParity(&runtime, .{ .ints = numbers }, "grade dup len range * 0 (+) fold");
+        try expectParity(&runtime, .{ .ints = numbers }, "sort 1 drop 0 (+) fold");
+        try expectParity(&runtime, .{ .ints = numbers }, "reverse grade 25 take");
+    }
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "grade");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 0.0, -1.5, -0.0 } }, "sort");
+}
+
+// A recognized `each` or `zip-with` over a boxed spine arms one cursor per
+// element and runs elements until the step's budget is spent, so a spine
+// longer than the budget resumes between elements and inside a nested row.
+test "typed kernels: recognized each over a boxed spine resumes between elements across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @intCast(index % 1000);
+    for ([_][]const u8{
+        "(1 +) each 0 (+) fold",
+        "(neg) each 0 (+) fold",
+        "(2 swap -) each 0 (+) fold",
+        "dup (*) zip-with 0 (+) fold",
+        "dup len 1 - 9223372036854775807 put (1 +) each",
+        "(pop [1 2]) each (1 +) each raze 0 (+) fold",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+}
+
+// Leaf-needle membership tables the distinct needles, scans the haystack once
+// (stopping when every needle is found), and writes the mask from the table.
+// Each phase crosses a budget boundary here; the reference route compares
+// pairwise, so one side of each case stays short.
+test "typed kernels: tabled membership matches the pairwise route across numeric classes and budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 101)) - 50;
+    for ([_][]const u8{
+        "[3 -7 200 3] in? 0 (+) fold",
+        "[3.0 -7.5 0.0] in? 0 (+) fold",
+        "dup 25 take 1 + swap in?",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+    for (numbers, 0..) |*item, index| item.* = @intCast(index);
+    try expectParity(&runtime, .{ .ints = numbers }, "[5 70000 140000 131074] swap in?");
+    try expectParity(&runtime, .{ .ints = numbers }, "[0 1 2] swap in?");
+    try expectParity(&runtime, .{ .floats = &.{ -0.0, 2.0, 2.5 } }, "[0 2 3] in?");
+    try expectParity(&runtime, .{ .floats = &.{ -0.0, 2.0, 2.5 } }, "[0 2 3] swap in?");
+}
+
+// A typed leaf groups by its elements' match keys in one bulk pass; offsets,
+// cursors, and the scatter run in granted ranges for every input. Both cross
+// a budget boundary here, with many groups and with zeros of either sign.
+test "typed kernels: typed group matches the boxed route across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 70001)) - 35000;
+    try expectParity(&runtime, .{ .ints = numbers }, "group dict.size");
+    try expectParity(&runtime, .{ .ints = numbers }, "group dict.vals (len) each 0 (+) fold");
+    try expectParity(&runtime, .{ .ints = numbers }, "group dict.keys 40 take");
+    try expectParity(&runtime, .{ .ints = numbers }, "group 3 at");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 1.5, 0.0, -0.0 } }, "group");
+}
+
+// `reduce-groups` over typed numeric values and typed index groups reduces in
+// granted runs. A group longer than one step's budget resumes mid-group, and a
+// bad index after an overflowing element still reports the overflow first.
+test "typed kernels: typed reduce-groups matches the boxed route across budget boundaries and fault order" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 1001)) - 500;
+    for ([_][]const u8{
+        "dup 7 mod group dict.vals 'sum reduce-groups",
+        "dup 7 mod group dict.vals 'count reduce-groups",
+        "dup 7 mod group dict.vals 'min reduce-groups",
+        "dup 7 mod group dict.vals 'max reduce-groups",
+        "dup len range 1 wrap 'sum reduce-groups",
+        "dup len range 5 + 1 wrap 'count reduce-groups",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 1 5]] 'sum reduce-groups");
+    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 5 1]] 'sum reduce-groups");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1] [1 0] [2 2]] 'min reduce-groups");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1 2] []] 'sum reduce-groups");
+}
+
+// Typed `del` marks a mask from a typed index leaf, checking each granted run
+// of indices at once, and compacts the kept elements; one scalar position
+// copies the two slices around it. Both cross a budget boundary here.
+test "typed kernels: typed del matches the boxed route across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum * 2 + 3);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+    for ([_][]const u8{
+        "dup len 2 / floor range 2 * del 0 (+) fold",
+        "dup len 1 - del 0 (+) fold",
+        "70000 del 0 (+) fold",
+        "0 del 0 (+) fold",
+        "dup len range dup reverse cat del len",
+        "[5 5 70000 3] del 0 (+) fold",
+        "dup len range dup len 1 - -1 put del",
+        "dup len range dup 1 over len put del",
+    }) |source| {
+        try expectParity(&runtime, .{ .ints = numbers }, source);
+    }
+}
+
+// A typed stencil input copies each window's slice into a window of its own
+// representation in granted runs, so a window wider than one step's budget
+// resumes mid-window.
+test "typed kernels: typed stencil windows match the profiled route across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const numbers = try allocator.alloc(i64, quantum + 5);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+    try expectParity(&runtime, .{ .ints = numbers }, "65537 (sum) stencil");
+    try expectParity(&runtime, .{ .ints = numbers }, "65540 (dup len swap last pair) stencil");
+    try expectParity(&runtime, .{ .ints = numbers[0..9] }, "3 () stencil");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 2.5 } }, "2 () stencil");
+}
+
+// `split` searches a granted run of start positions per transition, sized by
+// the separator's length, so a long text with sparse or long separators
+// resumes mid-search; leftmost non-overlapping matches are unchanged.
+test "typed kernels: split finds leftmost separators across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // Expected outputs are the per-codepoint scan's, recorded before the
+    // search changed; split has no boxed route to compare against.
+    for ([_]struct { source: []const u8, expected: []const u8 }{
+        .{ .source = "\"x\" 70000 str.repeat \",\" cat \"y\" 70000 str.repeat cat \",\" split (len) each", .expected = "[70000 70000]" },
+        .{ .source = "\"ab\" 40000 str.repeat \"abx\" cat dup cat \"abx\" split (len) each", .expected = "[80000 80000 0]" },
+        .{ .source = "\"aaa\" 30000 str.repeat \"aa\" split len", .expected = "45001" },
+        .{ .source = "\"λ,\" 40000 str.repeat \",\" split len", .expected = "40001" },
+        .{ .source = "\"x\" 70000 str.repeat \"x\" 69000 str.repeat split (len) each", .expected = "[0 1000]" },
+    }) |case| {
+        const rendered = try outcome(&runtime, &.{}, case.source);
+        defer allocator.free(rendered);
+        std.testing.expectEqualStrings(case.expected, std.mem.trimEnd(u8, rendered, "\n")) catch |err| {
+            std.log.err("split case `{s}`", .{case.source});
+            return err;
+        };
+        try clearStack(&runtime);
+    }
+}
+
+// `where` validates typed counts a block at a time and rescans only a failing
+// block, so a bad count in the first, a middle, or the last block — or past a
+// budget boundary — must report the generic route's kind, message, and index.
+// Runs longer than one step's budget resume inside the run, and a long mask
+// stays within bounded safe points.
+test "typed kernels: where reports the first bad count and resumes runs across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const length = quantum + flat.block_size + 3;
+    const numbers = try allocator.alloc(i64, length);
+    defer allocator.free(numbers);
+    for ([_]usize{ 0, flat.block_size - 1, flat.block_size, flat.block_size + 1, quantum - 1, quantum, length - 1 }) |bad| {
+        for (numbers, 0..) |*item, index| item.* = @intCast(index % 2);
+        numbers[bad] = -1;
+        try expectParity(&runtime, .{ .ints = numbers }, "where len");
+        // A count too large to sum in a block takes the exact rescan, which
+        // still reaches the negative count after it.
+        if (bad == 0) continue;
+        numbers[bad / 2] = std.math.maxInt(i64);
+        try expectParity(&runtime, .{ .ints = numbers }, "where len");
+    }
+
+    for ([_][]const i64{
+        &.{ 0, quantum * 2 + 5, 1 },
+        &.{ quantum - 1, 0, 0, 2, quantum + 1 },
+        &.{ 1, 0, 0, 0 },
+        &.{ 0, 0, 0 },
+    }) |counts| {
+        try expectParity(&runtime, .{ .ints = counts }, "where");
+    }
+
+    for (numbers, 0..) |*item, index| item.* = @intCast(index % 3 % 2);
+    const input = try buildInts(.specialized, numbers);
+    const rendered = try outcome(&runtime, &.{input}, "where len");
+    defer allocator.free(rendered);
+    try std.testing.expect(runtime.lastPolls() <= 2 * length / quantum + 8);
+}
+
+// `put` with a flat typed index vector into a typed leaf validates every index
+// before its first store, copies a shared collection and reuses a unique one.
+// Parity against the boxed collection covers atoms, conforming replacements
+// of the same and of the byte representation, repeated indices, every
+// fallback that widens the result, and a bad index in the first, a middle, or
+// the last block of a collection longer than one step's budget.
+test "typed kernels: vector put matches the pervasive route across blocks reuse and fallbacks" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ 3, flat.block_size + 1, quantum + 3 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+        for ([_][]const u8{
+            "dup len 2 / floor range 2 * 7 put 0 (+) fold",
+            "dup dup len 2 / floor range 2 * 7 put swap pop 0 (+) fold",
+            "dup len range dup 3 * over len mod put 0 (+) fold",
+            "dup len range dup reverse put 0 (+) fold",
+            "[0 0 1] [5 6 7] put 3 take",
+            "[0 1] [5 6.5] put 3 take",
+            "[0 2] 2.5 put 3 take",
+            "[0 1] [5 6 7] put",
+            "dup len range 1 put 0 (+) fold",
+            "[0 -1] 5 put",
+            "dup len range dup len 2 / floor -1 put 5 put",
+            "dup len range dup len 1 - -1 put 5 put",
+            "dup len range dup 1 over len put 5 put",
+        }) |source| {
+            try expectParity(&runtime, .{ .ints = numbers }, source);
+        }
+    }
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5, 3.5 } }, "[2 0] 9.5 put");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5, 3.5 } }, "[2 0] 9 put");
+}
+
 // A fault in the first, a middle, or the final block reports the first failing
 // logical index with the scalar path's kind, message, and data — proven by
 // comparing the whole rendered error dict against the generic route, and by

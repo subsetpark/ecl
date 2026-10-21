@@ -383,10 +383,14 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
 
 /// Counts, then fills. The result is an exact-size index vector whose element
 /// type is known before the first store, so the fill writes `leaf_i64` storage
-/// directly; a run of equal indices is one bounded fill rather than a loop.
+/// directly.
 ///
-/// A typed count list is read through a pinned typed slice. A boxed one keeps
-/// the bounded per-element read, which is its registry classification.
+/// A typed count list is read through a pinned typed slice and validated a
+/// block at a time; only a block that fails is rescanned element by element, to
+/// report the first failing position. A boxed one keeps the bounded
+/// per-element read, which is its registry classification. Both share one
+/// fill loop, and both charge the budget once per granted range rather than
+/// once per element.
 const WhereDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     counts: heap.Owned(Value),
@@ -396,13 +400,121 @@ const WhereDriver = struct {
     writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
     reader: ?heap.Owned(heap.LeafReader(.leaf_i64)) = null,
     destination: usize = 0,
+    /// What remains of the run at `index` when a step's budget ran out inside it.
     repetition: usize = 0,
 
-    /// The count at one position: from the pinned typed slice when the input is
-    /// a typed leaf, through the bounded boxed read otherwise.
-    fn countAt(self: *const WhereDriver, index: usize) Value {
-        if (self.reader) |*pinned| return .{ .int = pinned.borrow().slice()[index] };
-        return list.atUnchecked(self.counts.borrow(), index);
+    /// Counts already validated by the counting pass, read without boxing.
+    const TypedCounts = struct {
+        items: []const i64,
+        fn at(self: TypedCounts, index: usize) usize {
+            return @intCast(self.items[index]);
+        }
+    };
+    const BoxedCounts = struct {
+        items: Value,
+        fn at(self: BoxedCounts, index: usize) usize {
+            return @intCast(list.atUnchecked(self.items, index).int);
+        }
+    };
+
+    /// The sum of one block of typed counts, or null when the block holds a
+    /// count that is negative or too large to sum without a checked add. Every
+    /// count below 2^55 keeps a block's sum below 2^63, so one `or` decides both.
+    fn blockSum(counts: []const i64) ?usize {
+        std.debug.assert(counts.len <= kernel_flat.block_size);
+        var bits: i64 = 0;
+        var sum: i64 = 0;
+        for (counts) |item| {
+            bits |= item;
+            sum +%= item;
+        }
+        if (bits >> 55 != 0) return null;
+        return std.math.cast(usize, sum);
+    }
+
+    /// Validates and adds the count at `index`: the exact per-element check,
+    /// which reports the first failing position.
+    fn countOne(self: *WhereDriver, evaluator: *Machine, item: Value) MachineError!void {
+        if (item != .int) return evaluator.failAtIndex(
+            .type,
+            "where expected integer counts",
+            self.index,
+        );
+        if (item.int < 0) return evaluator.failAtIndex(
+            .domain,
+            "where counts must be non-negative",
+            self.index,
+        );
+        const repetitions = std.math.cast(usize, item.int) orelse
+            return evaluator.failAtIndex(
+                .overflow,
+                "where count exceeds addressable size",
+                self.index,
+            );
+        self.total = std.math.add(usize, self.total, repetitions) catch
+            return evaluator.fail(.overflow, "where result is too large");
+        self.index += 1;
+    }
+
+    /// Counts one granted range of a typed list, a block at a time.
+    fn countTyped(self: *WhereDriver, evaluator: *Machine, counts: []const i64) MachineError!void {
+        var offset: usize = 0;
+        while (offset != counts.len) {
+            const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
+            offset += block.len;
+            if (blockSum(block)) |sum| {
+                if (std.math.add(usize, self.total, sum)) |total| {
+                    self.total = total;
+                    self.index += block.len;
+                    continue;
+                } else |_| {}
+            }
+            for (block) |item| try self.countOne(evaluator, .{ .int = item });
+        }
+    }
+
+    /// Writes as much of the result as `work` pays for: one unit per count
+    /// read, or per element written when a count is above one. A count of zero
+    /// or one stores its index unconditionally and advances by the count, so a
+    /// mask fills without a branch on its contents; the store a zero leaves
+    /// behind lies inside the result and is overwritten by the next index.
+    fn fill(self: *WhereDriver, work: *poll.WorkBudget, counts: anytype) void {
+        const out = self.writer.?.borrowMut().unpublishedRange(
+            self.destination,
+            self.total - self.destination,
+        );
+        const limit = work.remaining;
+        var spent: usize = 0;
+        var written: usize = 0;
+        var index = self.index;
+        if (self.repetition != 0) {
+            const run = @min(self.repetition, limit);
+            @memset(out[0..run], @intCast(index));
+            written = run;
+            spent = run;
+            self.repetition -= run;
+            if (self.repetition == 0) index += 1;
+        }
+        while (self.repetition == 0 and written != out.len and spent != limit) : (index += 1) {
+            const repetitions = counts.at(index);
+            out[written] = @intCast(index);
+            if (repetitions <= 1) {
+                written += repetitions;
+                spent += 1;
+                continue;
+            }
+            const run = @min(repetitions, limit - spent);
+            @memset(out[written..][0..run], @intCast(index));
+            written += run;
+            spent += run;
+            if (run != repetitions) {
+                self.repetition = repetitions - run;
+                break;
+            }
+        }
+        _ = work.take(spent);
+        self.index = index;
+        self.destination += written;
     }
 
     pub fn advance(evaluator: *Machine, self: *WhereDriver) MachineError!machine.WorkProgress {
@@ -412,6 +524,9 @@ const WhereDriver = struct {
         while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
+                    // Every index the fill stores is below `count`.
+                    if (count != 0 and std.math.cast(i64, count - 1) == null)
+                        return evaluator.fail(.overflow, "where index exceeds integer range");
                     self.writer = .init(try heap.LeafWriter(.leaf_i64).init(
                         evaluator.allocator(),
                         self.total,
@@ -420,50 +535,24 @@ const WhereDriver = struct {
                     self.phase = .fill;
                     continue;
                 }
-                const item = self.countAt(self.index);
-                if (item != .int) return evaluator.failAtIndex(
-                    .type,
-                    "where expected integer counts",
-                    self.index,
-                );
-                if (item.int < 0) return evaluator.failAtIndex(
-                    .domain,
-                    "where counts must be non-negative",
-                    self.index,
-                );
-                const repetitions = std.math.cast(usize, item.int) orelse
-                    return evaluator.failAtIndex(
-                        .overflow,
-                        "where count exceeds addressable size",
-                        self.index,
-                    );
-                self.total = std.math.add(usize, self.total, repetitions) catch
-                    return evaluator.fail(.overflow, "where result is too large");
-                self.index += 1;
-                _ = work.spend();
+                if (self.reader) |*pinned| {
+                    const granted = work.take(count - self.index);
+                    try self.countTyped(evaluator, pinned.borrow().slice()[self.index..][0..granted]);
+                } else {
+                    try self.countOne(evaluator, list.atUnchecked(self.counts.borrow(), self.index));
+                    _ = work.spend();
+                }
             },
             .fill => {
-                if (self.index == count) {
+                // Counts after the last nonzero one contribute nothing.
+                if (self.destination == self.total) {
                     self.phase = .materialize;
                     continue;
                 }
-                if (self.repetition == 0) {
-                    self.repetition = @intCast(self.countAt(self.index).int);
-                    if (self.repetition == 0) {
-                        self.index += 1;
-                        _ = work.spend();
-                        continue;
-                    }
-                }
-                const element = std.math.cast(i64, self.index) orelse
-                    return evaluator.fail(.overflow, "where index exceeds integer range");
-                // One run of equal indices is one bounded fill, charged for the
-                // elements it actually wrote.
-                const run = work.take(self.repetition);
-                self.writer.?.borrowMut().fillRange(self.destination, run, element);
-                self.destination += run;
-                self.repetition -= run;
-                if (self.repetition == 0) self.index += 1;
+                if (self.reader) |*pinned|
+                    self.fill(work, TypedCounts{ .items = pinned.borrow().slice() })
+                else
+                    self.fill(work, BoxedCounts{ .items = self.counts.borrow() });
             },
             .materialize => {
                 if (self.reader) |*pinned| pinned.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -700,6 +789,52 @@ fn ScalarMembershipDriver(comptime haystack_kind: value.HeapKind) type {
     };
 }
 
+/// The distinct needles of a membership test, open-addressed, each marked once
+/// the haystack is seen to hold it.
+const NeedleTable = struct {
+    const Slot = struct { key: equal.LeafMatchKey, found: bool };
+    slots: []Slot,
+    unfound: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, needles: usize) error{OutOfMemory}!NeedleTable {
+        const capacity = std.math.ceilPowerOfTwo(usize, @max(8, needles * 2)) catch return error.OutOfMemory;
+        const slots = try allocator.alloc(Slot, capacity);
+        for (slots) |*slot| slot.* = .{ .key = .{ .class = .empty, .bits = 0 }, .found = false };
+        return .{ .slots = slots };
+    }
+
+    pub fn retire(self: *NeedleTable, _: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        allocator.free(self.slots);
+    }
+
+    /// The slot holding `key`, or the empty slot where it belongs.
+    fn find(self: *const NeedleTable, key: equal.LeafMatchKey) *Slot {
+        const mask = self.slots.len - 1;
+        var index: usize = @intCast(key.hash() >> 32 & mask);
+        while (self.slots[index].key.class != .empty and !self.slots[index].key.eql(key)) index = (index + 1) & mask;
+        return &self.slots[index];
+    }
+
+    fn insert(self: *NeedleTable, key: equal.LeafMatchKey) void {
+        const slot = self.find(key);
+        if (slot.key.class != .empty) return;
+        slot.key = key;
+        self.unfound += 1;
+    }
+
+    fn mark(self: *NeedleTable, key: equal.LeafMatchKey) void {
+        const slot = self.find(key);
+        if (slot.key.class == .empty or slot.found) return;
+        slot.found = true;
+        self.unfound -= 1;
+    }
+};
+
+/// Membership of every needle of a flat leaf in a flat haystack, in O(needles
+/// + haystack): the needles' distinct keys are tabled, one pass over the
+/// haystack marks the keys it holds and stops once every key is marked, and
+/// the mask is written from the table. A disjoint leaf domain or an empty
+/// haystack is a fill of zeros.
 fn LeafMembershipDriver(
     comptime needle_kind: value.HeapKind,
     comptime haystack_kind: value.HeapKind,
@@ -712,61 +847,59 @@ fn LeafMembershipDriver(
         needles: heap.Owned(heap.LeafReader(needle_kind)),
         haystack: heap.Owned(heap.LeafReader(haystack_kind)),
         writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
-        cursor: kernel_flat.FlatCursor,
-        needle_index: usize = 0,
+        table: heap.Owned(NeedleTable),
+        phase: enum { table, scan, write } = .table,
+        position: usize = 0,
 
         fn finish(self: *Self, evaluator: *Machine) machine.WorkProgress {
             self.needles.deinit(evaluator.releaseDomain(), evaluator.allocator());
             self.haystack.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.table.deinit(evaluator.releaseDomain(), evaluator.allocator());
             return .{ .output = self.writer.borrowMut().finish() };
         }
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
             const needles = self.needles.borrow().slice();
             const candidates = self.haystack.borrow().slice();
-
-            // A disjoint leaf domain, or an empty haystack, is a typed fill.
-            // It is still chunked by the needle count so a large mask cannot
-            // bypass cancellation merely because no comparisons are needed.
-            if (!compatible or candidates.len == 0) {
-                if (try self.cursor.nextRange(context)) |range| {
-                    self.writer.borrowMut().fillRange(range.start, range.len(), 0);
-                }
-                if (!self.cursor.complete()) return .stepped;
-                return self.finish(evaluator);
-            }
-
-            // Spend one unit-wide fuel interval across as many short searches
-            // as fit. A long haystack is one charged range; a short one does
-            // not force one scheduler handoff per needle.
-            var first = true;
-            while (first or context.remaining() != 0) {
-                first = false;
-                const range = (try self.cursor.nextRange(context)).?;
-                var found = false;
-                for (candidates[range.start..range.end]) |candidate| {
-                    if (typedElementsMatch(
-                        needle_kind,
-                        haystack_kind,
-                        needles[self.needle_index],
-                        candidate,
-                    )) {
-                        found = true;
-                        break;
+            const table = self.table.borrowMut();
+            while (!work.exhausted()) switch (self.phase) {
+                .table => {
+                    if (!compatible or candidates.len == 0) {
+                        self.phase = .write;
+                        continue;
                     }
-                }
-                if (found or self.cursor.complete()) {
-                    self.writer.borrowMut().fillRange(
-                        self.needle_index,
-                        1,
-                        @intFromBool(found),
-                    );
-                    self.needle_index += 1;
-                    if (self.needle_index == needles.len) return self.finish(evaluator);
-                    self.cursor = kernel_flat.FlatCursor.init(candidates.len);
-                }
-            }
+                    const granted = work.take(needles.len - self.position);
+                    for (needles[self.position..][0..granted]) |needle| table.insert(equal.LeafMatchKey.of(needle_kind, needle));
+                    self.position += granted;
+                    if (self.position != needles.len) continue;
+                    self.position = 0;
+                    self.phase = .scan;
+                },
+                .scan => {
+                    const granted = work.take(candidates.len - self.position);
+                    for (candidates[self.position..][0..granted]) |candidate| {
+                        table.mark(equal.LeafMatchKey.of(haystack_kind, candidate));
+                        if (table.unfound == 0) break;
+                    }
+                    self.position = if (table.unfound == 0) candidates.len else self.position + granted;
+                    if (self.position != candidates.len) continue;
+                    self.position = 0;
+                    self.phase = .write;
+                },
+                .write => {
+                    const granted = work.take(needles.len - self.position);
+                    const out = self.writer.borrowMut().unpublishedRange(self.position, granted);
+                    if (!compatible or candidates.len == 0) {
+                        @memset(out, 0);
+                    } else for (out, needles[self.position..][0..granted]) |*slot, needle| {
+                        slot.* = @intFromBool(table.find(equal.LeafMatchKey.of(needle_kind, needle)).found);
+                    }
+                    self.position += granted;
+                    if (self.position == needles.len) return self.finish(evaluator);
+                },
+            };
             return .stepped;
         }
     };
@@ -811,12 +944,13 @@ fn startTypedMembership(evaluator: *Machine, needle: Value, haystack: Value) Mac
                 );
                 var held_locally = true;
                 errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
-                const candidate_count: usize = @intCast(haystack.list.length());
+                var table = try NeedleTable.init(evaluator.allocator(), @intCast(needle.list.length()));
+                errdefer if (held_locally) table.retire(evaluator.releaseDomain(), evaluator.allocator());
                 const driver = Driver{
                     .needles = .init(heap.LeafReader(candidate_needle).acquire(needle.list)),
                     .haystack = .init(heap.LeafReader(candidate_haystack).acquire(haystack.list)),
                     .writer = .init(writer),
-                    .cursor = kernel_flat.FlatCursor.init(if (membershipKindsCompatible(candidate_needle, candidate_haystack) and candidate_count != 0) candidate_count else @intCast(needle.list.length())),
+                    .table = .init(table),
                 };
                 held_locally = false;
                 try evaluator.startDriver(driver);
@@ -1039,16 +1173,100 @@ fn razePrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(RazeDriver{ .collection = .init(collection.take()) });
 }
 
+/// The element class a raze's typed result is chosen from.
+const RazeClass = enum { none, ints, floats, chars, symbols, boxed };
+
+fn razeClass(kind: value.HeapKind) RazeClass {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64 => .ints,
+        .leaf_f64 => .floats,
+        .leaf_char1, .leaf_char2, .leaf_char4 => .chars,
+        .leaf_symbol => .symbols,
+        .generic_spine, .dict, .task, .module, .port, .reserved_mask => .boxed,
+    };
+}
+
+/// The typed result buffer, held so a cancelled raze retires it.
+const RazeOutput = struct {
+    builder: heap.AnyListBuilder,
+    pub fn retire(self: *RazeOutput, releases: *heap.ReleaseDomain) void {
+        self.builder.retirePartial(releases);
+    }
+};
+
+/// Flattens one level. When every non-empty child is a typed leaf of one
+/// element class, each child's slice is copied, widened where narrower,
+/// straight into a typed result as wide as the widest child. Otherwise the
+/// children are read into boxed values and the result is profiled.
 const RazeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     collection: heap.Owned(Value),
-    phase: enum { count, fill, materialize } = .count,
+    phase: enum { count, fill, typed_fill, materialize } = .count,
     index: usize = 0,
     child_index: usize = 0,
     total: usize = 0,
+    class: RazeClass = .none,
+    widest: value.HeapKind = .leaf_u8,
     values: ?heap.Owned([]Value) = null,
+    output: ?heap.Owned(RazeOutput) = null,
     destination: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    fn classify(self: *RazeDriver, item: Value) void {
+        if (item != .list) {
+            self.class = .boxed;
+            return;
+        }
+        if (item.list.length() == 0 or self.class == .boxed) return;
+        const kind = item.list.kind();
+        const class = razeClass(kind);
+        if (self.class == .none) {
+            self.class = class;
+            self.widest = kind;
+        } else if (self.class != class) {
+            self.class = .boxed;
+        } else if (elementBits(kind) > elementBits(self.widest)) {
+            self.widest = kind;
+        }
+    }
+
+    fn elementBits(kind: value.HeapKind) usize {
+        return switch (kind) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |leaf| @bitSizeOf(heap.LeafElement(leaf)),
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        };
+    }
+
+    /// Whether every `Source` element coerces to `Out` unchanged. The class
+    /// check already keeps floats, symbols, and codepoints apart at run time;
+    /// this only decides which pairs need code.
+    fn widens(comptime Source: type, comptime Out: type) bool {
+        if (Source == Out) return true;
+        const from = @typeInfo(Source);
+        const to = @typeInfo(Out);
+        if (from != .int or to != .int) return false;
+        return to.int.bits > from.int.bits and
+            (to.int.signedness == .signed or from.int.signedness == .unsigned);
+    }
+
+    /// Copies `out.len` elements of `child`, starting at `from`, into `out`.
+    fn copyChild(comptime Out: type, out: []Out, child: *heap.ListHandle, from: usize, releases: *heap.ReleaseDomain) void {
+        switch (child.kind()) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+                const Source = heap.LeafElement(kind);
+                if (comptime !widens(Source, Out)) unreachable;
+                var reader = heap.LeafReader(kind).acquire(child);
+                defer reader.release(releases);
+                const source = reader.slice()[from..][0..out.len];
+                if (Source == Out) {
+                    @memcpy(out, source);
+                } else for (out, source) |*slot, item| {
+                    slot.* = item;
+                }
+            },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        }
+    }
 
     pub fn advance(evaluator: *Machine, self: *RazeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1057,17 +1275,56 @@ const RazeDriver = struct {
         while (!work.exhausted()) switch (self.phase) {
             .count => {
                 if (self.index == count) {
-                    self.values = .init(try evaluator.allocator().alloc(Value, self.total));
                     self.index = 0;
+                    if (self.class != .none and self.class != .boxed) {
+                        self.output = .init(.{ .builder = try heap.AnyListBuilder.init(
+                            evaluator.allocator(),
+                            self.widest,
+                            self.total,
+                            self.total,
+                        ) });
+                        self.phase = .typed_fill;
+                        continue;
+                    }
+                    self.values = .init(try evaluator.allocator().alloc(Value, self.total));
                     self.phase = .fill;
                     continue;
                 }
                 const item = list.atUnchecked(self.collection.borrow(), self.index);
+                self.classify(item);
                 const contribution: usize = if (item == .list) @intCast(item.list.length()) else 1;
                 self.total = std.math.add(usize, self.total, contribution) catch
                     return evaluator.fail(.overflow, "raze result is too large");
                 self.index += 1;
                 _ = work.spend();
+            },
+            .typed_fill => {
+                if (self.index == count) {
+                    var output = self.output.?.take();
+                    self.output = null;
+                    return .{ .output = .{ .list = output.builder.finish() } };
+                }
+                const child = list.atUnchecked(self.collection.borrow(), self.index).list;
+                const length: usize = @intCast(child.length());
+                if (self.child_index == length) {
+                    self.child_index = 0;
+                    self.index += 1;
+                    _ = work.spend();
+                    continue;
+                }
+                const run = work.take(length - self.child_index);
+                switch (self.output.?.borrowMut().builder) {
+                    .generic => unreachable,
+                    inline else => |*builder| copyChild(
+                        @TypeOf(builder.items()[0]),
+                        builder.items()[self.destination..][0..run],
+                        child,
+                        self.child_index,
+                        evaluator.releaseDomain(),
+                    ),
+                }
+                self.destination += run;
+                self.child_index += run;
             },
             .fill => {
                 if (self.index == count) {
@@ -1962,6 +2219,7 @@ const leaf_kinds = [_]value.HeapKind{
 
 fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
+    const Index = heap.LeafElement(index_kind);
     return struct {
         const Self = @This();
         pub const ownership: heap.DriverOwnership = .fields;
@@ -1976,52 +2234,41 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
             const context = support.Context{ .evaluator = evaluator };
-            var block: [kernel_flat.block_size]Element = undefined;
             if (try self.cursor.nextRange(context)) |range| {
                 const source = self.source.borrow().slice();
-                var offset: usize = 0;
-                while (offset != range.len()) {
-                    const piece = kernel_flat.blockRange(range, offset);
-                    switch (self.shape) {
-                        .contiguous => |contiguous| {
-                            const from = contiguous.start + piece.start;
-                            @memcpy(block[0..piece.len()], source[from..][0..piece.len()]);
-                        },
-                        .reversed => |reversed| {
-                            for (piece.start..piece.end) |index| {
-                                block[index - piece.start] = source[reversed.end - index - 1];
-                            }
-                        },
-                        .cyclic => |cyclic| {
-                            for (piece.start..piece.end) |index| {
-                                block[index - piece.start] = source[(cyclic.start + index) % source.len];
-                            }
-                        },
-                        .concat => |concat| {
-                            const right = self.other.?.borrow().slice();
-                            for (piece.start..piece.end) |index| {
-                                block[index - piece.start] = if (index < concat.left_count)
-                                    source[index]
-                                else
-                                    right[index - concat.left_count];
-                            }
-                        },
-                        .gather => {
-                            const indices = self.indices.?.borrow().slice();
-                            for (piece.start..piece.end) |index| {
-                                const position = indices[index];
-                                if (index_kind == .leaf_i64 and position < 0)
-                                    return context.fail(.domain, "at index is negative");
-                                const offset_position = std.math.cast(usize, position) orelse
-                                    return context.fail(.domain, "at index is out of bounds");
-                                if (offset_position >= source.len)
-                                    return context.fail(.domain, "at index is out of bounds");
-                                block[index - piece.start] = source[offset_position];
-                            }
-                        },
-                    }
-                    self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
-                    offset += piece.len();
+                // Nothing reads the result before it is published, so each
+                // shape writes its range in place, with no staging block.
+                const out: []Element = self.writer.borrowMut().unpublishedRange(range.start, range.len());
+                switch (self.shape) {
+                    .contiguous => |contiguous| @memcpy(out, source[contiguous.start + range.start ..][0..out.len]),
+                    .reversed => |reversed| for (out, range.start..) |*slot, index| {
+                        slot.* = source[reversed.end - index - 1];
+                    },
+                    .cyclic => |cyclic| {
+                        var from = (cyclic.start + range.start) % source.len;
+                        var written: usize = 0;
+                        while (written != out.len) {
+                            const run = @min(source.len - from, out.len - written);
+                            @memcpy(out[written..][0..run], source[from..][0..run]);
+                            written += run;
+                            from = 0;
+                        }
+                    },
+                    .concat => |concat| {
+                        const right = self.other.?.borrow().slice();
+                        const split = @min(out.len, concat.left_count -| range.start);
+                        if (split != 0) @memcpy(out[0..split], source[range.start..][0..split]);
+                        const right_start = (range.start + split) -| concat.left_count;
+                        @memcpy(out[split..], right[right_start..][0 .. out.len - split]);
+                    },
+                    .gather => {
+                        const indices = self.indices.?.borrow().slice()[range.start..range.end];
+                        if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
+                            .negative => context.fail(.domain, "at index is negative"),
+                            .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
+                        };
+                        for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
+                    },
                 }
             }
             if (!self.cursor.complete()) return .stepped;

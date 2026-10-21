@@ -1159,19 +1159,42 @@ pub const AnyListBuilder = union(enum) {
     }
 
     pub fn writeValue(self: *AnyListBuilder, index: usize, item: Value) void {
+        self.writeValues(index, &.{item});
+    }
+
+    /// Stores a run of values the caller has profiled as this builder's kind,
+    /// dispatching once for the run. A generic spine retains each value and
+    /// counts the run only once every cell in it is retained.
+    pub fn writeValues(self: *AnyListBuilder, index: usize, items: []const Value) void {
         switch (self.*) {
             .generic => |*builder| {
-                retainValue(item);
-                builder.items()[index] = item;
-                builder.setLen(index + 1);
+                for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                    retainValue(item);
+                    slot.* = item;
+                }
+                builder.setLen(index + items.len);
             },
-            .u8 => |*builder| builder.items()[index] = @intCast(item.int),
-            .i64 => |*builder| builder.items()[index] = item.int,
-            .f64 => |*builder| builder.items()[index] = item.float,
-            .char1 => |*builder| builder.items()[index] = @intCast(item.char),
-            .char2 => |*builder| builder.items()[index] = @intCast(item.char),
-            .char4 => |*builder| builder.items()[index] = item.char,
-            .symbol => |*builder| builder.items()[index] = item.symbol,
+            .u8 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = @intCast(item.int);
+            },
+            .i64 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = item.int;
+            },
+            .f64 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = item.float;
+            },
+            .char1 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = @intCast(item.char);
+            },
+            .char2 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = @intCast(item.char);
+            },
+            .char4 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = item.char;
+            },
+            .symbol => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
+                slot.* = item.symbol;
+            },
         }
     }
 };

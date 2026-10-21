@@ -1345,12 +1345,45 @@ const StencilControl = struct {
     }
 };
 
+/// A typed window under construction, held so a cancelled stencil retires it.
+const StencilWindow = struct {
+    builder: heap.AnyListBuilder,
+    pub fn retire(self: *StencilWindow, releases: *heap.ReleaseDomain) void {
+        self.builder.retirePartial(releases);
+    }
+};
+
 const StencilBootstrapDriver = struct {
     control: heap.Owned(StencilControl),
     window_values: heap.Owned(heap.OwnedValueBuffer),
     stack: machine.StackReservation,
     fill_index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
+    typed_window: ?heap.Owned(StencilWindow) = null,
+
+    /// Copies the next granted run of a typed input's window straight into a
+    /// window of the input's own representation; null when the input is boxed.
+    fn fillTyped(self: *StencilBootstrapDriver, evaluator: *Machine) MachineError!?bool {
+        const control = self.control.borrow();
+        const input = control.input.borrow().list;
+        switch (input.kind()) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+                if (self.typed_window == null) self.typed_window = .init(.{
+                    .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, control.width, control.width),
+                });
+                var reader = heap.LeafReader(kind).acquire(input);
+                defer reader.release(evaluator.releaseDomain());
+                const run = evaluator.workBudget().take(control.width - self.fill_index);
+                const items = switch (self.typed_window.?.borrowMut().builder) {
+                    inline else => |*builder| if (@TypeOf(builder.items()) == []heap.LeafElement(kind)) builder.items() else unreachable,
+                };
+                @memcpy(items[self.fill_index..][0..run], reader.slice()[control.index + self.fill_index ..][0..run]);
+                self.fill_index += run;
+                return self.fill_index == control.width;
+            },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => return null,
+        }
+    }
 
     pub fn advance(
         evaluator: *Machine,
@@ -1359,6 +1392,12 @@ const StencilBootstrapDriver = struct {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
         const control = self.control.borrow();
+        if (self.materializer == null) if (try self.fillTyped(evaluator)) |complete| {
+            if (!complete) return .stepped;
+            var window = self.typed_window.?.take();
+            self.typed_window = null;
+            return self.apply(evaluator, .{ .list = window.builder.finish() });
+        };
         if (self.materializer == null) {
             const end = self.fill_index + evaluator.workBudget().take(control.width - self.fill_index);
             while (self.fill_index != end) : (self.fill_index += 1) {
@@ -1375,25 +1414,28 @@ const StencilBootstrapDriver = struct {
         }
         switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .stepped,
-            .complete => |window| {
-                var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
-                defer window_owner.deinit();
-                const state = try evaluator.allocator().create(StencilApplication);
-                var state_owner: ?*StencilApplication = state;
-                errdefer if (state_owner) |owned| heap.destroyDriver(
-                    evaluator.releaseDomain(),
-                    evaluator.allocator(),
-                    owned,
-                );
-                state.* = .{ .control = .init(self.control.take()) };
-                var stack = self.stack;
-                evaluator.retireDriver(self);
-                stack.pushBorrowed(window_owner.borrow());
-                state_owner = null;
-                try evaluator.beginIsolatedApplication(state.application());
-                return .detached;
-            },
+            .complete => |window| return self.apply(evaluator, window),
         }
+    }
+
+    /// Hands the finished window to the quotation; consumes `window`.
+    fn apply(self: *StencilBootstrapDriver, evaluator: *Machine, window: Value) MachineError!machine.WorkProgress {
+        var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
+        defer window_owner.deinit();
+        const state = try evaluator.allocator().create(StencilApplication);
+        var state_owner: ?*StencilApplication = state;
+        errdefer if (state_owner) |owned| heap.destroyDriver(
+            evaluator.releaseDomain(),
+            evaluator.allocator(),
+            owned,
+        );
+        state.* = .{ .control = .init(self.control.take()) };
+        var stack = self.stack;
+        evaluator.retireDriver(self);
+        stack.pushBorrowed(window_owner.borrow());
+        state_owner = null;
+        try evaluator.beginIsolatedApplication(state.application());
+        return .detached;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

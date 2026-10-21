@@ -688,6 +688,47 @@ pub fn blockRange(range: Chunk, offset: usize) Chunk {
     return .{ .start = start, .end = end };
 }
 
+/// Why an index cannot select from a collection, and where it is.
+pub const IndexFault = struct {
+    kind: enum { negative, out_of_bounds },
+    position: usize,
+};
+
+/// The fault of the first index in `indices` that is negative or not below
+/// `count`, with its position in `indices`, or null when every index selects. Read as unsigned, a negative
+/// index is also past `count`, so the common case is one vector compare per
+/// lane group folded into a flag; only a flagged slice is rescanned in order,
+/// so the reported fault is the first one a sequential check would meet. A
+/// byte index cannot reach a collection longer than a byte's range.
+pub fn firstIndexFault(comptime Index: type, indices: []const Index, count: usize) ?IndexFault {
+    comptime std.debug.assert(Index == u8 or Index == i64);
+    if (Index == u8 and count > std.math.maxInt(u8)) return null;
+    const Lane = if (Index == u8) u8 else u64;
+    const limit: Lane = @intCast(count);
+    const lanes = comptime std.simd.suggestVectorLength(Lane) orelse 1;
+    const group = lanes * 4;
+    const LaneVector = @Vector(lanes, Lane);
+    const none: LaneVector = @splat(0);
+    const all: LaneVector = @splat(std.math.maxInt(Lane));
+    const bound: LaneVector = @splat(limit);
+    var outside = none;
+    var offset: usize = 0;
+    while (offset + group <= indices.len) : (offset += group) {
+        inline for (0..4) |member| {
+            const lane_values: LaneVector = @bitCast(indices[offset + member * lanes ..][0..lanes].*);
+            outside |= @select(Lane, lane_values >= bound, all, none);
+        }
+    }
+    var flagged = @reduce(.Or, outside) != 0;
+    for (indices[offset..]) |index| flagged = flagged or @as(Lane, @bitCast(index)) >= limit;
+    if (!flagged) return null;
+    for (indices, 0..) |index, position| {
+        if (index < 0) return .{ .kind = .negative, .position = position };
+        if (@as(Lane, @bitCast(index)) >= limit) return .{ .kind = .out_of_bounds, .position = position };
+    }
+    unreachable;
+}
+
 test "range planning bounds by budget quantum and remaining length" {
     // A complete operation plans nothing.
     try std.testing.expect(planRange(4, 4, 100, 100) == null);

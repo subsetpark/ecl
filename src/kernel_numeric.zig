@@ -299,18 +299,48 @@ pub const PervadeCursor = struct {
         left: Value,
         right: Value,
     ) error{OutOfMemory}!PervadeCursor {
+        var cursor = initIdle(releases, allocator);
+        cursor.rearmBinary(operation, left, right);
+        return cursor;
+    }
+
+    /// A cursor with no operation yet. A caller pervading many independent
+    /// operands arms one cursor in place for each, rather than building and
+    /// moving a cursor, whose frame stack holds its first frame inline, per
+    /// operand.
+    pub fn initIdle(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) PervadeCursor {
         return .{
             .releases = releases,
             .allocator = allocator,
             .frames = poll.ChunkStack(Frame).init(allocator),
-            .root_child = .{ .binary = .{
-                .operation = operation,
-                .left = left,
-                .right = right,
-                .depth = 0,
-                .logical_index = null,
-            } },
         };
+    }
+
+    /// Starts an operation on a cursor that is idle or whose last operation
+    /// completed. The operands are borrowed, as for `initBinary`.
+    pub fn rearmBinary(self: *PervadeCursor, operation: BinaryOp, left: Value, right: Value) void {
+        self.assertIdle();
+        self.root_child = .{ .binary = .{
+            .operation = operation,
+            .left = left,
+            .right = right,
+            .depth = 0,
+            .logical_index = null,
+        } };
+    }
+
+    pub fn rearmUnary(self: *PervadeCursor, operation: UnaryOp, operand: Value) void {
+        self.assertIdle();
+        self.root_child = .{ .unary = .{
+            .operation = operation,
+            .operand = operand,
+            .depth = 0,
+            .logical_index = null,
+        } };
+    }
+
+    fn assertIdle(self: *const PervadeCursor) void {
+        std.debug.assert(self.frames.isEmpty() and self.last == null and self.root == null and self.root_child == null);
     }
 
     /// Like `initBinary`, but consumes `left`: the cursor owns it on success
@@ -336,17 +366,9 @@ pub const PervadeCursor = struct {
         operation: UnaryOp,
         operand: Value,
     ) error{OutOfMemory}!PervadeCursor {
-        return .{
-            .releases = releases,
-            .allocator = allocator,
-            .frames = poll.ChunkStack(Frame).init(allocator),
-            .root_child = .{ .unary = .{
-                .operation = operation,
-                .operand = operand,
-                .depth = 0,
-                .logical_index = null,
-            } },
-        };
+        var cursor = initIdle(releases, allocator);
+        cursor.rearmUnary(operation, operand);
+        return cursor;
     }
 
     pub fn deinit(self: *PervadeCursor) void {
@@ -3172,23 +3194,85 @@ pub fn reduceGroups(evaluator: *Machine) MachineError!void {
 }
 
 const GroupReducer = enum { sum, count, min, max };
+/// Reduces each group in order. A typed numeric value leaf selected by a typed
+/// index leaf is reduced in granted runs: the run's indices are checked at
+/// once, and the elements before the first bad one are still reduced, so a
+/// fault earlier in a group is reported before a bad index after it. Any
+/// other group takes the per-element boxed loop. The results are profiled
+/// into a typed list like every other collected result.
 const GroupReduceDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     values: heap.Owned(Value),
     groups: heap.Owned(Value),
     operation: GroupReducer,
     output: ?heap.Owned(heap.OwnedValueBuffer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
     group: usize = 0,
     index: usize = 0,
     accumulator: Value = .{ .int = 0 },
     comparison: ?@import("kernel_order.zig").CompareCursor = null,
 
+    fn reduceRun(
+        self: *GroupReduceDriver,
+        comptime value_kind: value.HeapKind,
+        comptime index_kind: value.HeapKind,
+        evaluator: *Machine,
+        work: *poll.WorkBudget,
+        indices: *heap.ListHandle,
+    ) MachineError!void {
+        const Element = heap.LeafElement(value_kind);
+        var values = heap.LeafReader(value_kind).acquire(self.values.borrow().list);
+        defer values.release(evaluator.releaseDomain());
+        var selectors = heap.LeafReader(index_kind).acquire(indices);
+        defer selectors.release(evaluator.releaseDomain());
+        const items = values.slice();
+        const run = selectors.slice()[self.index..][0..work.take(selectors.len() - self.index)];
+        const fault = flat.firstIndexFault(heap.LeafElement(index_kind), run, items.len);
+        for (run[0..if (fault) |found| found.position else run.len]) |selector| {
+            const position: usize = @intCast(selector);
+            const item: Element = items[position];
+            const boxed: Value = if (Element == f64) .{ .float = item } else .{ .int = item };
+            switch (self.operation) {
+                .count => self.accumulator.int += 1,
+                .sum => self.accumulator = add(self.accumulator, boxed) catch |err|
+                    return scalarFailure(evaluator, err, position),
+                .min, .max => {
+                    // The first element seeds the accumulator, which until
+                    // then holds the sum's integer zero.
+                    const replace = self.index == 0 or replace: {
+                        const current: Element = if (Element == f64) self.accumulator.float else @intCast(self.accumulator.int);
+                        break :replace if (self.operation == .min) item < current else item > current;
+                    };
+                    if (replace) self.accumulator = boxed;
+                },
+            }
+            self.index += 1;
+        }
+        if (fault != null) return evaluator.fail(.domain, "group index is out of bounds");
+    }
+
+    /// Reduces part of the current group through the typed run when both the
+    /// values and its selectors are typed numeric leaves; false otherwise.
+    fn typedRun(self: *GroupReduceDriver, evaluator: *Machine, work: *poll.WorkBudget, indices: Value) MachineError!bool {
+        const values = self.values.borrow().list;
+        switch (values.kind()) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64 => |value_kind| switch (indices.list.kind()) {
+                inline .leaf_u8, .leaf_i64 => |index_kind| {
+                    try self.reduceRun(value_kind, index_kind, evaluator, work, indices.list);
+                    return true;
+                },
+                else => return false,
+            },
+            else => return false,
+        }
+    }
+
     pub fn advance(evaluator: *Machine, self: *GroupReduceDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.groups.borrow().list.length());
-        if (self.output == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
+        if (self.output == null and self.materializer == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
         const work = evaluator.workBudget();
-        while (self.group != count and work.spend()) {
+        while (self.group != count and !work.exhausted()) {
             const indices = list.atUnchecked(self.groups.borrow(), self.group);
             if (indices != .list) return evaluator.typeError("group index lists");
             if (self.index == indices.list.length()) {
@@ -3198,8 +3282,11 @@ const GroupReduceDriver = struct {
                 self.accumulator = .{ .int = 0 };
                 self.group += 1;
                 self.index = 0;
+                _ = work.spend();
                 continue;
             }
+            if (try self.typedRun(evaluator, work, indices)) continue;
+            _ = work.spend();
             const selector = list.atUnchecked(indices, self.index);
             if (selector != .int) return evaluator.typeError("integer group indices");
             if (selector.int < 0 or @as(u64, @intCast(selector.int)) >= self.values.borrow().list.length())
@@ -3227,8 +3314,19 @@ const GroupReduceDriver = struct {
             self.index += 1;
         }
         if (self.group != count) return .stepped;
-        const result = self.output.?.borrowMut().takeList();
-        self.output = null;
-        return .{ .output = result };
+        if (self.materializer == null) {
+            const results = self.output.?.take();
+            self.output = null;
+            self.materializer = .init(list.ValueMaterializer.initOwned(evaluator.allocator(), results));
+        }
+        if (work.exhausted()) return .stepped;
+        return switch (try self.materializer.?.borrowMut().advance(work)) {
+            .pending => .stepped,
+            .complete => |result| completed: {
+                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer = null;
+                break :completed .{ .output = result };
+            },
+        };
     }
 };

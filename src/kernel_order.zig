@@ -187,103 +187,191 @@ fn typedOrder(comptime kind: value.HeapKind, left: heap.LeafElement(kind), right
     };
 }
 
-fn TypedGradeComparator(comptime kind: value.HeapKind) type {
-    const Element = heap.LeafElement(kind);
-    return struct {
-        pub const Context = []const Element;
-        pub const Cursor = struct { ordering: std.math.Order };
-
-        pub fn init(collection: Context, left: usize, right: usize) Cursor {
-            return .{ .ordering = typedOrder(kind, collection[left], collection[right]) };
-        }
-
-        pub fn advance(cursor: *Cursor, _: *poll.WorkBudget) poll.Progress(std.math.Order) {
-            return .{ .complete = cursor.ordering };
-        }
-    };
-}
-
+/// A stable sort of (key, position) pairs. Keys are compared in place rather
+/// than through a position into the collection, and floats by an integer
+/// image; runs of `run_width` are
+/// insertion-sorted first and bottom-up merge passes follow. Every phase takes
+/// a granted range of the budget per transition and carries its position
+/// across steps. Leaf comparisons are a strict weak order (floats exclude
+/// NaN), so any stable sort yields the one permutation `grade` names.
 fn TypedGradeDriver(comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
-    const Sort = poll.MergeSortCursor(usize, TypedGradeComparator(kind));
+    // Floats sort by an order-preserving unsigned image, so the merge
+    // compares integers; both zeros map to one key and stay in input order.
+    const Key = if (Element == f64) u64 else Element;
+    const Pair = struct { key: Key, position: usize };
+    const run_width = 16;
     return struct {
         const Self = @This();
         pub const ownership: heap.DriverOwnership = .fields;
 
         collection: heap.Owned(heap.LeafReader(kind)),
-        indices: heap.Owned([]usize),
+        pairs: heap.Owned([]Pair),
+        scratch: heap.Owned([]Pair),
         sorted_values: bool,
-        phase: enum { initialize, sort, output } = .initialize,
-        cursor: kernel_flat.FlatCursor,
-        sort: ?heap.Owned(Sort) = null,
+        phase: enum { initialize, runs, merge, output } = .initialize,
+        position: usize = 0,
+        /// The width of the runs being merged, the buffer holding them, and
+        /// the progress through the pair of runs that begins at `start`.
+        width: usize = run_width,
+        from_scratch: bool = false,
+        start: usize = 0,
+        left: usize = 0,
+        right: usize = 0,
+        output: usize = 0,
         index_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
         value_writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
 
-        fn finish(self: *Self, evaluator: *Machine) machine.WorkProgress {
-            self.collection.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            return .{ .output = if (self.sorted_values)
-                self.value_writer.?.borrowMut().finish()
-            else
-                self.index_writer.?.borrowMut().finish() };
+        fn init(
+            allocator: std.mem.Allocator,
+            collection: heap.LeafReader(kind),
+            sorted_values: bool,
+        ) error{OutOfMemory}!Self {
+            const count = collection.len();
+            const pairs = try allocator.alloc(Pair, count);
+            errdefer allocator.free(pairs);
+            const scratch = try allocator.alloc(Pair, count);
+            return .{
+                .collection = .init(collection),
+                .pairs = .init(pairs),
+                .scratch = .init(scratch),
+                .sorted_values = sorted_values,
+            };
+        }
+
+        fn sortKey(item: Element) Key {
+            if (Element != f64) return item;
+            const bits: u64 = @bitCast(if (item == 0) 0.0 else item);
+            return if (bits >> 63 == 1) ~bits else bits | 1 << 63;
+        }
+
+        /// Whether `right` must precede `left`: only when strictly less, so
+        /// equal keys keep their input order.
+        fn before(right: Key, left: Key) bool {
+            return right < left;
+        }
+
+        fn sortRun(run: []Pair) void {
+            for (1..run.len) |index| {
+                const item = run[index];
+                var hole = index;
+                while (hole != 0 and before(item.key, run[hole - 1].key)) : (hole -= 1) run[hole] = run[hole - 1];
+                run[hole] = item;
+            }
+        }
+
+        fn sorted(self: *const Self) []const Pair {
+            return if (self.from_scratch) self.scratch.borrow() else self.pairs.borrow();
+        }
+
+        /// Merges up to `budget` pairs of the current pass and any that follow
+        /// it, returning how many it wrote.
+        fn merge(self: *Self, budget: usize) usize {
+            const count = self.pairs.borrow().len;
+            var produced: usize = 0;
+            while (produced != budget and self.width < count) {
+                const middle = @min(self.start + self.width, count);
+                const end = @min(middle + self.width, count);
+                if (self.output == end) {
+                    self.start = end;
+                    if (self.start == count) {
+                        self.width *|= 2;
+                        self.from_scratch = !self.from_scratch;
+                        self.start = 0;
+                    }
+                    self.left = self.start;
+                    self.right = @min(self.start +| self.width, count);
+                    self.output = self.start;
+                    continue;
+                }
+                const source = self.sorted();
+                const destination = if (self.from_scratch) self.pairs.borrow() else self.scratch.borrow();
+                // The cursors live in locals for the loop: through `self`
+                // each store would feed the next element's loads.
+                const limit = self.output + @min(budget - produced, end - self.output);
+                var left = self.left;
+                var right = self.right;
+                var output = self.output;
+                while (output != limit and left != middle and right != end) : (output += 1) {
+                    const take_right = before(source[right].key, source[left].key);
+                    destination[output] = if (take_right) source[right] else source[left];
+                    right += @intFromBool(take_right);
+                    left += @intFromBool(!take_right);
+                }
+                if (output != limit) {
+                    const from = if (left == middle) &right else &left;
+                    const run = limit - output;
+                    @memcpy(destination[output..][0..run], source[from.*..][0..run]);
+                    from.* += run;
+                    output += run;
+                }
+                produced += output - self.output;
+                self.left = left;
+                self.right = right;
+                self.output = output;
+            }
+            return produced;
         }
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            switch (self.phase) {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            const count = self.pairs.borrow().len;
+            while (!work.exhausted()) switch (self.phase) {
                 .initialize => {
-                    const range = (try self.cursor.nextRange(context)).?;
-                    const indices = self.indices.borrow();
-                    for (range.start..range.end) |index| indices[index] = index;
-                    if (!self.cursor.complete()) return .stepped;
-                    self.sort = .init(try Sort.init(
-                        evaluator.allocator(),
-                        indices,
-                        self.collection.borrow().slice(),
-                    ));
-                    self.phase = .sort;
-                    return .stepped;
-                },
-                .sort => {
-                    try evaluator.pollKernel();
-                    switch (self.sort.?.borrowMut().advance(evaluator.workBudget())) {
-                        .pending => return .stepped,
-                        .complete => {
-                            self.sort.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                            self.sort = null;
-                            const count = self.indices.borrow().len;
-                            if (self.sorted_values) {
-                                self.value_writer = .init(try heap.LeafWriter(kind).init(evaluator.allocator(), count));
-                            } else {
-                                self.index_writer = .init(try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count));
-                            }
-                            self.cursor = kernel_flat.FlatCursor.init(count);
-                            self.phase = .output;
-                            return .stepped;
-                        },
+                    const keys = self.collection.borrow().slice();
+                    const granted = work.take(count - self.position);
+                    for (self.pairs.borrow()[self.position..][0..granted], self.position..) |*pair, position| {
+                        pair.* = .{ .key = sortKey(keys[position]), .position = position };
                     }
+                    self.position += granted;
+                    if (self.position != count) continue;
+                    self.position = 0;
+                    self.phase = .runs;
+                },
+                .runs => {
+                    // Each run is charged one unit per element it holds.
+                    const granted = work.take(count - self.position);
+                    const end = self.position + granted;
+                    while (self.position < end) : (self.position += run_width) {
+                        sortRun(self.pairs.borrow()[self.position..@min(self.position + run_width, count)]);
+                    }
+                    if (self.position < count) continue;
+                    self.position = 0;
+                    self.right = @min(self.width, count);
+                    self.phase = .merge;
+                },
+                .merge => {
+                    _ = work.take(self.merge(work.remaining));
+                    if (self.width < count) continue;
+                    if (self.sorted_values) {
+                        self.value_writer = .init(try heap.LeafWriter(kind).init(evaluator.allocator(), count));
+                    } else {
+                        self.index_writer = .init(try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count));
+                    }
+                    self.phase = .output;
                 },
                 .output => {
-                    const range = (try self.cursor.nextRange(context)).?;
-                    const indices = self.indices.borrow();
-                    var value_block: [kernel_flat.block_size]Element = undefined;
-                    var index_block: [kernel_flat.block_size]i64 = undefined;
-                    var offset: usize = 0;
-                    while (offset != range.len()) {
-                        const piece = kernel_flat.blockRange(range, offset);
-                        if (self.sorted_values) {
-                            const source = self.collection.borrow().slice();
-                            for (piece.start..piece.end) |index| value_block[index - piece.start] = source[indices[index]];
-                            self.value_writer.?.borrowMut().writeRange(piece.start, value_block[0..piece.len()]);
-                        } else {
-                            for (piece.start..piece.end) |index| index_block[index - piece.start] = @intCast(indices[index]);
-                            self.index_writer.?.borrowMut().writeRange(piece.start, index_block[0..piece.len()]);
-                        }
-                        offset += piece.len();
+                    const granted = work.take(count - self.position);
+                    const pairs = self.sorted()[self.position..][0..granted];
+                    if (self.sorted_values) {
+                        const out = self.value_writer.?.borrowMut().unpublishedRange(self.position, granted);
+                        const values = self.collection.borrow().slice();
+                        for (out, pairs) |*slot, pair| slot.* = if (Key == Element) pair.key else values[pair.position];
+                    } else {
+                        const out = self.index_writer.?.borrowMut().unpublishedRange(self.position, granted);
+                        for (out, pairs) |*slot, pair| slot.* = @intCast(pair.position);
                     }
-                    if (!self.cursor.complete()) return .stepped;
-                    return self.finish(evaluator);
+                    self.position += granted;
+                    if (self.position != count) continue;
+                    self.collection.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    return .{ .output = if (self.sorted_values)
+                        self.value_writer.?.borrowMut().finish()
+                    else
+                        self.index_writer.?.borrowMut().finish() };
                 },
-            }
+            };
+            return .stepped;
         }
     };
 }
@@ -300,13 +388,12 @@ fn startTypedGrade(evaluator: *Machine, collection: Value, sorted_values: bool) 
     inline for (order_leaf_kinds) |candidate| {
         if (kind == candidate) {
             const Driver = TypedGradeDriver(candidate);
-            const indices = try evaluator.allocator().alloc(usize, count);
-            try evaluator.startDriver(Driver{
-                .collection = .init(heap.LeafReader(candidate).acquire(collection.list)),
-                .indices = .init(indices),
-                .sorted_values = sorted_values,
-                .cursor = kernel_flat.FlatCursor.init(count),
-            });
+            var source = heap.LeafReader(candidate).acquire(collection.list);
+            const driver = Driver.init(evaluator.allocator(), source, sorted_values) catch |err| {
+                source.release(evaluator.releaseDomain());
+                return err;
+            };
+            try evaluator.startDriver(driver);
             return true;
         }
     }
@@ -574,9 +661,12 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
         inline for (order_leaf_kinds) |candidate| {
             if (kind == candidate) {
                 const Driver = TypedDistinctDriver(candidate);
-                try evaluator.startDriver(Driver{
-                    .source = .init(heap.LeafReader(candidate).acquire(collection.borrow().list)),
-                });
+                var source = heap.LeafReader(candidate).acquire(collection.borrow().list);
+                const driver = Driver.init(evaluator.allocator(), source) catch |err| {
+                    source.release(evaluator.releaseDomain());
+                    return err;
+                };
+                try evaluator.startDriver(driver);
                 return;
             }
         }
@@ -588,6 +678,10 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     });
 }
 
+/// One hashed pass in input order: an element is kept when no kept element
+/// equals it under the leaf's own `==`, so zeros of either sign meet (floats
+/// exclude NaN). Kept elements collect in a scratch buffer and are copied
+/// once into the exact-size result.
 fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     return struct {
@@ -595,55 +689,60 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
         pub const ownership: heap.DriverOwnership = .fields;
 
         source: heap.Owned(heap.LeafReader(kind)),
-        writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
-        phase: enum { count, fill } = .count,
+        /// Open-addressed positions into `kept`, plus one; zero is empty.
+        slots: heap.Owned([]usize),
+        kept: heap.Owned([]Element),
+        kept_count: usize = 0,
         item_index: usize = 0,
-        candidate: usize = 0,
-        distinct_count: usize = 0,
-        output_index: usize = 0,
+
+        fn init(allocator: std.mem.Allocator, source: heap.LeafReader(kind)) error{OutOfMemory}!Self {
+            const count = source.len();
+            const capacity = std.math.ceilPowerOfTwo(usize, @max(8, count * 2)) catch return error.OutOfMemory;
+            const slots = try allocator.alloc(usize, capacity);
+            errdefer allocator.free(slots);
+            @memset(slots, 0);
+            const kept = try allocator.alloc(Element, count);
+            return .{ .source = .init(source), .slots = .init(slots), .kept = .init(kept) };
+        }
+
+        fn hash(item: Element) u64 {
+            const bits: u64 = if (Element == f64)
+                @bitCast(if (item == 0) 0.0 else item)
+            else if (Element == i64)
+                @bitCast(item)
+            else
+                item;
+            return bits *% 0x9E37_79B9_7F4A_7C15;
+        }
+
+        /// Keeps `item` unless an equal element is already kept.
+        fn keep(self: *Self, item: Element) void {
+            const kept = self.kept.borrow();
+            const slots = self.slots.borrow();
+            const mask = slots.len - 1;
+            var slot: usize = @intCast(hash(item) >> 32 & mask);
+            while (slots[slot] != 0) : (slot = (slot + 1) & mask) {
+                if (kept[slots[slot] - 1] == item) return;
+            }
+            kept[self.kept_count] = item;
+            self.kept_count += 1;
+            slots[slot] = self.kept_count;
+        }
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
             try evaluator.pollKernel();
             const work = evaluator.workBudget();
             const source: []const Element = self.source.borrow().slice();
-            while (!work.exhausted()) {
-                if (self.item_index == source.len) {
-                    if (self.phase == .count) {
-                        self.writer = .init(try heap.LeafWriter(kind).init(
-                            evaluator.allocator(),
-                            self.distinct_count,
-                        ));
-                        self.phase = .fill;
-                        self.item_index = 0;
-                        self.candidate = 0;
-                        continue;
-                    }
-                    std.debug.assert(self.output_index == self.distinct_count);
-                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    return .{ .output = self.writer.?.borrowMut().finish() };
-                }
-                if (self.candidate == self.item_index) {
-                    if (self.phase == .count) {
-                        self.distinct_count += 1;
-                    } else {
-                        self.writer.?.borrowMut().writeRange(
-                            self.output_index,
-                            &.{source[self.item_index]},
-                        );
-                        self.output_index += 1;
-                    }
-                    self.item_index += 1;
-                    self.candidate = 0;
-                    _ = work.spend();
-                    continue;
-                }
-                if (source[self.candidate] == source[self.item_index]) {
-                    self.item_index += 1;
-                    self.candidate = 0;
-                } else self.candidate += 1;
-                _ = work.spend();
+            if (self.item_index != source.len) {
+                const granted = work.take(source.len - self.item_index);
+                for (source[self.item_index..][0..granted]) |item| self.keep(item);
+                self.item_index += granted;
+                if (self.item_index != source.len) return .stepped;
             }
-            return .stepped;
+            var writer = try heap.LeafWriter(kind).init(evaluator.allocator(), self.kept_count);
+            writer.writeRange(0, self.kept.borrow()[0..self.kept_count]);
+            self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = writer.finish() };
         }
     };
 }
@@ -743,7 +842,10 @@ const GroupDriver = struct {
     offsets: ?heap.Owned([]usize) = null,
     cursors: ?heap.Owned([]usize) = null,
     indices: ?heap.Owned([]i64) = null,
-    phase: enum { validate, allocate, initialize, hash, scan, key, offsets, cursors, scatter, groups, dictionary } = .validate,
+    phase: enum { validate, allocate, initialize, hash, scan, key, typed_assign, offsets, cursors, scatter, groups, dictionary } = .validate,
+    /// A single typed leaf is grouped by its elements' match keys in one bulk
+    /// pass, with no boxed reads, hash cursors, or per-cell matching.
+    typed: bool = false,
     item_index: usize = 0,
     key_count: usize = 0,
     candidate: usize = 0,
@@ -780,6 +882,49 @@ const GroupDriver = struct {
         const source = self.collection.borrow();
         return list.atUnchecked(if (self.columns) list.atUnchecked(source, column) else source, row);
     }
+    /// One typed leaf element as the scalar value it stands for.
+    fn leafValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
+        return switch (kind) {
+            .leaf_u8, .leaf_i64 => .{ .int = item },
+            .leaf_f64 => .{ .float = item },
+            .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
+            .leaf_symbol => .{ .symbol = item },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        };
+    }
+
+    /// Assigns `rows` of a typed leaf to groups. The open-addressed `slots`
+    /// hold group numbers plus one; a group's key is its first row's element.
+    fn assignTyped(self: *GroupDriver, comptime kind: value.HeapKind, rows: usize, releases: *heap.ReleaseDomain) void {
+        var reader = heap.LeafReader(kind).acquire(self.collection.borrow().list);
+        defer reader.release(releases);
+        const items = reader.slice();
+        const slots = self.slots.?.borrow();
+        const mask = slots.len - 1;
+        const key_rows = self.key_rows.?.borrow();
+        const assignments = self.assignments.?.borrow();
+        const frequencies = self.frequencies.?.borrow();
+        for (self.item_index..self.item_index + rows) |row| {
+            const key = equal.LeafMatchKey.of(kind, items[row]);
+            var slot: usize = @intCast(key.hash() >> 32 & mask);
+            const group = while (slots[slot] != 0) : (slot = (slot + 1) & mask) {
+                const existing = slots[slot] - 1;
+                if (equal.LeafMatchKey.of(kind, items[key_rows[existing]]).eql(key)) break existing;
+            } else fresh: {
+                const fresh = self.key_count;
+                self.keys.?.borrow()[fresh] = leafValue(kind, items[row]);
+                key_rows[fresh] = row;
+                frequencies[fresh] = 0;
+                slots[slot] = fresh + 1;
+                self.key_count += 1;
+                break :fresh fresh;
+            };
+            assignments[row] = group;
+            frequencies[group] += 1;
+        }
+        self.item_index += rows;
+    }
+
     fn assigned(self: *GroupDriver, group: usize) void {
         self.assignments.?.borrow()[self.item_index] = group;
         self.frequencies.?.borrow()[group] += 1;
@@ -797,6 +942,7 @@ const GroupDriver = struct {
                 const source = self.collection.borrow();
                 if (!self.columns) {
                     self.row_count = @intCast(source.list.length());
+                    self.typed = source.list.kind() != .generic_spine;
                     self.phase = .allocate;
                     continue;
                 }
@@ -818,12 +964,24 @@ const GroupDriver = struct {
                 const slots = self.slots.?.borrow();
                 if (self.index == slots.len) {
                     self.index = 0;
-                    self.phase = .hash;
+                    self.phase = if (self.typed) .typed_assign else .hash;
                     continue;
                 }
-                slots[self.index] = 0;
-                self.index += 1;
-                _ = work.spend();
+                const granted = work.take(slots.len - self.index);
+                @memset(slots[self.index..][0..granted], 0);
+                self.index += granted;
+            },
+            .typed_assign => {
+                if (self.item_index == self.row_count) {
+                    self.phase = .offsets;
+                    self.index = 0;
+                    continue;
+                }
+                const rows = work.take(self.row_count - self.item_index);
+                switch (self.collection.borrow().list.kind()) {
+                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| self.assignTyped(kind, rows, evaluator.releaseDomain()),
+                    .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+                }
             },
             .hash => {
                 if (self.item_index == self.row_count) {
@@ -926,10 +1084,11 @@ const GroupDriver = struct {
                     self.index = 0;
                     continue;
                 }
-                self.offsets.?.borrow()[self.index + 1] =
-                    self.offsets.?.borrow()[self.index] + self.frequencies.?.borrow()[self.index];
-                self.index += 1;
-                _ = work.spend();
+                const offsets = self.offsets.?.borrow();
+                const frequencies = self.frequencies.?.borrow();
+                const end = self.index + work.take(self.key_count - self.index);
+                while (self.index != end) : (self.index += 1)
+                    offsets[self.index + 1] = offsets[self.index] + frequencies[self.index];
             },
             .cursors => {
                 if (self.index == self.key_count) {
@@ -937,9 +1096,12 @@ const GroupDriver = struct {
                     self.index = 0;
                     continue;
                 }
-                self.cursors.?.borrow()[self.index] = self.offsets.?.borrow()[self.index];
-                self.index += 1;
-                _ = work.spend();
+                const granted = work.take(self.key_count - self.index);
+                @memcpy(
+                    self.cursors.?.borrow()[self.index..][0..granted],
+                    self.offsets.?.borrow()[self.index..][0..granted],
+                );
+                self.index += granted;
             },
             .scatter => {
                 if (self.index == self.assignments.?.borrow().len) {
@@ -947,11 +1109,15 @@ const GroupDriver = struct {
                     self.index = 0;
                     continue;
                 }
-                const group_index = self.assignments.?.borrow()[self.index];
-                self.indices.?.borrow()[self.cursors.?.borrow()[group_index]] = @intCast(self.index);
-                self.cursors.?.borrow()[group_index] += 1;
-                self.index += 1;
-                _ = work.spend();
+                const assignments = self.assignments.?.borrow();
+                const indices = self.indices.?.borrow();
+                const cursors = self.cursors.?.borrow();
+                const end = self.index + work.take(assignments.len - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    const group_index = assignments[self.index];
+                    indices[cursors[group_index]] = @intCast(self.index);
+                    cursors[group_index] += 1;
+                }
             },
             .groups => {
                 if (self.index == self.key_count) {

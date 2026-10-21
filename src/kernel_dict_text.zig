@@ -239,6 +239,7 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
         },
         .list => {
             if (key.borrow() == .list) {
+                if (try startTypedVectorPut(evaluator, &collection, key.borrow(), new_value.borrow())) return;
                 const count: usize = @intCast(collection.borrow().list.length());
                 const values = try evaluator.allocator().alloc(Value, count);
                 var actions = poll.ChunkStack(PutAction).init(evaluator.allocator());
@@ -514,6 +515,222 @@ fn startTypedListPut(
     unreachable;
 }
 
+/// What a typed vector put stores: one atom at every selected position, or a
+/// conforming leaf read in the collection's representation. A byte leaf widens
+/// losslessly into an integer collection, since literal and profiled integer
+/// lists are bytes whenever they can be.
+fn VectorReplacement(comptime kind: value.HeapKind) type {
+    return union(enum) {
+        const Self = @This();
+        atom: heap.LeafElement(kind),
+        same: heap.LeafReader(kind),
+        bytes: heap.LeafReader(.leaf_u8),
+
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .atom => {},
+                .same => |*reader| reader.release(releases),
+                .bytes => |*reader| reader.release(releases),
+            }
+        }
+    };
+}
+
+/// The result buffer: a fresh copy, or the collection itself when this put
+/// holds its only reference. Indices are validated before the first store, so
+/// a reused collection is never left half-replaced by a failing put.
+fn VectorPutOutput(comptime kind: value.HeapKind) type {
+    return union(enum) {
+        const Self = @This();
+        fresh: struct { writer: heap.LeafWriter(kind), source: heap.LeafReader(kind) },
+        /// `root` is the collection's reference; publishing republishes that
+        /// same list, so the reference becomes the result's.
+        reuse: struct { adoption: heap.UniqueLeafAdoption(kind), root: Value },
+
+        fn items(self: *Self, count: usize) []heap.LeafElement(kind) {
+            return switch (self.*) {
+                .fresh => |*fresh| fresh.writer.unpublishedRange(0, count),
+                .reuse => |*reuse| reuse.adoption.inPlaceRange(0, count),
+            };
+        }
+
+        fn finish(self: *Self, releases: *heap.ReleaseDomain) Value {
+            switch (self.*) {
+                .fresh => |*fresh| {
+                    fresh.source.release(releases);
+                    return fresh.writer.finish();
+                },
+                .reuse => |*reuse| return reuse.adoption.finish(),
+            }
+        }
+
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .fresh => |*fresh| {
+                    fresh.writer.retirePartial(releases);
+                    fresh.source.release(releases);
+                },
+                .reuse => |*reuse| {
+                    reuse.adoption.abandon();
+                    releases.releaseValue(reuse.root);
+                },
+            }
+        }
+    };
+}
+
+/// `put` with a flat typed index vector into a typed leaf: validate every
+/// index, copy the collection unless it is reused, then scatter. Each phase
+/// takes a granted range per transition. Validation reports the first bad
+/// index in selector order, as on the pervasive path.
+fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    const Index = heap.LeafElement(index_kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        indices: heap.Owned(heap.LeafReader(index_kind)),
+        replacement: heap.Owned(VectorReplacement(kind)),
+        output: heap.Owned(VectorPutOutput(kind)),
+        count: usize,
+        phase: enum { validate, copy, scatter } = .validate,
+        position: usize = 0,
+
+        fn scatter(out: []Element, indices: []const Index, offset: usize, replacement: VectorReplacement(kind)) void {
+            switch (replacement) {
+                .atom => |item| for (indices) |index| {
+                    out[@intCast(index)] = item;
+                },
+                .same => |reader| for (indices, reader.slice()[offset..][0..indices.len]) |index, item| {
+                    out[@intCast(index)] = item;
+                },
+                .bytes => |reader| if (kind == .leaf_i64) {
+                    for (indices, reader.slice()[offset..][0..indices.len]) |index, item| out[@intCast(index)] = item;
+                } else unreachable,
+            }
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            const indices = self.indices.borrow().slice();
+            while (!work.exhausted()) switch (self.phase) {
+                .validate => {
+                    if (self.position == indices.len) {
+                        self.position = 0;
+                        self.phase = if (self.output.borrow() == .fresh) .copy else .scatter;
+                        continue;
+                    }
+                    const granted = work.take(indices.len - self.position);
+                    const selected = indices[self.position..][0..granted];
+                    if (kernel_flat.firstIndexFault(Index, selected, self.count)) |fault| return switch (fault.kind) {
+                        .negative => evaluator.fail(.domain, "put index is negative"),
+                        .out_of_bounds => evaluator.fail(.domain, "put index is out of bounds"),
+                    };
+                    self.position += granted;
+                },
+                .copy => {
+                    if (self.position == self.count) {
+                        self.position = 0;
+                        self.phase = .scatter;
+                        continue;
+                    }
+                    const fresh = &self.output.borrowMut().fresh;
+                    const granted = work.take(self.count - self.position);
+                    fresh.writer.writeRange(self.position, fresh.source.slice()[self.position..][0..granted]);
+                    self.position += granted;
+                },
+                .scatter => {
+                    if (self.position == indices.len) {
+                        self.indices.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.replacement.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        var output = self.output.take();
+                        return .{ .output = output.finish(evaluator.releaseDomain()) };
+                    }
+                    const granted = work.take(indices.len - self.position);
+                    scatter(
+                        self.output.borrowMut().items(self.count),
+                        indices[self.position..][0..granted],
+                        self.position,
+                        self.replacement.borrow(),
+                    );
+                    self.position += granted;
+                },
+            };
+            return .stepped;
+        }
+    };
+}
+
+/// Starts the typed vector put when the collection is a typed leaf, the
+/// selector a flat byte or integer leaf, and the replacement an atom of the
+/// collection's class or a conforming leaf that needs no widening of the
+/// result. Anything else, including a mismatched replacement length, returns
+/// false and takes the pervasive path, which owns those errors.
+fn startTypedVectorPut(
+    evaluator: *Machine,
+    collection: *heap.OwnedValue,
+    selector: Value,
+    replacement: Value,
+) MachineError!bool {
+    const kind = collection.borrow().list.kind();
+    const index_kind = selector.list.kind();
+    if (index_kind != .leaf_u8 and index_kind != .leaf_i64) return false;
+    const selected: usize = @intCast(selector.list.length());
+    if (replacement == .list and replacement.list.length() != selected) return false;
+    inline for (put_leaf_kinds) |candidate| {
+        if (kind == candidate) {
+            const Replacement = VectorReplacement(candidate);
+            const typed_replacement: Replacement = switch (replacement) {
+                .list => |items| if (items.kind() == candidate)
+                    .{ .same = heap.LeafReader(candidate).acquire(items) }
+                else if (candidate == .leaf_i64 and items.kind() == .leaf_u8)
+                    .{ .bytes = heap.LeafReader(.leaf_u8).acquire(items) }
+                else
+                    return false,
+                else => .{ .atom = typedReplacement(candidate, replacement) orelse return false },
+            };
+            inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
+                if (index_kind == candidate_index) {
+                    return startTypedVectorPutDriver(candidate, candidate_index, evaluator, collection, selector, typed_replacement);
+                }
+            }
+            unreachable;
+        }
+    }
+    return false;
+}
+
+fn startTypedVectorPutDriver(
+    comptime kind: value.HeapKind,
+    comptime index_kind: value.HeapKind,
+    evaluator: *Machine,
+    collection: *heap.OwnedValue,
+    selector: Value,
+    replacement: VectorReplacement(kind),
+) MachineError!bool {
+    var held_replacement = replacement;
+    var replacement_held = true;
+    errdefer if (replacement_held) held_replacement.retire(evaluator.releaseDomain());
+    const count: usize = @intCast(collection.borrow().list.length());
+    const output: VectorPutOutput(kind) = if (heap.UniqueLeafAdoption(kind).claim(collection.borrow().list, count)) |claim|
+        .{ .reuse = .{ .adoption = claim, .root = collection.take() } }
+    else
+        .{ .fresh = .{
+            .writer = try heap.LeafWriter(kind).init(evaluator.allocator(), count),
+            .source = heap.LeafReader(kind).acquire(collection.borrow().list),
+        } };
+    replacement_held = false;
+    try evaluator.startDriver(TypedVectorPutDriver(kind, index_kind){
+        .indices = .init(heap.LeafReader(index_kind).acquire(selector.list)),
+        .replacement = .init(held_replacement),
+        .output = .init(output),
+        .count = count,
+    });
+    return true;
+}
+
 const ListPutDriver = struct {
     /// One list rebuilt around a replaced element, then it publishes.
     pub const inline_driver = true;
@@ -716,6 +933,12 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
         },
         .list => {
             if (key.borrow() == .list) {
+                const selection: ?DelSelection = switch (key.borrow().list.kind()) {
+                    .leaf_u8 => .{ .bytes = heap.LeafReader(.leaf_u8).acquire(key.borrow().list) },
+                    .leaf_i64 => .{ .ints = heap.LeafReader(.leaf_i64).acquire(key.borrow().list) },
+                    else => null,
+                };
+                if (selection) |typed| if (try startTypedDel(evaluator, collection.borrow(), typed)) return;
                 const count: usize = @intCast(collection.borrow().list.length());
                 const removed = try evaluator.allocator().alloc(bool, count);
                 var removed_owned_locally = true;
@@ -742,6 +965,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
                 return evaluator.fail(.domain, "del index is out of bounds");
             const count: usize = @intCast(collection.borrow().list.length());
             if (index >= count) return evaluator.fail(.domain, "del index is out of bounds");
+            if (try startTypedDel(evaluator, collection.borrow(), .{ .one = index })) return;
             const values = try evaluator.allocator().alloc(Value, count - 1);
             try evaluator.startDriver(ListDelDriver{
                 .collection = .init(collection.take()),
@@ -843,6 +1067,147 @@ const PervasiveDelDriver = struct {
         return .stepped;
     }
 };
+
+/// The positions a typed `del` removes: one validated index, or a flat typed
+/// index leaf whose entries are validated as they are marked.
+const DelSelection = union(enum) {
+    one: usize,
+    bytes: heap.LeafReader(.leaf_u8),
+    ints: heap.LeafReader(.leaf_i64),
+
+    pub fn retire(self: *DelSelection, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            .one => {},
+            .bytes => |*reader| reader.release(releases),
+            .ints => |*reader| reader.release(releases),
+        }
+    }
+};
+
+/// `del` from a typed leaf: mark the selected positions in a mask, checking
+/// each granted run of indices at once, then compact the kept elements into a
+/// typed result. One scalar position needs no mask: the result is the two
+/// slices around it. Every phase takes a granted range per transition.
+fn TypedDelDriver(comptime kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        source: heap.Owned(heap.LeafReader(kind)),
+        selection: heap.Owned(DelSelection),
+        removed: ?heap.Owned([]bool) = null,
+        writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
+        phase: enum { initialize, mark, copy } = .initialize,
+        position: usize = 0,
+        removed_count: usize = 0,
+        destination: usize = 0,
+
+        fn mark(self: *Self, evaluator: *Machine, comptime Index: type, indices: []const Index) MachineError!void {
+            const removed = self.removed.?.borrow();
+            const run = indices[self.position..][0..evaluator.workBudget().take(indices.len - self.position)];
+            if (kernel_flat.firstIndexFault(Index, run, removed.len)) |fault| return switch (fault.kind) {
+                .negative => evaluator.fail(.domain, "del index is negative"),
+                .out_of_bounds => evaluator.fail(.domain, "del index is out of bounds"),
+            };
+            for (run) |index| {
+                const slot = &removed[@intCast(index)];
+                self.removed_count += @intFromBool(!slot.*);
+                slot.* = true;
+            }
+            self.position += run.len;
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            const source = self.source.borrow().slice();
+            while (!work.exhausted()) switch (self.phase) {
+                .initialize => {
+                    if (self.selection.borrow() == .one) {
+                        self.removed_count = 1;
+                        self.phase = .copy;
+                        continue;
+                    }
+                    if (self.removed == null) self.removed = .init(try evaluator.allocator().alloc(bool, source.len));
+                    const removed = self.removed.?.borrow();
+                    const granted = work.take(removed.len - self.position);
+                    @memset(removed[self.position..][0..granted], false);
+                    self.position += granted;
+                    if (self.position != removed.len) continue;
+                    self.position = 0;
+                    self.phase = .mark;
+                },
+                .mark => {
+                    const length = switch (self.selection.borrowMut().*) {
+                        .one => unreachable,
+                        .bytes => |*reader| length: {
+                            try self.mark(evaluator, u8, reader.slice());
+                            break :length reader.len();
+                        },
+                        .ints => |*reader| length: {
+                            try self.mark(evaluator, i64, reader.slice());
+                            break :length reader.len();
+                        },
+                    };
+                    if (self.position != length) continue;
+                    self.position = 0;
+                    self.phase = .copy;
+                },
+                .copy => {
+                    if (self.writer == null) self.writer = .init(try heap.LeafWriter(kind).init(
+                        evaluator.allocator(),
+                        source.len - self.removed_count,
+                    ));
+                    const writer = self.writer.?.borrowMut();
+                    const end = self.position + work.take(source.len - self.position);
+                    switch (self.selection.borrow()) {
+                        .one => |removed_index| {
+                            const left_end = @min(end, removed_index);
+                            if (self.position < left_end)
+                                writer.writeRange(self.position, source[self.position..left_end]);
+                            const right_start = @max(self.position, removed_index + 1);
+                            if (right_start < end)
+                                writer.writeRange(right_start - 1, source[right_start..end]);
+                        },
+                        .bytes, .ints => {
+                            const removed = self.removed.?.borrow();
+                            const out = writer.unpublishedRange(0, writer.len());
+                            for (source[self.position..end], removed[self.position..end]) |item, gone| {
+                                if (gone) continue;
+                                out[self.destination] = item;
+                                self.destination += 1;
+                            }
+                        },
+                    }
+                    self.position = end;
+                    if (self.position != source.len) continue;
+                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.selection.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    return .{ .output = writer.finish() };
+                },
+            };
+            return .stepped;
+        }
+    };
+}
+
+/// Starts the typed `del` for a typed leaf collection and a validated scalar
+/// position or a flat typed index leaf; false for any other shape.
+fn startTypedDel(evaluator: *Machine, collection: Value, selection: DelSelection) MachineError!bool {
+    var held = selection;
+    const kind = collection.list.kind();
+    inline for (put_leaf_kinds) |candidate| {
+        if (kind == candidate) {
+            try evaluator.startDriver(TypedDelDriver(candidate){
+                .source = .init(heap.LeafReader(candidate).acquire(collection.list)),
+                .selection = .init(held),
+            });
+            return true;
+        }
+    }
+    held.retire(evaluator.releaseDomain());
+    return false;
+}
 
 const ListDelDriver = struct {
     /// One list rebuilt without an indexed element, then it publishes.
@@ -1124,7 +1489,6 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         phase: enum { scan, profile_part, fill_part, materialize_result } = .scan,
         cursor: usize = 0,
         start: usize = 0,
-        match_index: usize = 0,
         empty_part_index: usize = 0,
         scan_complete: bool = false,
         part_start: usize = 0,
@@ -1133,6 +1497,13 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         part_max_codepoint: u32 = 0,
         part_writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
         result_materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+        fn matchesAt(text: anytype, separator: anytype, start: usize) bool {
+            for (separator, text[start..][0..separator.len]) |expected, actual| {
+                if (@as(u32, expected) != @as(u32, actual)) return false;
+            }
+            return true;
+        }
 
         fn beginPart(self: *Self, start: usize, end: usize) void {
             self.part_start = start;
@@ -1176,22 +1547,25 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                         self.beginPart(self.start, text_len);
                         continue;
                     }
-                    if (@as(u32, text_slice[self.cursor + self.match_index]) ==
-                        @as(u32, separator_slice[self.match_index]))
-                    {
-                        self.match_index += 1;
-                        if (self.match_index == separator_len) {
-                            const match_start = self.cursor;
-                            self.cursor += separator_len;
-                            self.match_index = 0;
-                            self.beginPart(self.start, match_start);
-                            self.start = self.cursor;
-                        }
-                    } else {
-                        self.cursor += 1;
-                        self.match_index = 0;
+                    // Try the start positions the budget pays for. A position
+                    // costs up to one comparison per separator codepoint, and
+                    // only the positions actually tried are charged.
+                    const positions = @min(
+                        text_len - separator_len + 1 - self.cursor,
+                        @max(1, work.remaining / separator_len),
+                    );
+                    const first = self.cursor;
+                    const end = self.cursor + positions;
+                    const found = while (self.cursor != end) : (self.cursor += 1) {
+                        if (matchesAt(text_slice, separator_slice, self.cursor)) break self.cursor;
+                    } else null;
+                    const tried = (if (found) |match_start| match_start + 1 else end) - first;
+                    _ = work.take(tried * separator_len);
+                    if (found) |match_start| {
+                        self.cursor = match_start + separator_len;
+                        self.beginPart(self.start, match_start);
+                        self.start = self.cursor;
                     }
-                    _ = work.spend();
                 },
                 .profile_part => {
                     const part_len = self.part_end - self.part_start;
