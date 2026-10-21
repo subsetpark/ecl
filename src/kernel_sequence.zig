@@ -2051,6 +2051,7 @@ const leaf_kinds = [_]value.HeapKind{
 
 fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
+    const Index = heap.LeafElement(index_kind);
     return struct {
         const Self = @This();
         pub const ownership: heap.DriverOwnership = .fields;
@@ -2065,52 +2066,41 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
             const context = support.Context{ .evaluator = evaluator };
-            var block: [kernel_flat.block_size]Element = undefined;
             if (try self.cursor.nextRange(context)) |range| {
                 const source = self.source.borrow().slice();
-                var offset: usize = 0;
-                while (offset != range.len()) {
-                    const piece = kernel_flat.blockRange(range, offset);
-                    switch (self.shape) {
-                        .contiguous => |contiguous| {
-                            const from = contiguous.start + piece.start;
-                            @memcpy(block[0..piece.len()], source[from..][0..piece.len()]);
-                        },
-                        .reversed => |reversed| {
-                            for (piece.start..piece.end) |index| {
-                                block[index - piece.start] = source[reversed.end - index - 1];
-                            }
-                        },
-                        .cyclic => |cyclic| {
-                            for (piece.start..piece.end) |index| {
-                                block[index - piece.start] = source[(cyclic.start + index) % source.len];
-                            }
-                        },
-                        .concat => |concat| {
-                            const right = self.other.?.borrow().slice();
-                            for (piece.start..piece.end) |index| {
-                                block[index - piece.start] = if (index < concat.left_count)
-                                    source[index]
-                                else
-                                    right[index - concat.left_count];
-                            }
-                        },
-                        .gather => {
-                            const indices = self.indices.?.borrow().slice();
-                            for (piece.start..piece.end) |index| {
-                                const position = indices[index];
-                                if (index_kind == .leaf_i64 and position < 0)
-                                    return context.fail(.domain, "at index is negative");
-                                const offset_position = std.math.cast(usize, position) orelse
-                                    return context.fail(.domain, "at index is out of bounds");
-                                if (offset_position >= source.len)
-                                    return context.fail(.domain, "at index is out of bounds");
-                                block[index - piece.start] = source[offset_position];
-                            }
-                        },
-                    }
-                    self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
-                    offset += piece.len();
+                // Nothing reads the result before it is published, so each
+                // shape writes its range in place, with no staging block.
+                const out: []Element = self.writer.borrowMut().unpublishedRange(range.start, range.len());
+                switch (self.shape) {
+                    .contiguous => |contiguous| @memcpy(out, source[contiguous.start + range.start ..][0..out.len]),
+                    .reversed => |reversed| for (out, range.start..) |*slot, index| {
+                        slot.* = source[reversed.end - index - 1];
+                    },
+                    .cyclic => |cyclic| {
+                        var from = (cyclic.start + range.start) % source.len;
+                        var written: usize = 0;
+                        while (written != out.len) {
+                            const run = @min(source.len - from, out.len - written);
+                            @memcpy(out[written..][0..run], source[from..][0..run]);
+                            written += run;
+                            from = 0;
+                        }
+                    },
+                    .concat => |concat| {
+                        const right = self.other.?.borrow().slice();
+                        const split = @min(out.len, concat.left_count -| range.start);
+                        if (split != 0) @memcpy(out[0..split], source[range.start..][0..split]);
+                        const right_start = (range.start + split) -| concat.left_count;
+                        @memcpy(out[split..], right[right_start..][0 .. out.len - split]);
+                    },
+                    .gather => {
+                        const indices = self.indices.?.borrow().slice()[range.start..range.end];
+                        if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault) {
+                            .negative => context.fail(.domain, "at index is negative"),
+                            .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
+                        };
+                        for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
+                    },
                 }
             }
             if (!self.cursor.complete()) return .stepped;

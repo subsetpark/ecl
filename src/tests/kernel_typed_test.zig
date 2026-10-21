@@ -673,6 +673,38 @@ test "typed kernels: a flat operation of length n needs at most ceil(n over budg
     }
 }
 
+// Typed copies write each granted range straight into the result, so a range
+// that ends mid-shape — inside the left operand of a concatenation, partway
+// round a cycle, or across a gather block holding a bad index — must resume
+// exactly where the previous step stopped.
+test "typed kernels: copy shapes resume across budget boundaries and report the first bad gather index" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    for ([_]usize{ quantum - 1, quantum + 1, quantum * 2 + 3 }) |length| {
+        const numbers = try allocator.alloc(i64, length);
+        defer allocator.free(numbers);
+        for (numbers, 0..) |*item, index| item.* = @intCast(index * 7 + 1000);
+        for ([_][]const u8{
+            "dup cat 0 (+) fold",
+            "dup 3 take swap cat 0 (+) fold",
+            "dup 3 take cat 0 (+) fold",
+            "reverse 0 (+) fold",
+            "dup len 3 * 1 + take 0 (+) fold",
+            "5 drop -70000 take 0 (+) fold",
+            "dup len range reverse at 0 (+) fold",
+            "dup len range dup len 1 - -1 put at",
+            "dup len range dup 300 over len put at",
+            "dup len range dup 1 -1 put dup len 1 - over len put at",
+        }) |source| {
+            try expectParity(&runtime, .{ .ints = numbers }, source);
+        }
+    }
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.

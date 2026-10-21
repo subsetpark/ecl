@@ -581,9 +581,8 @@ fn VectorPutOutput(comptime kind: value.HeapKind) type {
 
 /// `put` with a flat typed index vector into a typed leaf: validate every
 /// index, copy the collection unless it is reused, then scatter. Each phase
-/// takes a granted range per transition. Validation checks a block's bounds
-/// at once and rescans only a failing block, so the first bad index in
-/// selector order decides the error, as on the pervasive path.
+/// takes a granted range per transition. Validation reports the first bad
+/// index in selector order, as on the pervasive path.
 fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     const Index = heap.LeafElement(index_kind);
@@ -597,23 +596,6 @@ fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: valu
         count: usize,
         phase: enum { validate, copy, scatter } = .validate,
         position: usize = 0,
-
-        /// Fails with the first index in `block` that is negative or past the
-        /// collection, if any.
-        fn validate(evaluator: *Machine, block: []const Index, count: usize) MachineError!void {
-            var low: Index = 0;
-            var high: Index = 0;
-            for (block) |index| {
-                low = @min(low, index);
-                high = @max(high, index);
-            }
-            if (low >= 0 and high >= 0 and @as(u64, @intCast(high)) < count) return;
-            for (block) |index| {
-                if (index < 0) return evaluator.fail(.domain, "put index is negative");
-                if (@as(u64, @intCast(index)) >= count)
-                    return evaluator.fail(.domain, "put index is out of bounds");
-            }
-        }
 
         fn scatter(out: []Element, indices: []const Index, offset: usize, replacement: VectorReplacement(kind)) void {
             switch (replacement) {
@@ -641,12 +623,11 @@ fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: valu
                         continue;
                     }
                     const granted = work.take(indices.len - self.position);
-                    var offset: usize = 0;
-                    while (offset != granted) {
-                        const block = indices[self.position + offset ..][0..@min(kernel_flat.block_size, granted - offset)];
-                        try validate(evaluator, block, self.count);
-                        offset += block.len;
-                    }
+                    const selected = indices[self.position..][0..granted];
+                    if (kernel_flat.firstIndexFault(Index, selected, self.count)) |fault| return switch (fault) {
+                        .negative => evaluator.fail(.domain, "put index is negative"),
+                        .out_of_bounds => evaluator.fail(.domain, "put index is out of bounds"),
+                    };
                     self.position += granted;
                 },
                 .copy => {
