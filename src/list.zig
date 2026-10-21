@@ -433,10 +433,13 @@ pub fn fromU8Slice(
     return result;
 }
 
+/// ECL has no NaN value; every boundary that turns outside bits into floats
+/// rejects one, so a caller here never holds one.
 pub fn fromF64Slice(
     allocator: std.mem.Allocator,
     source: []const f64,
 ) error{OutOfMemory}!Value {
+    for (source) |item| std.debug.assert(!std.math.isNan(item));
     var cursor = F64Materializer.init(allocator, source);
     var work = poll.unbounded();
     const result = try poll.driveFallible(Value, &cursor, .{&work});

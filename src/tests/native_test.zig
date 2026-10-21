@@ -1116,7 +1116,7 @@ test "native: the SDK generates a descriptor the production validator accepts" {
         "increment",          "discard",        "split",                 "forward",        "nested-port",    "fail-user",   "fail-kind",
         "make-char",          "singleton",      "pair-dict",             "sum-list",       "sum-dict",       "cooperative", "draft-fail",
         "yield-forever",      "builder-budget", "forward-values-budget", "text-span",      "forward-stage",  "bulk-budget", "bulk-immediate",
-        "bulk-values-budget", "large-list",     "large-dict",            "duplicate-dict", "noncooperative",
+        "bulk-values-budget", "large-list",     "large-dict",            "duplicate-dict", "noncooperative", "nan-scalar",  "nan-bulk",
     };
     try std.testing.expectEqual(expected_names.len, validated.definitions().len);
     for (validated.definitions(), expected_names) |definition, expected| {
@@ -1157,7 +1157,8 @@ test "native: a discovered artifact publishes its complete table atomically" {
         "sample.large-dict",     "sample.duplicate-dict",     "sample.noncooperative",
         "sample.nested-port",    "sample.make-char",          "sample.forward-values-budget",
         "sample.text-span",      "sample.forward-stage",      "sample.bulk-budget",
-        "sample.bulk-immediate", "sample.bulk-values-budget",
+        "sample.bulk-immediate", "sample.bulk-values-budget", "sample.nan-scalar",
+        "sample.nan-bulk",
     };
     var completion = try runtime.completionCandidates("sample.");
     defer completion.deinit();
@@ -1683,6 +1684,29 @@ test "native: message builders preserve nested scalars and capability identity" 
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set p portprobe.build-result p wrap port.call 'payload at " ++
         "dup 0 at swap dup 1 at int swap dup 2 at swap dup 3 at swap 4 at p match? " ++
         "p port.close portprobe.cleaned", "0.5 955 42 'tag 1 1");
+}
+
+test "native: a NaN float is rejected at every native boundary" {
+    // ECL has no NaN value. A native call's scalar or bulk float and a port
+    // message's float are the only ways outside bits become floats, and each
+    // rejects a NaN as invalid, exactly as it rejects a non-scalar codepoint.
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .ecl_path = native_fixture.directory,
+    }), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    try expectErrorContains(&runtime, "sample.nan-scalar", &.{ "'kind 'domain", "nan scalar rejected" });
+    try expectErrorContains(&runtime, "sample.nan-bulk", &.{ "'kind 'domain", "nan bulk rejected" });
+    for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 2, "portprobe.factory [] port.open 'p set " ++
+        "p wrap (portprobe.nan-result [] port.call) @attempt 'err at 'kind at p port.close", "'type");
 }
 
 test "native: message builder failures reject partial output and duplicate dictionaries" {

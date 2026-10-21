@@ -907,6 +907,9 @@ fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: a
                 .char4 => if (word > 0x10ffff or (word >= 0xd800 and word <= 0xdfff)) {
                     return .invalid;
                 },
+                .floats => if (std.math.isNan(@as(f64, @bitCast(word)))) {
+                    return .invalid;
+                },
                 else => {},
             };
             switch (builder.state.writing) {
@@ -1128,7 +1131,12 @@ fn hostScalar(
     if (units != 0 and charge(call, units) != .ok) return .yield_required;
     const item: Value = switch (scalar.kind) {
         .int => .{ .int = @bitCast(scalar.bits) },
-        .float => .{ .float = @bitCast(scalar.bits) },
+        // ECL has no NaN value, so a NaN bit pattern is an invalid scalar,
+        // exactly as a non-scalar codepoint is.
+        .float => if (std.math.isNan(@as(f64, @bitCast(scalar.bits))))
+            return .invalid
+        else
+            .{ .float = @bitCast(scalar.bits) },
         .char => if (value.unicodeScalar(scalar.bits)) |codepoint|
             .{ .char = codepoint }
         else

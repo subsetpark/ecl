@@ -1426,7 +1426,9 @@ traverse an outer list of whole keys without descending into those keys.
   `inf` or `-inf`: overflow (`1e308 10 *`), poles (`0 log` is `-inf`), and
   division of a nonzero number by zero (`1 0 /` is `inf`, `1 -0.0 /` is
   `-inf`). Any operation whose IEEE result would be NaN is `'domain` (e.g.
-  `-1 log`, `0 0 /`, `inf -inf +`). NaN therefore never exists.
+  `-1 log`, `0 0 /`, `inf -inf +`). NaN therefore never exists, and nothing
+  outside the language can introduce one: a NaN float that a native extension
+  returns or puts in a port message is rejected as an invalid value.
 - `floor`, `ceil`, and `round` return int64 (`'overflow` when the result
   exceeds the range): their results are indices and mask material, and int-ness
   keeps integer pipelines integer. `pow` returns float.

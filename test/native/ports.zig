@@ -1,4 +1,4 @@
-const CounterMode = enum { step, receive_step, block, block_send, echo, checksum, failure, inspect, allocation_failure, noop, buffered_failure, finished_failure, pipeline, early_exit, resource_messages, resource_bytes, resource_notify, rpc, invalid_reply, reply_result, resource_compete_messages, resource_compete_bytes, datagram, watch, watch_config, transform_message, child, dependent_child, child_event, child_event_blocked, child_result_blocked, discard_child, child_pair, events, build_result, duplicate_result, oversize_event, build_received, messages, message_result, message_failure, blocked, long_failure };
+const CounterMode = enum { step, receive_step, block, block_send, echo, checksum, failure, inspect, allocation_failure, noop, buffered_failure, finished_failure, pipeline, early_exit, resource_messages, resource_bytes, resource_notify, rpc, invalid_reply, reply_result, resource_compete_messages, resource_compete_bytes, datagram, watch, watch_config, transform_message, child, dependent_child, child_event, child_event_blocked, child_result_blocked, discard_child, child_pair, events, build_result, duplicate_result, nan_result, oversize_event, build_received, messages, message_result, message_failure, blocked, long_failure };
 const StorageMode = enum { query, transaction, durable, storage_status, detached_query, lookalike_child };
 const CursorMode = enum { rows, position };
 const TransactionPortMode = enum { transaction_write, commit, transaction_wait };
@@ -174,7 +174,7 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                 _ = controller.acknowledgeCancellation();
             };
             if (switch (mode) {
-                .resource_messages, .resource_bytes, .resource_notify, .rpc, .invalid_reply, .reply_result, .resource_compete_messages, .resource_compete_bytes, .datagram, .watch, .watch_config, .transform_message, .child, .dependent_child, .child_event, .child_event_blocked, .child_result_blocked, .discard_child, .child_pair, .events, .build_result, .duplicate_result, .oversize_event, .build_received => true,
+                .resource_messages, .resource_bytes, .resource_notify, .rpc, .invalid_reply, .reply_result, .resource_compete_messages, .resource_compete_bytes, .datagram, .watch, .watch_config, .transform_message, .child, .dependent_child, .child_event, .child_event_blocked, .child_result_blocked, .discard_child, .child_pair, .events, .build_result, .duplicate_result, .nan_result, .oversize_event, .build_received => true,
                 else => false,
             }) {
                 if (mode == .resource_compete_messages) {
@@ -362,6 +362,11 @@ fn DuplexSpec(comptime acknowledge: bool) type {
                     try builder.dictionary(2);
                     return;
                 }
+                if (mode == .nan_result) {
+                    try builder.float(std.math.nan(f64));
+                    try builder.result();
+                    return;
+                }
                 if (mode == .oversize_event) {
                     {
                         try builder.symbol(&@as([(64 * 1024)]u8, @splat('x')));
@@ -530,6 +535,7 @@ const DuplexSdk = ecl.Port(.{
             .events = .{ .name = "events", .doc = "Produce unsolicited structured events under pressure.", .handler = on_events, .lane = .receive, .endpoints = .{.receiver} },
             .build_result = .{ .name = "build-result", .doc = "Construct a nested structured result with a capability.", .handler = on_build_result, .lane = .receive, .endpoints = .{} },
             .duplicate_result = .{ .name = "duplicate-result", .doc = "Reject duplicate structured keys.", .handler = on_duplicate_result, .lane = .receive, .endpoints = .{} },
+            .nan_result = .{ .name = "nan-result", .doc = "Return a NaN float, which the host must reject.", .handler = on_nan_result, .lane = .receive, .endpoints = .{} },
             .oversize_event = .{ .name = "oversize-event", .doc = "Reject oversize construction before output.", .handler = on_oversize_event, .lane = .receive, .endpoints = .{.receiver} },
             .build_received = .{ .name = "build-received", .doc = "Copy received values and construct empty aggregates.", .handler = on_build_received, .lane = .receive, .endpoints = .{ .sender, .receiver } },
             .messages = .{ .name = "messages", .doc = "Forward complete structured messages.", .handler = on_messages, .lane = .receive, .endpoints = .{ .sender, .receiver } },
@@ -649,6 +655,9 @@ const DuplexSdk = ecl.Port(.{
         }
         fn on_duplicate_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
             try Base.run(Duplex, state, .duplicate_result, .receive, controller);
+        }
+        fn on_nan_result(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
+            try Base.run(Duplex, state, .nan_result, .receive, controller);
         }
         fn on_oversize_event(state: *State, controller: *ecl.Controller) ecl.ControllerError!void {
             try Base.run(Duplex, state, .oversize_event, .receive, controller);

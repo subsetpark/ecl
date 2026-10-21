@@ -204,6 +204,27 @@ fn bulkImmediate(call: *ecl.Call("input -- result"), build: *ecl.BuildValues) ec
     };
 }
 
+/// Returns a NaN float scalar. ECL has no NaN value, so the host rejects it;
+/// a host that accepted it would complete with the NaN.
+fn nanScalar(call: *ecl.Call("-- result"), build: *ecl.BuildValues) ecl.CallbackResult {
+    const item = build.scalar(ecl.Scalar.float(std.math.nan(f64))) catch |err| switch (err) {
+        error.InvalidValue => return call.fail(.domain, "nan scalar rejected"),
+        else => |other| return other,
+    };
+    return call.complete(.{item});
+}
+
+/// Appends a float list holding a NaN; the host rejects the append.
+fn nanBulk(call: *ecl.Call("-- result"), build: *ecl.BuildValues) ecl.CallbackResult {
+    const words = [_]u64{ @bitCast(@as(f64, 1.5)), @bitCast(std.math.nan(f64)) };
+    if (try build.appendBulk(1, .floats, words.len, false, &words) != .appended)
+        return call.fail(.domain, "nan bulk rejected");
+    return switch (try build.finishBulk(1, .floats, words.len, false)) {
+        .candidate => |result| call.complete(.{result}),
+        else => call.fail(.user, "nan bulk finish failed"),
+    };
+}
+
 fn bulkBudget(call: *ecl.Call("input -- result"), build: *ecl.BuildValues, schedule: *BulkProbeSchedule) ecl.CallbackResult {
     const state = schedule.state();
     while (true) switch (state.phase) {
@@ -595,6 +616,8 @@ pub const Extension = ecl.module(.{
         ecl.word("large-dict", "Build a dictionary across multiple scheduler turns.", largeDict),
         ecl.word("duplicate-dict", "Report duplicate dictionary keys without trapping.", duplicateDict),
         ecl.word("noncooperative", "Demonstrate the opt-in native overrun diagnostic.", noncooperative),
+        ecl.word("nan-scalar", "Return a NaN float scalar, which the host must reject.", nanScalar),
+        ecl.word("nan-bulk", "Append a NaN to a float list, which the host must reject.", nanBulk),
     },
 });
 
