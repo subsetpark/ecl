@@ -574,9 +574,12 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
         inline for (order_leaf_kinds) |candidate| {
             if (kind == candidate) {
                 const Driver = TypedDistinctDriver(candidate);
-                try evaluator.startDriver(Driver{
-                    .source = .init(heap.LeafReader(candidate).acquire(collection.borrow().list)),
-                });
+                var source = heap.LeafReader(candidate).acquire(collection.borrow().list);
+                const driver = Driver.init(evaluator.allocator(), source) catch |err| {
+                    source.release(evaluator.releaseDomain());
+                    return err;
+                };
+                try evaluator.startDriver(driver);
                 return;
             }
         }
@@ -588,6 +591,10 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     });
 }
 
+/// One hashed pass in input order: an element is kept when no kept element
+/// equals it under the leaf's own `==`, so zeros of either sign meet (floats
+/// exclude NaN). Kept elements collect in a scratch buffer and are copied
+/// once into the exact-size result.
 fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     return struct {
@@ -595,55 +602,60 @@ fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
         pub const ownership: heap.DriverOwnership = .fields;
 
         source: heap.Owned(heap.LeafReader(kind)),
-        writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
-        phase: enum { count, fill } = .count,
+        /// Open-addressed positions into `kept`, plus one; zero is empty.
+        slots: heap.Owned([]usize),
+        kept: heap.Owned([]Element),
+        kept_count: usize = 0,
         item_index: usize = 0,
-        candidate: usize = 0,
-        distinct_count: usize = 0,
-        output_index: usize = 0,
+
+        fn init(allocator: std.mem.Allocator, source: heap.LeafReader(kind)) error{OutOfMemory}!Self {
+            const count = source.len();
+            const capacity = std.math.ceilPowerOfTwo(usize, @max(8, count * 2)) catch return error.OutOfMemory;
+            const slots = try allocator.alloc(usize, capacity);
+            errdefer allocator.free(slots);
+            @memset(slots, 0);
+            const kept = try allocator.alloc(Element, count);
+            return .{ .source = .init(source), .slots = .init(slots), .kept = .init(kept) };
+        }
+
+        fn hash(item: Element) u64 {
+            const bits: u64 = if (Element == f64)
+                @bitCast(if (item == 0) 0.0 else item)
+            else if (Element == i64)
+                @bitCast(item)
+            else
+                item;
+            return bits *% 0x9E37_79B9_7F4A_7C15;
+        }
+
+        /// Keeps `item` unless an equal element is already kept.
+        fn keep(self: *Self, item: Element) void {
+            const kept = self.kept.borrow();
+            const slots = self.slots.borrow();
+            const mask = slots.len - 1;
+            var slot: usize = @intCast(hash(item) >> 32 & mask);
+            while (slots[slot] != 0) : (slot = (slot + 1) & mask) {
+                if (kept[slots[slot] - 1] == item) return;
+            }
+            kept[self.kept_count] = item;
+            self.kept_count += 1;
+            slots[slot] = self.kept_count;
+        }
 
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
             try evaluator.pollKernel();
             const work = evaluator.workBudget();
             const source: []const Element = self.source.borrow().slice();
-            while (!work.exhausted()) {
-                if (self.item_index == source.len) {
-                    if (self.phase == .count) {
-                        self.writer = .init(try heap.LeafWriter(kind).init(
-                            evaluator.allocator(),
-                            self.distinct_count,
-                        ));
-                        self.phase = .fill;
-                        self.item_index = 0;
-                        self.candidate = 0;
-                        continue;
-                    }
-                    std.debug.assert(self.output_index == self.distinct_count);
-                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    return .{ .output = self.writer.?.borrowMut().finish() };
-                }
-                if (self.candidate == self.item_index) {
-                    if (self.phase == .count) {
-                        self.distinct_count += 1;
-                    } else {
-                        self.writer.?.borrowMut().writeRange(
-                            self.output_index,
-                            &.{source[self.item_index]},
-                        );
-                        self.output_index += 1;
-                    }
-                    self.item_index += 1;
-                    self.candidate = 0;
-                    _ = work.spend();
-                    continue;
-                }
-                if (source[self.candidate] == source[self.item_index]) {
-                    self.item_index += 1;
-                    self.candidate = 0;
-                } else self.candidate += 1;
-                _ = work.spend();
+            if (self.item_index != source.len) {
+                const granted = work.take(source.len - self.item_index);
+                for (source[self.item_index..][0..granted]) |item| self.keep(item);
+                self.item_index += granted;
+                if (self.item_index != source.len) return .stepped;
             }
-            return .stepped;
+            var writer = try heap.LeafWriter(kind).init(evaluator.allocator(), self.kept_count);
+            writer.writeRange(0, self.kept.borrow()[0..self.kept_count]);
+            self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = writer.finish() };
         }
     };
 }

@@ -736,6 +736,29 @@ test "typed kernels: raze of leaf children matches the profiled route across cla
     try expectParity(&runtime, .{ .floats = &.{ 1.5, 2.5 } }, "dup pair raze");
 }
 
+// `distinct` hashes in one pass under the leaf's own equality: first
+// occurrences in input order, zeros of either sign meeting at the first one
+// seen, and a pass longer than one step's budget resuming mid-table.
+test "typed kernels: hashed distinct keeps first occurrences under leaf equality across budget boundaries" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    // The generic reference compares pairwise, so the long input keeps few
+    // distinct values and the many-valued input stays short.
+    const length = quantum * 2 + 5;
+    const numbers = try allocator.alloc(i64, length);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 301)) - 150;
+    try expectParity(&runtime, .{ .ints = numbers }, "distinct");
+    for (numbers[0..5000], 0..) |*item, index| item.* = @intCast((index * 7919) % 5003);
+    try expectParity(&runtime, .{ .ints = numbers[0..5000] }, "distinct");
+    try expectParity(&runtime, .{ .floats = &.{ 1.5, -0.0, 0.0, 1.5, 2.5, 0.0 } }, "distinct");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0 } }, "distinct");
+}
+
 // `where` validates typed counts a block at a time and rescans only a failing
 // block, so a bad count in the first, a middle, or the last block — or past a
 // budget boundary — must report the generic route's kind, message, and index.
