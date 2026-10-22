@@ -40,7 +40,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "1 [2 3] [3 2 1] [1 2 3] [1 2]",
         },
         .{ .name = "partition", .source = "[1 2 3 4] (2 >) partition", .expected = "[3 4] [1 2]" },
-        .{ .name = "aggregates", .source = "[3 1 2] min-of [3 1 2] max-of [1 2 3] sum [1 2 3] prod", .expected = "1 3 6 6" },
+        .{ .name = "aggregates", .source = "[3 1 2] min-of [3 1 2] max-of [1 2 3] sum [1 2 3] product", .expected = "1 3 6 6" },
+        .{
+            .name = "sum starts from its first element",
+            .source = "[] sum [7] sum [-0.0] sum [-0.0 -0.0] sum [[1 2] [3 4]] sum [[1.5 -0.0] [2.0 -0.0]] sum",
+            .expected = "0 7 -0.0 -0.0 [4 6] [3.5 -0.0]",
+        },
+        .{
+            .name = "product starts from its first element",
+            .source = "[] product [7] product [1.5 -0.0] product [[1 2] [3 4]] product",
+            .expected = "1 7 -0.0 [3 8]",
+        },
         .{
             .name = "at-or",
             .source = "{'a 1} 'a 9 at-or {'a 1} 'b 9 at-or {'a foo} 'a 9 at-or {} 'a (bar) first at-or",
@@ -170,7 +180,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "last",         "pair",      "pack",       "append",   "rest",         "reverse",
         "uncons",       "unappend",  "empty?",     "zip",      "lex-cmp-with", "lex-cmp",
         "min-of",       "max-of",    "sort",       "distinct", "at-path",      "at-or",
-        "filter",       "partition", "any?",       "all?",     "sum",          "prod",
+        "filter",       "partition", "any?",       "all?",     "sum",          "product",
         "mean",         "fail",      "find",       "set",      "setp",         "assert",
         "rotate",       "windows",   "each-prior", "fold1",    "scan1",        "iterations",
         "while-values", "converges", "converge",   "chunk",    "from-digits",  "to-digits",

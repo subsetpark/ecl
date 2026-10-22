@@ -262,13 +262,17 @@
 (|l q| l q each 1 (and) fold) 'all? def
 
 ### def sum
+# A nonempty sequence starts from its first element, as `(+) fold1` does, so
+# no zero seed copies a first row or turns a -0.0 total into 0.0.
 (sequence -- total : "Add every element of a numeric sequence, using zero for an empty sequence.")
-(0 (+) fold) 'sum def
+(dup empty? (pop 0) ((+) fold1) if) 'sum def
 
-### def prod
+### def product
+# A nonempty sequence starts from its first element, as `(*) fold1` does, so
+# no one seed multiplies a copy of a first row.
 (sequence -- product :
  "Multiply every element of a numeric sequence, using one for an empty sequence.")
-(1 (*) fold) 'prod def
+(dup empty? (pop 1) ((*) fold1) if) 'product def
 
 ### def mean
 (sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")

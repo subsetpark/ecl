@@ -81,7 +81,7 @@ const cases = [_]Case{
     .{ .name = "pair", .source = "1 2 pair" },
     .{ .name = "last", .source = "[1 2 3] last" },
     .{ .name = "sum", .source = "[1 2 3] sum" },
-    .{ .name = "prod", .source = "[1 2 3] prod" },
+    .{ .name = "product", .source = "[1 2 3] product" },
     .{ .name = "mean", .source = "[1 2 3] mean" },
     .{ .name = "print", .source = "\"hi\" io.print" },
     .{ .name = "io.inspect", .source = "7 io.inspect" },
@@ -697,8 +697,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\6
         \\stderr:
         \\<empty>
-        \\=== prod ===
-        \\source: [1 2 3] prod
+        \\=== product ===
+        \\source: [1 2 3] product
         \\exit: 0
         \\stdout:
         \\6

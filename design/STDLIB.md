@@ -985,9 +985,10 @@ returning 0. Defined in ecl.
 ### pow
 `( x y -- z )` — **Pervasive.** Exponentiation; returns float.
 
-### prod
+### product
 `( sequence -- product )` — Product of a numeric sequence; 1 when empty.
-Equivalent to `1 (*) fold`.
+Equivalent to `(*) fold1` for a nonempty sequence, so the product starts from
+the first element and a list of rows multiplies to a row.
 
 ### put
 `( collection selector value -- collection )` — Functional replacement.
@@ -1214,7 +1215,20 @@ readable value.
 
 ### sum
 `( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
-Equivalent to `0 (+) fold`.
+Equivalent to `(+) fold1` for a nonempty sequence, so the total starts from
+the first element: a list of rows sums to a row, and a sum of negative
+zeros is `-0.0`.
+
+#### Examples
+
+```ecl
+[1 2 3] sum
+# => 6
+[[1 2] [3 4]] sum
+# => [4 6]
+[] sum
+# => 0
+```
 
 ### symbol
 `( value -- symbol )` — Return a symbol unchanged, a word as a symbol, or the
