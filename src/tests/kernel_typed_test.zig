@@ -380,8 +380,8 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
         try expectParity(&runtime, .{ .ints = numbers }, "dup <");
         // Typed rows of a spine run inside the list frame; a row longer than
         // the quantum must suspend there and resume through the frame stack.
-        try expectParity(&runtime, .{ .ints = numbers }, "dup 2 pack 1 +");
-        try expectParity(&runtime, .{ .ints = numbers }, "dup 2 pack neg");
+        try expectParity(&runtime, .{ .ints = numbers }, "dup pair 1 +");
+        try expectParity(&runtime, .{ .ints = numbers }, "dup pair neg");
     }
 
     // Character-element pervasion has two typed result shapes: fixed i64 for
@@ -478,12 +478,12 @@ test "typed differential: sequence order text and random operation parity across
         // Rank-two reshape: typed rows, cycling, and columns that span a block.
         "[3 5] reshape",
         "[2 7] reshape",
-        "2 over len 2 pack reshape",
-        "dup len 1 2 pack reshape",
+        "2 over len pair reshape",
+        "dup len 1 pair reshape",
         // Transposing rows of one representation, including rows spanning a block.
         "[3 5] reshape flip",
-        "2 over len 2 pack reshape flip",
-        "dup len 1 2 pack reshape flip",
+        "2 over len pair reshape flip",
+        "dup len 1 pair reshape flip",
         // Pieces of a leaf. Starts that leave no piece empty: an empty piece keeps
         // its operand's representation, which prints differently (see above).
         "0 wrap cut",

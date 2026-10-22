@@ -23,7 +23,7 @@ import
 [] (["a" "a"] [] from-rows) @attempt 'err at 'kind at io.pp
 [] (["a" "b"] [[1]] from-rows) @attempt 'err at 'kind at io.pp
 [] ([] from-records) @attempt 'err at 'kind at io.pp
-[] ({"a" 1} {"a" 2 "b" 3} 2 pack from-records) @attempt 'err at 'kind at io.pp
+[] ({"a" 1} {"a" 2 "b" 3} pair from-records) @attempt 'err at 'kind at io.pp
 [] ({"a" [1 2]} "z" column) @attempt 'err at 'kind at io.pp
 [] ({"a" [1 2]} ["a" "a"] select) @attempt 'err at 'kind at io.pp
 [] ({"a" [1 2]} [] select) @attempt 'err at 'kind at io.pp

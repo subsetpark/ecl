@@ -243,7 +243,7 @@ test "archive: open-tgz exposes metadata and bounded member contents without pac
     const concurrent = try std.fmt.allocPrint(allocator, "{s} 'a set a archive.next-member pop a archive.next-member pop " ++
         "[] (a 1 archive.read-member first) @spawn 'x set " ++
         "[] (a 1 archive.read-member first) @spawn 'y set " ++
-        "x task.await 'ok at first y task.await 'ok at first 2 pack sort a port.close", .{opened});
+        "x task.await 'ok at first y task.await 'ok at first pair sort a port.close", .{opened});
     defer allocator.free(concurrent);
     try expectIoStackConfig(&scratch, .{ .worker_pool = 4 }, concurrent, "[50 52]");
     try scratch.expectEntryCount(0);

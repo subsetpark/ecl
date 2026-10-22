@@ -7,7 +7,7 @@
 
  ### test counter-streams
  (-- : "Keep counter-based random draws deterministic and order-independent.")
- ([0 0] 100 rand.int 2 pack ([0 1] 35) equal
+ ([0 0] 100 rand.int pair ([0 1] 35) equal
   [0 0] 100 rand.int nip [0 0] 100 rand.int nip = 1 equal
   [0 0] 100 rand.int nip [7 0] 100 rand.int nip <> 1 equal
   [0 0] 100 rand.int pop [0 1] equal

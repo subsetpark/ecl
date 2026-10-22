@@ -22,7 +22,7 @@ sales json.emit io.pp
 {"id" [1 2] "city" ["Oslo" "Lima"]} from-columns io.pp
 ["id" "city"] [[1 "Oslo"] [2 "Lima"]] from-rows io.pp
 [["id" "city"] [1 "Oslo"] [2 "Lima"]] from-header-rows io.pp
-{"id" 1 "city" "Oslo"} {"city" "Lima" "id" 2} 2 pack from-records io.pp
+{"id" 1 "city" "Oslo"} {"city" "Lima" "id" 2} pair from-records io.pp
 
 # Zero-row schemas are constructible through the explicit forms.
 ["id" "city"] [] from-rows io.pp

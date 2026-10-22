@@ -1047,8 +1047,8 @@ fn stdlibSessionAllocationProbe(
             "oom-give.ecl",
             "{'address \"127.0.0.1\" 'port 0} net.listen 'a set " ++
                 "{'address \"127.0.0.1\" 'port 0} net.listen 'b set b net.close " ++
-                "[] (a b 2 pack [] (pop pop) @give) @attempt pop " ++
-                "[] (a a 2 pack [] (pop pop) @give) @attempt pop " ++
+                "[] (a b pair [] (pop pop) @give) @attempt pop " ++
+                "[] (a a pair [] (pop pop) @give) @attempt pop " ++
                 "a wrap [] (pop) @give task.await pop",
         ),
         .time => try runOk(

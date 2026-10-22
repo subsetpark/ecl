@@ -385,7 +385,7 @@ test "native: concurrent writes remain contiguous through repeated byte pressure
 test "native: overlapping endpoint reads fail without consuming the pending read" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.blocked [] port.begin 'x set 1 portprobe.await-blocked " ++
         "x portprobe.output port.endpoint 'r set r wrap (8 port.read) @spawn 'a set r wrap (8 port.read) @spawn 'b set " ++
-        "a b 2 pack task.await-any 'err at 'kind at swap pop " ++
+        "a b pair task.await-any 'err at 'kind at swap pop " ++
         "x port.cancel a task.await pop b task.await pop x port.close p port.close portprobe.cleaned", "'contract 1");
 }
 

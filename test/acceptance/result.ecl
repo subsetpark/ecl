@@ -62,5 +62,5 @@ import
 [] ({'ok 5} (missing) result.and-then) @attempt 'err at 'kind at io.pp
 [] ({'err 5} (missing) result.and-then) @attempt 'err at 'kind at io.pp
 [] (7 result.ok?) @attempt 'err at 'kind at io.pp
-[] ({'ok 5} 1 pack result.all) @attempt 'err at 'kind at io.pp
+[] ({'ok 5} wrap result.all) @attempt 'err at 'kind at io.pp
 [] ({'nope 1} (missing) (missing) result.either) @attempt 'err at 'kind at io.pp

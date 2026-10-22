@@ -22,7 +22,7 @@
   [["a" "b"] [1 2] [3 4]] table.from-header-rows
   {"a" [1 3] "b" [2 4]} equal
   [["a" "b"]] table.from-header-rows table.height 0 equal
-  {"a" 1 "b" 2} {"b" 4 "a" 3} 2 pack table.from-records
+  {"a" 1 "b" 2} {"b" 4 "a" 3} pair table.from-records
   {"a" [1 3] "b" [2 4]} equal
   ({} table.from-columns) 'shape "at least one column" raises-containing
   (5 table.from-columns) 'type "must be a dict" raises-containing
@@ -40,7 +40,7 @@
   'shape
   "cannot infer a schema"
   raises-containing
-  ({"a" 1} {"a" 2 "b" 3} 2 pack table.from-records)
+  ({"a" 1} {"a" 2 "b" 3} pair table.from-records)
   'domain
   "exactly the first record's keys"
   raises-containing)

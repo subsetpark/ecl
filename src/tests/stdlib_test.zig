@@ -272,7 +272,7 @@ test "stdlib: concurrent first references converge on one published module" {
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "([1] result.ok) ([2] 'result 'ok qualify execute) 2 pack ([] swap @spawn) each (task.await) each " ++
+            "([1] result.ok) ([2] 'result 'ok qualify execute) pair ([] swap @spawn) each (task.await) each " ++
                 "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each",
             "({'ok ({'ok [1]})} {'ok ({'ok [2]})}) " ++
                 "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++

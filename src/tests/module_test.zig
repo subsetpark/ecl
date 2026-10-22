@@ -243,8 +243,8 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     // Measured window: delays from one to two quanta cancel mid-interning;
     // three let the target finish.
     const source =
-        "1 pack (execute) @spawn dup 'target set " ++
-        "1 pack (1536 () times task.cancel) @spawn task.await pop target task.await";
+        "wrap (execute) @spawn dup 'target set " ++
+        "wrap (1536 () times task.cancel) @spawn task.await pop target task.await";
 
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();

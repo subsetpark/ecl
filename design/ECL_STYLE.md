@@ -206,8 +206,9 @@ infra dict.from-flat
 
 This is preferable to a raw sentinel: the quotation supplies a lexical
 boundary, errors cannot strand a marker, and program data cannot collide with
-it. Use `pair` for two values and `pack` when a literal count is itself the
-clearest description; do not retain a distant count solely to delimit a long
+it. When the construction needs no seed values, `collect` is `[] swap infra`.
+Use `wrap` for one value, `pair` for two, and `pack` when a literal count is
+itself the clearest description; do not retain a distant count solely to delimit a long
 computed region.
 
 Use `dict.associate` for one computed value and key. Use `dict.from-lists` when

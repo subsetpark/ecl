@@ -17,6 +17,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         // `dup grade at` in kernel_order_test) and `see` renders the stored
         // body wherever a rendering is asserted.
         .{ .name = "pack", .source = "1 2 3 4 4 pack", .expected = "[1 2 3 4]" },
+        .{ .name = "collect", .source = "9 (1 2 3 +) collect", .expected = "9 [1 5]" },
         .{
             .name = "migrated stack and quotation words",
             .source = "1 2 over (1) (2) compose call 4 7 (1 +) dip 42 str",
@@ -81,7 +82,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "quotation with initial values",
-            .source = "[2 3] (+) with call (type) first 7 2 pack (pop type) with call",
+            .source = "[2 3] (+) with call (type) first 7 pair (pop type) with call",
             .expected = "5 'word",
         },
         .{
@@ -191,6 +192,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "mean",         "fail",      "find",       "set",      "setp",         "assert",
         "rotate",       "windows",   "each-prior", "fold1",    "scan1",        "iterations",
         "while-values", "converges", "converge",   "chunk",    "from-digits",  "to-digits",
+        "collect",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

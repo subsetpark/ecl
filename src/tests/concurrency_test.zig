@@ -153,7 +153,7 @@ test "concurrency: two parked waiters share one cached result with one worker" {
     try runOk(
         &runtime,
         "[] (42) @spawn 'shared-task set " ++
-            "shared-task shared-task 2 pack [] (task.await) @each",
+            "shared-task shared-task pair [] (task.await) @each",
     );
     var actual = try display(&runtime);
     defer actual.deinit();

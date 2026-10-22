@@ -465,6 +465,18 @@ codepoint-lexicographic; anything else, including cross-kind pairs, is
 `'type`. `cmp` exists because the subtraction idiom is unsafe for
 ordering: `-` errors on int64 overflow where an ordering must be total.
 
+### collect
+`( quotation -- list )` — Run the quotation on an empty isolated stack and
+return what it leaves as a list, preserving order. Equivalent to
+`[] swap infra`; the quotation cannot see values beneath it.
+
+#### Examples
+
+```ecl
+9 (1 2 3 +) collect
+# => 9 [1 5]
+```
+
 ### compose
 `( left right -- quotation )` — Concatenate two quotations in execution
 order.

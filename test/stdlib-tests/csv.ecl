@@ -60,9 +60,9 @@
   ("\"a\"b" [] csv.parse) 'parse 'csv.parse raises-word
   (5 [] csv.parse) 'type 'csv.parse raises-word
   (5 csv.emit) 'type 'csv.emit raises-word
-  (5 1 pack csv.emit) 'type "every record to be a list" raises-containing
-  ((5) 1 pack csv.emit) 'type "every field to be a string" raises-containing
-  ([] 1 pack csv.emit) 'shape "no fields" raises-containing)
+  (5 wrap csv.emit) 'type "every record to be a list" raises-containing
+  ((5) wrap csv.emit) 'type "every field to be a string" raises-containing
+  ([] wrap csv.emit) 'shape "no fields" raises-containing)
  'invalid-input test
 
  ### test columns-and-schema

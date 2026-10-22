@@ -96,11 +96,11 @@
   reader limit [] 0 reader 4096 port.read
   (dup len 0 >) (capture-step) while pop pop rollup pop pop raze) 'capture defp
 
- ### defp collect
+ ### defp await-all
  (tasks -- result : "Observe every task, propagating the first observed failure.")
  ({} (over len 0 >)
   (over task.await-any result.or-raise first swap (dict.merge) dip rollup (swap del) dip)
-  while nip) 'collect defp
+  while nip) 'await-all defp
 
  ### defp run-result
  (fields -- result : "Return process results in a stable field order.")
@@ -119,7 +119,7 @@
   process proc.core.stderr port.endpoint stderr-limit pair
   (capture 'stderr swap pair dict.from-flat) @spawn
   process wrap (wait 'term swap pair dict.from-flat) @spawn
-  4 pack collect run-result process port.close) 'run-streams defp
+  4 pack await-all run-result process port.close) 'run-streams defp
 
  ### defp checked-limit
  (value maximum -- value : "Validate an optional capture bound against host policy.")
