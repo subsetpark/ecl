@@ -5306,6 +5306,13 @@ pub const Machine = struct {
         try self.require(1);
         return .init(self.releaseDomain(), self.unit.takeStackOwned().?);
     }
+    /// The top two operands, the lower first, after one underflow check.
+    pub fn popPair(self: *Machine) MachineError!struct { heap.OwnedValue, heap.OwnedValue } {
+        try self.require(2);
+        const right = self.unit.takeStackOwned().?;
+        const left = self.unit.takeStackOwned().?;
+        return .{ .init(self.releaseDomain(), left), .init(self.releaseDomain(), right) };
+    }
     fn popChecked(
         self: *Machine,
         comptime expected: []const u8,
@@ -5410,6 +5417,11 @@ pub const Machine = struct {
             self.unit.releases.releaseValue(item);
             return error.OutOfMemory;
         };
+    }
+    /// Consumes `item` into a slot this primitive freed by popping, which
+    /// cannot grow the stack.
+    pub fn pushIntoFreed(self: *Machine, item: Value) void {
+        self.unit.stack.appendAssumeCapacity(item);
     }
     pub fn pushBorrowed(self: *Machine, item: Value) error{OutOfMemory}!void {
         heap.retainValue(item);

@@ -58,7 +58,9 @@ fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
 fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
-            return binaryPrimitive(evaluator, operation);
+            // Each operation already has its own specialized copy, so
+            // inlining it removes only the trampoline.
+            return @call(.always_inline, binaryPrimitive, .{ evaluator, operation });
         }
     }.run;
 }
@@ -86,7 +88,7 @@ fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
 fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
-            return unaryPrimitive(evaluator, operation);
+            return @call(.always_inline, unaryPrimitive, .{ evaluator, operation });
         }
     }.run;
 }
@@ -102,10 +104,8 @@ fn isPervadeScalar(item: Value) bool {
 }
 
 fn binaryPrimitive(evaluator: *Machine, comptime operation: BinaryOp) MachineError!void {
-    try evaluator.require(2);
-    var right = try evaluator.popValue();
+    var left, var right = try evaluator.popPair();
     defer right.deinit();
-    var left = try evaluator.popValue();
     defer left.deinit();
     // Two scalars are the whole operation. `PervadeCursor.startBinary` reaches
     // this same call for its leaf case, so routing there costs one cursor and
@@ -116,7 +116,7 @@ fn binaryPrimitive(evaluator: *Machine, comptime operation: BinaryOp) MachineErr
     if (isPervadeScalar(left.borrow()) and isPervadeScalar(right.borrow())) {
         const result = scalarBinary(operation, left.borrow(), right.borrow()) catch |fault|
             return scalarFailure(evaluator, fault, null);
-        return evaluator.pushOwned(result);
+        return evaluator.pushIntoFreed(result);
     }
     if (try startTypedBinary(evaluator, operation, &left, &right, .{})) return;
 
@@ -141,7 +141,7 @@ fn unaryPrimitive(evaluator: *Machine, comptime operation: UnaryOp) MachineError
     if (isPervadeScalar(operand.borrow())) {
         const result = scalarUnary(operation, operand.borrow()) catch |fault|
             return scalarFailure(evaluator, fault, null);
-        return evaluator.pushOwned(result);
+        return evaluator.pushIntoFreed(result);
     }
     if (try startTypedUnary(evaluator, operation, &operand, .{})) return;
     const cursor = try PervadeCursor.initUnary(
