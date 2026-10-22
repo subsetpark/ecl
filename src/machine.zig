@@ -2842,6 +2842,18 @@ pub const Unit = struct {
             else => null,
         };
     }
+    /// The kind of the innermost saved frame, or null with none saved.
+    fn topFrameTag(self: *const Unit) ?std.meta.Tag(Frame) {
+        const frames = self.frames.items;
+        return if (frames.len == 0) null else std.meta.activeTag(frames[frames.len - 1]);
+    }
+    /// Removes the innermost saved frame, which is a `tag`, and returns its
+    /// payload. Popping the whole frame copied the union's largest variant.
+    fn popFrame(self: *Unit, comptime tag: std.meta.Tag(Frame)) @FieldType(Frame, @tagName(tag)) {
+        const payload = @field(self.frames.items[self.frames.items.len - 1], @tagName(tag));
+        self.frames.items.len -= 1;
+        return payload;
+    }
     pub fn hasWorkDriver(self: *const Unit) bool {
         return self.native == .work or self.native == .work_park_request or
             self.native == .work_park_resume or self.native == .work_join_cleanup;
@@ -6622,17 +6634,18 @@ pub const Machine = struct {
     /// inherits its named trace owner so inline control does not erase the
     /// activation that selected it.
     fn suspendCurrent(self: *Machine) error{OutOfMemory}!intern.TraceWord {
-        const current = self.unit.current.?;
-        const inherited_trace = if (!current.hasInstructions())
-            current.traced_word
-        else
-            no_word;
+        const current = &self.unit.current.?;
         if (current.hasInstructions()) {
-            try self.unit.frames.append(self.unit.allocator, .{ .eval = current });
+            // Built in place: an appended frame was a stack temporary copied
+            // into the array.
+            const frame = try self.unit.frames.addOne(self.unit.allocator);
+            frame.* = .{ .eval = current.* };
             self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
-        } else {
-            self.retireCompletedEval(current);
+            self.unit.current = null;
+            return no_word;
         }
+        const inherited_trace = current.traced_word;
+        self.retireCompletedEval(current.*);
         self.unit.current = null;
         return inherited_trace;
     }
@@ -8938,17 +8951,20 @@ fn prepareEffectCheck(
     };
 }
 fn resumeFrames(self: *Machine) MachineError!bool {
-    while (self.unit.fuel != 0) switch (self.unit.frames.pop() orelse return false) {
-        .eval => |continuation| {
+    while (self.unit.fuel != 0) switch (self.unit.topFrameTag() orelse return false) {
+        .eval => {
+            const continuation = self.unit.popFrame(.eval);
             self.unit.current = continuation;
             return true;
         },
-        .effect_check => |owned| {
+        .effect_check => {
+            const owned = self.unit.popFrame(.effect_check);
             var check = owned;
             defer check.deinit(self.releaseDomain());
             try finishEffectCheck(self, &check);
         },
-        .application => |continuation| {
+        .application => {
+            const continuation = self.unit.popFrame(.application);
             var application_selection = continuation.selection;
             defer application_selection.deinit(self.releaseDomain());
             const launch: Machine.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
@@ -9032,7 +9048,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             // resumed only while fuel remains.
             if (self.unit.hasWorkDriver()) return true;
         },
-        .qualified_after_load => |continuation| {
+        .qualified_after_load => {
+            const continuation = self.unit.popFrame(.qualified_after_load);
             var loading = continuation.loading;
             defer loading.deinit();
             var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
@@ -9070,7 +9087,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             });
             return true;
         },
-        .boundary => |boundary| {
+        .boundary => {
+            const boundary = self.unit.popFrame(.boundary);
             std.debug.assert(@backingInt(self.unit.boundary_index.?) == self.unit.frames.items.len);
             self.unit.boundary_index = boundary.previous_boundary;
             self.unit.stack_base = boundary.previous_base;
