@@ -826,11 +826,16 @@ pub fn build(b: *std.Build) void {
     // exhaustive property and allocator-failure coverage; instrumenting those
     // single-threaded cases turns this race detector into a multi-minute stress
     // test without increasing its race coverage.
+    //
+    // Build it ReleaseSafe whatever `-Doptimize` says. Debug codegen copies a
+    // tagged union's whole payload to read its tag, so a tag check races with
+    // any thread writing the payload: TSan reports races that no optimized
+    // build contains. Safety checks stay on.
     const tsan_supported = target.result.os.tag == .linux or target.result.os.tag == .macos;
     const tsan_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .safe,
         .sanitize_thread = tsan_supported,
     });
     configureRuntime(tsan_mod, native_abi, native_sdk, test_options);
