@@ -1478,12 +1478,12 @@ test "oom: standard-library and host: registered process operation results" {
 
 test "oom: standard-library and host: common resource listener close" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.close").run);
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.close").run);
 }
 
 test "oom: standard-library and host: common resource listener shutdown" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.shutdown").run);
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.shutdown").run);
 }
 
 fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type {
