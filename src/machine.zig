@@ -6139,15 +6139,19 @@ pub const Machine = struct {
         out: *Resolution,
     ) bool {
         const cell = slot.current() orelse return false;
-        out.* = .{
-            // A borrow lasts only for this dispatch; a lease kept past it
-            // holds references.
-            .lease = if (self.slice) |slice| if (retain) cell.load() else cell.borrow(slice) else cell.load(),
-            .execution_generation = null,
-            .home = null,
-            .trace_word = .plain(name),
-            .origin = .core,
-        };
+        // A borrow lasts only for this dispatch; a lease kept past it holds
+        // references. Each branch writes the lease in place: choosing it
+        // inside one initializer built it in a temporary and copied it over.
+        if (self.slice != null and !retain)
+            out.lease = cell.borrow(self.slice.?)
+        else
+            out.lease = cell.load();
+        out.execution_generation = null;
+        out.home = null;
+        out.trace_word = .plain(name);
+        out.origin = .core;
+        out.defining_scope = null;
+        out.call_site_cache = null;
         if (written == null or cell == slot.coreCell()) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
