@@ -120,7 +120,7 @@ const cases = [_]Case{
     // and no environment dependence beyond an unset-variable error.
     .{ .name = "result ok", .source = "[1 2] result.ok" },
     .{ .name = "result and-then", .source = "[2 3] result.ok (+) result.and-then" },
-    .{ .name = "result all", .source = "[1] result.ok {'kind 'io} result.err 2 pack result.all" },
+    .{ .name = "result all", .source = "[1] result.ok {'kind 'io} result.err pair result.all" },
     .{ .name = "result malformed", .source = "{'ok 5} (missing) result.and-then" },
     .{ .name = "str upper", .source = "\"héllo\" str.upper" },
     .{ .name = "str index-of missing", .source = "\"abc\" \"z\" str.index-of" },
@@ -953,7 +953,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== result all ===
-        \\source: [1] result.ok {'kind 'io} result.err 2 pack result.all
+        \\source: [1] result.ok {'kind 'io} result.err pair result.all
         \\exit: 0
         \\stdout:
         \\{

@@ -182,7 +182,7 @@ fn runShellScenario(encoded: u16) !void {
         .wide_wait_setup => {
             try source_buffer.writer.writeAll(
                 "[] ((1) () while) @spawn 'gate set " ++
-                    "[] (gate 1 pack 200000 take task.await-any) @spawn " ++
+                    "[] (gate wrap 200000 take task.await-any) @spawn " ++
                     "[] (7) @spawn pair task.await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
@@ -231,7 +231,7 @@ fn runShellScenario(encoded: u16) !void {
                 if (index != 0) try source_buffer.writer.writeByte(' ');
                 try source_buffer.writer.print("{d}", .{index % 3});
             }
-            try source_buffer.writer.writeAll("] dup group dict.size swap 1 pack \"{}\" str.format pop");
+            try source_buffer.writer.writeAll("] dup group dict.size swap wrap \"{}\" str.format pop");
             try expected_buffer.writer.print("{d}\n", .{@min(scenario.width, 3)});
         },
     }

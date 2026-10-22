@@ -319,7 +319,7 @@ test "clock: many sleepers wake by deadline across one advance" {
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     // Seventy sleepers span more than one timer-heap chunk. Durations 1..70.
-    try runOk(runtime, "70 range (1 +) each (1 pack (clock.sleep clock.now) @spawn) each 'sleepers set");
+    try runOk(runtime, "70 range (1 +) each (wrap (clock.sleep clock.now) @spawn) each 'sleepers set");
     awaitTimerEntries(runtime, 70);
     try advance(runtime, 35);
     try expectDisplay(runtime, "sleepers 35 take (task.await) each ({'ok [{'monotonic 35}]} match?) all?", "1");
@@ -385,7 +385,7 @@ test "clock: session shutdown retires pending sleeps and their timers without le
     {
         var fixture: Fixture = .{};
         const runtime = try fixture.openWith(counting.allocator(), .{ .config = .{ .worker_pool = 1 } });
-        try runOk(runtime, "3 range (1 pack (1000000 + clock.sleep) @spawn) each pop");
+        try runOk(runtime, "3 range (wrap (1000000 + clock.sleep) @spawn) each pop");
         awaitTimerEntries(runtime, 3);
         fixture.closeSession();
     }

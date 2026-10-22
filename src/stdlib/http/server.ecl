@@ -546,7 +546,7 @@
    response.")
  (|connection config handler|
   connection config handler
-  connection config 2 pack (read-request) @spawn
+  connection config pair (read-request) @spawn
   dup config 'read-timeout-ms at task.await-for
   dispatch-read) 'handle-connection defp
 
@@ -569,7 +569,7 @@
  (|listener config handler tasks|
   listener config handler
   tasks
-  listener net.accept wrap config handler 2 pack (serve-connection) @give
+  listener net.accept wrap config handler pair (serve-connection) @give
   append) 'accept-one defp
 
  ### defp reap-one

@@ -511,7 +511,7 @@ test "fs: incremental enumeration owns its cursor and joins staging closure" {
     try runCase(scratch.filesystem(), .{ .worker_pool = 4 }, "'root \".\" fs.open-list 'cursor set " ++
         "[] (cursor fs.next-entry 'name at) @spawn 'a set " ++
         "[] (cursor fs.next-entry 'name at) @spawn 'b set " ++
-        "a task.await 'ok at first b task.await 'ok at first 2 pack sort " ++
+        "a task.await 'ok at first b task.await 'ok at first pair sort " ++
         "cursor fs.next-entry cursor fs.next-entry cursor port.close " ++
         "[] (cursor fs.next-entry) @attempt 'err at 'kind at", .{ .stack = "(\"a\" \"b\") {} {} 'io" });
     try expectStack(scratch.filesystem(), "'root \"published\" fs.stage-dir 's set \"x\" s \"file\" fs.publish-text " ++

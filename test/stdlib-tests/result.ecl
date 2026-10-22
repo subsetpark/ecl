@@ -78,7 +78,7 @@
   ({'kind 'io} {'kind 'type}) equal
   ([1] [2 3]) equal
   [] result.partition () equal () equal
-  {'kind 'io} result.err 1 pack result.partition
+  {'kind 'io} result.err wrap result.partition
   len 1 equal
   len 0 equal)
  'aggregation test
@@ -129,11 +129,11 @@
   "exactly one of 'ok or 'err"
   raises-containing
   (7 result.all) 'type "expected a list of results" raises-containing
-  ({'ok 5} 1 pack result.all)
+  ({'ok 5} wrap result.all)
   'type
   "list of success values"
   raises-containing
-  ({'nope 1} 1 pack result.partition)
+  ({'nope 1} wrap result.partition)
   'type
   "exactly one of 'ok or 'err"
   raises-containing)

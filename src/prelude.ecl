@@ -167,6 +167,10 @@
 (: "Collect the requested number of preceding stack values into a list, preserving their order.")
 (() swap (cons) times) 'pack def
 
+### def collect
+(quotation -- list : "Run a quotation on an empty stack and collect what it leaves into a list.")
+([] swap infra) 'collect def
+
 ### def append
 (sequence value -- sequence : "Append one value to the end of a sequence.")
 (wrap cat) 'append def
@@ -336,10 +340,10 @@
 (|x rs|
  rs (dup type 'int match? (0 >) (pop 0) if) all?
  {'kind 'domain 'msg "to-digits radices must be positive integers"} assert
- rs reverse x [] 2 pack
+ rs reverse x [] pair
  (|st r|
   st 0 at r mod 0 < st r
-  (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat 2 pack) call)
+  (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) call)
  fold 1 at) 'to-digits def
 
 ### def each-prior
