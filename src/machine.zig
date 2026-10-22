@@ -7314,21 +7314,21 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .word => |reference| reference,
         .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
-    // The locals backend is reserved from every publication, so these names
-    // can only mean their core primitives.
-    const locals = self.unit.environment.localsWords();
-    const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
-        prims.readLocal
-    else if (word.name == locals.load)
-        prims.bindLocals
-    else if (word.name == locals.drop)
-        prims.unbindLocals
-    else
-        null;
     // Locals lowering emits the backend words unlinked; a linked one is
     // ordinary text and dispatches through its slot like any word.
-    if (backend) |primitive| {
-        if (word.slot == 0) return invokeBuiltin(self, .plain(word.name), primitive);
+    if (word.slot == 0) {
+        // The locals backend is reserved from every publication, so these
+        // names can only mean their core primitives.
+        const locals = self.unit.environment.localsWords();
+        const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
+            prims.readLocal
+        else if (word.name == locals.load)
+            prims.bindLocals
+        else if (word.name == locals.drop)
+            prims.unbindLocals
+        else
+            null;
+        if (backend) |primitive| return invokeBuiltin(self, .plain(word.name), primitive);
     }
     try self.executeWord(word);
 }
