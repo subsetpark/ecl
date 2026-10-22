@@ -284,7 +284,7 @@ fn unaryInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const 
 
 fn isBitwise(operation: ecl.kernels.numeric.BinaryOp) bool {
     return switch (operation) {
-        .band, .bor, .bxor, .bsl, .bsr => true,
+        .band, .bor, .bxor, .bsl, .bsr, .wrap_add, .wrap_sub, .wrap_mul => true,
         else => false,
     };
 }

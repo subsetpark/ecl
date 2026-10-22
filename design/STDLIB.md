@@ -74,6 +74,20 @@ cancellable.
 `( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
 `'overflow`.
 
+### *%
+`( x y -- z )` — **Pervasive.** Multiply integers modulo 2^64 in two's
+complement, wrapping where `*` raises `'overflow`. Int-only: a float or a char
+is `'type`. With `band`, arithmetic modulo any power of two.
+
+#### Examples
+
+```ecl
+4294967295 4294967295 *%
+# => -8589934591
+1103515245 4198498305 *% 12345 +% 4294967295 band
+# => 1325825702
+```
+
 ### \*file\*
 `( -- string )` — Return the source name attached to the currently executing
 reader-authored occurrence. A definition reports the file that authored its
@@ -100,10 +114,26 @@ overflow is `'overflow`.
 # => 3
 ```
 
+### +%
+`( x y -- z )` — **Pervasive.** Add integers modulo 2^64 in two's complement,
+wrapping where `+` raises `'overflow`. Int-only: a float or a char is `'type`.
+
+#### Examples
+
+```ecl
+9223372036854775807 1 +%
+# => -9223372036854775808
+```
+
 ### -
 `( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
 `char char -` is an int, `char int -` is a char, `int char -` is `'type`.
 Integer overflow is `'overflow`.
+
+### -%
+`( x y -- z )` — **Pervasive.** Subtract integers modulo 2^64 in two's
+complement, wrapping where `-` raises `'overflow`. Int-only: a float or a char
+is `'type`.
 
 ### /
 `( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero

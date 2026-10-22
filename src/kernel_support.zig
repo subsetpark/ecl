@@ -125,6 +125,9 @@ pub const BinaryOp = enum {
     bxor,
     bsl,
     bsr,
+    wrap_add,
+    wrap_sub,
+    wrap_mul,
 
     pub fn spelling(self: BinaryOp) []const u8 {
         return switch (self) {
@@ -151,6 +154,9 @@ pub const BinaryOp = enum {
             .bxor => "bxor",
             .bsl => "bsl",
             .bsr => "bsr",
+            .wrap_add => "+%",
+            .wrap_sub => "-%",
+            .wrap_mul => "*%",
         };
     }
 };

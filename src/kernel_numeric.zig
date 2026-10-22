@@ -48,6 +48,9 @@ fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
         .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or over integer bit patterns pervasively." },
         .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern left, truncating bits off the top." },
         .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern right, filling zeros from the top." },
+        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
+        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
+        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
         .mod, .ne, .le, .ge, .and_word, .or_word => null,
     };
 }
@@ -875,6 +878,7 @@ fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarE
         .and_word, .or_word => booleanBinary(left, right, operation == .and_word),
         .band, .bor, .bxor => bitwiseBinary(left, right, operation),
         .bsl, .bsr => bitwiseShift(left, right, operation == .bsl),
+        .wrap_add, .wrap_sub, .wrap_mul => wrappingBinary(left, right, operation),
     };
 }
 
@@ -932,6 +936,19 @@ fn bitwiseBinary(left: Value, right: Value, operation: BinaryOp) ScalarError!Val
         .band => left.int & right.int,
         .bor => left.int | right.int,
         .bxor => left.int ^ right.int,
+        else => unreachable,
+    } };
+}
+
+/// Wrapping arithmetic is two's-complement i64 arithmetic modulo 2^64: it
+/// cannot overflow, so it carries no overflow arm. Int-only, like the
+/// bitwise words; the checked words keep floats and characters.
+fn wrappingBinary(left: Value, right: Value, operation: BinaryOp) ScalarError!Value {
+    if (left != .int or right != .int) return error.Type;
+    return .{ .int = switch (operation) {
+        .wrap_add => left.int +% right.int,
+        .wrap_sub => left.int -% right.int,
+        .wrap_mul => left.int *% right.int,
         else => unreachable,
     } };
 }
@@ -1303,6 +1320,7 @@ fn binaryResult(comptime operation: BinaryOp, comptime left: Number, comptime ri
         .add, .sub, .mul => if (real) .real else .integer,
         .div, .pow, .atan2 => .real,
         .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr, .and_word, .or_word => .integer,
+        .wrap_add, .wrap_sub, .wrap_mul => .integer,
         .eq, .ne, .lt, .gt, .le, .ge => .integer,
         .min, .max => if (real)
             if (left != right) null else .real
@@ -1348,6 +1366,8 @@ fn binaryLoopPolicy(
 ) LoopPolicy {
     if (left == .integer and right == .integer) return switch (operation) {
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .vector_infallible,
+        .wrap_add, .wrap_sub => .vector_infallible,
+        .wrap_mul => if (support.targetHasNativePackedI64Multiply()) .vector_infallible else .scalar_infallible,
         .add, .sub => .vector_checked,
         .mul => if (support.targetHasNativePackedI64Multiply()) .vector_checked else .scalar_checked,
         .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
@@ -1358,9 +1378,11 @@ fn binaryLoopPolicy(
         .add, .sub, .mul, .div => .vector_checked,
         .pow, .atan2 => .scalar_checked,
         .int_div, .mod, .and_word, .or_word, .band, .bor, .bxor, .bsl, .bsr => .scalar_checked,
+        .wrap_add, .wrap_sub, .wrap_mul => .scalar_checked,
     };
     if (left == .byte and right == .byte) return switch (operation) {
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .scalar_infallible,
+        .wrap_add, .wrap_sub, .wrap_mul => .scalar_infallible,
         .add, .sub, .mul, .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
     };
     return .scalar_checked;
@@ -1947,6 +1969,9 @@ fn binaryStep(
                 .band => @intCast(a & b),
                 .bor => @intCast(a | b),
                 .bxor => @intCast(a ^ b),
+                .wrap_add => @as(i64, a) +% @as(i64, b),
+                .wrap_sub => @as(i64, a) -% @as(i64, b),
+                .wrap_mul => @as(i64, a) *% @as(i64, b),
                 .add,
                 .sub,
                 .mul,
@@ -1988,6 +2013,9 @@ fn binaryStep(
                 .band => a & b,
                 .bor => a | b,
                 .bxor => a ^ b,
+                .wrap_add => a +% b,
+                .wrap_sub => a -% b,
+                .wrap_mul => a *% b,
                 .add,
                 .sub,
                 .mul,

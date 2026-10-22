@@ -322,7 +322,8 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
     const binary_words = [_][]const u8{
         "+",   "-",   "*",    "/",   "div",  "mod", "pow", "atan2",
         "min", "max", "=",    "<>",  "<",    ">",   "<=",  ">=",
-        "and", "or",  "band", "bor", "bxor", "bsl", "bsr",
+        "and", "or",  "band", "bor", "bxor", "bsl", "bsr", "+%",
+        "-%",  "*%",
     };
     const unary_words = [_][]const u8{
         "neg", "abs", "sqrt", "floor", "ceil", "round", "exp", "log", "sin", "cos", "not", "bnot",
@@ -1121,7 +1122,7 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
 
     // Full vectors plus a short tail, every operand shape, and every explicit
     // infallible vector family.
-    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor" }) |word| {
+    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor", "+%", "-%", "*%" }) |word| {
         try expectParity(&runtime, .{ .int_pair = .{ .left = left, .right = right } }, word);
         try expectParity(&runtime, .{ .ints = left }, "3 " ++ word);
         try expectParity(&runtime, .{ .ints = left }, "3 swap " ++ word);
