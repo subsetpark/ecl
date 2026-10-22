@@ -585,7 +585,11 @@ pub const PervadeCursor = struct {
                     .logical_index = index,
                 } },
             };
-            switch (try self.start(evaluator, child)) {
+            const started = switch (child) {
+                .binary => |node| try self.startNumericRow(evaluator, node),
+                .unary => null,
+            } orelse try self.start(evaluator, child);
+            switch (started) {
                 .finished => self.acceptListChild(frame),
                 .framed => {
                     frame.waiting = true;
@@ -605,6 +609,50 @@ pub const PervadeCursor = struct {
                 self.last = result;
                 return .done;
             },
+        }
+    }
+
+    /// A list child whose operands are a numeric leaf and a numeric leaf or
+    /// scalar runs its typed step here, without a child node, frame, or
+    /// `NestedTyped` round trip: exactly what `startBinary` would build for it,
+    /// with the same readers, conformance check, and fault report. A step the
+    /// turn cannot finish becomes the typed frame `runTyped` would push. Null
+    /// leaves every other child to `start`.
+    fn startNumericRow(self: *PervadeCursor, evaluator: *Machine, node: BinaryNode) MachineError!?Started {
+        // A leaf is still a list to the depth guard, which `startBinary` owns.
+        if (node.depth >= support.max_depth) return null;
+        const left_leaf = leafNumber(node.left);
+        const right_leaf = leafNumber(node.right);
+        const shape: Shape = if (left_leaf != null and right_leaf != null)
+            .leaf_leaf
+        else if (left_leaf != null and scalarNumber(node.right) != null)
+            .leaf_scalar
+        else if (right_leaf != null and scalarNumber(node.left) != null)
+            .scalar_leaf
+        else
+            return null;
+        const length = try conformingLength(evaluator, shape, node.left, node.right);
+        if (length == 0) return null;
+        const plan = NumericBinaryPlan.select(
+            node.operation,
+            left_leaf orelse scalarNumber(node.left).?,
+            right_leaf orelse scalarNumber(node.right).?,
+            shape,
+        ) orelse return null;
+        var typed = try plan.prepare(evaluator, node.left, node.right, .{}, length, .{});
+        errdefer typed.retire(self.releases);
+        const numeric = &typed.numeric;
+        switch (try advanceTypedState(evaluator, &numeric.state, numeric.step)) {
+            .output => |result| {
+                self.last = result;
+                return .finished;
+            },
+            .stepped => {
+                try self.frames.reserve(1);
+                self.frames.pushReserved(.{ .typed = typed });
+                return .framed;
+            },
+            .completed, .reserved_output, .yielded, .detached, .failed => unreachable,
         }
     }
 
