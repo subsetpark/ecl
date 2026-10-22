@@ -588,8 +588,6 @@ const Matcher = struct {
     /// nothing a plain word may run, or whose root has retired, is simply not
     /// the expected binding; generic execution reports any error.
     fn resolve(self: *Matcher, evaluator: *Machine, word: value.WordRef) Step {
-        evaluator.beginBindingRead();
-        defer evaluator.endBindingRead();
         // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
         var resolved: machine.Resolution = undefined;
         if (!evaluator.peekSlotWord(word, &resolved)) {

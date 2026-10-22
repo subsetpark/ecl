@@ -642,14 +642,19 @@ snapshot, so it sees its own definitions. Module images and core are not
 versioned: an image is private to its constructing unit until registration and
 frozen after, and core is frozen.
 
-A replaced snapshot stays in its chain only while some live pin falls within
-the versions it was current for; otherwise it is unlinked at once. Kept
-snapshots are rechecked whenever a pin ends, so a long-running task retains
-one snapshot per name it can observe rather than every intermediate
-definition. An unlinked snapshot retires once the word dispatches that may
-still hold it end (each dispatch opens a read section, the read-side form of
-Fraser's EBR) and no counted reader is copying it or walking past it. Readers
-outside a unit, such as completion, acquire counted leases.
+A replaced session snapshot stays in its chain only while some live pin falls
+within the versions it was current for; otherwise it is unlinked at once.
+Kept snapshots are rechecked whenever a pin ends, so a long-running task
+retains one snapshot per name it can observe rather than every intermediate
+definition. An unlinked snapshot retires through the release domain once no
+counted reader is copying it or walking past it. Dispatch reads with one load
+and no announcement: a pinned unit's pin keeps what it observes, and the only
+unpinned reader of a session binding is the unit that replaces it, which does
+so only by running code, after its dispatch has retained what it keeps.
+Readers outside a unit, such as completion, acquire counted leases. A module
+image under construction is read live by the unit building it and by tasks it
+spawned, so its replaced snapshots stay in the chain until the cell is torn
+down.
 
 Slots are reached two ways, and their lifetimes follow. A session or core slot
 has an id in a lock-free directory whose ids are never reused; those roots

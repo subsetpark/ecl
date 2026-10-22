@@ -373,8 +373,6 @@ const BindingSpec = struct {
 /// pin observes is unlinked from the chain and retired.
 const BindingSnapshot = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
-    /// An unlinked snapshot waits out the read sections that may still hold it.
-    deferred: heap.ReleaseDomain.Deferred = .{},
     /// Null for a removal: the root binds nothing for the name from `since`.
     spec: ?BindingSpec,
     /// The binding version that published this snapshot.
@@ -428,7 +426,7 @@ const BindingSnapshot = struct {
     }
     fn retireKept(kept: *heap.ReleaseDomain.KeptBinding, releases: *heap.ReleaseDomain) void {
         const self: *BindingSnapshot = @fieldParentPtr("kept", kept);
-        releases.retireAfterSlices(self, &self.retirement, &self.deferred);
+        releases.retire(self, &self.retirement);
     }
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
@@ -513,13 +511,23 @@ pub const BindingCell = struct {
         return cell;
     }
     /// Publishes `spec`, or the name's removal when null, as the cell's next
-    /// snapshot. The one it replaces stays in the chain while a live pin
-    /// observes it; otherwise it leaves the chain now and retires once the
-    /// read sections and counted readers that may hold it are done.
+    /// snapshot.
+    ///
+    /// In a versioned root (the session) the snapshot it replaces stays in the
+    /// chain while a live pin observes it; otherwise it leaves the chain now
+    /// and retires once no counted reader holds it. Its other readers cannot:
+    /// the unit replacing it reads only current bindings, and does so after
+    /// its dispatches have retained what they keep.
+    ///
+    /// Any other root is read live by the unit building it and by tasks that
+    /// unit spawned, with no pin to protect them, so a snapshot it replaces
+    /// stays until the cell is torn down. Only a module body redefining its
+    /// own words replaces one.
     fn replace(
         self: *BindingCell,
         allocator: std.mem.Allocator,
         spec: ?BindingSpec,
+        versioned: bool,
     ) error{OutOfMemory}!void {
         const replaced = self.snapshots;
         const snapshot = try BindingSnapshot.create(allocator, spec, replaced);
@@ -527,18 +535,20 @@ pub const BindingCell = struct {
         const version = releases.beginBindingPublication();
         snapshot.since = version;
         replaced.next = snapshot;
-        replaced.cell = self;
-        self.retain();
-        const kept = releases.pinnedWithinLocked(replaced.since, version);
-        if (kept) {
-            replaced.kept.since = replaced.since;
-            replaced.kept.until = version;
-            releases.keepBindingLocked(&replaced.kept);
-        } else replaced.unlinkLocked();
+        const retire = versioned and !releases.pinnedWithinLocked(replaced.since, version);
+        if (versioned) {
+            replaced.cell = self;
+            self.retain();
+            if (retire) replaced.unlinkLocked() else {
+                replaced.kept.since = replaced.since;
+                replaced.kept.until = version;
+                releases.keepBindingLocked(&replaced.kept);
+            }
+        }
         self.snapshots = snapshot;
         self.publisher.publish(snapshot);
         releases.endBindingPublication(version);
-        if (!kept) releases.retireAfterSlices(replaced, &replaced.retirement, &replaced.deferred);
+        if (retire) releases.retire(replaced, &replaced.retirement);
     }
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
@@ -547,9 +557,15 @@ pub const BindingCell = struct {
     ) bool {
         std.debug.assert(self.references.load(.acquire) == 0);
         std.debug.assert(self.publisher.quiescent());
-        const current = self.publisher.currentOwned();
+        // A retiring root has no readers left. Its chain holds the current
+        // snapshot and, for an unversioned root, every one it replaced; a
+        // versioned root's replaced snapshots hold this cell and are gone.
+        var cursor = self.publisher.currentOwned();
         self.publisher.publish(null);
-        if (current) |last| releases.retireAfterSlices(last, &last.retirement, &last.deferred);
+        while (cursor) |snapshot| {
+            cursor = snapshot.previous.load(.acquire);
+            snapshot.destroy(allocator, releases);
+        }
         allocator.destroy(self);
         return true;
     }
@@ -591,13 +607,12 @@ pub const BindingCell = struct {
         return .{ .releases = self.releases, .held = .{ .owned = spec } };
     }
 
-    /// The current binding for a reader inside a slice's read section: one
-    /// load, no reader count and no references. Valid until the section ends,
-    /// because a replaced snapshot retires only after every section that began
-    /// before its replacement has ended. The lease owns nothing; anything kept past the
-    /// dispatch must be retained on its own, as a scheduled body already is.
-    pub fn borrow(self: *BindingCell, slice: *const heap.ReleaseDomain.SliceRecord, pin: ?u64) ?BindingLease {
-        std.debug.assert(slice.depth != 0 or pin != null);
+    /// What a dispatching unit pinned at `pin` observes, or the current
+    /// binding for a null pin: one load, no reader count and no references.
+    /// Valid for the dispatch (see `replace`). The lease owns nothing; anything
+    /// kept past the dispatch must be retained on its own, as a scheduled body
+    /// already is.
+    pub fn borrow(self: *BindingCell, pin: ?u64) ?BindingLease {
         const spec = self.observed(pin) orelse return null;
         return .{ .releases = self.releases, .held = .{ .borrowed = spec } };
     }
@@ -621,8 +636,8 @@ pub const BindingCellHandle = enum(usize) {
     pub fn load(self: BindingCellHandle, pin: ?u64) ?BindingLease {
         return self.cell().load(pin);
     }
-    pub fn borrow(self: BindingCellHandle, slice: *const heap.ReleaseDomain.SliceRecord, pin: ?u64) ?BindingLease {
-        return self.cell().borrow(slice, pin);
+    pub fn borrow(self: BindingCellHandle, pin: ?u64) ?BindingLease {
+        return self.cell().borrow(pin);
     }
 
     pub fn deinit(self: *BindingCellHandle) void {
@@ -763,6 +778,9 @@ pub const BindError = error{ OutOfMemory, Frozen };
 pub const Environment = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
+    /// Whether this root's bindings are versioned for pinned units: true for
+    /// the session alone (see `Scope.isSession`).
+    versioned: bool = false,
     writer: std.Io.Mutex = .init,
     /// Counted name and lookup cursors, which teardown waits out.
     readers: std.atomic.Value(u32) = .init(0),
@@ -894,7 +912,7 @@ pub const Environment = struct {
             // one when this cursor began still has it; one that had none may
             // have gained one since, and the candidate then goes unused.
             const cell = if (slot.cell.load(.acquire)) |kept| replaced: {
-                try kept.replace(environment.allocator, self.spec);
+                try kept.replace(environment.allocator, self.spec, environment.versioned);
                 break :replaced kept;
             } else adopted: {
                 const candidate = self.candidate_cell.?;
@@ -962,7 +980,7 @@ pub const Environment = struct {
             if (!slot.bound.load(.acquire)) return .{ .complete = false };
             // Removal is published like a binding, so a unit pinned before it
             // keeps observing the name.
-            try slot.cell.load(.acquire).?.replace(environment.allocator, null);
+            try slot.cell.load(.acquire).?.replace(environment.allocator, null, environment.versioned);
             slot.bound.store(false, .release);
             return .{ .complete = true };
         }
@@ -1829,7 +1847,7 @@ pub const Env = enum(usize) {
         backing.* = .{
             .host = host,
             .core = .{ .allocator = allocator, .releases = releases, .slot_buckets = 1024 },
-            .session = .{ .allocator = allocator, .releases = releases, .slot_buckets = 1024 },
+            .session = .{ .allocator = allocator, .releases = releases, .versioned = true, .slot_buckets = 1024 },
             .locals_words = locals_words,
             // SAFETY: the cell needs the Env handle that this very allocation
             // becomes, so it is filled in on the next line, before `backing`

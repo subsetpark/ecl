@@ -3121,18 +3121,7 @@ pub fn PathActionDriver(
 
 pub const Machine = struct {
     unit: *Unit,
-    /// Present while this machine runs inside a slice, which lets a dispatch
-    /// read a binding without taking references to it, inside a read section.
-    slice: ?*heap.ReleaseDomain.SliceRecord = null,
 
-    /// Opens a binding read section: until the matching `endBindingRead`,
-    /// bindings this slice borrows stay valid. Nests.
-    pub fn beginBindingRead(self: *Machine) void {
-        if (self.slice) |slice| slice.beginRead();
-    }
-    pub fn endBindingRead(self: *Machine) void {
-        if (self.slice) |slice| slice.endRead();
-    }
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -6178,10 +6167,10 @@ pub const Machine = struct {
         // session bindings are versioned (`Scope.isSession`).
         const pin = if (written != null and written.?.isSession()) self.unit.bindingPin() else null;
         const own = slot.cell.load(.acquire);
-        const from_core = own == null or !self.leaseInto(own.?, pin, retain, &out.lease);
+        const from_core = own == null or !leaseInto(own.?, pin, retain, &out.lease);
         if (from_core) {
             const core = slot.coreCell() orelse return false;
-            if (!self.leaseInto(core, null, retain, &out.lease)) return false;
+            if (!leaseInto(core, null, retain, &out.lease)) return false;
         }
         out.execution_generation = null;
         out.home = null;
@@ -6219,9 +6208,9 @@ pub const Machine = struct {
     /// dispatch; a lease kept past it holds references. Each branch writes
     /// the lease in place: choosing it inside one initializer built it in a
     /// temporary and copied it over.
-    fn leaseInto(self: *Machine, cell: *env.BindingCell, pin: ?u64, retain: bool, out: *env.BindingLease) bool {
-        if (self.slice != null and !retain)
-            out.* = cell.borrow(self.slice.?, pin) orelse return false
+    fn leaseInto(cell: *env.BindingCell, pin: ?u64, retain: bool, out: *env.BindingLease) bool {
+        if (!retain)
+            out.* = cell.borrow(pin) orelse return false
         else
             out.* = cell.load(pin) orelse return false;
         return true;
@@ -6345,10 +6334,10 @@ pub const Machine = struct {
         if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
-        // Bindings borrowed below stay valid until the dispatch has taken
-        // whatever it keeps: a scheduled body, an effect, a native call.
-        self.beginBindingRead();
-        defer self.endBindingRead();
+        // A binding borrowed below stays valid for the dispatch: a unit that
+        // may define replaces bindings only by running code, which starts
+        // after the dispatch has retained what it keeps (a scheduled body, an
+        // effect, a native call); any other unit's pin keeps what it observes.
         var borrow_pin: ?modules.GenerationPin = null;
         errdefer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
@@ -6384,7 +6373,6 @@ pub const Machine = struct {
                 self.releaseDomain(),
                 self.unit.module_access,
                 cached_site,
-                self.slice,
             )) {
                 .absent => {},
                 .stale => {
@@ -6883,10 +6871,7 @@ pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     // the previous one already polled cancellation, and every driver polls
     // before it draws.
     unit.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
-    const domain = unit.environment.bindingDomain();
-    const slice = try domain.enterSlice();
-    defer domain.exitSlice(slice);
-    var evaluator = Machine{ .unit = unit, .slice = slice };
+    var evaluator = Machine{ .unit = unit };
     const status = loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
@@ -7957,7 +7942,6 @@ const ModuleCallSiteCache = struct {
         releases: *heap.ReleaseDomain,
         access: *const modules.ExecutionAccess,
         found: ?usize,
-        slice: ?*const heap.ReleaseDomain.SliceRecord,
     ) CallSiteCacheLookup {
         const slot_index = found orelse return .absent;
         const candidate = &(self.entries[slot_index] orelse return .absent);
@@ -7969,7 +7953,7 @@ const ModuleCallSiteCache = struct {
         };
         // A module image is frozen once registered, so its bindings need no
         // version.
-        const lease = (if (slice) |held| qualified.cell.borrow(held, null) else qualified.cell.load(null)).?;
+        const lease = qualified.cell.borrow(null).?;
         const home = execution.home(access);
         return .{ .hit = .{
             .lease = lease,

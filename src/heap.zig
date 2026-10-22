@@ -1815,41 +1815,6 @@ pub const ReleaseDomain = struct {
         wake_fn: *const fn (*anyopaque, WakeReason) void,
     };
 
-    /// One running slice of execution: epoch-based reclamation's per-thread
-    /// record, in the read-side-critical-section form (Fraser's EBR; the
-    /// generic flavor of userspace RCU). Inside a read section, between
-    /// `beginRead` and `endRead`, the slice may read an object published for
-    /// slice readers through a plain load, holding no reference; `epoch` is
-    /// the domain's epoch when the outermost section began, or zero outside
-    /// one. An object deferred at epoch `t` is released once no record shows
-    /// a nonzero epoch below `t`. A slice that is not reading never delays
-    /// reclamation; one descheduled inside a section delays it until it runs
-    /// again, which is the scheme's known limit.
-    pub const SliceRecord = struct {
-        epoch: std.atomic.Value(u64) = .init(0),
-        next_free: ?*SliceRecord = null,
-        /// The domain epoch this record announces.
-        source: ?*const std.atomic.Value(u64) = null,
-        /// Nested read sections; only the owning slice touches it.
-        depth: u32 = 0,
-
-        pub fn beginRead(self: *SliceRecord) void {
-            self.depth += 1;
-            if (self.depth != 1) return;
-            // Announced before the section reads anything. A deferral whose
-            // epoch this load does not reach unpublished its object first, so
-            // the section can never load it; one it reaches waits for the
-            // section to end.
-            self.epoch.store(self.source.?.load(.seq_cst), .seq_cst);
-        }
-
-        pub fn endRead(self: *SliceRecord) void {
-            std.debug.assert(self.depth != 0);
-            self.depth -= 1;
-            if (self.depth == 0) self.epoch.store(0, .release);
-        }
-    };
-
     /// A replaced binding some pin still observes: it was current for versions
     /// `since` up to, not including, `until`. Kept bindings are guarded by the
     /// binding lock; once no pin observes one, `unlink_fn` removes it from
@@ -1862,14 +1827,6 @@ pub const ReleaseDomain = struct {
         retire_fn: *const fn (*KeptBinding, *ReleaseDomain) void,
     };
 
-    /// A retirement waiting out the slices that began before it. The object
-    /// embeds this beside its `Retirement`, which is prepared at deferral and
-    /// enqueued only once every slice older than `epoch` has ended.
-    pub const Deferred = struct {
-        next: ?*Deferred = null,
-        epoch: u64 = 0,
-        node: ?*Retirement = null,
-    };
     pub const WakeReason = enum { retirement_available, backpressure_relieved };
 
     /// The archive's O(1) notification that one code header it indexed is
@@ -1886,23 +1843,14 @@ pub const ReleaseDomain = struct {
     };
 
     allocator: std.mem.Allocator,
-    /// Slice records and deferred retirements, under one lock. Slices are
-    /// coarse -- a fuel quantum at least -- so taking it twice per slice is
-    /// not on the per-word path.
-    slices_mutex: std.Io.Mutex = .init,
-    slice_epoch: std.atomic.Value(u64) = .init(1),
-    slice_records: std.ArrayList(*SliceRecord) = .empty,
-    free_slice_records: ?*SliceRecord = null,
-    /// Records checked out by running slices. A running slice's epoch is zero
-    /// between read sections, so only this count says a record is in use.
-    running_slices: usize = 0,
-    /// Oldest first: epochs are taken under `slices_mutex` and appended, so
-    /// the ready retirements are always a prefix.
-    deferred: ?*Deferred = null,
-    deferred_last: ?*Deferred = null,
-    /// Binding versions pinned by live units, unordered, under `slices_mutex`.
+    /// Binding publication, pins, and kept bindings, under one lock. It is
+    /// taken per publication and per child unit, never per word.
+    bindings_mutex: std.Io.Mutex = .init,
+    /// The version of the newest binding publication.
+    binding_version: std.atomic.Value(u64) = .init(1),
+    /// Binding versions pinned by live units, unordered.
     binding_pins: std.ArrayList(u64) = .empty,
-    /// Replaced bindings a pin still observes, under `slices_mutex`.
+    /// Replaced bindings a pin still observes.
     kept_bindings: ?*KeptBinding = null,
     queue_mutex: std.Io.Mutex = .init,
     claim_released: std.Io.Condition = .init,
@@ -2008,50 +1956,13 @@ pub const ReleaseDomain = struct {
         );
     }
 
-    /// Begins a slice that may read slice-published objects without holding
-    /// references to them.
-    pub fn enterSlice(self: *ReleaseDomain) error{OutOfMemory}!*SliceRecord {
-        const record = record: {
-            std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-            defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-            self.running_slices += 1;
-            errdefer self.running_slices -= 1;
-            if (self.free_slice_records) |free| {
-                self.free_slice_records = free.next_free;
-                free.next_free = null;
-                break :record free;
-            }
-            try self.slice_records.ensureUnusedCapacity(self.allocator, 1);
-            const created = try self.allocator.create(SliceRecord);
-            created.* = .{ .source = &self.slice_epoch };
-            self.slice_records.appendAssumeCapacity(created);
-            break :record created;
-        };
-        std.debug.assert(record.depth == 0 and record.epoch.load(.monotonic) == 0);
-        return record;
-    }
-
-    /// Ends a slice and releases every deferred retirement no slice still
-    /// guards.
-    pub fn exitSlice(self: *ReleaseDomain, record: *SliceRecord) void {
-        std.debug.assert(record.depth == 0);
-        record.epoch.store(0, .seq_cst);
-        std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-        self.running_slices -= 1;
-        record.next_free = self.free_slice_records;
-        self.free_slice_records = record;
-        const ready = self.collectDeferredLocked();
-        std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-        self.enqueueDeferred(ready);
-    }
-
     /// Pins the binding version current now, for a unit that observes the
     /// bindings of its creation for its whole life. A replaced binding stays
     /// readable while some pin falls within the versions it was current for.
     pub fn pinBindings(self: *ReleaseDomain) error{OutOfMemory}!u64 {
-        std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-        const version = self.slice_epoch.load(.seq_cst);
+        std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
+        const version = self.binding_version.load(.seq_cst);
         try self.binding_pins.append(self.allocator, version);
         return version;
     }
@@ -2060,8 +1971,8 @@ pub const ReleaseDomain = struct {
     pub fn unpinBindings(self: *ReleaseDomain, version: u64) void {
         var released: ?*KeptBinding = null;
         {
-            std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-            defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
+            std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
+            defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
             const index = std.mem.indexOfScalar(u64, self.binding_pins.items, version).?;
             _ = self.binding_pins.swapRemove(index);
             var link = &self.kept_bindings;
@@ -2084,7 +1995,7 @@ pub const ReleaseDomain = struct {
     }
 
     /// Whether a live pin observes a binding current from `since` until
-    /// `until`. Caller holds the binding lock (`slices_mutex`).
+    /// `until`. Caller holds the binding lock (`bindings_mutex`).
     pub fn pinnedWithinLocked(self: *const ReleaseDomain, since: u64, until: u64) bool {
         for (self.binding_pins.items) |pin| {
             if (since <= pin and pin < until) return true;
@@ -2100,95 +2011,17 @@ pub const ReleaseDomain = struct {
     }
 
     /// Starts a binding publication and returns its version, newer than every
-    /// pin and read section open now, holding the binding lock until
-    /// `endBindingPublication`. The caller publishes stamped with it and
-    /// decides what becomes of the binding it replaced; ending advances the
-    /// epoch, so a pin or section announced before may still observe what was
-    /// replaced, and one announced after observes the publication.
+    /// pin, holding the binding lock until `endBindingPublication`. The caller
+    /// publishes stamped with it and decides, against the pins, what becomes
+    /// of the binding it replaced; a pin taken later observes the publication.
     pub fn beginBindingPublication(self: *ReleaseDomain) u64 {
-        std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-        return self.slice_epoch.load(.seq_cst) + 1;
+        std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
+        return self.binding_version.load(.seq_cst) + 1;
     }
 
     pub fn endBindingPublication(self: *ReleaseDomain, version: u64) void {
-        self.slice_epoch.store(version, .seq_cst);
-        std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-    }
-
-    /// Retires `owner` once every slice that began before now has ended. The
-    /// caller has already stopped publishing it, so no later slice can reach it.
-    pub fn retireAfterSlices(
-        self: *ReleaseDomain,
-        owner: anytype,
-        node: *Retirement,
-        deferred: *Deferred,
-    ) void {
-        const version = version: {
-            std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-            defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-            break :version self.slice_epoch.fetchAdd(1, .seq_cst) + 1;
-        };
-        self.retireAfterVersion(owner, node, deferred, version);
-    }
-
-    /// Retires `owner` once no read section older than `version` remains.
-    fn retireAfterVersion(
-        self: *ReleaseDomain,
-        owner: anytype,
-        node: *Retirement,
-        deferred: *Deferred,
-        version: u64,
-    ) void {
-        const Pointer = @TypeOf(owner);
-        const pointer = @typeInfo(Pointer).pointer;
-        const adapters = RetirementAdapters(pointer.child);
-        std.debug.assert(node.context == null and node.advance_fn == null and node.next == null);
-        node.context = @ptrCast(owner);
-        node.advance_fn = adapters.advance;
-        std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-        deferred.* = .{
-            .next = null,
-            .epoch = version,
-            .node = node,
-        };
-        if (self.deferred_last) |last| last.next = deferred else self.deferred = deferred;
-        self.deferred_last = deferred;
-        const ready = self.collectDeferredLocked();
-        std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-        self.enqueueDeferred(ready);
-    }
-
-    /// Detaches every deferred retirement whose epoch no active slice
-    /// predates. Caller holds `slices_mutex`.
-    fn collectDeferredLocked(self: *ReleaseDomain) ?*Deferred {
-        if (self.deferred == null) return null;
-        var oldest: u64 = std.math.maxInt(u64);
-        for (self.slice_records.items) |record| {
-            const epoch = record.epoch.load(.seq_cst);
-            if (epoch != 0 and epoch < oldest) oldest = epoch;
-        }
-        const ready = self.deferred;
-        var last: ?*Deferred = null;
-        var cursor = self.deferred;
-        while (cursor) |item| : (cursor = item.next) {
-            if (item.epoch > oldest) break;
-            last = item;
-        }
-        const tail = last orelse return null;
-        self.deferred = tail.next;
-        if (self.deferred == null) self.deferred_last = null;
-        tail.next = null;
-        return ready;
-    }
-
-    fn enqueueDeferred(self: *ReleaseDomain, ready: ?*Deferred) void {
-        var cursor = ready;
-        while (cursor) |item| {
-            cursor = item.next;
-            const node = item.node.?;
-            item.* = .{};
-            self.enqueueRetirement(node, .new);
-        }
+        self.binding_version.store(version, .seq_cst);
+        std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
     }
 
     pub fn retire(self: *ReleaseDomain, owner: anytype, node: *Retirement) void {
@@ -2411,35 +2244,15 @@ pub const ReleaseDomain = struct {
     }
 
     fn drainOwned(self: *ReleaseDomain) void {
-        // Draining to quiescence implies no slice is running, so whatever is
-        // deferred is released. Retiring can defer more -- a cell defers its
-        // snapshots -- so this alternates until both are empty.
-        while (true) {
-            const ready = ready: {
-                std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-                defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-                break :ready self.collectDeferredLocked();
-            };
-            self.enqueueDeferred(ready);
-            while (!self.advance(65_536)) {}
-            std.Io.Threaded.mutexLockUncancelable(&self.slices_mutex);
-            defer std.Io.Threaded.mutexUnlock(&self.slices_mutex);
-            // A running slice may still read what remains, and owns its record;
-            // both are released when that slice exits, not here.
-            if (self.running_slices != 0) return;
-            if (self.deferred != null) continue;
-            for (self.slice_records.items) |record| self.allocator.destroy(record);
-            self.slice_records.deinit(self.allocator);
-            self.slice_records = .empty;
-            self.free_slice_records = null;
-            // A parked unit holds a pin without a slice. Kept bindings exist
-            // only while a pin does.
-            if (self.binding_pins.items.len == 0) {
-                std.debug.assert(self.kept_bindings == null);
-                self.binding_pins.deinit(self.allocator);
-                self.binding_pins = .empty;
-            }
-            return;
+        while (!self.advance(65_536)) {}
+        std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
+        // A live unit may still hold a pin. Kept bindings exist only while a
+        // pin does.
+        if (self.binding_pins.items.len == 0) {
+            std.debug.assert(self.kept_bindings == null);
+            self.binding_pins.deinit(self.allocator);
+            self.binding_pins = .empty;
         }
     }
 
