@@ -98,7 +98,7 @@ test "every primitive exposes meaningful reflective documentation" {
         "range",          "shape",    "len",        "flip",        "reshape",      "cmp",
         "grade",          "distinct", "group",      "put",         "update",       "del",
         "split",          "join",     "str",        "band",        "bor",          "bxor",
-        "bsl",            "bsr",      "bnot",       "stack",
+        "bsl",            "bsr",      "bnot",       "stack",       "cut",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();

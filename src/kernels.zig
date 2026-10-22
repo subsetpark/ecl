@@ -96,7 +96,7 @@ pub const Operation = union(enum) {
                 // `at` gathers with a list index; `cat`, `take`, `drop`, `in?`,
                 // and `reshape` each read two operands whose representations
                 // both matter.
-                .at, .cat, .take, .drop, .in_word, .reshape => .two,
+                .at, .cat, .take, .drop, .in_word, .reshape, .cut => .two,
                 .where, .first_where, .raze, .reverse, .first, .rest, .range, .shape, .len, .flip => .one,
             },
             .order => |operation| switch (operation) {
@@ -547,6 +547,15 @@ const sequence_rows = [_]Row{
         .right = without(any_operand, all_leaves),
         .class = .generic_fallback,
         // a boxed or keyed source reshapes through the generic spine path
+    },
+    // cut
+    .{
+        .operations = only(.{Operation{ .sequence = .cut }}),
+        .left = any_operand,
+        .right = any_operand,
+        .class = .generic_fallback,
+        // each piece is profiled and materialized from borrowed cells, so a homogeneous piece
+        // becomes a typed leaf; there is no typed slice path yet
     },
     // unary sequence operations
     .{

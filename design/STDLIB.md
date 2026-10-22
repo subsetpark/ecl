@@ -466,6 +466,24 @@ the repeated boundary value is not appended. Defined in ecl over `unfold`.
 ### cos
 `( x -- y )` — **Pervasive.** Cosine; float transcendental.
 
+### cut
+`( list starts -- pieces )` — Split a list into one piece per start index.
+Each piece runs from its start up to the next start, and the last runs to
+the end of the list; elements before the first start belong to no piece.
+Starts must be integers from zero through the length, in nondecreasing
+order, so equal starts give empty pieces. A start out of range or below its
+predecessor fails with `'domain` at that start's position. Strings cut into
+strings.
+
+#### Examples
+
+```ecl
+[0 1 2 3 4 5 6] [0 2 5] cut
+# => [[0 1] [2 3 4] [5 6]]
+"hello world" [6] cut
+# => ["world"]
+```
+
 ### def
 `( annotation? body 'name -- )` — Bind a quotation to a public word, with
 optional effect and documentation metadata. See

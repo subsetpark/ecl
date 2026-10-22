@@ -40,6 +40,7 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
         .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Return a list's top-level element count." },
         .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Transpose a rectangular list." },
         .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
+        .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into pieces that begin at each nondecreasing start index and end at the next; elements before the first start are dropped." },
         .reverse, .first, .rest => null,
     };
 }
@@ -70,6 +71,7 @@ fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
         .len => lenPrimitive(evaluator),
         .flip => flipPrimitive(evaluator),
         .reshape => reshapePrimitive(evaluator),
+        .cut => cutPrimitive(evaluator),
     };
 }
 
@@ -2170,6 +2172,118 @@ const ReshapeDriver = struct {
                 return .stepped;
             },
         }
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn cutPrimitive(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var starts = try evaluator.popValue();
+    defer starts.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or starts.borrow() != .list)
+        return evaluator.typeError("a list and a list of integer start indices");
+    try evaluator.startDriver(CutDriver{
+        .collection = .init(collection.take()),
+        .starts = .init(starts.take()),
+    });
+}
+
+/// Validates every start, then materializes each piece from borrowed cells and
+/// finally the list of pieces. One cell buffer, sized for the longest piece,
+/// is reused for every piece.
+const CutDriver = struct {
+    collection: heap.Owned(Value),
+    starts: heap.Owned(Value),
+    validated: usize = 0,
+    previous: usize = 0,
+    longest: usize = 0,
+    pieces: ?heap.Owned(heap.OwnedValueBuffer) = null,
+    cells: ?heap.Owned([]Value) = null,
+    piece: usize = 0,
+    filled: usize = 0,
+    inner: ?heap.Owned(list.ValueMaterializer) = null,
+    outer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    fn start(self: *const CutDriver, index: usize) usize {
+        return @intCast(list.atUnchecked(self.starts.borrow(), index).int);
+    }
+
+    fn end(self: *const CutDriver, index: usize) usize {
+        const count: usize = @intCast(self.starts.borrow().list.length());
+        return if (index + 1 == count)
+            @intCast(self.collection.borrow().list.length())
+        else
+            self.start(index + 1);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *CutDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.starts.borrow().list.length());
+        const length: usize = @intCast(self.collection.borrow().list.length());
+        if (self.validated != count) {
+            while (self.validated != count and evaluator.workBudget().spend()) : (self.validated += 1) {
+                const item = list.atUnchecked(self.starts.borrow(), self.validated);
+                if (item != .int) return evaluator.typeError("a list of integer start indices");
+                if (item.int < 0 or item.int > length) return evaluator.failAtIndex(
+                    .domain,
+                    "cut starts must lie within the list",
+                    self.validated,
+                );
+                const position: usize = @intCast(item.int);
+                if (self.validated != 0 and position < self.previous) return evaluator.failAtIndex(
+                    .domain,
+                    "cut starts must be nondecreasing",
+                    self.validated,
+                );
+                if (self.validated != 0) self.longest = @max(self.longest, position - self.previous);
+                self.previous = position;
+            }
+            if (self.validated == count and count != 0)
+                self.longest = @max(self.longest, length - self.previous);
+            return .stepped;
+        }
+        if (self.pieces == null) {
+            self.pieces = .init(try .init(evaluator.releaseDomain(), count));
+            self.cells = .init(try evaluator.allocator().alloc(Value, self.longest));
+            if (count == 0) self.outer = .init(.init(evaluator.allocator(), self.pieces.?.borrow().values()));
+            return .stepped;
+        }
+        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
+            .complete => |result| .{ .output = result },
+        };
+        if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
+            .complete => |piece_value| {
+                inner.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.inner = null;
+                self.finishPiece(evaluator, piece_value);
+                return .stepped;
+            },
+        };
+        const first = self.start(self.piece);
+        const size = self.end(self.piece) - first;
+        if (size == 0) {
+            self.finishPiece(evaluator, try emptyLike(evaluator.allocator(), self.collection.borrow()));
+            return .stepped;
+        }
+        const cells = self.cells.?.borrow();
+        while (self.filled != size and evaluator.workBudget().spend()) : (self.filled += 1) {
+            cells[self.filled] = list.atUnchecked(self.collection.borrow(), first + self.filled);
+        }
+        if (self.filled == size) self.inner = .init(.init(evaluator.allocator(), cells[0..size]));
+        return .stepped;
+    }
+
+    fn finishPiece(self: *CutDriver, evaluator: *Machine, piece_value: Value) void {
+        self.pieces.?.borrowMut().appendOwned(piece_value);
+        self.piece += 1;
+        self.filled = 0;
+        if (self.piece == @as(usize, @intCast(self.starts.borrow().list.length())))
+            self.outer = .init(.init(evaluator.allocator(), self.pieces.?.borrow().values()));
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
