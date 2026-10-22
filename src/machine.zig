@@ -2550,6 +2550,8 @@ pub const Unit = struct {
     /// Null for a unit that may define, which reads current bindings and
     /// so sees its own definitions.
     binding_pin: ?u64 = null,
+    /// Resolutions of session and core words in this unit's view of bindings.
+    binding_cache: BindingCache = .{},
     /// Protected invocation may start this child at one selected registered
     /// module generation. The Unit lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
@@ -3051,6 +3053,7 @@ pub const Unit = struct {
 
     pub fn deinit(self: *Unit) void {
         if (self.binding_pin) |pin| self.environment.bindingDomain().unpinBindings(pin);
+        self.binding_cache.deinit(self.allocator);
         self.module_call_sites.deinit(self.releases);
         if (self.current) |current| self.releases.releaseHeader(current.code);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
@@ -6203,6 +6206,12 @@ pub const Machine = struct {
         return true;
     }
 
+    /// The number that determines this unit's view of session bindings: its
+    /// pin, or the current binding version for a unit that may define.
+    fn bindingView(self: *const Machine) u64 {
+        return self.unit.binding_pin orelse self.unit.environment.bindingDomain().binding_version.load(.acquire);
+    }
+
     /// Writes into `out` what `cell` holds for a reader pinned at `pin`, and
     /// returns false when it holds nothing then. A borrow lasts only for this
     /// dispatch; a lease kept past it holds references. Each branch writes
@@ -6330,6 +6339,20 @@ pub const Machine = struct {
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        // A session or core word resolved before in this unit's view.
+        const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
+        const view = self.bindingView();
+        if (cacheable) if (self.unit.binding_cache.find(word.slot, view)) |cached| {
+            var resolved: Resolution = .{
+                .lease = .{ .releases = self.unit.releases, .held = .{ .borrowed = cached.spec } },
+                .execution_generation = null,
+                .home = null,
+                .trace_word = cached.trace_word,
+                .origin = cached.origin,
+                .defining_scope = cached.defining_scope,
+            };
+            return executeResolved(self, &resolved);
+        };
         const plan_entry = try self.planEntryFor(word);
         if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
@@ -6356,6 +6379,19 @@ pub const Machine = struct {
                 return executeResolved(self, &entry.resolution.?);
             };
             defer slot_resolution.deinit(self.unit.allocator);
+            if (cacheable and slot_resolution.home == null and slot_resolution.borrow_pin == null and
+                slot_resolution.execution_generation == null and slot_resolution.lease.held == .borrowed and
+                slot_resolution.lease.traceWord() == null)
+            {
+                self.unit.binding_cache.put(self.unit.allocator, .{
+                    .slot = word.slot,
+                    .view = view,
+                    .spec = slot_resolution.lease.spec(),
+                    .trace_word = slot_resolution.trace_word,
+                    .origin = slot_resolution.origin,
+                    .defining_scope = slot_resolution.defining_scope,
+                });
+            }
             try executeResolved(self, &slot_resolution);
             return;
         }
@@ -8204,6 +8240,80 @@ const PlanTree = struct {
             self.stack_len += 1;
         }
         return false;
+    }
+};
+
+/// A unit's resolutions of session and core words, keyed by slot id.
+///
+/// A unit's view of those bindings is one number: its pin, or for a unit that
+/// may define, the binding version, which only its own definitions advance
+/// for the session. A resolution made in a view therefore holds while the view
+/// number is unchanged, and its borrowed specification stays valid as long:
+/// a pin keeps what it observes, and a defining unit's view moves on before
+/// anything it replaced can retire. Words whose resolution depends on more
+/// than the slot and the view are not kept: module image words (root liveness
+/// and home are the running activation's), module-local bindings (their home
+/// is the caller's), and qualified words (the registry is live).
+pub const BindingCache = struct {
+    pub const Entry = struct {
+        slot: u32,
+        view: u64,
+        spec: *const env.BindingSpec,
+        trace_word: intern.TraceWord,
+        origin: ResolutionOrigin,
+        defining_scope: ?*env.Scope,
+    };
+    entries: []?Entry = &.{},
+    count: usize = 0,
+    /// 64 minus log2 of the table size, for multiplicative hashing.
+    shift: u6 = 0,
+
+    fn deinit(self: *BindingCache, allocator: std.mem.Allocator) void {
+        allocator.free(self.entries);
+        self.* = .{};
+    }
+    fn home(self: *const BindingCache, slot: u32) usize {
+        return @intCast((@as(u64, slot) *% 0x9E3779B97F4A7C15) >> self.shift);
+    }
+    /// The entry for `slot` made in view `view`, if any.
+    pub fn find(self: *const BindingCache, slot: u32, view: u64) ?*const Entry {
+        if (self.entries.len == 0) return null;
+        const mask = self.entries.len - 1;
+        var index = self.home(slot);
+        while (true) : (index = (index + 1) & mask) {
+            const entry = &(self.entries[index] orelse return null);
+            if (entry.slot == slot) return if (entry.view == view) entry else null;
+        }
+    }
+    /// Records `entry`, replacing one for the same slot. Failing to grow only
+    /// leaves the word uncached.
+    pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) void {
+        if ((self.count + 1) * 4 > self.entries.len * 3) self.grow(allocator) catch return;
+        self.insert(entry);
+    }
+    fn insert(self: *BindingCache, entry: Entry) void {
+        const mask = self.entries.len - 1;
+        var index = self.home(entry.slot);
+        while (true) : (index = (index + 1) & mask) {
+            if (self.entries[index]) |*existing| {
+                if (existing.slot != entry.slot) continue;
+                existing.* = entry;
+                return;
+            }
+            self.entries[index] = entry;
+            self.count += 1;
+            return;
+        }
+    }
+    fn grow(self: *BindingCache, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+        const old = self.entries;
+        const fresh = try allocator.alloc(?Entry, @max(16, old.len * 2));
+        @memset(fresh, null);
+        self.entries = fresh;
+        self.shift = @intCast(64 - @as(u7, std.math.log2_int(usize, fresh.len)));
+        self.count = 0;
+        for (old) |kept| if (kept) |entry| self.insert(entry);
+        allocator.free(old);
     }
 };
 

@@ -299,7 +299,7 @@ fn lookupFrozen(environment: *const Environment, name: u32) ?BindingLease {
     return poll.drive(?BindingLease, &cursor, .{});
 }
 
-const BindingSpec = struct {
+pub const BindingSpec = struct {
     binding: Binding,
     visibility: Visibility = .public,
     origin: BindingOrigin = .top,

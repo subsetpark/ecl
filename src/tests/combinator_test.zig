@@ -1148,3 +1148,10 @@ test "task.cancel-self requests cancellation of the current task" {
     // A request: the task runs on to its next safe point, where it observes it.
     try expectFreshStack("[] (task.cancel-self 0 100000 (1 +) times) @spawn task.await 'err at 'kind at", "'cancelled");
 }
+
+test "bindings: a unit's cached resolutions follow its own definitions" {
+    try expectFreshStack("(1 +) 'inc def 5 inc inc (10 +) 'inc def inc", "17");
+    try expectFreshStack("(1 +) 'inc def 0 3 (inc) times (10 +) 'inc def 3 (inc) times", "33");
+    // Shadowing a core word after using it, and removing the shadow.
+    try expectFreshStack("1 2 + (pop pop 42) '+ def 1 2 + '+ undef 1 2 +", "3 42 3");
+}
