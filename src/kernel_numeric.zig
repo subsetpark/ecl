@@ -107,16 +107,18 @@ fn binaryPrimitive(evaluator: *Machine, comptime operation: BinaryOp) MachineErr
     defer right.deinit();
     var left = try evaluator.popValue();
     defer left.deinit();
-    if (try startTypedBinary(evaluator, operation, &left, &right, .{})) return;
     // Two scalars are the whole operation. `PervadeCursor.startBinary` reaches
     // this same call for its leaf case, so routing there costs one cursor and
     // one driver allocation to arrive at a value already in hand. A scalar at
     // top level carries no logical index, exactly as the cursor reports it.
+    // Typed kernels need a list leaf, so they never take this pair: testing it
+    // first skips their classification.
     if (isPervadeScalar(left.borrow()) and isPervadeScalar(right.borrow())) {
         const result = scalarBinary(operation, left.borrow(), right.borrow()) catch |fault|
             return scalarFailure(evaluator, fault, null);
         return evaluator.pushOwned(result);
     }
+    if (try startTypedBinary(evaluator, operation, &left, &right, .{})) return;
 
     const cursor = try PervadeCursor.initBinary(
         evaluator.releaseDomain(),
@@ -135,12 +137,13 @@ fn binaryPrimitive(evaluator: *Machine, comptime operation: BinaryOp) MachineErr
 fn unaryPrimitive(evaluator: *Machine, comptime operation: UnaryOp) MachineError!void {
     var operand = try evaluator.popValue();
     defer operand.deinit();
-    if (try startTypedUnary(evaluator, operation, &operand, .{})) return;
+    // As for binary operations, a scalar never takes a typed kernel.
     if (isPervadeScalar(operand.borrow())) {
         const result = scalarUnary(operation, operand.borrow()) catch |fault|
             return scalarFailure(evaluator, fault, null);
         return evaluator.pushOwned(result);
     }
+    if (try startTypedUnary(evaluator, operation, &operand, .{})) return;
     const cursor = try PervadeCursor.initUnary(
         evaluator.releaseDomain(),
         evaluator.allocator(),
