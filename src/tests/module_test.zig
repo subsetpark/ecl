@@ -882,6 +882,31 @@ test "session: mutation settlement is independent of a busy sole worker" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
+test "session: a pinned task keeps only the snapshot it observes" {
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+        defer runtime.deinit();
+        const name = try intern.internNamespace("pinned-redefinition");
+        const binding = try TestBinding.init(allocator);
+        defer runtime.release(binding.body);
+        try runtime.define(name, binding.top());
+        // The task pins the first binding, which it observes until it ends.
+        try expectOk(&runtime, "[] ((1) () while) @spawn");
+        for (0..64) |_| try runtime.define(name, binding.top());
+        const warmed_live_bytes = counting.total_requested_bytes;
+        // Every later binding is observed by no pin, so none is kept.
+        for (0..4096) |_| try runtime.define(name, binding.top());
+        try std.testing.expect(counting.total_requested_bytes <= warmed_live_bytes + 4096);
+        try expectOk(&runtime, "dup task.cancel task.await pop");
+    }
+    // The first binding was kept for the task; its end released it.
+    try std.testing.expectEqual(.ok, counting.deinit());
+}
+
 test "env: a replaced interior remains valid only through its binding lease" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();

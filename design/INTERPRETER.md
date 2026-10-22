@@ -628,18 +628,28 @@ A binding payload is one closed choice:
 - a validated native callable.
 
 Effect metadata, documentation, visibility, source slices, and module-local
-diagnostic identity travel in the same snapshot. Writers build before taking
-the publication lock, validate and swap in constant time, and retire the old
-snapshot after unlocking. Reclamation is epoch-based, in the read-side form
-of Fraser's EBR and userspace RCU: a word dispatch opens a read section that
-records the domain's epoch, borrows the current snapshot with one load and no
-references, and clears the record when it has retained whatever it keeps (a
-scheduled body, an effect, a native call). A replaced snapshot retires once no
-open section predates its replacement. A slice that is not dispatching never
-delays reclamation; a thread descheduled inside a dispatch does until it runs
-again, the scheme's known limit, against which a robust scheme such as
-interval-based reclamation would trade a per-read reservation. Readers outside
-a slice, such as reflection, acquire counted leases instead.
+diagnostic identity travel in the same snapshot. A snapshot records the
+binding version that published it, and a removal is published as a snapshot
+with no binding. Writers build before taking the publication lock, stamp the
+next version under the release domain's binding lock, publish, and only then
+advance the version, so a reader that announced an older version may still
+reach what was replaced and one that announces later reaches the publication.
+
+A unit that cannot define pins the version current at its creation and reads a
+session slot's newest snapshot at or before it, walking back through the chain
+only for a name redefined since. A unit that may define reads the current
+snapshot, so it sees its own definitions. Module images and core are not
+versioned: an image is private to its constructing unit until registration and
+frozen after, and core is frozen.
+
+A replaced snapshot stays in its chain only while some live pin falls within
+the versions it was current for; otherwise it is unlinked at once. Kept
+snapshots are rechecked whenever a pin ends, so a long-running task retains
+one snapshot per name it can observe rather than every intermediate
+definition. An unlinked snapshot retires once the word dispatches that may
+still hold it end (each dispatch opens a read section, the read-side form of
+Fraser's EBR) and no counted reader is copying it or walking past it. Readers
+outside a unit, such as completion, acquire counted leases.
 
 Slots are reached two ways, and their lifetimes follow. A session or core slot
 has an id in a lock-free directory whose ids are never reused; those roots

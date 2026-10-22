@@ -20,6 +20,8 @@ pub const Candidate = struct {
 pub const LexicalCursor = struct {
     core: env.EnvironmentView,
     word: u32,
+    /// The binding version the reader observes in a session root.
+    pin: ?u64,
     state: union(enum) {
         root: ?*env.Scope,
         lookup: struct { location: Location, cursor: env.DirectLookupCursor },
@@ -27,8 +29,8 @@ pub const LexicalCursor = struct {
     },
 
     /// `root` is the root a word was written in, or null for core alone.
-    pub fn init(core: env.EnvironmentView, root: ?*env.Scope, word: u32) LexicalCursor {
-        return .{ .core = core, .word = word, .state = .{ .root = root } };
+    pub fn init(core: env.EnvironmentView, root: ?*env.Scope, word: u32, pin: ?u64) LexicalCursor {
+        return .{ .core = core, .word = word, .pin = pin, .state = .{ .root = root } };
     }
 
     pub fn deinit(self: *LexicalCursor) void {
@@ -46,7 +48,7 @@ pub const LexicalCursor = struct {
                     if (root.environmentOrNull()) |environment| {
                         self.state = .{ .lookup = .{
                             .location = .{ .scope = root },
-                            .cursor = environment.directLookupCursor(self.word),
+                            .cursor = environment.directLookupCursor(self.word).at(if (root.isSession()) self.pin else null),
                         } };
                         break :step .pending;
                     }

@@ -581,8 +581,8 @@ test "linrec: empty post retains explicit depth frames and cancellation reaches 
     try std.testing.expect(depth_runtime.lastMaxFrames() >= 10_000);
 
     try support.expectStack(
-        "[] (200 (dup 100 = dup (victim task.cancel) () if pop dup 0 =) " ++
-            "(pop) (1 -) () linrec) @spawn dup 'victim set task.await 'err at 'kind at",
+        "[] (200 (dup 100 = dup (task.cancel-self) () if pop dup 0 =) " ++
+            "(pop) (1 -) () linrec) @spawn task.await 'err at 'kind at",
         "'cancelled",
     );
 }
@@ -674,8 +674,8 @@ test "cancellation retires continuation-installed work before failure unwind" {
     for (0..506) |_| try source.appendSlice(std.testing.allocator, "0 pop ");
     try source.appendSlice(
         std.testing.allocator,
-        "0 {'a 1} {'a 2} (pop pop victim task.cancel) dict.merge-with pop pop) " ++
-            "@spawn dup 'victim set task.await 'err at 'kind at",
+        "0 {'a 1} {'a 2} (pop pop task.cancel-self) dict.merge-with pop pop) " ++
+            "@spawn task.await 'err at 'kind at",
     );
     try std.testing.expect((try runtime.runUnit("<driver-cancel>", source.items)) == .ok);
     var display = try runtime.stackDisplay();
@@ -1103,4 +1103,48 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
             "(pop pop 42) '+ def [7 8] f [1 2 3] sum",
         "3 7 11 6 42 6",
     );
+}
+
+fn expectFreshStack(source: []const u8, expected: []const u8) !void {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, source, expected);
+}
+
+// A unit observes the bindings that existed when it was created, plus its own
+// definitions. Each task below waits before reading the word, so it would see
+// the parent's later definition if lookup crossed units; under the rule its
+// result does not depend on scheduling.
+test "bindings: a task keeps the bindings that existed when it was spawned" {
+    try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn (2) 'f def task.await", "{'ok [1]}");
+    // Through a caller: the task's `f` still reaches the `g` of its creation.
+    try expectFreshStack("(1) 'g def (g) 'f def [] (20 clock.sleep f) @spawn (2) 'g def task.await", "{'ok [1]}");
+    // Shadowing a core word after the spawn does not reach the task.
+    try expectFreshStack("[] (20 clock.sleep 1 2 +) @spawn (pop pop 42) '+ def task.await", "{'ok [3]}");
+    // Removing the name after the spawn does not either.
+    try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn 'f undef task.await", "{'ok [1]}");
+    // Several replacements and a removal after the spawn: only the first
+    // binding is kept for the task.
+    try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn (2) 'f def (3) 'f def 'f undef (4) 'f def task.await", "{'ok [1]}");
+    // A name first defined after the spawn is undefined in the task.
+    try expectFreshStack("[] (20 clock.sleep g) @spawn (5) 'g def task.await 'err at 'kind at", "'undefined-word");
+}
+
+test "bindings: a task spawned after a definition observes it" {
+    try expectFreshStack("(1) 'f def (2) 'f def [] (f) @spawn task.await", "{'ok [2]}");
+    try expectFreshStack("(1) 'f def 'f undef [] (f) @spawn task.await 'err at 'kind at", "'undefined-word");
+    // The defining unit itself sees its definitions as it makes them.
+    try expectFreshStack("(1) 'f def f (2) 'f def f", "1 2");
+}
+
+test "task.cancel-self requests cancellation of the current task" {
+    // Outside a task there is nothing to cancel, including in an `@attempt`
+    // of the root unit, which shares its scope.
+    try expectFreshStack("[] (task.cancel-self) @attempt 'err at 'kind at", "'domain");
+    // A request: the task runs on to its next safe point, where it observes it.
+    try expectFreshStack("[] (task.cancel-self 0 100000 (1 +) times) @spawn task.await 'err at 'kind at", "'cancelled");
 }
