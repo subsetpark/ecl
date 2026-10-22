@@ -417,9 +417,9 @@ fn frozenBindingMatches(
     var hit = lookup.resolve(word.slot, word.name) orelse return false;
     defer hit.lease.deinit();
     const binding_matches = switch (binding) {
-        .builtin => hit.lease.binding == .builtin and
-            (primitive == null or hit.lease.binding.builtin == primitive.?),
-        .source => hit.lease.binding == .word,
+        .builtin => hit.lease.spec().binding == .builtin and
+            (primitive == null or hit.lease.spec().binding.builtin == primitive.?),
+        .source => hit.lease.spec().binding == .word,
     };
     const origin_matches = switch (origin) {
         .trusted => true,
@@ -574,9 +574,9 @@ const Matcher = struct {
     /// Whether the resolved word is the trusted binding the atom expects.
     fn accept(self: *Matcher, resolved: *const machine.Resolution) void {
         const binding_matches = switch (self.expected_binding) {
-            .builtin => resolved.lease.binding == .builtin and
-                (self.expected == null or resolved.lease.binding.builtin == self.expected.?),
-            .source => resolved.lease.binding == .word,
+            .builtin => resolved.lease.spec().binding == .builtin and
+                (self.expected == null or resolved.lease.spec().binding.builtin == self.expected.?),
+            .source => resolved.lease.spec().binding == .word,
         };
         const origin_matches = resolved.origin == .core or resolved.origin == .standard_library;
         if (!origin_matches or !binding_matches) return self.rejectEntry();

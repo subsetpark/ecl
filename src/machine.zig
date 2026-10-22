@@ -2842,6 +2842,18 @@ pub const Unit = struct {
             else => null,
         };
     }
+    /// The kind of the innermost saved frame, or null with none saved.
+    fn topFrameTag(self: *const Unit) ?std.meta.Tag(Frame) {
+        const frames = self.frames.items;
+        return if (frames.len == 0) null else std.meta.activeTag(frames[frames.len - 1]);
+    }
+    /// Removes the innermost saved frame, which is a `tag`, and returns its
+    /// payload. Popping the whole frame copied the union's largest variant.
+    fn popFrame(self: *Unit, comptime tag: std.meta.Tag(Frame)) @FieldType(Frame, @tagName(tag)) {
+        const payload = @field(self.frames.items[self.frames.items.len - 1], @tagName(tag));
+        self.frames.items.len -= 1;
+        return payload;
+    }
     pub fn hasWorkDriver(self: *const Unit) bool {
         return self.native == .work or self.native == .work_park_request or
             self.native == .work_park_resume or self.native == .work_join_cleanup;
@@ -5294,6 +5306,13 @@ pub const Machine = struct {
         try self.require(1);
         return .init(self.releaseDomain(), self.unit.takeStackOwned().?);
     }
+    /// The top two operands, the lower first, after one underflow check.
+    pub fn popPair(self: *Machine) MachineError!struct { heap.OwnedValue, heap.OwnedValue } {
+        try self.require(2);
+        const right = self.unit.takeStackOwned().?;
+        const left = self.unit.takeStackOwned().?;
+        return .{ .init(self.releaseDomain(), left), .init(self.releaseDomain(), right) };
+    }
     fn popChecked(
         self: *Machine,
         comptime expected: []const u8,
@@ -5398,6 +5417,11 @@ pub const Machine = struct {
             self.unit.releases.releaseValue(item);
             return error.OutOfMemory;
         };
+    }
+    /// Consumes `item` into a slot this primitive freed by popping, which
+    /// cannot grow the stack.
+    pub fn pushIntoFreed(self: *Machine, item: Value) void {
+        self.unit.stack.appendAssumeCapacity(item);
     }
     pub fn pushBorrowed(self: *Machine, item: Value) error{OutOfMemory}!void {
         heap.retainValue(item);
@@ -6139,19 +6163,23 @@ pub const Machine = struct {
         out: *Resolution,
     ) bool {
         const cell = slot.current() orelse return false;
-        out.* = .{
-            // A borrow lasts only for this dispatch; a lease kept past it
-            // holds references.
-            .lease = if (self.slice) |slice| if (retain) cell.load() else cell.borrow(slice) else cell.load(),
-            .execution_generation = null,
-            .home = null,
-            .trace_word = .plain(name),
-            .origin = .core,
-        };
+        // A borrow lasts only for this dispatch; a lease kept past it holds
+        // references. Each branch writes the lease in place: choosing it
+        // inside one initializer built it in a temporary and copied it over.
+        if (self.slice != null and !retain)
+            out.lease = cell.borrow(self.slice.?)
+        else
+            out.lease = cell.load();
+        out.execution_generation = null;
+        out.home = null;
+        out.trace_word = .plain(name);
+        out.origin = .core;
+        out.defining_scope = null;
+        out.call_site_cache = null;
         if (written == null or cell == slot.coreCell()) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
-            if (out.lease.visibility == .private) {
+            if (out.lease.spec().visibility == .private) {
                 out.lease.deinit();
                 return false;
             }
@@ -6618,17 +6646,18 @@ pub const Machine = struct {
     /// inherits its named trace owner so inline control does not erase the
     /// activation that selected it.
     fn suspendCurrent(self: *Machine) error{OutOfMemory}!intern.TraceWord {
-        const current = self.unit.current.?;
-        const inherited_trace = if (!current.hasInstructions())
-            current.traced_word
-        else
-            no_word;
+        const current = &self.unit.current.?;
         if (current.hasInstructions()) {
-            try self.unit.frames.append(self.unit.allocator, .{ .eval = current });
+            // Built in place: an appended frame was a stack temporary copied
+            // into the array.
+            const frame = try self.unit.frames.addOne(self.unit.allocator);
+            frame.* = .{ .eval = current.* };
             self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
-        } else {
-            self.retireCompletedEval(current);
+            self.unit.current = null;
+            return no_word;
         }
+        const inherited_trace = current.traced_word;
+        self.retireCompletedEval(current.*);
         self.unit.current = null;
         return inherited_trace;
     }
@@ -6874,97 +6903,104 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (!first_step and !self.unit.cancelled.load(.acquire) and
             self.unit.releases.evaluationBackpressured()) return .yielded;
         first_step = false;
-        if (self.unit.native == .task_join_cleanup) {
-            const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
-            if (!cleanup.complete) return .yielded;
-            if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
-            continue;
-        }
-        if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
-            self.unit.native == .task_join_resume)
-        {
-            resumePark(self) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Ecl => {
-                    try startFailure(self);
+        switch (self.unit.native) {
+            // Nothing native is pending: no cleanup, resumption, park
+            // request, or work driver precedes the next evaluation step.
+            .idle, .task_join => {},
+            else => {
+                if (self.unit.native == .task_join_cleanup) {
+                    const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
+                    if (!cleanup.complete) return .yielded;
+                    if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
                     continue;
-                },
-            };
-        }
-        if (self.unit.hasParkRequest()) return .parked;
-        if (self.unit.workDriver()) |driver_ptr| {
-            const driver = driver_ptr.*;
-            if (comptime root_execution_metrics_enabled)
-                self.unit.root_execution_metrics.driver_resumes += 1;
-            const progress = driver.advance(self) catch |err| {
-                if (err == error.Ecl and self.unit.pendingFailure().site == null) {
-                    if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
                 }
-                if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
-                    self.unit.pendingFailure().trace_parent = driver.trace_parent;
-                }
-                clearWorkDriver(self.unit);
-                switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Ecl => {
-                        try startFailure(self);
-                        continue;
-                    },
-                }
-            };
-            switch (progress) {
-                inline .stepped, .yielded => |_, tag| {
-                    const outcome: turn_core.Outcome = switch (tag) {
-                        .stepped => .stepped,
-                        .yielded => .{ .yielded = progress.yielded },
-                        else => comptime unreachable,
-                    };
-                    const decision = turn_core.afterDriver(
-                        outcome,
-                        &self.unit.kernel_budget,
-                        self.unit.hasParkRequest(),
-                    ) catch @panic("driver outcome contradicts its park request");
-                    if (decision.poll_cancellation) self.pollKernel() catch |err| switch (err) {
+                if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
+                    self.unit.native == .task_join_resume)
+                {
+                    resumePark(self) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Ecl => {
                             try startFailure(self);
                             continue;
                         },
                     };
-                    switch (decision.action) {
-                        .resume_driver => continue,
-                        .end_turn => return .yielded,
-                        .park => return .parked,
+                }
+                if (self.unit.hasParkRequest()) return .parked;
+                if (self.unit.workDriver()) |driver_ptr| {
+                    const driver = driver_ptr.*;
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.driver_resumes += 1;
+                    const progress = driver.advance(self) catch |err| {
+                        if (err == error.Ecl and self.unit.pendingFailure().site == null) {
+                            if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
+                        }
+                        if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
+                            self.unit.pendingFailure().trace_parent = driver.trace_parent;
+                        }
+                        clearWorkDriver(self.unit);
+                        switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.Ecl => {
+                                try startFailure(self);
+                                continue;
+                            },
+                        }
+                    };
+                    switch (progress) {
+                        inline .stepped, .yielded => |_, tag| {
+                            const outcome: turn_core.Outcome = switch (tag) {
+                                .stepped => .stepped,
+                                .yielded => .{ .yielded = progress.yielded },
+                                else => comptime unreachable,
+                            };
+                            const decision = turn_core.afterDriver(
+                                outcome,
+                                &self.unit.kernel_budget,
+                                self.unit.hasParkRequest(),
+                            ) catch @panic("driver outcome contradicts its park request");
+                            if (decision.poll_cancellation) self.pollKernel() catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                error.Ecl => {
+                                    try startFailure(self);
+                                    continue;
+                                },
+                            };
+                            switch (decision.action) {
+                                .resume_driver => continue,
+                                .end_turn => return .yielded,
+                                .park => return .parked,
+                            }
+                        },
+                        .completed => {
+                            clearWorkDriver(self.unit);
+                            continue;
+                        },
+                        .output => |item| {
+                            clearWorkDriver(self.unit);
+                            try self.pushOwned(item);
+                            continue;
+                        },
+                        .reserved_output => |reserved| {
+                            clearWorkDriver(self.unit);
+                            var destination = reserved.reservation;
+                            destination.pushOwned(reserved.value);
+                            continue;
+                        },
+                        // The driver destroyed and detached itself before invoking a
+                        // continuation which may have installed its successor.
+                        .detached => continue,
+                        .failed => {
+                            clearWorkDriver(self.unit);
+                            if (self.unit.native == .task_join_cleanup) {
+                                const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
+                                std.debug.assert(cleanup.complete);
+                                std.debug.assert(cleanup.disposition.? == .continue_evaluation);
+                            }
+                            return error.Ecl;
+                        },
                     }
-                },
-                .completed => {
-                    clearWorkDriver(self.unit);
-                    continue;
-                },
-                .output => |item| {
-                    clearWorkDriver(self.unit);
-                    try self.pushOwned(item);
-                    continue;
-                },
-                .reserved_output => |reserved| {
-                    clearWorkDriver(self.unit);
-                    var destination = reserved.reservation;
-                    destination.pushOwned(reserved.value);
-                    continue;
-                },
-                // The driver destroyed and detached itself before invoking a
-                // continuation which may have installed its successor.
-                .detached => continue,
-                .failed => {
-                    clearWorkDriver(self.unit);
-                    if (self.unit.native == .task_join_cleanup) {
-                        const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
-                        std.debug.assert(cleanup.complete);
-                        std.debug.assert(cleanup.disposition.? == .continue_evaluation);
-                    }
-                    return error.Ecl;
-                },
-            }
+                }
+            },
         }
         if (self.unit.hasRequestedExit()) {
             return .completed;
@@ -7310,21 +7346,21 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .word => |reference| reference,
         .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
-    // The locals backend is reserved from every publication, so these names
-    // can only mean their core primitives.
-    const locals = self.unit.environment.localsWords();
-    const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
-        prims.readLocal
-    else if (word.name == locals.load)
-        prims.bindLocals
-    else if (word.name == locals.drop)
-        prims.unbindLocals
-    else
-        null;
     // Locals lowering emits the backend words unlinked; a linked one is
     // ordinary text and dispatches through its slot like any word.
-    if (backend) |primitive| {
-        if (word.slot == 0) return invokeBuiltin(self, .plain(word.name), primitive);
+    if (word.slot == 0) {
+        // The locals backend is reserved from every publication, so these
+        // names can only mean their core primitives.
+        const locals = self.unit.environment.localsWords();
+        const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
+            prims.readLocal
+        else if (word.name == locals.load)
+            prims.bindLocals
+        else if (word.name == locals.drop)
+            prims.unbindLocals
+        else
+            null;
+        if (backend) |primitive| return invokeBuiltin(self, .plain(word.name), primitive);
     }
     try self.executeWord(word);
 }
@@ -7703,15 +7739,15 @@ const QualifiedRegistrationDriver = struct {
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home();
-    const cross_home_effect = if (cross_home) resolved.lease.effect else null;
-    switch (resolved.lease.binding) {
+    const cross_home_effect = if (cross_home) resolved.lease.spec().effect else null;
+    switch (resolved.lease.spec().binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
             // A trusted definition's recognition was decided when its
             // environment froze; one that recognized nothing runs as any
             // source word does.
             const trusted = resolved.origin == .core or resolved.origin == .standard_library;
-            if (trusted) if (resolved.lease.direct_idiom) |idiom| if (self.unit.inherited.phrase_recognizer) |recognizer| {
+            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| if (self.unit.inherited.phrase_recognizer) |recognizer| {
                 switch (try recognizer.trusted(self, .{ .body = body_header, .idiom = idiom })) {
                     .applied => return,
                     .declined => {},
@@ -8927,17 +8963,20 @@ fn prepareEffectCheck(
     };
 }
 fn resumeFrames(self: *Machine) MachineError!bool {
-    while (self.unit.fuel != 0) switch (self.unit.frames.pop() orelse return false) {
-        .eval => |continuation| {
+    while (self.unit.fuel != 0) switch (self.unit.topFrameTag() orelse return false) {
+        .eval => {
+            const continuation = self.unit.popFrame(.eval);
             self.unit.current = continuation;
             return true;
         },
-        .effect_check => |owned| {
+        .effect_check => {
+            const owned = self.unit.popFrame(.effect_check);
             var check = owned;
             defer check.deinit(self.releaseDomain());
             try finishEffectCheck(self, &check);
         },
-        .application => |continuation| {
+        .application => {
+            const continuation = self.unit.popFrame(.application);
             var application_selection = continuation.selection;
             defer application_selection.deinit(self.releaseDomain());
             const launch: Machine.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
@@ -9021,7 +9060,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             // resumed only while fuel remains.
             if (self.unit.hasWorkDriver()) return true;
         },
-        .qualified_after_load => |continuation| {
+        .qualified_after_load => {
+            const continuation = self.unit.popFrame(.qualified_after_load);
             var loading = continuation.loading;
             defer loading.deinit();
             var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
@@ -9059,7 +9099,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             });
             return true;
         },
-        .boundary => |boundary| {
+        .boundary => {
+            const boundary = self.unit.popFrame(.boundary);
             std.debug.assert(@backingInt(self.unit.boundary_index.?) == self.unit.frames.items.len);
             self.unit.boundary_index = boundary.previous_boundary;
             self.unit.stack_base = boundary.previous_base;

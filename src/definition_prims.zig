@@ -574,7 +574,7 @@ const LookupDriver = struct {
                         .resolved => |resolution| resolution,
                     };
                     defer resolved.deinit(evaluator.allocator());
-                    const document = resolved.lease.doc orelse
+                    const document = resolved.lease.spec().doc orelse
                         return evaluator.fail(.domain, "binding has no documentation");
                     self.normalization = .init(try .init(evaluator, document));
                 },
@@ -675,26 +675,26 @@ const WhichDriver = struct {
             1 => try self.add(.{ .bytes = " -> " }),
             2 => try self.add(.{ .trace_word = resolved.trace_word }),
             3 => try self.add(.{ .bytes = " " }),
-            4 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
+            4 => try self.add(.{ .bytes = switch (resolved.lease.spec().binding) {
                 .word => "def",
                 .builtin => "primitive",
                 .native => "native",
             } }),
             5 => try self.add(.{ .bytes = " " }),
-            6 => try self.add(.{ .bytes = @tagName(resolved.lease.visibility) }),
+            6 => try self.add(.{ .bytes = @tagName(resolved.lease.spec().visibility) }),
             7 => if (resolved.home != null)
                 try self.add(.{ .bytes = " generation " }),
             8 => if (resolved.home) |home|
                 try self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } }),
-            9 => if (resolved.lease.effect != null) try self.add(.{ .bytes = " " }),
-            10 => if (resolved.lease.effect) |effect|
+            9 => if (resolved.lease.spec().effect != null) try self.add(.{ .bytes = " " }),
+            10 => if (resolved.lease.spec().effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            11 => switch (resolved.lease.binding) {
+            11 => switch (resolved.lease.spec().binding) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             12 => {
-                const requirements = switch (resolved.lease.binding) {
+                const requirements = switch (resolved.lease.spec().binding) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
@@ -884,7 +884,7 @@ const SeeDriver = struct {
             // string as prose.
             0 => if (plan.context.document.isPresent()) {
                 try self.add(.{ .bytes = "(" });
-                if (resolved.lease.effect) |effect| {
+                if (resolved.lease.spec().effect) |effect| {
                     const header = effect.header();
                     const count: usize = @intCast(header.length());
                     var index: usize = 0;
@@ -896,32 +896,32 @@ const SeeDriver = struct {
                 try self.add(.{ .bytes = ": " });
                 try self.add(.{ .document = plan.context.document.borrow() });
                 try self.add(.{ .bytes = ")" });
-            } else if (resolved.lease.effect) |effect|
+            } else if (resolved.lease.spec().effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            1 => if (resolved.lease.doc != null or resolved.lease.effect != null)
+            1 => if (resolved.lease.spec().doc != null or resolved.lease.spec().effect != null)
                 try self.add(.{ .bytes = " " }),
-            2 => switch (resolved.lease.binding) {
-                .word => |word_body| if (resolved.lease.source) |source|
+            2 => switch (resolved.lease.spec().binding) {
+                .word => |word_body| if (resolved.lease.spec().source) |source|
                     try self.add(.{ .bytes = source.bytes() })
                 else
                     try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
                 .builtin => try self.add(.{ .bytes = "<primitive>" }),
                 .native => try self.add(.{ .bytes = "<native:" }),
             },
-            3 => switch (resolved.lease.binding) {
+            3 => switch (resolved.lease.spec().binding) {
                 .native => try self.add(.{ .trace_word = resolved.trace_word }),
                 else => {},
             },
-            4 => switch (resolved.lease.binding) {
+            4 => switch (resolved.lease.spec().binding) {
                 .native => try self.add(.{ .bytes = ">" }),
                 else => {},
             },
-            5 => switch (resolved.lease.binding) {
+            5 => switch (resolved.lease.spec().binding) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             6 => {
-                const requirements = switch (resolved.lease.binding) {
+                const requirements = switch (resolved.lease.spec().binding) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
@@ -968,7 +968,7 @@ const SeeDriver = struct {
                     };
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     var context: Context = .{ .resolved = .init(resolved) };
-                    const document = resolved.lease.doc orelse {
+                    const document = resolved.lease.spec().doc orelse {
                         self.state.borrowMut().* = .{ .plan = .{
                             .context = context,
                             .step = 0,

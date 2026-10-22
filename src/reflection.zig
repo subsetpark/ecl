@@ -101,7 +101,7 @@ pub const VisibleNameCursor = struct {
     fn publicEntry(entry: env.NameEntry) VisibleNameProgress {
         var lease = entry.lease;
         defer lease.deinit();
-        return if (lease.visibility == .public) .{ .item = entry.name } else .pending;
+        return if (lease.spec().visibility == .public) .{ .item = entry.name } else .pending;
     }
 
     pub fn advance(self: *VisibleNameCursor) VisibleNameProgress {
