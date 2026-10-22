@@ -162,6 +162,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
                 "[5 3 255 255]",
         },
         .{
+            .name = "chunk and digit conversion at the integer boundaries",
+            .source = "[1] 9223372036854775807 chunk 1 [9223372036854775807] to-digits " ++
+                "-9223372036854775808 [10] to-digits 9223372036854775807 [10 10] to-digits " ++
+                "-9223372036854775808 [9223372036854775807 9223372036854775807] to-digits",
+            .expected = "([1]) [1] [2] [0 7] [9223372036854775805 9223372036854775806]",
+        },
+        .{
             .name = "state iteration combinators",
             .source = "3 (0 >) (1 -) while-values 100 (2 div) converges " ++
                 "100 (2 div) converge 0 (1 + 3 mod) converges 1 (0 +) converges",
@@ -270,6 +277,10 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },
         .{ .name = "pack underflow", .source = "1 2 pack", .kind = "underflow", .word = "cons" },
+        .{ .name = "chunk size zero", .source = "[1 2] 0 chunk", .kind = "domain" },
+        .{ .name = "to-digits radix zero", .source = "1 [2 0] to-digits", .kind = "domain" },
+        .{ .name = "to-digits float radix", .source = "1 [2.5] to-digits", .kind = "domain" },
+        .{ .name = "to-digits symbol radix", .source = "1 ['a] to-digits", .kind = "domain" },
     });
 }
 
