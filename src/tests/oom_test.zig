@@ -1974,7 +1974,7 @@ test "oom: standard-library and host: native port child result publication" {
 
 test "oom: standard-library and host: native port child message publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.child-event [] port.begin dup portprobe.receiver port.endpoint " ++
             "port.receive 'value at port.close port.close port.close",
     ).run);
@@ -1989,7 +1989,7 @@ test "oom: standard-library and host: native port child dependency publication" 
 
 test "oom: standard-library and host: native port child batch publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.child-pair [] port.call (dup port.close) each pop port.close",
     ).run);
 }
