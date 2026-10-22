@@ -1559,7 +1559,7 @@ test "oom: standard-library and host: native port registered vocabulary publicat
 
 test "oom: standard-library and host: native child initialization borrow" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
         "instanceprobe.resource [] port.open dup instanceprobe.child [] port.call port.close port.close",
         "",
     ).run);
@@ -1982,7 +1982,7 @@ test "oom: standard-library and host: native port child message publication" {
 
 test "oom: standard-library and host: native port child dependency publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.dependent-child [] port.call pop port.close",
     ).run);
 }
