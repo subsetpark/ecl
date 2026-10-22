@@ -6878,97 +6878,104 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (!first_step and !self.unit.cancelled.load(.acquire) and
             self.unit.releases.evaluationBackpressured()) return .yielded;
         first_step = false;
-        if (self.unit.native == .task_join_cleanup) {
-            const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
-            if (!cleanup.complete) return .yielded;
-            if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
-            continue;
-        }
-        if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
-            self.unit.native == .task_join_resume)
-        {
-            resumePark(self) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Ecl => {
-                    try startFailure(self);
+        switch (self.unit.native) {
+            // Nothing native is pending: no cleanup, resumption, park
+            // request, or work driver precedes the next evaluation step.
+            .idle, .task_join => {},
+            else => {
+                if (self.unit.native == .task_join_cleanup) {
+                    const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
+                    if (!cleanup.complete) return .yielded;
+                    if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
                     continue;
-                },
-            };
-        }
-        if (self.unit.hasParkRequest()) return .parked;
-        if (self.unit.workDriver()) |driver_ptr| {
-            const driver = driver_ptr.*;
-            if (comptime root_execution_metrics_enabled)
-                self.unit.root_execution_metrics.driver_resumes += 1;
-            const progress = driver.advance(self) catch |err| {
-                if (err == error.Ecl and self.unit.pendingFailure().site == null) {
-                    if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
                 }
-                if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
-                    self.unit.pendingFailure().trace_parent = driver.trace_parent;
-                }
-                clearWorkDriver(self.unit);
-                switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Ecl => {
-                        try startFailure(self);
-                        continue;
-                    },
-                }
-            };
-            switch (progress) {
-                inline .stepped, .yielded => |_, tag| {
-                    const outcome: turn_core.Outcome = switch (tag) {
-                        .stepped => .stepped,
-                        .yielded => .{ .yielded = progress.yielded },
-                        else => comptime unreachable,
-                    };
-                    const decision = turn_core.afterDriver(
-                        outcome,
-                        &self.unit.kernel_budget,
-                        self.unit.hasParkRequest(),
-                    ) catch @panic("driver outcome contradicts its park request");
-                    if (decision.poll_cancellation) self.pollKernel() catch |err| switch (err) {
+                if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
+                    self.unit.native == .task_join_resume)
+                {
+                    resumePark(self) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Ecl => {
                             try startFailure(self);
                             continue;
                         },
                     };
-                    switch (decision.action) {
-                        .resume_driver => continue,
-                        .end_turn => return .yielded,
-                        .park => return .parked,
+                }
+                if (self.unit.hasParkRequest()) return .parked;
+                if (self.unit.workDriver()) |driver_ptr| {
+                    const driver = driver_ptr.*;
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.driver_resumes += 1;
+                    const progress = driver.advance(self) catch |err| {
+                        if (err == error.Ecl and self.unit.pendingFailure().site == null) {
+                            if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
+                        }
+                        if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
+                            self.unit.pendingFailure().trace_parent = driver.trace_parent;
+                        }
+                        clearWorkDriver(self.unit);
+                        switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.Ecl => {
+                                try startFailure(self);
+                                continue;
+                            },
+                        }
+                    };
+                    switch (progress) {
+                        inline .stepped, .yielded => |_, tag| {
+                            const outcome: turn_core.Outcome = switch (tag) {
+                                .stepped => .stepped,
+                                .yielded => .{ .yielded = progress.yielded },
+                                else => comptime unreachable,
+                            };
+                            const decision = turn_core.afterDriver(
+                                outcome,
+                                &self.unit.kernel_budget,
+                                self.unit.hasParkRequest(),
+                            ) catch @panic("driver outcome contradicts its park request");
+                            if (decision.poll_cancellation) self.pollKernel() catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                error.Ecl => {
+                                    try startFailure(self);
+                                    continue;
+                                },
+                            };
+                            switch (decision.action) {
+                                .resume_driver => continue,
+                                .end_turn => return .yielded,
+                                .park => return .parked,
+                            }
+                        },
+                        .completed => {
+                            clearWorkDriver(self.unit);
+                            continue;
+                        },
+                        .output => |item| {
+                            clearWorkDriver(self.unit);
+                            try self.pushOwned(item);
+                            continue;
+                        },
+                        .reserved_output => |reserved| {
+                            clearWorkDriver(self.unit);
+                            var destination = reserved.reservation;
+                            destination.pushOwned(reserved.value);
+                            continue;
+                        },
+                        // The driver destroyed and detached itself before invoking a
+                        // continuation which may have installed its successor.
+                        .detached => continue,
+                        .failed => {
+                            clearWorkDriver(self.unit);
+                            if (self.unit.native == .task_join_cleanup) {
+                                const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
+                                std.debug.assert(cleanup.complete);
+                                std.debug.assert(cleanup.disposition.? == .continue_evaluation);
+                            }
+                            return error.Ecl;
+                        },
                     }
-                },
-                .completed => {
-                    clearWorkDriver(self.unit);
-                    continue;
-                },
-                .output => |item| {
-                    clearWorkDriver(self.unit);
-                    try self.pushOwned(item);
-                    continue;
-                },
-                .reserved_output => |reserved| {
-                    clearWorkDriver(self.unit);
-                    var destination = reserved.reservation;
-                    destination.pushOwned(reserved.value);
-                    continue;
-                },
-                // The driver destroyed and detached itself before invoking a
-                // continuation which may have installed its successor.
-                .detached => continue,
-                .failed => {
-                    clearWorkDriver(self.unit);
-                    if (self.unit.native == .task_join_cleanup) {
-                        const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
-                        std.debug.assert(cleanup.complete);
-                        std.debug.assert(cleanup.disposition.? == .continue_evaluation);
-                    }
-                    return error.Ecl;
-                },
-            }
+                }
+            },
         }
         if (self.unit.hasRequestedExit()) {
             return .completed;
