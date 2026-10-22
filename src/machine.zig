@@ -6163,17 +6163,16 @@ pub const Machine = struct {
         name: u32,
         written: ?*env.Scope,
         borrow_pin: *?modules.GenerationPin,
-        retain: bool,
         out: *Resolution,
     ) bool {
         // The root's own binding as this unit observes it, else core's. Only
         // session bindings are versioned (`Scope.isSession`).
         const pin = if (written != null and written.?.isSession()) self.unit.bindingPin() else null;
         const own = slot.cell.load(.acquire);
-        const from_core = own == null or !leaseInto(own.?, pin, retain, &out.lease);
+        const from_core = own == null or !leaseInto(own.?, pin, &out.lease);
         if (from_core) {
             const core = slot.coreCell() orelse return false;
-            if (!leaseInto(core, null, retain, &out.lease)) return false;
+            if (!leaseInto(core, null, &out.lease)) return false;
         }
         out.execution_generation = null;
         out.home = null;
@@ -6212,16 +6211,11 @@ pub const Machine = struct {
         return self.unit.binding_pin orelse self.unit.environment.bindingDomain().binding_version.load(.acquire);
     }
 
-    /// Writes into `out` what `cell` holds for a reader pinned at `pin`, and
-    /// returns false when it holds nothing then. A borrow lasts only for this
-    /// dispatch; a lease kept past it holds references. Each branch writes
-    /// the lease in place: choosing it inside one initializer built it in a
-    /// temporary and copied it over.
-    fn leaseInto(cell: *env.BindingCell, pin: ?u64, retain: bool, out: *env.BindingLease) bool {
-        if (!retain)
-            out.* = cell.borrow(pin) orelse return false
-        else
-            out.* = cell.load(pin) orelse return false;
+    /// Borrows into `out` what `cell` holds for a reader pinned at `pin`, and
+    /// returns false when it holds nothing then. The borrow lasts for this
+    /// dispatch; anything kept past it is retained on its own.
+    fn leaseInto(cell: *env.BindingCell, pin: ?u64, out: *env.BindingLease) bool {
+        out.* = cell.borrow(pin) orelse return false;
         return true;
     }
 
@@ -6305,7 +6299,7 @@ pub const Machine = struct {
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
-        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, false, out);
+        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, out);
     }
 
     /// The plan of the finite iteration applying the running code, when that
@@ -6327,17 +6321,6 @@ pub const Machine = struct {
         return try plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
-    /// The entry for `word` when it is the form at the executing position. A
-    /// word a primitive dispatches, as `execute` does, runs at that
-    /// primitive's position and takes no entry: the position's binding is the
-    /// primitive's.
-    fn planEntryFor(self: *Machine, word: value.WordRef) error{OutOfMemory}!?*PlanEntry {
-        const plan = self.applicationPlan() orelse return null;
-        const form = list.atUnchecked(.{ .list = plan.code }, self.unit.active_index);
-        if (form != .word or form.word.name != word.name or form.word.slot != word.slot) return null;
-        return try plan.entry(self.unit.allocator, self.unit.active_index);
-    }
-
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
         // A session or core word resolved before in this unit's view.
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
@@ -6353,8 +6336,6 @@ pub const Machine = struct {
             };
             return executeResolved(self, &resolved);
         };
-        const plan_entry = try self.planEntryFor(word);
-        if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
         // A binding borrowed below stays valid for the dispatch: a unit that
@@ -6368,16 +6349,7 @@ pub const Machine = struct {
         const written = target.written;
         // SAFETY: read only after `slotResolution` returns true, which initializes it.
         var slot_resolution: Resolution = undefined;
-        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, plan_entry != null, &slot_resolution) else false) {
-            // A finite iteration's call keeps the binding for its later
-            // applications. One carrying a module home, generation, or pin
-            // belongs to this dispatch alone.
-            if (plan_entry) |entry| if (slot_resolution.home == null and slot_resolution.borrow_pin == null and
-                slot_resolution.execution_generation == null)
-            {
-                entry.resolution = slot_resolution;
-                return executeResolved(self, &entry.resolution.?);
-            };
+        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, &slot_resolution) else false) {
             defer slot_resolution.deinit(self.unit.allocator);
             if (cacheable and slot_resolution.home == null and slot_resolution.borrow_pin == null and
                 slot_resolution.execution_generation == null and slot_resolution.lease.held == .borrowed and
@@ -8079,8 +8051,6 @@ pub const LookupChain = enum {
 /// What one finite-iteration call has decided for a word position of its
 /// quotation, kept for the rest of the call.
 pub const PlanEntry = struct {
-    /// The word's binding, from its first execution in the call.
-    resolution: ?Resolution = null,
     /// For a word that offers a phrase to idiom recognition, the first phrase
     /// it offered in the call and what recognition made of it.
     offered: ?OfferedMatch = null,
@@ -8204,7 +8174,6 @@ const PlanTree = struct {
 
     fn retirePage(self: *PlanTree, releases: *heap.ReleaseDomain, held: *Page) void {
         for (held) |*planned| {
-            if (planned.resolution) |*resolution| resolution.deinit(self.allocator);
             if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
         }
         self.allocator.destroy(held);

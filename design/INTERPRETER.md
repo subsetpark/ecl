@@ -600,8 +600,12 @@ and the cell keeps its last payload until the name is bound again or the root
 retires. Binding and removal are constant-time under the root's writer lock.
 Enumeration and lookup by name read the table without a lock; enumeration is
 not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
-cell's current payload, so a redefinition reaches every existing occurrence at
-its next execution, including open-ended loop bodies already running.
+payload the executing unit observes, so a redefinition reaches every existing
+occurrence at its next execution in that unit and in every unit created
+afterwards, including open-ended loop bodies already running. A unit keeps
+the session and core resolutions it makes in a table keyed by slot id, valid
+while its view number (its pin, or the session version for a unit that may
+define) is unchanged.
 
 A finite iteration's call owns a plan for its quotation, reached through the
 application frame and used only while that exact quotation is the running
@@ -609,17 +613,12 @@ code. Its entries are paged by word position under fixed-fanout nodes, as
 many levels as the quotation's length needs; each node and page is allocated
 and cleared by the first entry that needs it, and a retired plan is freed a
 node or page per release-domain turn, so no step does work in proportion to
-the quotation. An entry keeps the word's resolution from its first
-execution in the call, with a lease that holds references, and, for a word that
-offers a phrase to recognition, the retained phrase and the registry entry its
-pattern matched. Later applications reuse both and still check the matched
-entry against their own operands. An entry is used only when the dispatched
-word is the form at the executing position, so a word a primitive dispatches
-at that position resolves as usual. A resolution carrying a module home,
-generation, or pin is never kept, so qualified and module-homed words stay
-late-bound through the call-site path, and a module the same unit registers
-mid-call reaches the call's later applications. The plan's lease keeps a
-replaced snapshot alive until the call ends.
+the quotation. For a word that offers a phrase to recognition, an entry keeps
+the retained phrase and the registry entry its pattern matched, from its first
+offer in the call. Later applications reuse it and still check the matched
+entry against their own operands. Bindings need no plan: no binding a call
+observes changes while it runs, and the unit's resolution table already
+serves every repeated word.
 
 A binding payload is one closed choice:
 
