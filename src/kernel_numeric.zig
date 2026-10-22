@@ -214,6 +214,10 @@ pub const PervadeCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
+        /// Whether every child result so far is a list. A list of lists has no
+        /// leaf representation to choose, so it publishes as a spine without
+        /// profiling its children.
+        all_lists: bool = true,
         materializer: ?list.ValueMaterializer = null,
 
         fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {
@@ -586,6 +590,10 @@ pub const PervadeCursor = struct {
                 },
             }
         }
+        if (frame.all_lists and frame.values.capacity() != 0) {
+            self.last = frame.values.takeList();
+            return .done;
+        }
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
         switch (try frame.materializer.?.advance(work)) {
@@ -598,6 +606,7 @@ pub const PervadeCursor = struct {
     }
 
     fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
+        if (self.last.? != .list) frame.all_lists = false;
         frame.values.appendOwned(self.last.?);
         self.last = null;
         frame.index += 1;
