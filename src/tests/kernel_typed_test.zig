@@ -474,6 +474,16 @@ test "typed differential: sequence order text and random operation parity across
         "first-where",
         "dup len range at",
         "dup len wrap reshape",
+        // Rank-two reshape: typed rows, cycling, and columns that span a block.
+        "[3 5] reshape",
+        "[2 7] reshape",
+        "2 over len 2 pack reshape",
+        "dup len 1 2 pack reshape",
+        // Pieces of a leaf. Starts that leave no piece empty: an empty piece keeps
+        // its operand's representation, which prints differently (see above).
+        "0 wrap cut",
+        "dup len 1 - wrap cut",
+        "3 chunk",
         // Same-kind list put. `dup` forces the allocating copy path and keeps
         // the original live so copy-on-write is observable.
         "dup 0 9 put swap pop",

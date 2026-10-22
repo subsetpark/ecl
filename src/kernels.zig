@@ -531,8 +531,9 @@ const sequence_rows = [_]Row{
         .left = union2(all_leaves, integers),
         .right = all_leaves,
         .class = .bulk_copy,
-        // rank-one reshape is a typed cyclic fill selected before traversal; a shape above rank one
-        // constructs its required spine through the shape-specific builder
+        // rank-one reshape is a typed cyclic fill selected before traversal; rank two fills each row
+        // the same way into one spine; a higher rank constructs its spine through the shape-specific
+        // builder
     },
     .{
         .operations = only(.{Operation{ .sequence = .reshape }}),

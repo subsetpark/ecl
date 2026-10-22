@@ -1910,6 +1910,12 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
                 count,
             )) return;
         }
+        if (rank == 2 and source_count != 0 and try startTypedMatrix(
+            evaluator,
+            collection.borrow(),
+            count,
+            list.atUnchecked(shape_value.borrow(), 1),
+        )) return;
     }
     const dimensions = try evaluator.allocator().alloc(usize, rank);
     var dimensions_owner: ?[]usize = dimensions;
@@ -1922,6 +1928,83 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
         .dimensions = .init(dimensions),
         .ravel = .init(ravel),
     });
+}
+
+/// A rank-two reshape of a non-empty typed leaf: every row is a cyclic typed
+/// copy and the result is one spine of those rows, exactly what the generic
+/// builder produces from the same cells. Returns false without consuming
+/// anything when the column dimension is not a positive integer or the volume
+/// is zero, leaving validation and its errors to the generic driver.
+fn startTypedMatrix(
+    evaluator: *Machine,
+    source: Value,
+    rows: usize,
+    columns_value: Value,
+) MachineError!bool {
+    if (columns_value != .int or columns_value.int <= 0 or rows == 0) return false;
+    const columns = std.math.cast(usize, columns_value.int) orelse return false;
+    _ = std.math.mul(usize, rows, columns) catch return false;
+    const source_kind = source.list.kind();
+    inline for (leaf_kinds) |candidate| {
+        if (candidate == source_kind) {
+            var spine = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), rows);
+            var held_locally = true;
+            errdefer if (held_locally) spine.deinit();
+            const driver = TypedMatrixDriver(candidate){
+                .source = .init(heap.LeafReader(candidate).acquire(source.list)),
+                .spine = .init(spine.take()),
+                .columns = columns,
+            };
+            held_locally = false;
+            try evaluator.startDriver(driver);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn TypedMatrixDriver(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        source: heap.Owned(heap.LeafReader(kind)),
+        spine: heap.Owned(heap.OwnedValueBuffer),
+        columns: usize,
+        row: ?heap.Owned(heap.LeafWriter(kind)) = null,
+        cursor: kernel_flat.FlatCursor = kernel_flat.FlatCursor.init(0),
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            const spine = self.spine.borrowMut();
+            if (self.row == null) {
+                if (spine.len() == spine.capacity()) {
+                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    return .{ .output = spine.takeList() };
+                }
+                self.row = .init(try heap.LeafWriter(kind).init(evaluator.allocator(), self.columns));
+                self.cursor = kernel_flat.FlatCursor.init(self.columns);
+            }
+            if (try self.cursor.nextRange(context)) |range| {
+                const source = self.source.borrow().slice();
+                const out: []Element = self.row.?.borrowMut().unpublishedRange(range.start, range.len());
+                var from = (spine.len() * self.columns + range.start) % source.len;
+                var written: usize = 0;
+                while (written != out.len) {
+                    const run = @min(source.len - from, out.len - written);
+                    @memcpy(out[written..][0..run], source[from..][0..run]);
+                    written += run;
+                    from = 0;
+                }
+            }
+            if (!self.cursor.complete()) return .stepped;
+            var writer = self.row.?.take();
+            self.row = null;
+            spine.appendOwned(writer.finish());
+            return .stepped;
+        }
+    };
 }
 
 const RavelProgress = union(enum) { pending, complete: usize, too_deep };
