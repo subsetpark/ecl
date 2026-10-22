@@ -262,13 +262,17 @@
 (|l q| l q each 1 (and) fold) 'all? def
 
 ### def sum
+# A nonempty sequence starts from its first element, as `(+) fold1` does, so
+# no zero seed copies a first row or turns a -0.0 total into 0.0.
 (sequence -- total : "Add every element of a numeric sequence, using zero for an empty sequence.")
-(0 (+) fold) 'sum def
+(dup empty? (pop 0) ((+) fold1) if) 'sum def
 
-### def prod
+### def product
+# A nonempty sequence starts from its first element, as `(*) fold1` does, so
+# no one seed multiplies a copy of a first row.
 (sequence -- product :
  "Multiply every element of a numeric sequence, using one for an empty sequence.")
-(1 (*) fold) 'prod def
+(dup empty? (pop 1) ((*) fold1) if) 'product def
 
 ### def mean
 (sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")
@@ -306,6 +310,37 @@
 ### def windows
 (list width -- windows : "Return every overlapping window of a positive width.")
 (() stencil) 'windows def
+
+### def chunk
+(list size -- pieces :
+ "Split a list into consecutive pieces of a positive size; the last piece may be shorter.")
+(|xs k|
+ k 0 > {'kind 'domain 'msg "chunk size must be positive"} assert
+ xs xs len k div xs len k mod 0 > + range k * cut) 'chunk def
+
+### def from-digits
+(digits base -- value :
+ "Combine digits, most significant first, under a base or a list of radices, one per digit; digits
+  pervade, so a list of equal-length digit lists gives one value per position.")
+(|ds base|
+ ds base ds len base type 'list match?
+ (|b n| b len n = {'kind 'shape 'msg "from-digits needs one radix per digit"} assert b)
+ (|b n| b wrap n take)
+ if
+ zip 0 (|acc p| acc p 1 at * p 0 at +) fold) 'from-digits def
+
+### def to-digits
+(value radices -- digits :
+ "Split a value into one digit per positive radix, most significant first, using floor division; a
+  value beyond the radices' capacity keeps only its low digits, and values pervade.")
+(|x rs|
+ rs (dup type 'int match? (0 >) (pop 0) if) all?
+ {'kind 'domain 'msg "to-digits radices must be positive integers"} assert
+ rs reverse x [] 2 pack
+ (|st r|
+  st 0 at r mod 0 < st r
+  (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat 2 pack) call)
+ fold 1 at) 'to-digits def
 
 ### def each-prior
 (list seed quotation -- list :

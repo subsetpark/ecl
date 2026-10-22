@@ -168,6 +168,42 @@ test "sequence: take cycles and where replicates" {
     });
 }
 
+test "sequence: cut splits at nondecreasing starts" {
+    try helper.expectStack(
+        "[0 1 2 3 4 5 6] [0 2 5] cut [0 1 2 3 4 5 6] [2 5] cut [0 1 2] [0 0 3] cut " ++
+            "[1.5 2.5 3.5] [0 1] cut \"hello world\" [0 6] cut [0 1 2] [] cut " ++
+            "[[1 2] 3 \"x\"] [0 1] cut",
+        "([0 1] [2 3 4] [5 6]) ([2 3 4] [5 6]) ([] [0 1 2] []) ([1.5] [2.5 3.5]) " ++
+            "(\"hello \" \"world\") () (([1 2]) (3 \"x\"))",
+    );
+    try helper.expectError(.{
+        .name = "decreasing cut start",
+        .source = "[0 1 2] [2 1] cut",
+        .kind = "domain",
+        .word = "cut",
+        .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+    });
+    try helper.expectError(.{
+        .name = "cut start past the end",
+        .source = "[0 1 2] [4] cut",
+        .kind = "domain",
+        .word = "cut",
+        .data = &.{.{ .name = "index", .expected = .{ .int = 0 } }},
+    });
+    try helper.expectError(.{
+        .name = "non-integer cut start",
+        .source = "[0 1 2] [0.5] cut",
+        .kind = "type",
+        .word = "cut",
+    });
+    try helper.expectError(.{
+        .name = "cut of a non-list",
+        .source = "7 [0] cut",
+        .kind = "type",
+        .word = "cut",
+    });
+}
+
 test "sequence: first rest take drop reverse and range preserve representation" {
     try helper.expectStack(
         "\"abc\" first \"abc\" rest [1 2 3] -2 take [1 2 3] -1 drop \"abc\" reverse 4 range",

@@ -1440,6 +1440,11 @@ traverse an outer list of whole keys without descending into those keys.
   off the top where `*` would raise. Their `count` operand is the one place
   they can fail on a value: a shift outside `0..63` is `'domain`. They pervade
   and align dicts like every other pervasive word.
+- The wrapping words `+%`, `-%`, and `*%` are the integer sum, difference, and
+  product modulo 2^64 in two's complement: where `+`, `-`, and `*` raise
+  `'overflow`, they wrap, as Zig's operators of the same spelling do. They are
+  int-only like the bitwise words, so a float or a char is `'type`, and with
+  `band` they give arithmetic modulo any power of two up to 2^64.
 
 ## Randomness
 

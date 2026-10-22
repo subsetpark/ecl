@@ -81,7 +81,7 @@ const cases = [_]Case{
     .{ .name = "pair", .source = "1 2 pair" },
     .{ .name = "last", .source = "[1 2 3] last" },
     .{ .name = "sum", .source = "[1 2 3] sum" },
-    .{ .name = "prod", .source = "[1 2 3] prod" },
+    .{ .name = "product", .source = "[1 2 3] product" },
     .{ .name = "mean", .source = "[1 2 3] mean" },
     .{ .name = "print", .source = "\"hi\" io.print" },
     .{ .name = "io.inspect", .source = "7 io.inspect" },
@@ -146,6 +146,7 @@ const cases = [_]Case{
     .{ .name = "band", .source = "[12 10] 6 band" },
     .{ .name = "bor", .source = "12 10 bor" },
     .{ .name = "bxor", .source = "12 10 bxor" },
+    .{ .name = "*%", .source = "4294967295 4294967295 *%" },
     .{ .name = "bsl", .source = "[1 -8] 4 bsl" },
     .{ .name = "bsr", .source = "-1 1 bsr" },
     .{ .name = "bnot", .source = "[0 5] bnot" },
@@ -697,8 +698,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\6
         \\stderr:
         \\<empty>
-        \\=== prod ===
-        \\source: [1 2 3] prod
+        \\=== product ===
+        \\source: [1 2 3] product
         \\exit: 0
         \\stdout:
         \\6
@@ -1092,6 +1093,13 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\6
+        \\stderr:
+        \\<empty>
+        \\=== *% ===
+        \\source: 4294967295 4294967295 *%
+        \\exit: 0
+        \\stdout:
+        \\-8589934591
         \\stderr:
         \\<empty>
         \\=== bsl ===

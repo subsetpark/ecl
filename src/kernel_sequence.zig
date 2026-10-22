@@ -40,6 +40,7 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
         .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Return a list's top-level element count." },
         .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Transpose a rectangular list." },
         .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
+        .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into pieces that begin at each nondecreasing start index and end at the next; elements before the first start are dropped." },
         .reverse, .first, .rest => null,
     };
 }
@@ -70,6 +71,7 @@ fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
         .len => lenPrimitive(evaluator),
         .flip => flipPrimitive(evaluator),
         .reshape => reshapePrimitive(evaluator),
+        .cut => cutPrimitive(evaluator),
     };
 }
 
@@ -1774,9 +1776,14 @@ fn flipPrimitive(evaluator: *Machine) MachineError!void {
         .list => |row| .{ .rows = .{ .columns = @intCast(row.length()), .next = 1 } },
         else => .{ .flat = 1 },
     };
+    const leaf_kind: ?value.HeapKind = if (validation == .rows)
+        FlipDriver.leafKind(list.atUnchecked(source, 0).list.kind())
+    else
+        null;
     try evaluator.startDriver(FlipDriver{
         .collection = .init(collection.take()),
         .validation = validation,
+        .leaf_kind = leaf_kind,
     });
 }
 
@@ -1791,6 +1798,13 @@ const FlipDriver = struct {
 
     collection: heap.Owned(Value),
     validation: Validation,
+    /// The one leaf representation every row shares, or null once any row
+    /// differs. Rows of one representation transpose without boxing a cell.
+    leaf_kind: ?value.HeapKind = null,
+    /// The typed route: every column scattered into one flat buffer, which is
+    /// then split into the result rows.
+    typed: ?heap.Owned(RazeOutput) = null,
+    flat: ?heap.Owned(Value) = null,
     result_rows: ?heap.Owned(heap.OwnedValueBuffer) = null,
     cells: ?heap.Owned([]Value) = null,
     column: usize = 0,
@@ -1816,6 +1830,7 @@ const FlipDriver = struct {
                     const row = list.atUnchecked(self.collection.borrow(), validation.next);
                     if (row != .list or row.list.length() != validation.columns)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
+                    if (self.leaf_kind != null and row.list.kind() != self.leaf_kind.?) self.leaf_kind = null;
                 }
                 if (validation.next != rows) return .stepped;
                 if (validation.columns == 0) return evaluator.fail(
@@ -1827,6 +1842,7 @@ const FlipDriver = struct {
             },
             .ready => |columns| columns,
         };
+        if (self.leaf_kind) |kind| return self.advanceTyped(evaluator, kind, rows, columns);
         if (self.result_rows == null) {
             self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
             self.cells = .init(try evaluator.allocator().alloc(Value, rows));
@@ -1862,6 +1878,129 @@ const FlipDriver = struct {
             self.cells.?.borrow(),
         ));
         return .stepped;
+    }
+
+    fn leafKind(kind: value.HeapKind) ?value.HeapKind {
+        return switch (kind) {
+            .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => kind,
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => null,
+        };
+    }
+
+    /// Scatters every row into the column-major flat buffer, then splits it into
+    /// one typed row per column. `row` and `column` index the scatter, then the
+    /// split's current result row and position.
+    fn advanceTyped(
+        self: *FlipDriver,
+        evaluator: *Machine,
+        kind: value.HeapKind,
+        rows: usize,
+        columns: usize,
+    ) MachineError!machine.WorkProgress {
+        const work = evaluator.workBudget();
+        if (self.flat == null) {
+            if (self.typed == null) {
+                const total = std.math.mul(usize, rows, columns) catch
+                    return evaluator.fail(.overflow, "flip result is too large");
+                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, total, total) });
+                self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
+                return .stepped;
+            }
+            while (self.row != rows and !work.exhausted()) {
+                // A group of consecutive rows writes consecutive elements of
+                // each column, so every touched cache line fills.
+                const group = @min(scatter_group, rows - self.row);
+                var children: [scatter_group]*heap.ListHandle = undefined;
+                for (children[0..group], self.row..) |*child, index|
+                    child.* = list.atUnchecked(self.collection.borrow(), index).list;
+                const run = @max(1, work.take((columns - self.column) * group) / group);
+                switch (self.typed.?.borrowMut().builder) {
+                    .generic => unreachable,
+                    inline else => |*builder| scatterRows(
+                        @TypeOf(builder.items()[0]),
+                        builder.items(),
+                        children[0..group],
+                        self.row,
+                        rows,
+                        self.column,
+                        @min(run, columns - self.column),
+                        evaluator.releaseDomain(),
+                    ),
+                }
+                self.column += @min(run, columns - self.column);
+                if (self.column == columns) {
+                    self.column = 0;
+                    self.row += group;
+                }
+            }
+            if (self.row != rows) return .stepped;
+            var output = self.typed.?.take();
+            self.typed = null;
+            self.flat = .init(.{ .list = output.builder.finish() });
+            self.row = 0;
+            return .stepped;
+        }
+        const spine = self.result_rows.?.borrowMut();
+        while (!work.exhausted()) {
+            if (self.typed == null) {
+                if (spine.len() == columns) return .{ .output = spine.takeList() };
+                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, rows, rows) });
+                self.row = 0;
+            }
+            const run = work.take(rows - self.row);
+            switch (self.typed.?.borrowMut().builder) {
+                .generic => unreachable,
+                inline else => |*builder| RazeDriver.copyChild(
+                    @TypeOf(builder.items()[0]),
+                    builder.items()[self.row..][0..run],
+                    self.flat.?.borrow().list,
+                    spine.len() * rows + self.row,
+                    evaluator.releaseDomain(),
+                ),
+            }
+            self.row += run;
+            if (self.row == rows) {
+                var output = self.typed.?.take();
+                self.typed = null;
+                spine.appendOwned(.{ .list = output.builder.finish() });
+            }
+        }
+        return .stepped;
+    }
+
+    const scatter_group = 8;
+
+    /// Writes `count` elements of each of the consecutive rows starting at
+    /// `first`, from column `from`, to their transposed positions
+    /// `column * rows + row` of the flat buffer. The readers live only for
+    /// this call.
+    fn scatterRows(
+        comptime Out: type,
+        out: []Out,
+        children: []const *heap.ListHandle,
+        first: usize,
+        rows: usize,
+        from: usize,
+        count: usize,
+        releases: *heap.ReleaseDomain,
+    ) void {
+        switch (children[0].kind()) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+                if (comptime heap.LeafElement(kind) != Out) unreachable;
+                var readers: [scatter_group]heap.LeafReader(kind) = undefined;
+                var sources: [scatter_group][]const Out = undefined;
+                for (children, readers[0..children.len], sources[0..children.len]) |child, *reader, *source| {
+                    reader.* = heap.LeafReader(kind).acquire(child);
+                    source.* = reader.slice();
+                }
+                defer for (readers[0..children.len]) |*reader| reader.release(releases);
+                for (from..from + count) |column| {
+                    const line = out[column * rows + first ..][0..children.len];
+                    for (line, sources[0..children.len]) |*slot, source| slot.* = source[column];
+                }
+            },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        }
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
@@ -1908,6 +2047,12 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
                 count,
             )) return;
         }
+        if (rank == 2 and source_count != 0 and try startTypedMatrix(
+            evaluator,
+            collection.borrow(),
+            count,
+            list.atUnchecked(shape_value.borrow(), 1),
+        )) return;
     }
     const dimensions = try evaluator.allocator().alloc(usize, rank);
     var dimensions_owner: ?[]usize = dimensions;
@@ -1920,6 +2065,83 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
         .dimensions = .init(dimensions),
         .ravel = .init(ravel),
     });
+}
+
+/// A rank-two reshape of a non-empty typed leaf: every row is a cyclic typed
+/// copy and the result is one spine of those rows, exactly what the generic
+/// builder produces from the same cells. Returns false without consuming
+/// anything when the column dimension is not a positive integer or the volume
+/// is zero, leaving validation and its errors to the generic driver.
+fn startTypedMatrix(
+    evaluator: *Machine,
+    source: Value,
+    rows: usize,
+    columns_value: Value,
+) MachineError!bool {
+    if (columns_value != .int or columns_value.int <= 0 or rows == 0) return false;
+    const columns = std.math.cast(usize, columns_value.int) orelse return false;
+    _ = std.math.mul(usize, rows, columns) catch return false;
+    const source_kind = source.list.kind();
+    inline for (leaf_kinds) |candidate| {
+        if (candidate == source_kind) {
+            var spine = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), rows);
+            var held_locally = true;
+            errdefer if (held_locally) spine.deinit();
+            const driver = TypedMatrixDriver(candidate){
+                .source = .init(heap.LeafReader(candidate).acquire(source.list)),
+                .spine = .init(spine.take()),
+                .columns = columns,
+            };
+            held_locally = false;
+            try evaluator.startDriver(driver);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn TypedMatrixDriver(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        source: heap.Owned(heap.LeafReader(kind)),
+        spine: heap.Owned(heap.OwnedValueBuffer),
+        columns: usize,
+        row: ?heap.Owned(heap.LeafWriter(kind)) = null,
+        cursor: kernel_flat.FlatCursor = kernel_flat.FlatCursor.init(0),
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            const spine = self.spine.borrowMut();
+            if (self.row == null) {
+                if (spine.len() == spine.capacity()) {
+                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    return .{ .output = spine.takeList() };
+                }
+                self.row = .init(try heap.LeafWriter(kind).init(evaluator.allocator(), self.columns));
+                self.cursor = kernel_flat.FlatCursor.init(self.columns);
+            }
+            if (try self.cursor.nextRange(context)) |range| {
+                const source = self.source.borrow().slice();
+                const out: []Element = self.row.?.borrowMut().unpublishedRange(range.start, range.len());
+                var from = (spine.len() * self.columns + range.start) % source.len;
+                var written: usize = 0;
+                while (written != out.len) {
+                    const run = @min(source.len - from, out.len - written);
+                    @memcpy(out[written..][0..run], source[from..][0..run]);
+                    written += run;
+                    from = 0;
+                }
+            }
+            if (!self.cursor.complete()) return .stepped;
+            var writer = self.row.?.take();
+            self.row = null;
+            spine.appendOwned(writer.finish());
+            return .stepped;
+        }
+    };
 }
 
 const RavelProgress = union(enum) { pending, complete: usize, too_deep };
@@ -2170,6 +2392,118 @@ const ReshapeDriver = struct {
                 return .stepped;
             },
         }
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn cutPrimitive(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var starts = try evaluator.popValue();
+    defer starts.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or starts.borrow() != .list)
+        return evaluator.typeError("a list and a list of integer start indices");
+    try evaluator.startDriver(CutDriver{
+        .collection = .init(collection.take()),
+        .starts = .init(starts.take()),
+    });
+}
+
+/// Validates every start, then materializes each piece from borrowed cells and
+/// finally the list of pieces. One cell buffer, sized for the longest piece,
+/// is reused for every piece.
+const CutDriver = struct {
+    collection: heap.Owned(Value),
+    starts: heap.Owned(Value),
+    validated: usize = 0,
+    previous: usize = 0,
+    longest: usize = 0,
+    pieces: ?heap.Owned(heap.OwnedValueBuffer) = null,
+    cells: ?heap.Owned([]Value) = null,
+    piece: usize = 0,
+    filled: usize = 0,
+    inner: ?heap.Owned(list.ValueMaterializer) = null,
+    outer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    fn start(self: *const CutDriver, index: usize) usize {
+        return @intCast(list.atUnchecked(self.starts.borrow(), index).int);
+    }
+
+    fn end(self: *const CutDriver, index: usize) usize {
+        const count: usize = @intCast(self.starts.borrow().list.length());
+        return if (index + 1 == count)
+            @intCast(self.collection.borrow().list.length())
+        else
+            self.start(index + 1);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *CutDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.starts.borrow().list.length());
+        const length: usize = @intCast(self.collection.borrow().list.length());
+        if (self.validated != count) {
+            while (self.validated != count and evaluator.workBudget().spend()) : (self.validated += 1) {
+                const item = list.atUnchecked(self.starts.borrow(), self.validated);
+                if (item != .int) return evaluator.typeError("a list of integer start indices");
+                if (item.int < 0 or item.int > length) return evaluator.failAtIndex(
+                    .domain,
+                    "cut starts must lie within the list",
+                    self.validated,
+                );
+                const position: usize = @intCast(item.int);
+                if (self.validated != 0 and position < self.previous) return evaluator.failAtIndex(
+                    .domain,
+                    "cut starts must be nondecreasing",
+                    self.validated,
+                );
+                if (self.validated != 0) self.longest = @max(self.longest, position - self.previous);
+                self.previous = position;
+            }
+            if (self.validated == count and count != 0)
+                self.longest = @max(self.longest, length - self.previous);
+            return .stepped;
+        }
+        if (self.pieces == null) {
+            self.pieces = .init(try .init(evaluator.releaseDomain(), count));
+            self.cells = .init(try evaluator.allocator().alloc(Value, self.longest));
+            if (count == 0) self.outer = .init(.init(evaluator.allocator(), self.pieces.?.borrow().values()));
+            return .stepped;
+        }
+        if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
+            .complete => |result| .{ .output = result },
+        };
+        if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
+            .complete => |piece_value| {
+                inner.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.inner = null;
+                self.finishPiece(evaluator, piece_value);
+                return .stepped;
+            },
+        };
+        const first = self.start(self.piece);
+        const size = self.end(self.piece) - first;
+        if (size == 0) {
+            self.finishPiece(evaluator, try emptyLike(evaluator.allocator(), self.collection.borrow()));
+            return .stepped;
+        }
+        const cells = self.cells.?.borrow();
+        while (self.filled != size and evaluator.workBudget().spend()) : (self.filled += 1) {
+            cells[self.filled] = list.atUnchecked(self.collection.borrow(), first + self.filled);
+        }
+        if (self.filled == size) self.inner = .init(.init(evaluator.allocator(), cells[0..size]));
+        return .stepped;
+    }
+
+    fn finishPiece(self: *CutDriver, evaluator: *Machine, piece_value: Value) void {
+        self.pieces.?.borrowMut().appendOwned(piece_value);
+        self.piece += 1;
+        self.filled = 0;
+        if (self.piece == @as(usize, @intCast(self.starts.borrow().list.length())))
+            self.outer = .init(.init(evaluator.allocator(), self.pieces.?.borrow().values()));
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

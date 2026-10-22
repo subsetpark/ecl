@@ -48,6 +48,9 @@ fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
         .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or over integer bit patterns pervasively." },
         .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern left, truncating bits off the top." },
         .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern right, filling zeros from the top." },
+        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
+        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
+        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
         .mod, .ne, .le, .ge, .and_word, .or_word => null,
     };
 }
@@ -214,6 +217,10 @@ pub const PervadeCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
+        /// Whether every child result so far is a list. A list of lists has no
+        /// leaf representation to choose, so it publishes as a spine without
+        /// profiling its children.
+        all_lists: bool = true,
         materializer: ?list.ValueMaterializer = null,
 
         fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {
@@ -578,13 +585,21 @@ pub const PervadeCursor = struct {
                     .logical_index = index,
                 } },
             };
-            switch (try self.start(evaluator, child)) {
+            const started = switch (child) {
+                .binary => |node| try self.startNumericRow(evaluator, node),
+                .unary => null,
+            } orelse try self.start(evaluator, child);
+            switch (started) {
                 .finished => self.acceptListChild(frame),
                 .framed => {
                     frame.waiting = true;
                     return .progressed;
                 },
             }
+        }
+        if (frame.all_lists and frame.values.capacity() != 0) {
+            self.last = frame.values.takeList();
+            return .done;
         }
         if (frame.materializer == null)
             frame.materializer = .init(self.allocator, frame.values.values());
@@ -597,7 +612,52 @@ pub const PervadeCursor = struct {
         }
     }
 
+    /// A list child whose operands are a numeric leaf and a numeric leaf or
+    /// scalar runs its typed step here, without a child node, frame, or
+    /// `NestedTyped` round trip: exactly what `startBinary` would build for it,
+    /// with the same readers, conformance check, and fault report. A step the
+    /// turn cannot finish becomes the typed frame `runTyped` would push. Null
+    /// leaves every other child to `start`.
+    fn startNumericRow(self: *PervadeCursor, evaluator: *Machine, node: BinaryNode) MachineError!?Started {
+        // A leaf is still a list to the depth guard, which `startBinary` owns.
+        if (node.depth >= support.max_depth) return null;
+        const left_leaf = leafNumber(node.left);
+        const right_leaf = leafNumber(node.right);
+        const shape: Shape = if (left_leaf != null and right_leaf != null)
+            .leaf_leaf
+        else if (left_leaf != null and scalarNumber(node.right) != null)
+            .leaf_scalar
+        else if (right_leaf != null and scalarNumber(node.left) != null)
+            .scalar_leaf
+        else
+            return null;
+        const length = try conformingLength(evaluator, shape, node.left, node.right);
+        if (length == 0) return null;
+        const plan = NumericBinaryPlan.select(
+            node.operation,
+            left_leaf orelse scalarNumber(node.left).?,
+            right_leaf orelse scalarNumber(node.right).?,
+            shape,
+        ) orelse return null;
+        var typed = try plan.prepare(evaluator, node.left, node.right, .{}, length, .{});
+        errdefer typed.retire(self.releases);
+        const numeric = &typed.numeric;
+        switch (try advanceTypedState(evaluator, &numeric.state, numeric.step)) {
+            .output => |result| {
+                self.last = result;
+                return .finished;
+            },
+            .stepped => {
+                try self.frames.reserve(1);
+                self.frames.pushReserved(.{ .typed = typed });
+                return .framed;
+            },
+            .completed, .reserved_output, .yielded, .detached, .failed => unreachable,
+        }
+    }
+
     fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
+        if (self.last.? != .list) frame.all_lists = false;
         frame.values.appendOwned(self.last.?);
         self.last = null;
         frame.index += 1;
@@ -866,6 +926,7 @@ fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarE
         .and_word, .or_word => booleanBinary(left, right, operation == .and_word),
         .band, .bor, .bxor => bitwiseBinary(left, right, operation),
         .bsl, .bsr => bitwiseShift(left, right, operation == .bsl),
+        .wrap_add, .wrap_sub, .wrap_mul => wrappingBinary(left, right, operation),
     };
 }
 
@@ -923,6 +984,19 @@ fn bitwiseBinary(left: Value, right: Value, operation: BinaryOp) ScalarError!Val
         .band => left.int & right.int,
         .bor => left.int | right.int,
         .bxor => left.int ^ right.int,
+        else => unreachable,
+    } };
+}
+
+/// Wrapping arithmetic is two's-complement i64 arithmetic modulo 2^64: it
+/// cannot overflow, so it carries no overflow arm. Int-only, like the
+/// bitwise words; the checked words keep floats and characters.
+fn wrappingBinary(left: Value, right: Value, operation: BinaryOp) ScalarError!Value {
+    if (left != .int or right != .int) return error.Type;
+    return .{ .int = switch (operation) {
+        .wrap_add => left.int +% right.int,
+        .wrap_sub => left.int -% right.int,
+        .wrap_mul => left.int *% right.int,
         else => unreachable,
     } };
 }
@@ -1294,6 +1368,7 @@ fn binaryResult(comptime operation: BinaryOp, comptime left: Number, comptime ri
         .add, .sub, .mul => if (real) .real else .integer,
         .div, .pow, .atan2 => .real,
         .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr, .and_word, .or_word => .integer,
+        .wrap_add, .wrap_sub, .wrap_mul => .integer,
         .eq, .ne, .lt, .gt, .le, .ge => .integer,
         .min, .max => if (real)
             if (left != right) null else .real
@@ -1339,6 +1414,8 @@ fn binaryLoopPolicy(
 ) LoopPolicy {
     if (left == .integer and right == .integer) return switch (operation) {
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .vector_infallible,
+        .wrap_add, .wrap_sub => .vector_infallible,
+        .wrap_mul => if (support.targetHasNativePackedI64Multiply()) .vector_infallible else .scalar_infallible,
         .add, .sub => .vector_checked,
         .mul => if (support.targetHasNativePackedI64Multiply()) .vector_checked else .scalar_checked,
         .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
@@ -1349,9 +1426,11 @@ fn binaryLoopPolicy(
         .add, .sub, .mul, .div => .vector_checked,
         .pow, .atan2 => .scalar_checked,
         .int_div, .mod, .and_word, .or_word, .band, .bor, .bxor, .bsl, .bsr => .scalar_checked,
+        .wrap_add, .wrap_sub, .wrap_mul => .scalar_checked,
     };
     if (left == .byte and right == .byte) return switch (operation) {
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .scalar_infallible,
+        .wrap_add, .wrap_sub, .wrap_mul => .scalar_infallible,
         .add, .sub, .mul, .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
     };
     return .scalar_checked;
@@ -1938,6 +2017,9 @@ fn binaryStep(
                 .band => @intCast(a & b),
                 .bor => @intCast(a | b),
                 .bxor => @intCast(a ^ b),
+                .wrap_add => @as(i64, a) +% @as(i64, b),
+                .wrap_sub => @as(i64, a) -% @as(i64, b),
+                .wrap_mul => @as(i64, a) *% @as(i64, b),
                 .add,
                 .sub,
                 .mul,
@@ -1979,6 +2061,9 @@ fn binaryStep(
                 .band => a & b,
                 .bor => a | b,
                 .bxor => a ^ b,
+                .wrap_add => a +% b,
+                .wrap_sub => a -% b,
+                .wrap_mul => a *% b,
                 .add,
                 .sub,
                 .mul,

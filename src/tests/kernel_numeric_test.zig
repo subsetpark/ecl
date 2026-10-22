@@ -262,6 +262,34 @@ test "numeric: short kernel loops share the unit poll budget" {
     try std.testing.expect(runtime.lastPolls() >= 1);
 }
 
+test "kernel: wrapping words are integer arithmetic modulo 2^64" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "wrapping where the checked words overflow",
+            .source = "9223372036854775807 1 +% -9223372036854775808 1 -% 4294967295 4294967295 *% 3 4 *%",
+            .expected = "-9223372036854775808 9223372036854775807 -8589934591 12",
+        },
+        .{
+            .name = "pervasion, bytes widen, and a modular LCG step",
+            .source = "[9223372036854775807 5] [1 2] +% [200] bytes 2 *% " ++
+                "1103515245 4198498305 *% 12345 +% 4294967295 band",
+            .expected = "[-9223372036854775808 7] [400] 1325825702",
+        },
+    });
+    try helper.expectError(.{
+        .name = "wrapping is int-only",
+        .source = "1.5 2 +%",
+        .kind = "type",
+        .word = "+%",
+    });
+    try helper.expectError(.{
+        .name = "wrapping refuses chars",
+        .source = "\\a 1 *%",
+        .kind = "type",
+        .word = "*%",
+    });
+}
+
 test "kernel: bitwise words are pattern words over the integer bit pattern" {
     try helper.expectStacks(&.{
         .{

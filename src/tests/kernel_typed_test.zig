@@ -322,7 +322,8 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
     const binary_words = [_][]const u8{
         "+",   "-",   "*",    "/",   "div",  "mod", "pow", "atan2",
         "min", "max", "=",    "<>",  "<",    ">",   "<=",  ">=",
-        "and", "or",  "band", "bor", "bxor", "bsl", "bsr",
+        "and", "or",  "band", "bor", "bxor", "bsl", "bsr", "+%",
+        "-%",  "*%",
     };
     const unary_words = [_][]const u8{
         "neg", "abs", "sqrt", "floor", "ceil", "round", "exp", "log", "sin", "cos", "not", "bnot",
@@ -474,6 +475,20 @@ test "typed differential: sequence order text and random operation parity across
         "first-where",
         "dup len range at",
         "dup len wrap reshape",
+        // Rank-two reshape: typed rows, cycling, and columns that span a block.
+        "[3 5] reshape",
+        "[2 7] reshape",
+        "2 over len 2 pack reshape",
+        "dup len 1 2 pack reshape",
+        // Transposing rows of one representation, including rows spanning a block.
+        "[3 5] reshape flip",
+        "2 over len 2 pack reshape flip",
+        "dup len 1 2 pack reshape flip",
+        // Pieces of a leaf. Starts that leave no piece empty: an empty piece keeps
+        // its operand's representation, which prints differently (see above).
+        "0 wrap cut",
+        "dup len 1 - wrap cut",
+        "3 chunk",
         // Same-kind list put. `dup` forces the allocating copy path and keeps
         // the original live so copy-on-write is observable.
         "dup 0 9 put swap pop",
@@ -1107,7 +1122,7 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
 
     // Full vectors plus a short tail, every operand shape, and every explicit
     // infallible vector family.
-    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor" }) |word| {
+    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor", "+%", "-%", "*%" }) |word| {
         try expectParity(&runtime, .{ .int_pair = .{ .left = left, .right = right } }, word);
         try expectParity(&runtime, .{ .ints = left }, "3 " ++ word);
         try expectParity(&runtime, .{ .ints = left }, "3 swap " ++ word);

@@ -74,6 +74,20 @@ cancellable.
 `( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
 `'overflow`.
 
+### *%
+`( x y -- z )` — **Pervasive.** Multiply integers modulo 2^64 in two's
+complement, wrapping where `*` raises `'overflow`. Int-only: a float or a char
+is `'type`. With `band`, arithmetic modulo any power of two.
+
+#### Examples
+
+```ecl
+4294967295 4294967295 *%
+# => -8589934591
+1103515245 4198498305 *% 12345 +% 4294967295 band
+# => 1325825702
+```
+
 ### \*file\*
 `( -- string )` — Return the source name attached to the currently executing
 reader-authored occurrence. A definition reports the file that authored its
@@ -100,10 +114,26 @@ overflow is `'overflow`.
 # => 3
 ```
 
+### +%
+`( x y -- z )` — **Pervasive.** Add integers modulo 2^64 in two's complement,
+wrapping where `+` raises `'overflow`. Int-only: a float or a char is `'type`.
+
+#### Examples
+
+```ecl
+9223372036854775807 1 +%
+# => -9223372036854775808
+```
+
 ### -
 `( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
 `char char -` is an int, `char int -` is a char, `int char -` is `'type`.
 Integer overflow is `'overflow`.
+
+### -%
+`( x y -- z )` — **Pervasive.** Subtract integers modulo 2^64 in two's
+complement, wrapping where `-` raises `'overflow`. Int-only: a float or a char
+is `'type`.
 
 ### /
 `( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero
@@ -411,6 +441,18 @@ representation: `'foo chars` is `"foo"`, not `"'foo"`. See
 # => "foo" "hé"
 ```
 
+### chunk
+`( list size -- pieces )` — Split a list into consecutive pieces of a
+positive size; the last piece is shorter when the size does not divide the
+length. Equivalent to cutting at every multiple of the size.
+
+#### Examples
+
+```ecl
+[0 1 2 3 4 5 6] 3 chunk
+# => [[0 1 2] [3 4 5] [6]]
+```
+
 ### clamp
 `( value lower upper -- bounded )` — **Pervasive** by composition.
 Constrain to the inclusive interval. Equivalent to `(max) dip min`.
@@ -465,6 +507,24 @@ the repeated boundary value is not appended. Defined in ecl over `unfold`.
 
 ### cos
 `( x -- y )` — **Pervasive.** Cosine; float transcendental.
+
+### cut
+`( list starts -- pieces )` — Split a list into one piece per start index.
+Each piece runs from its start up to the next start, and the last runs to
+the end of the list; elements before the first start belong to no piece.
+Starts must be integers from zero through the length, in nondecreasing
+order, so equal starts give empty pieces. A start out of range or below its
+predecessor fails with `'domain` at that start's position. Strings cut into
+strings.
+
+#### Examples
+
+```ecl
+[0 1 2 3 4 5 6] [0 2 5] cut
+# => [[0 1] [2 3 4] [5 6]]
+"hello world" [6] cut
+# => ["world"]
+```
 
 ### def
 `( annotation? body 'name -- )` — Bind a quotation to a public word, with
@@ -635,6 +695,25 @@ accumulator form `fold` is required for an empty list. Defined in ecl.
 `( collection quotation -- )` — *Isolated*, contract `( a -- )`. Apply to list
 elements or dictionary values in insertion order, left-to-right, collecting
 nothing.
+
+### from-digits
+`( digits base -- value )` — Combine digits, most significant first, into
+a value. The base is one integer for every position, or a list of radices
+with one per digit, as in mixed-radix time; the first radix has no effect.
+Digits pervade: a list of equal-length digit lists, one per position, gives
+one value per column. A radix list of the wrong length fails with `'shape`.
+Inverse of `to-digits` for values in range.
+
+#### Examples
+
+```ecl
+[1 0 1] 2 from-digits
+# => 5
+[[1 0] [0 1] [1 1]] 2 from-digits
+# => [5 3]
+[1 2 3] [24 60 60] from-digits
+# => 3723
+```
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an
@@ -936,9 +1015,10 @@ returning 0. Defined in ecl.
 ### pow
 `( x y -- z )` — **Pervasive.** Exponentiation; returns float.
 
-### prod
+### product
 `( sequence -- product )` — Product of a numeric sequence; 1 when empty.
-Equivalent to `1 (*) fold`.
+Equivalent to `(*) fold1` for a nonempty sequence, so the product starts from
+the first element and a list of rows multiplies to a row.
 
 ### put
 `( collection selector value -- collection )` — Functional replacement.
@@ -1165,7 +1245,20 @@ readable value.
 
 ### sum
 `( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
-Equivalent to `0 (+) fold`.
+Equivalent to `(+) fold1` for a nonempty sequence, so the total starts from
+the first element: a list of rows sums to a row, and a sum of negative
+zeros is `-0.0`.
+
+#### Examples
+
+```ecl
+[1 2 3] sum
+# => 6
+[[1 2] [3 4]] sum
+# => [4 6]
+[] sum
+# => 0
+```
 
 ### symbol
 `( value -- symbol )` — Return a symbol unchanged, a word as a symbol, or the
@@ -1201,6 +1294,25 @@ cycles.
 ### times
 `( n q -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a
 nonnegative int. Tail-call optimized.
+
+### to-digits
+`( value radices -- digits )` — Split a value into one digit per radix,
+most significant first, by floor division, so every digit lies from zero
+below its radix even for negative values. A value beyond the radices'
+capacity keeps only its low digits. Values pervade: a list of values gives
+one digit list per radix. Radices must be positive integers, or the word
+fails with `'domain`; `[2] 8 take` builds eight binary radices.
+
+#### Examples
+
+```ecl
+13 [2 2 2 2] to-digits
+# => [1 1 0 1]
+3723 [24 60 60] to-digits
+# => [1 2 3]
+-7 [10 10] to-digits
+# => [9 3]
+```
 
 ### tri
 `( x p q r -- ... )` — *Inline.* Apply three quotations to the same input

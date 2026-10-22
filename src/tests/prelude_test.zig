@@ -40,7 +40,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "1 [2 3] [3 2 1] [1 2 3] [1 2]",
         },
         .{ .name = "partition", .source = "[1 2 3 4] (2 >) partition", .expected = "[3 4] [1 2]" },
-        .{ .name = "aggregates", .source = "[3 1 2] min-of [3 1 2] max-of [1 2 3] sum [1 2 3] prod", .expected = "1 3 6 6" },
+        .{ .name = "aggregates", .source = "[3 1 2] min-of [3 1 2] max-of [1 2 3] sum [1 2 3] product", .expected = "1 3 6 6" },
+        .{
+            .name = "sum starts from its first element",
+            .source = "[] sum [7] sum [-0.0] sum [-0.0 -0.0] sum [[1 2] [3 4]] sum [[1.5 -0.0] [2.0 -0.0]] sum",
+            .expected = "0 7 -0.0 -0.0 [4 6] [3.5 -0.0]",
+        },
+        .{
+            .name = "product starts from its first element",
+            .source = "[] product [7] product [1.5 -0.0] product [[1 2] [3 4]] product",
+            .expected = "1 7 -0.0 [3 8]",
+        },
         .{
             .name = "at-or",
             .source = "{'a 1} 'a 9 at-or {'a 1} 'b 9 at-or {'a foo} 'a 9 at-or {} 'a (bar) first at-or",
@@ -143,6 +153,22 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "(\"abc\" \"bcd\" \"cde\" \"def\") [2 1 -2 6 -3] () 6 7 [1 3 6] [7] [1 2 4 8 16 32] [1]",
         },
         .{
+            .name = "cut-derived chunks and digit conversion",
+            .source = "[0 1 2 3 4 5 6] 3 chunk [] 3 chunk \"abcde\" 2 chunk " ++
+                "[1 0 1] 2 from-digits [[1 0] [0 1] [1 1]] 2 from-digits [1 2 3] [24 60 60] from-digits " ++
+                "[] 2 from-digits 13 [2 2 2 2] to-digits 3723 [24 60 60] to-digits -7 [10 10] to-digits " ++
+                "300 [2 2] to-digits [5 3 255 -1] [2] 8 take to-digits 2 from-digits",
+            .expected = "([0 1 2] [3 4 5] [6]) () (\"ab\" \"cd\" \"e\") 5 [5 3] 3723 0 [1 1 0 1] [1 2 3] [9 3] [0 0] " ++
+                "[5 3 255 255]",
+        },
+        .{
+            .name = "chunk and digit conversion at the integer boundaries",
+            .source = "[1] 9223372036854775807 chunk 1 [9223372036854775807] to-digits " ++
+                "-9223372036854775808 [10] to-digits 9223372036854775807 [10 10] to-digits " ++
+                "-9223372036854775808 [9223372036854775807 9223372036854775807] to-digits",
+            .expected = "([1]) [1] [2] [0 7] [9223372036854775805 9223372036854775806]",
+        },
+        .{
             .name = "state iteration combinators",
             .source = "3 (0 >) (1 -) while-values 100 (2 div) converges " ++
                 "100 (2 div) converge 0 (1 + 3 mod) converges 1 (0 +) converges",
@@ -161,10 +187,10 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "last",         "pair",      "pack",       "append",   "rest",         "reverse",
         "uncons",       "unappend",  "empty?",     "zip",      "lex-cmp-with", "lex-cmp",
         "min-of",       "max-of",    "sort",       "distinct", "at-path",      "at-or",
-        "filter",       "partition", "any?",       "all?",     "sum",          "prod",
+        "filter",       "partition", "any?",       "all?",     "sum",          "product",
         "mean",         "fail",      "find",       "set",      "setp",         "assert",
         "rotate",       "windows",   "each-prior", "fold1",    "scan1",        "iterations",
-        "while-values", "converges", "converge",
+        "while-values", "converges", "converge",   "chunk",    "from-digits",  "to-digits",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -251,6 +277,10 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },
         .{ .name = "pack underflow", .source = "1 2 pack", .kind = "underflow", .word = "cons" },
+        .{ .name = "chunk size zero", .source = "[1 2] 0 chunk", .kind = "domain" },
+        .{ .name = "to-digits radix zero", .source = "1 [2 0] to-digits", .kind = "domain" },
+        .{ .name = "to-digits float radix", .source = "1 [2.5] to-digits", .kind = "domain" },
+        .{ .name = "to-digits symbol radix", .source = "1 ['a] to-digits", .kind = "domain" },
     });
 }
 
