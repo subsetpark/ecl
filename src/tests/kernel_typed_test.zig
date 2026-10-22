@@ -479,6 +479,10 @@ test "typed differential: sequence order text and random operation parity across
         "[2 7] reshape",
         "2 over len 2 pack reshape",
         "dup len 1 2 pack reshape",
+        // Transposing rows of one representation, including rows spanning a block.
+        "[3 5] reshape flip",
+        "2 over len 2 pack reshape flip",
+        "dup len 1 2 pack reshape flip",
         // Pieces of a leaf. Starts that leave no piece empty: an empty piece keeps
         // its operand's representation, which prints differently (see above).
         "0 wrap cut",

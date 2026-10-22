@@ -1776,9 +1776,14 @@ fn flipPrimitive(evaluator: *Machine) MachineError!void {
         .list => |row| .{ .rows = .{ .columns = @intCast(row.length()), .next = 1 } },
         else => .{ .flat = 1 },
     };
+    const leaf_kind: ?value.HeapKind = if (validation == .rows)
+        FlipDriver.leafKind(list.atUnchecked(source, 0).list.kind())
+    else
+        null;
     try evaluator.startDriver(FlipDriver{
         .collection = .init(collection.take()),
         .validation = validation,
+        .leaf_kind = leaf_kind,
     });
 }
 
@@ -1793,6 +1798,13 @@ const FlipDriver = struct {
 
     collection: heap.Owned(Value),
     validation: Validation,
+    /// The one leaf representation every row shares, or null once any row
+    /// differs. Rows of one representation transpose without boxing a cell.
+    leaf_kind: ?value.HeapKind = null,
+    /// The typed route: every column scattered into one flat buffer, which is
+    /// then split into the result rows.
+    typed: ?heap.Owned(RazeOutput) = null,
+    flat: ?heap.Owned(Value) = null,
     result_rows: ?heap.Owned(heap.OwnedValueBuffer) = null,
     cells: ?heap.Owned([]Value) = null,
     column: usize = 0,
@@ -1818,6 +1830,7 @@ const FlipDriver = struct {
                     const row = list.atUnchecked(self.collection.borrow(), validation.next);
                     if (row != .list or row.list.length() != validation.columns)
                         return evaluator.fail(.shape, "flip requires rows of the same length");
+                    if (self.leaf_kind != null and row.list.kind() != self.leaf_kind.?) self.leaf_kind = null;
                 }
                 if (validation.next != rows) return .stepped;
                 if (validation.columns == 0) return evaluator.fail(
@@ -1829,6 +1842,7 @@ const FlipDriver = struct {
             },
             .ready => |columns| columns,
         };
+        if (self.leaf_kind) |kind| return self.advanceTyped(evaluator, kind, rows, columns);
         if (self.result_rows == null) {
             self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
             self.cells = .init(try evaluator.allocator().alloc(Value, rows));
@@ -1864,6 +1878,129 @@ const FlipDriver = struct {
             self.cells.?.borrow(),
         ));
         return .stepped;
+    }
+
+    fn leafKind(kind: value.HeapKind) ?value.HeapKind {
+        return switch (kind) {
+            .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => kind,
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => null,
+        };
+    }
+
+    /// Scatters every row into the column-major flat buffer, then splits it into
+    /// one typed row per column. `row` and `column` index the scatter, then the
+    /// split's current result row and position.
+    fn advanceTyped(
+        self: *FlipDriver,
+        evaluator: *Machine,
+        kind: value.HeapKind,
+        rows: usize,
+        columns: usize,
+    ) MachineError!machine.WorkProgress {
+        const work = evaluator.workBudget();
+        if (self.flat == null) {
+            if (self.typed == null) {
+                const total = std.math.mul(usize, rows, columns) catch
+                    return evaluator.fail(.overflow, "flip result is too large");
+                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, total, total) });
+                self.result_rows = .init(try .init(evaluator.releaseDomain(), columns));
+                return .stepped;
+            }
+            while (self.row != rows and !work.exhausted()) {
+                // A group of consecutive rows writes consecutive elements of
+                // each column, so every touched cache line fills.
+                const group = @min(scatter_group, rows - self.row);
+                var children: [scatter_group]*heap.ListHandle = undefined;
+                for (children[0..group], self.row..) |*child, index|
+                    child.* = list.atUnchecked(self.collection.borrow(), index).list;
+                const run = @max(1, work.take((columns - self.column) * group) / group);
+                switch (self.typed.?.borrowMut().builder) {
+                    .generic => unreachable,
+                    inline else => |*builder| scatterRows(
+                        @TypeOf(builder.items()[0]),
+                        builder.items(),
+                        children[0..group],
+                        self.row,
+                        rows,
+                        self.column,
+                        @min(run, columns - self.column),
+                        evaluator.releaseDomain(),
+                    ),
+                }
+                self.column += @min(run, columns - self.column);
+                if (self.column == columns) {
+                    self.column = 0;
+                    self.row += group;
+                }
+            }
+            if (self.row != rows) return .stepped;
+            var output = self.typed.?.take();
+            self.typed = null;
+            self.flat = .init(.{ .list = output.builder.finish() });
+            self.row = 0;
+            return .stepped;
+        }
+        const spine = self.result_rows.?.borrowMut();
+        while (!work.exhausted()) {
+            if (self.typed == null) {
+                if (spine.len() == columns) return .{ .output = spine.takeList() };
+                self.typed = .init(.{ .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, rows, rows) });
+                self.row = 0;
+            }
+            const run = work.take(rows - self.row);
+            switch (self.typed.?.borrowMut().builder) {
+                .generic => unreachable,
+                inline else => |*builder| RazeDriver.copyChild(
+                    @TypeOf(builder.items()[0]),
+                    builder.items()[self.row..][0..run],
+                    self.flat.?.borrow().list,
+                    spine.len() * rows + self.row,
+                    evaluator.releaseDomain(),
+                ),
+            }
+            self.row += run;
+            if (self.row == rows) {
+                var output = self.typed.?.take();
+                self.typed = null;
+                spine.appendOwned(.{ .list = output.builder.finish() });
+            }
+        }
+        return .stepped;
+    }
+
+    const scatter_group = 8;
+
+    /// Writes `count` elements of each of the consecutive rows starting at
+    /// `first`, from column `from`, to their transposed positions
+    /// `column * rows + row` of the flat buffer. The readers live only for
+    /// this call.
+    fn scatterRows(
+        comptime Out: type,
+        out: []Out,
+        children: []const *heap.ListHandle,
+        first: usize,
+        rows: usize,
+        from: usize,
+        count: usize,
+        releases: *heap.ReleaseDomain,
+    ) void {
+        switch (children[0].kind()) {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+                if (comptime heap.LeafElement(kind) != Out) unreachable;
+                var readers: [scatter_group]heap.LeafReader(kind) = undefined;
+                var sources: [scatter_group][]const Out = undefined;
+                for (children, readers[0..children.len], sources[0..children.len]) |child, *reader, *source| {
+                    reader.* = heap.LeafReader(kind).acquire(child);
+                    source.* = reader.slice();
+                }
+                defer for (readers[0..children.len]) |*reader| reader.release(releases);
+                for (from..from + count) |column| {
+                    const line = out[column * rows + first ..][0..children.len];
+                    for (line, sources[0..children.len]) |*slot, source| slot.* = source[column];
+                }
+            },
+            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        }
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
