@@ -424,8 +424,8 @@ const ImportDriver = struct {
                 self.publisher = .init(try self.scope.publishWordCursor(requested.binding, .{
                     .body = body,
                     .visibility = .public,
-                    .effect = lease.effect,
-                    .doc = lease.doc,
+                    .effect = lease.spec().effect,
+                    .doc = lease.spec().doc,
                 }));
                 continue;
             }

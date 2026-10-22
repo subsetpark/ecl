@@ -69,7 +69,7 @@ pub const LexicalCursor = struct {
                     var lease = maybe_lease orelse break :step .pending;
                     // A private core binding is reachable only through core's
                     // own qualified spelling, never by a plain word.
-                    if (location == .core and lease.visibility == .private) {
+                    if (location == .core and lease.spec().visibility == .private) {
                         lease.deinit();
                         break :step .pending;
                     }

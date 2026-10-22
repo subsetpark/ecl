@@ -6155,7 +6155,7 @@ pub const Machine = struct {
         if (written == null or cell == slot.coreCell()) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
-            if (out.lease.visibility == .private) {
+            if (out.lease.spec().visibility == .private) {
                 out.lease.deinit();
                 return false;
             }
@@ -7707,15 +7707,15 @@ const QualifiedRegistrationDriver = struct {
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home();
-    const cross_home_effect = if (cross_home) resolved.lease.effect else null;
-    switch (resolved.lease.binding) {
+    const cross_home_effect = if (cross_home) resolved.lease.spec().effect else null;
+    switch (resolved.lease.spec().binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
             // A trusted definition's recognition was decided when its
             // environment froze; one that recognized nothing runs as any
             // source word does.
             const trusted = resolved.origin == .core or resolved.origin == .standard_library;
-            if (trusted) if (resolved.lease.direct_idiom) |idiom| if (self.unit.inherited.phrase_recognizer) |recognizer| {
+            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| if (self.unit.inherited.phrase_recognizer) |recognizer| {
                 switch (try recognizer.trusted(self, .{ .body = body_header, .idiom = idiom })) {
                     .applied => return,
                     .declined => {},

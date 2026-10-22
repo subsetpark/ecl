@@ -524,7 +524,7 @@ fn reclamationReader(context: ReclamationRaceContext) void {
             };
             // Identity of the resolved body is the reader-visible fact: a
             // torn or stale snapshot would not carry the published quotation.
-            if (old.binding != .word or old.binding.word != context.publication.word.body)
+            if (old.spec().binding != .word or old.spec().binding.word != context.publication.word.body)
                 context.failed.store(true, .release);
             old.deinit();
             break;
@@ -548,7 +548,7 @@ fn reclamationReader(context: ReclamationRaceContext) void {
                 context.failed.store(true, .release);
                 break;
             };
-            if (observed.binding != .word or observed.binding.word != context.publication.word.body)
+            if (observed.spec().binding != .word or observed.spec().binding.word != context.publication.word.body)
                 context.failed.store(true, .release);
             observed.deinit();
             break;
@@ -567,7 +567,7 @@ fn reclamationReader(context: ReclamationRaceContext) void {
                     context.failed.store(true, .release);
                     break;
                 };
-                if (observed.binding != .word or observed.binding.word != context.publication.word.body)
+                if (observed.spec().binding != .word or observed.spec().binding.word != context.publication.word.body)
                     context.failed.store(true, .release);
                 observed.deinit();
                 break;
@@ -698,7 +698,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     try std.testing.expect(!failed.load(.acquire));
     var current = resolveDirect(container.sessionView(), intern.namespaceId(name)).?;
     defer current.deinit();
-    try std.testing.expectEqual(env.quotation(binding.body.list).?, current.binding.word);
+    try std.testing.expectEqual(env.quotation(binding.body.list).?, current.spec().binding.word);
 }
 
 test "environment and registry retirement stays bounded after a delayed reader drains" {
@@ -1135,7 +1135,7 @@ test "registry: generation cursors independently pin their snapshot" {
     };
     var old_binding = old;
     defer old_binding.deinit();
-    try std.testing.expectEqual(env.quotation(binding.body.list).?, old_binding.binding.word);
+    try std.testing.expectEqual(env.quotation(binding.body.list).?, old_binding.spec().binding.word);
     const old_name = while (true) switch (names.advance()) {
         .pending => {},
         .complete => return error.TestUnexpectedResult,

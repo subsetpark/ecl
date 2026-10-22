@@ -795,7 +795,7 @@ const Registration = struct {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
                     var lease = maybe_lease orelse break :result .{ .complete = null };
-                    if (lease.visibility == .private) {
+                    if (lease.spec().visibility == .private) {
                         lease.deinit();
                         break :result .{ .complete = null };
                     }
@@ -831,7 +831,7 @@ const Registration = struct {
                 .item => |entry| result: {
                     var lease = entry.lease;
                     defer lease.deinit();
-                    break :result if (lease.visibility == .public)
+                    break :result if (lease.spec().visibility == .public)
                         .{ .item = entry.name }
                     else
                         .pending;

@@ -1417,11 +1417,11 @@ test "native: the static transport publishes a linked descriptor through the sam
         .complete => |resolved| break resolved.?,
     };
     defer binding.deinit();
-    try std.testing.expect(binding.binding == .native);
-    try std.testing.expectEqual(@as(u32, 1), binding.effect.?.inputs);
-    try std.testing.expectEqual(@as(u32, 1), binding.effect.?.outputs);
-    try std.testing.expectEqual(@as(usize, 3), binding.binding.native.instance.requirements().len);
-    const document = env.documentationHeader(binding.doc.?);
+    try std.testing.expect(binding.spec().binding == .native);
+    try std.testing.expectEqual(@as(u32, 1), binding.spec().effect.?.inputs);
+    try std.testing.expectEqual(@as(u32, 1), binding.spec().effect.?.outputs);
+    try std.testing.expectEqual(@as(usize, 3), binding.spec().binding.native.instance.requirements().len);
+    const document = env.documentationHeader(binding.spec().doc.?);
     try std.testing.expectEqual(@as(u64, "Increment an integer.".len), document.length());
     for ("Increment an integer.", 0..) |byte, index|
         try std.testing.expectEqual(

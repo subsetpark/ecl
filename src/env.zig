@@ -408,56 +408,39 @@ const BindingSnapshot = struct {
         }
     }
 };
-/// Owned payload snapshot; release it with the environment's allocator. This
-/// is intentionally distinct from the unpublished internal specification.
+/// A binding's specification as a reader holds it; release it with the
+/// environment's allocator. This is intentionally distinct from the
+/// unpublished internal specification.
 pub const BindingLease = struct {
     releases: *heap.ReleaseDomain,
-    binding: Binding,
-    visibility: Visibility,
-    origin: BindingOrigin,
-    effect: ?ValidatedEffect,
-    doc: ?*DocumentationString,
-    source: ?reader_types.SourceSlice,
-    direct_idiom: ?DirectIdiom,
-    /// False for a slice reader's borrow, which holds no references.
-    owned: bool = true,
+    held: union(enum) {
+        /// A copy holding references, which outlives the cell's snapshot.
+        owned: BindingSpec,
+        /// A slice reader's borrow: the current snapshot's specification,
+        /// valid until the read section ends. It holds no references.
+        borrowed: *const BindingSpec,
+    },
 
-    fn fromSpec(spec: BindingSpec, releases: *heap.ReleaseDomain) BindingLease {
-        return .{
-            .releases = releases,
-            .binding = spec.binding,
-            .visibility = spec.visibility,
-            .origin = spec.origin,
-            .effect = spec.effect,
-            .doc = spec.doc,
-            .source = spec.source,
-            .direct_idiom = spec.direct_idiom,
-        };
-    }
-
-    /// The specification this lease holds, borrowed: it owns nothing apart
-    /// from the lease.
-    fn heldSpec(self: *const BindingLease) BindingSpec {
-        return .{
-            .binding = self.binding,
-            .visibility = self.visibility,
-            .origin = self.origin,
-            .effect = self.effect,
-            .doc = self.doc,
-            .source = self.source,
-            .direct_idiom = self.direct_idiom,
+    /// The specification this lease holds, borrowed from the lease.
+    pub fn spec(self: *const BindingLease) *const BindingSpec {
+        return switch (self.held) {
+            .owned => |*owned| owned,
+            .borrowed => |borrowed| borrowed,
         };
     }
 
     pub fn deinit(self: *BindingLease) void {
-        if (self.owned) self.heldSpec().retire(self.releases);
+        switch (self.held) {
+            .owned => |owned| owned.retire(self.releases),
+            .borrowed => {},
+        }
         self.* = undefined;
     }
 
     /// The definition's module-local name, or null for a top-level binding.
     /// Present exactly when the binding is module-local.
-    pub fn traceWord(self: BindingLease) ?intern.BindingName {
-        return self.origin.traceWord();
+    pub fn traceWord(self: *const BindingLease) ?intern.BindingName {
+        return self.spec().origin.traceWord();
     }
 };
 pub const BindingCell = struct {
@@ -537,7 +520,7 @@ pub const BindingCell = struct {
     pub fn load(self: *BindingCell) BindingLease {
         var lease = self.publisher.acquire();
         lease.snapshot.?.spec.retain();
-        const result = BindingLease.fromSpec(lease.snapshot.?.spec, self.releases);
+        const result: BindingLease = .{ .releases = self.releases, .held = .{ .owned = lease.snapshot.?.spec } };
         if (lease.deinit()) {
             self.lockRetired();
             const retired = self.detachRetired();
@@ -555,9 +538,7 @@ pub const BindingCell = struct {
     pub fn borrow(self: *BindingCell, slice: *const heap.ReleaseDomain.SliceRecord) BindingLease {
         std.debug.assert(slice.depth != 0);
         const snapshot = self.publisher.current.load(.seq_cst).?;
-        var result = BindingLease.fromSpec(snapshot.spec, self.releases);
-        result.owned = false;
-        return result;
+        return .{ .releases = self.releases, .held = .{ .borrowed = &snapshot.spec } };
     }
 };
 
@@ -915,13 +896,13 @@ pub const Environment = struct {
             const id = try intern.intern(spelling);
             var lease = lookupFrozen(self, id) orelse continue;
             defer lease.deinit();
-            const body = switch (lease.binding) {
+            const body = switch (lease.spec().binding) {
                 .word => |body| body,
                 .builtin, .native => continue,
             };
             const idiom = recognizer.recognize(lookup, spelling, body) orelse continue;
             const name = intern.namespaceName(id) catch continue;
-            var recognized = lease.heldSpec();
+            var recognized = lease.spec().*;
             recognized.direct_idiom = idiom;
             _ = self.bind(name, recognized) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -2336,7 +2317,7 @@ test "env: a slot keeps one cell per name across binding, removal, and rebinding
     try std.testing.expectEqual(first_cell, early_slot.current().?);
     var lease = first_cell.load();
     defer lease.deinit();
-    try std.testing.expectEqual(@as(i64, 2), list_api.atUnchecked(.{ .list = quotationHeader(lease.binding.word) }, 0).int);
+    try std.testing.expectEqual(@as(i64, 2), list_api.atUnchecked(.{ .list = quotationHeader(lease.spec().binding.word) }, 0).int);
 
     // Linked after a binding: adopts the environment's cell.
     try container.define(late, .{ .word = .{ .body = quotation(one.list).? } });
