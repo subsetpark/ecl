@@ -143,6 +143,15 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "(\"abc\" \"bcd\" \"cde\" \"def\") [2 1 -2 6 -3] () 6 7 [1 3 6] [7] [1 2 4 8 16 32] [1]",
         },
         .{
+            .name = "cut-derived chunks and digit conversion",
+            .source = "[0 1 2 3 4 5 6] 3 chunk [] 3 chunk \"abcde\" 2 chunk " ++
+                "[1 0 1] 2 from-digits [[1 0] [0 1] [1 1]] 2 from-digits [1 2 3] [24 60 60] from-digits " ++
+                "[] 2 from-digits 13 [2 2 2 2] to-digits 3723 [24 60 60] to-digits -7 [10 10] to-digits " ++
+                "300 [2 2] to-digits [5 3 255 -1] [2] 8 take to-digits 2 from-digits",
+            .expected = "([0 1 2] [3 4 5] [6]) () (\"ab\" \"cd\" \"e\") 5 [5 3] 3723 0 [1 1 0 1] [1 2 3] [9 3] [0 0] " ++
+                "[5 3 255 255]",
+        },
+        .{
             .name = "state iteration combinators",
             .source = "3 (0 >) (1 -) while-values 100 (2 div) converges " ++
                 "100 (2 div) converge 0 (1 + 3 mod) converges 1 (0 +) converges",
@@ -164,7 +173,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "filter",       "partition", "any?",       "all?",     "sum",          "prod",
         "mean",         "fail",      "find",       "set",      "setp",         "assert",
         "rotate",       "windows",   "each-prior", "fold1",    "scan1",        "iterations",
-        "while-values", "converges", "converge",
+        "while-values", "converges", "converge",   "chunk",    "from-digits",  "to-digits",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

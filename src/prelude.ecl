@@ -307,6 +307,36 @@
 (list width -- windows : "Return every overlapping window of a positive width.")
 (() stencil) 'windows def
 
+### def chunk
+(list size -- pieces :
+ "Split a list into consecutive pieces of a positive size; the last piece may be shorter.")
+(|xs k|
+ k 0 > {'kind 'domain 'msg "chunk size must be positive"} assert
+ xs xs len k + 1 - k div range k * cut) 'chunk def
+
+### def from-digits
+(digits base -- value :
+ "Combine digits, most significant first, under a base or a list of radices, one per digit; digits
+  pervade, so a list of equal-length digit lists gives one value per position.")
+(|ds base|
+ ds base ds len base type 'list match?
+ (|b n| b len n = {'kind 'shape 'msg "from-digits needs one radix per digit"} assert b)
+ (|b n| b wrap n take)
+ if
+ zip 0 (|acc p| acc p 1 at * p 0 at +) fold) 'from-digits def
+
+### def to-digits
+(value radices -- digits :
+ "Split a value into one digit per positive radix, most significant first, using floor division; a
+  value beyond the radices' capacity keeps only its low digits, and values pervade.")
+(|x rs|
+ rs 0 > sum rs len = {'kind 'domain 'msg "to-digits radices must be positive"} assert
+ rs reverse x [] 2 pack
+ (|st r|
+  st 0 at r mod r + r mod
+  st r (|m st r| st 0 at m - r div m wrap st 1 at cat 2 pack) partial partial call)
+ fold 1 at) 'to-digits def
+
 ### def each-prior
 (list seed quotation -- list :
  "Apply a binary quotation to each element and its predecessor, using the explicit seed before the

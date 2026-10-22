@@ -411,6 +411,18 @@ representation: `'foo chars` is `"foo"`, not `"'foo"`. See
 # => "foo" "hé"
 ```
 
+### chunk
+`( list size -- pieces )` — Split a list into consecutive pieces of a
+positive size; the last piece is shorter when the size does not divide the
+length. Equivalent to cutting at every multiple of the size.
+
+#### Examples
+
+```ecl
+[0 1 2 3 4 5 6] 3 chunk
+# => [[0 1 2] [3 4 5] [6]]
+```
+
 ### clamp
 `( value lower upper -- bounded )` — **Pervasive** by composition.
 Constrain to the inclusive interval. Equivalent to `(max) dip min`.
@@ -653,6 +665,25 @@ accumulator form `fold` is required for an empty list. Defined in ecl.
 `( collection quotation -- )` — *Isolated*, contract `( a -- )`. Apply to list
 elements or dictionary values in insertion order, left-to-right, collecting
 nothing.
+
+### from-digits
+`( digits base -- value )` — Combine digits, most significant first, into
+a value. The base is one integer for every position, or a list of radices
+with one per digit, as in mixed-radix time; the first radix has no effect.
+Digits pervade: a list of equal-length digit lists, one per position, gives
+one value per column. A radix list of the wrong length fails with `'shape`.
+Inverse of `to-digits` for values in range.
+
+#### Examples
+
+```ecl
+[1 0 1] 2 from-digits
+# => 5
+[[1 0] [0 1] [1 1]] 2 from-digits
+# => [5 3]
+[1 2 3] [24 60 60] from-digits
+# => 3723
+```
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an
@@ -1219,6 +1250,25 @@ cycles.
 ### times
 `( n q -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a
 nonnegative int. Tail-call optimized.
+
+### to-digits
+`( value radices -- digits )` — Split a value into one digit per radix,
+most significant first, by floor division, so every digit lies from zero
+below its radix even for negative values. A value beyond the radices'
+capacity keeps only its low digits. Values pervade: a list of values gives
+one digit list per radix. Radices must be positive integers, or the word
+fails with `'domain`; `[2] 8 take` builds eight binary radices.
+
+#### Examples
+
+```ecl
+13 [2 2 2 2] to-digits
+# => [1 1 0 1]
+3723 [24 60 60] to-digits
+# => [1 2 3]
+-7 [10 10] to-digits
+# => [9 3]
+```
 
 ### tri
 `( x p q r -- ... )` — *Inline.* Apply three quotations to the same input
