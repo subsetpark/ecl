@@ -1478,12 +1478,12 @@ test "oom: standard-library and host: registered process operation results" {
 
 test "oom: standard-library and host: common resource listener close" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.close").run);
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.close").run);
 }
 
 test "oom: standard-library and host: common resource listener shutdown" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.shutdown").run);
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.listener, "port.shutdown").run);
 }
 
 fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type {
@@ -1559,7 +1559,7 @@ test "oom: standard-library and host: native port registered vocabulary publicat
 
 test "oom: standard-library and host: native child initialization borrow" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
         "instanceprobe.resource [] port.open dup instanceprobe.child [] port.call port.close port.close",
         "",
     ).run);
@@ -1974,7 +1974,7 @@ test "oom: standard-library and host: native port child result publication" {
 
 test "oom: standard-library and host: native port child message publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.child-event [] port.begin dup portprobe.receiver port.endpoint " ++
             "port.receive 'value at port.close port.close port.close",
     ).run);
@@ -1982,14 +1982,14 @@ test "oom: standard-library and host: native port child message publication" {
 
 test "oom: standard-library and host: native port child dependency publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.dependent-child [] port.call pop port.close",
     ).run);
 }
 
 test "oom: standard-library and host: native port child batch publication" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortLifecycleProbe(
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.child-pair [] port.call (dup port.close) each pop port.close",
     ).run);
 }

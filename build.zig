@@ -8,29 +8,14 @@ pub fn build(b: *std.Build) void {
     const runtime_linkage: ?std.builtin.LinkMode =
         if (target.result.os.tag == .linux) .dynamic else null;
     const minish = b.dependency("minish", .{}).module("minish");
-    const native_abi = b.createModule(.{
-        .root_source_file = b.path("src/native/abi.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const native = createNativeModules(b, target, optimize, .public);
+    const native_abi = native.abi;
 
     const runtime_options = b.addOptions();
     runtime_options.addOption(usize, "default_worker_count", 1);
     runtime_options.addOption(bool, "instrument_root_execution", false);
 
-    const port_declarations = b.addModule("port-declarations", .{
-        .root_source_file = b.path("src/port_declarations.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const native_sdk = b.addModule("ecl-native", .{
-        .root_source_file = b.path("src/native/sdk.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    native_sdk.addImport("ecl-native-abi", native_abi);
-    native_sdk.addImport("port-declarations", port_declarations);
+    const native_sdk = native.sdk;
     const internal_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
         .target = target,
@@ -38,18 +23,8 @@ pub fn build(b: *std.Build) void {
     });
     configureRuntime(internal_mod, native_abi, native_sdk, runtime_options);
     internal_mod.sanitize_thread = git_tsan;
-    const native_sample = b.createModule(.{
-        .root_source_file = b.path("test/native/sample.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    native_sample.addImport("ecl-native", native_sdk);
-    const native_instance = b.createModule(.{
-        .root_source_file = b.path("test/native/instance.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    native_instance.addImport("ecl-native", native_sdk);
+    const native_sample = native.sample;
+    const native_instance = native.instance;
 
     const fixture = native_build.addExtension(b, .{
         .name = "sample",
@@ -826,15 +801,27 @@ pub fn build(b: *std.Build) void {
     // exhaustive property and allocator-failure coverage; instrumenting those
     // single-threaded cases turns this race detector into a multi-minute stress
     // test without increasing its race coverage.
+    //
+    // Build it ReleaseSafe whatever `-Doptimize` says. Debug codegen copies a
+    // tagged union's whole payload to read its tag, so a tag check races with
+    // any thread writing the payload: TSan reports races that no optimized
+    // build contains. Safety checks stay on. The pin covers the whole import
+    // graph: the SDK runs on native port threads too.
     const tsan_supported = target.result.os.tag == .linux or target.result.os.tag == .macos;
+    const tsan_native = createNativeModules(b, target, .safe, .private);
     const tsan_mod = b.createModule(.{
         .root_source_file = b.path("src/internal.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .safe,
         .sanitize_thread = tsan_supported,
     });
-    configureRuntime(tsan_mod, native_abi, native_sdk, test_options);
-    addTestInputs(tsan_mod, &test_imports, &test_fixture_inputs);
+    configureRuntime(tsan_mod, tsan_native.abi, tsan_native.sdk, test_options);
+    const tsan_imports = [_]std.Build.Module.Import{
+        .{ .name = "minish", .module = b.dependency("minish", .{ .optimize = .safe }).module("minish") },
+        .{ .name = "native-sample", .module = tsan_native.sample },
+        .{ .name = "native-instance", .module = tsan_native.instance },
+    };
+    addTestInputs(tsan_mod, &tsan_imports, &test_fixture_inputs);
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
         .filters = &.{
@@ -1329,6 +1316,58 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&host_metadata.step);
     precommit_step.dependOn(&run_pkg_tests.step);
     precommit_step.dependOn(git_extension_step);
+}
+
+const NativeModules = struct {
+    abi: *std.Build.Module,
+    sdk: *std.Build.Module,
+    sample: *std.Build.Module,
+    instance: *std.Build.Module,
+};
+
+/// The native ABI, the SDK over it, and the test extensions built on the SDK.
+/// `.public` registers the SDK and port declarations as this package's
+/// modules; a second graph at another optimization mode must stay private.
+fn createNativeModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    visibility: enum { public, private },
+) NativeModules {
+    const abi = b.createModule(.{
+        .root_source_file = b.path("src/native/abi.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const declarations_options: std.Build.Module.CreateOptions = .{
+        .root_source_file = b.path("src/port_declarations.zig"),
+        .target = target,
+        .optimize = optimize,
+    };
+    const sdk_options: std.Build.Module.CreateOptions = .{
+        .root_source_file = b.path("src/native/sdk.zig"),
+        .target = target,
+        .optimize = optimize,
+    };
+    const port_declarations, const sdk = switch (visibility) {
+        .public => .{ b.addModule("port-declarations", declarations_options), b.addModule("ecl-native", sdk_options) },
+        .private => .{ b.createModule(declarations_options), b.createModule(sdk_options) },
+    };
+    sdk.addImport("ecl-native-abi", abi);
+    sdk.addImport("port-declarations", port_declarations);
+    const sample = b.createModule(.{
+        .root_source_file = b.path("test/native/sample.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sample.addImport("ecl-native", sdk);
+    const instance = b.createModule(.{
+        .root_source_file = b.path("test/native/instance.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    instance.addImport("ecl-native", sdk);
+    return .{ .abi = abi, .sdk = sdk, .sample = sample, .instance = instance };
 }
 
 fn configureRuntime(
