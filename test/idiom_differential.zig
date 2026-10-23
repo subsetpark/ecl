@@ -223,24 +223,31 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
 fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
-    for (entry.pattern, 0..) |atom, index| {
+    try appendPattern(&result, entry, entry.pattern, variant);
+    return result.toOwnedSlice(allocator);
+}
+
+fn appendPattern(
+    result: *std.ArrayList(u8),
+    entry: ecl.idioms.RegistryEntry,
+    pattern: []const ecl.idioms.PatternAtom,
+    variant: Variant,
+) !void {
+    for (pattern, 0..) |atom, index| {
         if (index > 0) try result.append(allocator, ' ');
         switch (atom) {
-            .quotation_word => |word| {
+            .quotation => |inner| {
                 try result.append(allocator, '(');
-                try result.appendSlice(allocator, word.spelling);
+                try appendPattern(result, entry, inner, variant);
                 try result.append(allocator, ')');
             },
-            else => try result.appendSlice(allocator, switch (atom) {
-                .constant => constantFor(entry.operation, variant),
-                .literal => "0",
-                .operation => entry.operation.spelling(),
-                .word => |word| word.spelling,
-                .quotation_word => unreachable,
-            }),
+            .int => |number| try result.print(allocator, "{d}", .{number}),
+            .constant => try result.appendSlice(allocator, constantFor(entry.operation, variant)),
+            .literal => try result.appendSlice(allocator, "0"),
+            .operation => try result.appendSlice(allocator, entry.operation.spelling()),
+            .word => |word| try result.appendSlice(allocator, word.spelling),
         }
     }
-    return result.toOwnedSlice(allocator);
 }
 
 fn constantFor(operation: ecl.idioms.Operation, variant: Variant) []const u8 {

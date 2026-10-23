@@ -60,6 +60,9 @@ pub const ExpectedWord = struct {
     spelling: []const u8,
     binding: BindingKind = .builtin,
     origin: ExpectedOrigin = .trusted,
+    /// The word a fault inside the entry names, at the top-level position of
+    /// the phrase that holds it, as the definition's own execution would.
+    active: bool = false,
 };
 pub const PatternAtom = union(enum) {
     /// A non-word value, which becomes the operation's constant operand.
@@ -67,9 +70,13 @@ pub const PatternAtom = union(enum) {
     /// `partial` prefixes onto its quotation.
     constant,
     literal,
-    quotation_word: ExpectedWord,
+    /// An int literal equal to this value.
+    int: i64,
+    /// The entry's own operation word, which is also its active word.
     operation,
     word: ExpectedWord,
+    /// A quotation literal whose forms match this pattern exactly.
+    quotation: []const PatternAtom,
 };
 pub const RegistryEntry = struct {
     context: Context,
@@ -88,7 +95,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 };
 const sort_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "grade" } },
+    .{ .word = .{ .spelling = "grade", .active = true } },
     .{ .word = .{ .spelling = "at" } },
 };
 const neg_pattern = [_]PatternAtom{ .literal, .{ .word = .{ .spelling = "*" } } };
@@ -141,7 +148,7 @@ const first_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "at" } },
 };
 const find_pattern = [_]PatternAtom{
-    .{ .quotation_word = .{ .spelling = "match?" } },
+    .{ .quotation = &.{.{ .word = .{ .spelling = "match?" } }} },
     .{ .word = .{ .spelling = "partial", .binding = .source } },
     .{ .word = .{ .spelling = "each" } },
     .{ .word = .{ .spelling = "first-where" } },
@@ -177,14 +184,22 @@ const str_format_pattern = [_]PatternAtom{
     } },
 };
 /// `sum` and `product`: `dup empty? (pop seed) ((op) fold1) if`. The
-/// definition's name selects the operation.
-const total_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "empty?", .binding = .source } },
-    .literal,
-    .literal,
-    .{ .word = .{ .spelling = "if" } },
-};
+/// reduction's operator is the active word, so a fault names `+` or `*` at
+/// that literal, as the definition's own reduction would.
+fn totalPattern(comptime seed: i64, comptime operator: []const u8) [5]PatternAtom {
+    return .{
+        .{ .word = .{ .spelling = "dup" } },
+        .{ .word = .{ .spelling = "empty?", .binding = .source } },
+        .{ .quotation = &.{ .{ .word = .{ .spelling = "pop" } }, .{ .int = seed } } },
+        .{ .quotation = &.{
+            .{ .quotation = &.{.{ .word = .{ .spelling = operator, .active = true } }} },
+            .{ .word = .{ .spelling = "fold1", .binding = .source } },
+        } },
+        .{ .word = .{ .spelling = "if" } },
+    };
+}
+const sum_pattern = totalPattern(0, "+");
+const product_pattern = totalPattern(1, "*");
 const fold1_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
     .{ .word = .{ .spelling = "uncons", .binding = .source } },
@@ -283,8 +298,8 @@ pub const registry = blk: {
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .dip, .pattern = &dip_pattern },
         .{ .operation = .str_format, .pattern = &str_format_pattern },
-        .{ .operation = .sum, .pattern = &total_pattern },
-        .{ .operation = .product, .pattern = &total_pattern },
+        .{ .operation = .sum, .pattern = &sum_pattern },
+        .{ .operation = .product, .pattern = &product_pattern },
     }) |direct| {
         entries[index] = .{
             .context = .direct,
@@ -362,12 +377,7 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
     const phrase: Value = .{ .list = env.quotationHeader(body) };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
-        if (phrase.list.length() != entry.pattern.len) continue;
-        var capture = matchFrozen(lookup, phrase, entry) orelse continue;
-        if (entry.operation == .direct) switch (entry.operation.direct) {
-            .sum, .product => capture = totalCapture(lookup, phrase, entry.operation.direct, capture) orelse continue,
-            else => {},
-        };
+        const capture = matchPhrase(.{ .frozen = lookup }, phrase, entry) orelse continue;
         return .{
             .entry = @intCast(index),
             .constant = capture.constant,
@@ -378,75 +388,93 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
     return null;
 }
 
-/// A total's reduction literal must be exactly `((op) fold1)`. Its operator
-/// is the active word, so a fault names `+` or `*` at that literal, as the
-/// definition's own reduction would.
-fn totalCapture(lookup: env.FrozenLookup, phrase: Value, operation: DirectOp, matched: Capture) ?Capture {
-    const empty = list.atUnchecked(phrase, 2);
-    if (empty != .list or empty.list.length() != 2) return null;
-    const pop = list.atUnchecked(empty, 0);
-    const seed = list.atUnchecked(empty, 1);
-    if (pop != .word or !frozenWordMatches(lookup, pop.word, .{ .spelling = "pop" })) return null;
-    const expected_seed: i64 = if (operation == .sum) 0 else 1;
-    if (seed != .int or seed.int != expected_seed) return null;
+/// How a pattern word's binding is checked: against a frozen environment,
+/// once, when a trusted definition is recognized; or where the phrase runs,
+/// when a quotation is offered.
+const WordGuard = union(enum) {
+    frozen: env.FrozenLookup,
+    live: *Machine,
 
-    const reduction = list.atUnchecked(phrase, 3);
-    if (reduction != .list or reduction.list.length() != 2) return null;
-    const quoted = list.atUnchecked(reduction, 0);
-    const fold1 = list.atUnchecked(reduction, 1);
-    if (quoted != .list or quoted.list.length() != 1 or fold1 != .word) return null;
-    if (!frozenWordMatches(lookup, fold1.word, .{ .spelling = "fold1", .binding = .source })) return null;
-    const operator = list.atUnchecked(quoted, 0);
-    if (operator != .word) return null;
-    const spelling: []const u8 = if (operation == .sum) "+" else "*";
-    if (!frozenWordMatches(lookup, operator.word, .{ .spelling = spelling })) return null;
-    var capture = matched;
-    capture.active_word = operator.word.name;
-    capture.active_index = 3;
+    fn matches(
+        self: WordGuard,
+        word: value.WordRef,
+        binding: BindingKind,
+        primitive: ?env.PrimitiveImpl,
+        origin: ExpectedOrigin,
+    ) bool {
+        switch (self) {
+            .frozen => |lookup| return frozenBindingMatches(lookup, word, binding, primitive, origin),
+            .live => |evaluator| {
+                std.debug.assert(origin == .trusted);
+                if (!slotOnRunningRoot(evaluator, word.slot)) return false;
+                // A word that resolves to nothing a plain word may run, or whose
+                // root has retired, is simply not the expected binding; generic
+                // execution reports any error.
+                // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
+                var resolved: machine.Resolution = undefined;
+                if (!evaluator.peekSlotWord(word, &resolved)) return false;
+                defer resolved.deinit(evaluator.allocator());
+                const spec = resolved.lease.spec();
+                const binding_matches = switch (binding) {
+                    .builtin => spec.binding == .builtin and
+                        (primitive == null or spec.binding.builtin == primitive.?),
+                    .source => spec.binding == .word,
+                };
+                return binding_matches and (resolved.origin == .core or resolved.origin == .standard_library);
+            },
+        }
+    }
+};
+
+/// The one atom matcher, shared by every site; only the guard differs. The
+/// phrase matches when every atom does, at every nesting level.
+fn matchPhrase(guard: WordGuard, phrase: Value, entry: RegistryEntry) ?Capture {
+    var capture: Capture = .{};
+    if (!matchAtoms(guard, phrase, entry.pattern, entry.operation, &capture, null)) return null;
     return capture;
 }
 
-/// The atom-by-atom match `IdiomDriver` performs, over a frozen environment.
-fn matchFrozen(lookup: env.FrozenLookup, phrase: Value, entry: RegistryEntry) ?Capture {
-    var capture: Capture = .{};
-    for (entry.pattern, 0..) |atom, atom_index| {
+/// `top` is the top-level position of the quotation holding a nested
+/// pattern: a capture records where in the phrase a fault is reported.
+fn matchAtoms(
+    guard: WordGuard,
+    phrase: Value,
+    pattern: []const PatternAtom,
+    operation: Operation,
+    capture: *Capture,
+    top: ?u32,
+) bool {
+    if (phrase != .list or phrase.list.length() != pattern.len) return false;
+    for (pattern, 0..) |atom, atom_index| {
         const actual = list.atUnchecked(phrase, atom_index);
+        const site: u32 = top orelse @intCast(atom_index);
         switch (atom) {
             .constant => {
-                if (capture.constant != null or actual == .word) return null;
+                if (capture.constant != null or actual == .word) return false;
                 capture.constant = actual;
             },
-            .literal => if (actual == .word) return null,
-            .quotation_word => |expected| {
-                if (actual != .list or actual.list.length() != 1) return null;
-                const quoted = list.atUnchecked(actual, 0);
-                if (quoted != .word or !frozenWordMatches(lookup, quoted.word, expected)) return null;
-            },
+            .literal => if (actual == .word) return false,
+            .int => |expected| if (actual != .int or actual.int != expected) return false,
+            .quotation => |inner| if (!matchAtoms(guard, actual, inner, operation, capture, site)) return false,
             .operation => {
-                if (actual != .word) return null;
-                const word = actual.word;
-                if (!std.mem.eql(u8, intern.get(word.name), entry.operation.spelling())) return null;
-                const binding = operationBinding(entry.operation);
-                const primitive = if (binding == .builtin) operationPrimitive(entry.operation) else null;
-                if (!frozenBindingMatches(lookup, word, binding, primitive, .trusted)) return null;
-                capture.active_word = word.name;
-                capture.active_index = @intCast(atom_index);
+                if (actual != .word or !std.mem.eql(u8, intern.get(actual.word.name), operation.spelling())) return false;
+                const binding = operationBinding(operation);
+                const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
+                if (!guard.matches(actual.word, binding, primitive, .trusted)) return false;
+                capture.active_word = actual.word.name;
+                capture.active_index = site;
             },
             .word => |expected| {
-                if (actual != .word or !frozenWordMatches(lookup, actual.word, expected)) return null;
-                if (std.mem.eql(u8, expected.spelling, "grade")) {
+                if (actual != .word or !std.mem.eql(u8, intern.get(actual.word.name), expected.spelling)) return false;
+                if (!guard.matches(actual.word, expected.binding, null, expected.origin)) return false;
+                if (expected.active) {
                     capture.active_word = actual.word.name;
-                    capture.active_index = @intCast(atom_index);
+                    capture.active_index = site;
                 }
             },
         }
     }
-    return capture;
-}
-
-fn frozenWordMatches(lookup: env.FrozenLookup, word: value.WordRef, expected: ExpectedWord) bool {
-    if (!std.mem.eql(u8, intern.get(word.name), expected.spelling)) return false;
-    return frozenBindingMatches(lookup, word, expected.binding, null, expected.origin);
+    return true;
 }
 
 /// The binding guard, decided once. A trusted word may resolve in the frozen
@@ -492,7 +520,7 @@ pub fn tryApply(
             .active_word = offered.active_word,
             .active_index = offered.active_index,
         }, decline);
-    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline, request, planned);
+    return matchOffered(evaluator, candidate, entries, decline, request, planned);
 }
 
 /// What an offered match runs if it declines: still the caller's source while
@@ -590,173 +618,37 @@ fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, ca
 }
 
 /// Matches an offered phrase against the registry entries of its context and
-/// length. The work is bounded by the registry's shape and each pattern word
-/// is one slot read, so the whole match runs where the combinator applies.
-const Matcher = struct {
-    candidate: Candidate,
-    entries: []const u16,
-    entry_index: usize = 0,
-    atom_index: usize = 0,
-    capture: Capture = .{},
-    expected: ?env.PrimitiveImpl = null,
-    expected_binding: BindingKind = .builtin,
-
-    /// The registry index of the entry whose pattern the phrase matched, or
-    /// null once every entry has been rejected. Whether it applies is the
-    /// caller's to decide against the operands.
-    const Step = union(enum) { progressed, done: ?u16 };
-
-    fn phraseSite(self: *const Matcher) machine.ErrorSite {
-        return .{ .code = self.candidate.phrase.list, .index = @intCast(self.atom_index) };
-    }
-    fn rejectEntry(self: *Matcher) void {
-        self.entry_index += 1;
-        self.atom_index = 0;
-        self.capture = .{};
-        self.expected = null;
-        self.expected_binding = .builtin;
-    }
-    /// Whether the resolved word is the trusted binding the atom expects.
-    fn accept(self: *Matcher, resolved: *const machine.Resolution) void {
-        const binding_matches = switch (self.expected_binding) {
-            .builtin => resolved.lease.spec().binding == .builtin and
-                (self.expected == null or resolved.lease.spec().binding.builtin == self.expected.?),
-            .source => resolved.lease.spec().binding == .word,
-        };
-        const origin_matches = resolved.origin == .core or resolved.origin == .standard_library;
-        if (!origin_matches or !binding_matches) return self.rejectEntry();
-        self.atom_index += 1;
-        self.expected = null;
-        self.expected_binding = .builtin;
-    }
-    /// Resolves a pattern word through its slot. A word that resolves to
-    /// nothing a plain word may run, or whose root has retired, is simply not
-    /// the expected binding; generic execution reports any error.
-    fn resolve(self: *Matcher, evaluator: *Machine, word: value.WordRef) Step {
-        // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
-        var resolved: machine.Resolution = undefined;
-        if (!evaluator.peekSlotWord(word, &resolved)) {
-            self.rejectEntry();
-            return .progressed;
-        }
-        defer resolved.deinit(evaluator.allocator());
-        self.accept(&resolved);
-        return .progressed;
-    }
-    fn expectWord(
-        self: *Matcher,
-        evaluator: *Machine,
-        word: value.WordRef,
-        expected_word: ExpectedWord,
-    ) Step {
-        std.debug.assert(expected_word.origin == .trusted);
-        if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling) or
-            !slotOnRunningRoot(evaluator, word.slot))
-        {
-            self.rejectEntry();
-            return .progressed;
-        }
-        self.expected_binding = expected_word.binding;
-        self.expected = null;
-        return self.resolve(evaluator, word);
-    }
-    fn step(self: *Matcher, evaluator: *Machine) Step {
-        if (self.entry_index == self.entries.len) return .{ .done = null };
-        const entry = registry[self.entries[self.entry_index]];
-        if (self.atom_index == entry.pattern.len)
-            return .{ .done = self.entries[self.entry_index] };
-        const actual = list.atUnchecked(self.candidate.phrase, self.atom_index);
-        switch (entry.pattern[self.atom_index]) {
-            .constant => {
-                if (self.capture.constant != null or actual == .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.capture.constant = actual;
-                self.atom_index += 1;
-            },
-            .literal => {
-                if (actual == .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.atom_index += 1;
-            },
-            .quotation_word => |expected_word| {
-                if (actual != .list or actual.list.length() != 1) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                const quoted = list.atUnchecked(actual, 0);
-                if (quoted != .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                return self.expectWord(evaluator, quoted.word, expected_word);
-            },
-            .operation => {
-                if (actual != .word or
-                    !std.mem.eql(u8, intern.get(actual.word.name), entry.operation.spelling()) or
-                    !slotOnRunningRoot(evaluator, actual.word.slot))
-                {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.capture.active_word = actual.word.name;
-                self.capture.active_index = @intCast(self.atom_index);
-                self.expected_binding = operationBinding(entry.operation);
-                self.expected = if (self.expected_binding == .builtin)
-                    operationPrimitive(entry.operation)
-                else
-                    null;
-                return self.resolve(evaluator, actual.word);
-            },
-            .word => |expected_word| {
-                if (actual != .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                // Recorded before resolving: a cached answer advances the
-                // atom at once.
-                if (std.mem.eql(u8, expected_word.spelling, "grade")) {
-                    self.capture.active_word = actual.word.name;
-                    self.capture.active_index = @intCast(self.atom_index);
-                }
-                return self.expectWord(evaluator, actual.word, expected_word);
-            },
-        }
-        return .progressed;
-    }
-};
-
-/// Matches the phrase, then applies the selected entry or declines.
-/// Matches the phrase, records the match in the running finite iteration's
-/// plan when it has room, then applies the matched entry or declines.
+/// length, records the match in the running finite iteration's plan when it
+/// has room, then applies the matched entry or declines. The work is bounded
+/// by the registry's shape and each pattern word is one slot read, so the
+/// whole match runs where the combinator applies.
 fn matchOffered(
     evaluator: *Machine,
-    matcher: Matcher,
+    candidate: Candidate,
+    entries: []const u16,
     decline: Decline,
     request: machine.IdiomRequest,
     planned: ?*machine.PlanEntry,
 ) MachineError!void {
-    var matching = matcher;
-    const matched = while (true) switch (matching.step(evaluator)) {
-        .progressed => {},
-        .done => |entry| break entry,
-    };
+    var capture: Capture = .{};
+    const matched: ?u16 = for (entries) |index| {
+        if (matchPhrase(.{ .live = evaluator }, candidate.phrase, registry[index])) |found| {
+            capture = found;
+            break index;
+        }
+    } else null;
     if (planned) |entry| if (entry.offered == null) {
-        const phrase = matching.candidate.phrase;
-        heap.retainValue(phrase);
+        heap.retainValue(candidate.phrase);
         entry.offered = .{
             .request = request,
-            .phrase = phrase.list,
+            .phrase = candidate.phrase.list,
             .entry = matched,
-            .constant = matching.capture.constant,
-            .active_word = matching.capture.active_word,
-            .active_index = matching.capture.active_index,
+            .constant = capture.constant,
+            .active_word = capture.active_word,
+            .active_index = capture.active_index,
         };
     };
-    return applyMatched(evaluator, matching.candidate.phrase, matched, matching.capture, decline);
+    return applyMatched(evaluator, candidate.phrase, matched, capture, decline);
 }
 
 /// Applies a matched entry when this application's operands admit it, and
