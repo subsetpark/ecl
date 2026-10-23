@@ -3173,6 +3173,118 @@ fn unexpectedReduceShape(evaluator: *Machine) MachineError {
     return evaluator.fail(.domain, "typed reduction reached an unclassified operand shape");
 }
 
+/// The result of applying one row of a leading-axis fold.
+pub const RowFold = union(enum) {
+    /// Not a same-class, same-length typed pair, or the row does not fit the
+    /// turn's remaining budget: the caller applies it through its cursor.
+    declined,
+    /// The solely-owned accumulator was updated in place. The caller's
+    /// reference is now this value's reference.
+    in_place: Value,
+    /// A fresh accumulator. The caller still owns, and releases, the old one.
+    fresh: Value,
+};
+
+/// One step of a fold over rows: `accumulator operation row`, elementwise,
+/// when both are typed leaves of one class whose result keeps that class.
+/// It computes what the pervasive binary would, element by element through
+/// the same scalar authority, and reports the same first fault at the same
+/// element index; it only skips that route's per-row cursor, allocation, and
+/// machine turn. The whole row is charged before it runs, and a row larger
+/// than the remaining budget is declined rather than split.
+pub fn foldLeafRow(
+    evaluator: *Machine,
+    operation: BinaryOp,
+    accumulator: Value,
+    accumulator_owned: bool,
+    row: Value,
+) MachineError!RowFold {
+    const class = leafNumber(accumulator) orelse return .declined;
+    if (leafNumber(row) != class) return .declined;
+    const length: usize = @intCast(row.list.length());
+    if (length == 0 or accumulator.list.length() != length) return .declined;
+    if (length > evaluator.remainingKernelFuel()) return .declined;
+    return switch (operation) {
+        inline else => |selected| switch (class) {
+            .byte => .declined,
+            inline .integer, .real => |selected_class| if (comptime binaryResult(selected, selected_class, selected_class) != selected_class)
+                .declined
+            else
+                rowFoldStep(selected, selected_class).run(evaluator, accumulator, accumulator_owned, row, length),
+        },
+    };
+}
+
+fn rowFoldStep(comptime operation: BinaryOp, comptime class: Number) type {
+    const Element = class.Element();
+    const Staging = flat.Block(Element);
+    return struct {
+        /// See `reduceStep`: float `+ - *` fault only on a NaN result, so a
+        /// clean unchecked block needs no per-element test.
+        const unchecked = class == .real and
+            (operation == .add or operation == .sub or operation == .mul);
+
+        fn run(evaluator: *Machine, accumulator: Value, accumulator_owned: bool, row: Value, length: usize) MachineError!RowFold {
+            try evaluator.advanceKernel(length);
+            var right = heap.LeafReader(class.kind()).acquire(row.list);
+            defer right.release(evaluator.releaseDomain());
+            if (accumulator_owned) if (heap.UniqueLeafAdoption(class.kind()).claim(accumulator.list, length)) |claimed| {
+                var adoption = claimed;
+                errdefer adoption.abandon();
+                try apply(evaluator, adoption.sourceSlice(class.kind()), right.slice(), adoption.inPlaceRange(0, length));
+                return .{ .in_place = adoption.finish() };
+            };
+            var left = heap.LeafReader(class.kind()).acquire(accumulator.list);
+            defer left.release(evaluator.releaseDomain());
+            var writer = try heap.LeafWriter(class.kind()).init(evaluator.allocator(), length);
+            errdefer writer.retirePartial(evaluator.releaseDomain());
+            try apply(evaluator, left.slice(), right.slice(), writer.unpublishedRange(0, length));
+            return .{ .fresh = writer.finish() };
+        }
+
+        /// `out` may alias `left`: each block is computed from operands not
+        /// yet stored over, then stored.
+        fn apply(evaluator: *Machine, left: []const Element, right: []const Element, out: []Element) MachineError!void {
+            var block = Staging.init();
+            var start: usize = 0;
+            while (start != out.len) {
+                const end = @min(start + flat.block_size, out.len);
+                if (unchecked) {
+                    var clean = true;
+                    for (start..end, 0..) |index, slot| {
+                        const next = switch (operation) {
+                            .add => left[index] + right[index],
+                            .sub => left[index] - right[index],
+                            .mul => left[index] * right[index],
+                            else => unreachable,
+                        };
+                        clean = clean and !std.math.isNan(next);
+                        block.items[slot] = next;
+                    }
+                    if (clean) {
+                        @memcpy(out[start..end], block.items[0 .. end - start]);
+                        start = end;
+                        continue;
+                    }
+                }
+                for (start..end, 0..) |index, slot| {
+                    const next = @call(.always_inline, scalarBinary, .{
+                        operation,
+                        class.boxed(left[index]),
+                        class.boxed(right[index]),
+                    }) catch |fault| {
+                        const diagnostic = scalarDiagnostic(fault);
+                        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
+                    };
+                    block.items[slot] = class.unboxed(next);
+                }
+                @memcpy(out[start..end], block.items[0 .. end - start]);
+                start = end;
+            }
+        }
+    };
+}
+
 pub const IdiomReduceStart = *const fn (*Machine, Value, Value, bool, usize, usize) MachineError!void;
 
 /// Starts the typed reduction. The caller has guarded with

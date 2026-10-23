@@ -379,6 +379,15 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .failure => "[1 'bad] (+)",
         },
         .sort => sortInput(variant),
+        // A non-list operand declines to the definition, so the failure
+        // variant faults inside the recognized reduction.
+        .sum, .product => switch (variant) {
+            .atom => "[1 2 3]",
+            .empty => "[]",
+            .spine => "[[1 2] [3 4] [5 6]]",
+            .float => "[0.1 -0.0 0.2]",
+            .failure => "[[1 2] [3 'bad]]",
+        },
         .find => switch (variant) {
             .atom => "[1 2 1] 2",
             .empty => "[] 1",

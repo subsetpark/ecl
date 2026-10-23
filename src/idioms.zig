@@ -27,6 +27,8 @@ pub const DirectOp = enum {
     dip,
     str_format,
     fold1,
+    sum,
+    product,
 
     pub fn spelling(self: DirectOp) []const u8 {
         return switch (self) {
@@ -174,6 +176,15 @@ const str_format_pattern = [_]PatternAtom{
         .origin = .candidate_module,
     } },
 };
+/// `sum` and `product`: `dup empty? (pop seed) ((op) fold1) if`. The
+/// definition's name selects the operation.
+const total_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "empty?", .binding = .source } },
+    .literal,
+    .literal,
+    .{ .word = .{ .spelling = "if" } },
+};
 const fold1_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
     .{ .word = .{ .spelling = "uncons", .binding = .source } },
@@ -184,7 +195,7 @@ const fold1_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 16]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
@@ -272,6 +283,8 @@ pub const registry = blk: {
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .dip, .pattern = &dip_pattern },
         .{ .operation = .str_format, .pattern = &str_format_pattern },
+        .{ .operation = .sum, .pattern = &total_pattern },
+        .{ .operation = .product, .pattern = &total_pattern },
     }) |direct| {
         entries[index] = .{
             .context = .direct,
@@ -350,7 +363,11 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
         if (phrase.list.length() != entry.pattern.len) continue;
-        const capture = matchFrozen(lookup, phrase, entry) orelse continue;
+        var capture = matchFrozen(lookup, phrase, entry) orelse continue;
+        if (entry.operation == .direct) switch (entry.operation.direct) {
+            .sum, .product => capture = totalCapture(lookup, phrase, entry.operation.direct, capture) orelse continue,
+            else => {},
+        };
         return .{
             .entry = @intCast(index),
             .constant = capture.constant,
@@ -359,6 +376,26 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
         };
     }
     return null;
+}
+
+/// A total's reduction literal must be exactly `((op) fold1)`. Its operator
+/// is the active word, so a fault names `+` or `*` at that literal, as the
+/// definition's own reduction would.
+fn totalCapture(lookup: env.FrozenLookup, phrase: Value, operation: DirectOp, matched: Capture) ?Capture {
+    const reduction = list.atUnchecked(phrase, 3);
+    if (reduction != .list or reduction.list.length() != 2) return null;
+    const quoted = list.atUnchecked(reduction, 0);
+    const fold1 = list.atUnchecked(reduction, 1);
+    if (quoted != .list or quoted.list.length() != 1 or fold1 != .word) return null;
+    if (!frozenWordMatches(lookup, fold1.word, .{ .spelling = "fold1", .binding = .source })) return null;
+    const operator = list.atUnchecked(quoted, 0);
+    if (operator != .word) return null;
+    const spelling: []const u8 = if (operation == .sum) "+" else "*";
+    if (!frozenWordMatches(lookup, operator.word, .{ .spelling = spelling })) return null;
+    var capture = matched;
+    capture.active_word = operator.word.name;
+    capture.active_index = 3;
+    return capture;
 }
 
 /// The atom-by-atom match `IdiomDriver` performs, over a frozen environment.
@@ -753,6 +790,9 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
             .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
+            // Any other operand reaches the definition, so its error is the
+            // definition's.
+            .sum, .product => evaluator.available() >= 1 and stack[stack.len - 1] == .list,
             else => evaluator.available() >= 1,
         },
     };
@@ -793,7 +833,21 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .reverse => sequence.reverseForIdiom(evaluator),
         .dip => combinators.dipForIdiom(evaluator),
         .str_format => dict_text.formatForIdiom(evaluator),
+        .sum => applyTotal(evaluator, .add, 0),
+        .product => applyTotal(evaluator, .mul, 1),
     };
+}
+
+/// `sum`/`product` over a list: the empty seed, or `(op) fold1` without the
+/// definition's dispatch. The list is the reduction's only consumed value.
+fn applyTotal(evaluator: *Machine, operation: numeric.BinaryOp, empty: i64) MachineError!void {
+    const stack = evaluator.unit.stack.items;
+    const input = stack[stack.len - 1];
+    if (input.list.length() == 0) {
+        popRelease(evaluator, 1);
+        return evaluator.pushOwned(.{ .int = empty });
+    }
+    return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
 }
 
 fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!void {
@@ -1134,6 +1188,21 @@ fn applyReduction(
     const stack = evaluator.unit.stack.items;
     const input = stack[stack.len - consumed];
     const initial = if (from_first) list.atUnchecked(input, 0) else stack[stack.len - 2];
+    return startReduction(evaluator, operation, scan, input, initial, start, consumed);
+}
+
+/// `consumed` stack values lie under the result: the list is the deepest,
+/// and `start` is 1 when `initial` is its first element.
+fn startReduction(
+    evaluator: *Machine,
+    operation: numeric.BinaryOp,
+    scan: bool,
+    input: Value,
+    initial: Value,
+    start: usize,
+    consumed: usize,
+) MachineError!void {
+    const from_first = start == 1;
     std.debug.assert(input == .list);
     const count: usize = @intCast(input.list.length());
     if (count == start) {
@@ -1194,6 +1263,27 @@ const ReductionDriver = struct {
         self: *ReductionDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
+        // A fold whose accumulator and next row are typed leaves of one class
+        // and length applies whole rows here, each charged before it runs,
+        // without a cursor or a machine turn per row. Anything else, and any
+        // row the remaining budget cannot pay for, takes the cursor below.
+        if (!self.scan) while (!self.cursor.isPresent() and self.initialized < self.input.list.length()) {
+            const accumulator = self.accumulator.borrowMut();
+            const owned = accumulator.* == .owned;
+            switch (try numeric.foldLeafRow(
+                evaluator,
+                self.operation,
+                accumulator.value(),
+                owned,
+                list.atUnchecked(self.input, self.initialized),
+            )) {
+                .declined => break,
+                .in_place => |next| accumulator.* = .{ .owned = next },
+                .fresh => |next| accumulator.replaceOwned(evaluator.releaseDomain(), next),
+            }
+            self.initialized += 1;
+            if (evaluator.remainingKernelFuel() == 0) return .stepped;
+        };
         if (!self.materializing and self.initialized < self.input.list.length()) {
             if (!self.cursor.isPresent()) {
                 const row = list.atUnchecked(self.input, self.initialized);

@@ -1153,7 +1153,16 @@ Boolean reductions share the numeric reduction machinery, including validation
 of every operand. Recognized `fold1` reductions retain the original input and
 start after its first element; they never materialize a tail. An empty fold
 preserves its seed and a singleton `fold1` preserves its sole value without
-invoking the reducer. Arbitrary quotations retain generic application semantics.
+invoking the reducer. A reduction over rows applies a whole row in one charged
+step when the accumulator and the row are typed leaves of one class and
+length and the operation keeps that class. Each element goes through the
+scalar authority, so results and the first fault, with its element index, are
+the per-row cursor's; a row the remaining budget cannot pay for takes the
+cursor. `sum` and `product` are recognized as their whole definitions, with
+the reduction literal held to `((+) fold1)` or `((*) fold1)` and its operator
+as the active word: an empty list receives the seed and a nonempty one starts
+that `fold1` reduction directly, while any other operand runs the definition.
+Arbitrary quotations retain generic application semantics.
 For an offered quotation the guard result lives for that application and is
 discarded afterward, so redefinition receives a fresh check.
 
