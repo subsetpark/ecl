@@ -668,21 +668,20 @@ test "module values: an escaped quotation names the image it was written in" {
     try expectErrorContains(&runtime, "escaped call", &.{ "'kind 'domain", "retired" });
 }
 
-test "module values: escaped locals backend words reject retired scopes" {
+test "module values: an escaped locals body rejects a retired scope through its words" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectOk(&runtime, "[] (((|x| x)) 'q def) 'lowered-owner @defm lowered-owner.q 'held set");
-    try expectStack(&runtime, "7 held call", "7");
+    try expectOk(&runtime, "[] ((1 +) 'inc def ((|x| x inc)) 'q def ((|x| x)) 'r def) 'lowered-owner @defm " ++
+        "lowered-owner.q 'held set lowered-owner.r 'plain set");
+    try expectStack(&runtime, "7 held call", "8");
     try expectOk(&runtime, "[] ((0) 'q def) 'lowered-owner @defm");
+    // The body's own word names the retired image.
     try expectErrorContains(&runtime, "7 held call", &.{ "'kind 'domain", "retired" });
-
-    try expectOk(&runtime, "[] (((1 1 _ll 0 _gl 1 _dl)) 'q def) 'raw-owner @defm raw-owner.q 'raw-held set");
-    try expectStack(&runtime, "raw-held call", "1");
-    try expectOk(&runtime, "'raw-owner unmodule");
-    try expectErrorContains(&runtime, "raw-held call", &.{ "'kind 'domain", "retired" });
+    // Locals alone name nothing in the image.
+    try expectStack(&runtime, "7 plain call", "7");
 }
 
 test "module values: local call sites do not grant an escaped quotation the caller home" {

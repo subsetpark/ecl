@@ -1,5 +1,6 @@
 //! Session-lifetime ownership and direct lookup for reader provenance tables.
 const std = @import("std");
+const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
@@ -860,8 +861,9 @@ pub const SpanArchive = enum(usize) {
         ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
             shared: switch (item) {
                 // The one rewrite: a word occurrence inside this body's text
-                // names the image the body is becoming.
-                .word => |reference| return .{
+                // names the image the body is becoming. A lowered locals
+                // operation names no slot and keeps its operand.
+                .word => |reference| return if (env.localOperand(reference.slot) != null) item else .{
                     .word = .{ .name = reference.name, .slot = try self.linker.link(reference.name) },
                 },
                 .list => |nested| {

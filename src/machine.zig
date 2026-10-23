@@ -20,7 +20,6 @@ const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const task_join_core = @import("task_join_core.zig");
 const resolution_core = @import("resolution_core.zig");
-const prims = @import("prims.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
 pub const Value = value.Value;
@@ -5852,19 +5851,20 @@ pub const Machine = struct {
         }
     }
 
-    /// Reader-lowered locals end in `<count> _dl`. That cleanup must run
+    /// Reader-lowered locals end in a `_dl` operation. That cleanup must run
     /// after the authored final form, but it does not make a final control
     /// transfer semantically non-tail. The exact reserved epilogue is the only
     /// continuation shape granted this exception.
     fn isSourceTailPosition(self: *const Machine, current: Eval) bool {
         const length = current.code.length();
         if (current.nextIndex() == length) return true;
-        if (length - current.nextIndex() != 2) return false;
-        const count = list.atUnchecked(.{ .list = current.code }, current.nextIndex());
-        const drop = list.atUnchecked(.{ .list = current.code }, current.nextIndex() + 1);
-        return count == .int and count.int >= 0 and
-            drop == .word and drop.word.name == self.unit.environment.localsWords().drop and
-            @as(usize, @intCast(count.int)) <= self.unit.locals.items.len;
+        if (length - current.nextIndex() == 1) {
+            const drop = list.atUnchecked(.{ .list = current.code }, current.nextIndex());
+            if (drop != .word or drop.word.name != self.unit.environment.localsWords().drop) return false;
+            const count = env.localOperand(drop.word.slot) orelse return false;
+            return count <= self.unit.locals.items.len;
+        }
+        return false;
     }
     /// Starts one quotation application behind a base-index stack barrier.
     /// `application.context` is consumed on every path. Its callback either
@@ -6258,6 +6258,8 @@ pub const Machine = struct {
     ) error{Retired}!SlotTarget {
         switch (env.wordTarget(raw)) {
             .unlinked => unreachable,
+            // executeWord and peekSlotWord take these before resolution.
+            .local => return error.Retired,
             .slot => |id| {
                 const slot = self.unit.environment.slot(id) orelse return error.Retired;
                 const root = slot.rootCell();
@@ -6300,7 +6302,7 @@ pub const Machine = struct {
     /// so this never records a failure: an unlinked word, or one whose root
     /// has retired, is simply not a match, and generic execution reports it.
     pub fn peekSlotWord(self: *Machine, word: value.WordRef, out: *Resolution) bool {
-        if (word.slot == 0) return false;
+        if (word.slot == 0 or env.localOperand(word.slot) != null) return false;
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
@@ -6326,7 +6328,29 @@ pub const Machine = struct {
         return try plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
+    /// Runs a lowered locals operation: bind the top `operand` values, read
+    /// local `operand`, or drop `operand` locals. The lowerer computed the
+    /// operand, so the checks only guard a word built or moved by hand.
+    fn localOperation(self: *Machine, name: u32, operand: u32) MachineError!void {
+        const locals = self.unit.environment.localsWords();
+        self.unit.active_word = .plain(name);
+        if (name == locals.get) {
+            if (operand >= self.localDepth()) return self.fail(.domain, "_gl index is out of bounds");
+            return self.readLocal(operand);
+        }
+        if (name == locals.load) {
+            try self.require(operand);
+            return self.bindLocals(operand);
+        }
+        if (name == locals.drop) {
+            if (operand > self.localDepth()) return self.fail(.domain, "_dl count exceeds the live locals");
+            return self.unbindLocals(operand);
+        }
+        return self.fail(.domain, "a locals operand on a word that is not a locals operation");
+    }
+
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         // A session or core word resolved before in this unit's view.
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
         const view = self.bindingView();
@@ -7370,22 +7394,6 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .word => |reference| reference,
         .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
     };
-    // Locals lowering emits the backend words unlinked; a linked one is
-    // ordinary text and dispatches through its slot like any word.
-    if (word.slot == 0) {
-        // The locals backend is reserved from every publication, so these
-        // names can only mean their core primitives.
-        const locals = self.unit.environment.localsWords();
-        const backend: ?env.PrimitiveImpl = if (word.name == locals.get)
-            prims.readLocal
-        else if (word.name == locals.load)
-            prims.bindLocals
-        else if (word.name == locals.drop)
-            prims.unbindLocals
-        else
-            null;
-        if (backend) |primitive| return invokeBuiltin(self, .plain(word.name), primitive);
-    }
     try self.executeWord(word);
 }
 

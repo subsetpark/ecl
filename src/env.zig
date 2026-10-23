@@ -263,7 +263,7 @@ pub const FrozenLookup = struct {
     /// The root id of the slot a word carries, or zero for an unlinked word.
     fn rootOf(self: FrozenLookup, slot_id: u32) u32 {
         return switch (wordTarget(slot_id)) {
-            .unlinked => 0,
+            .unlinked, .local => 0,
             .image => |scope| @backingInt(scope),
             .slot => |id| found: {
                 const found = self.slots.get(id) orelse break :found 0;
@@ -1669,10 +1669,28 @@ const SlotIndex = Directory(SlotId, Slot);
 /// the image's own scope id already names it, and its name is in the word.
 pub const SlotId = enum(u32) { none = 0, _ };
 pub const image_root_flag: u32 = 1 << 31;
+/// A locals operation the reader lowered `|...|` into carries its count or
+/// index in the slot field with this flag set: one form per bind, read, or
+/// drop. It names no slot. Directory and scope ids stay below it.
+pub const local_operand_flag: u32 = 1 << 30;
+
+/// The slot field of a locals operation with `operand`.
+pub fn localOperandSlot(operand: u32) u32 {
+    std.debug.assert(operand < local_operand_flag);
+    return local_operand_flag | operand;
+}
+
+/// The count or index a locals operation carries, or null for any other word.
+pub fn localOperand(raw: u32) ?u32 {
+    if (raw & (image_root_flag | local_operand_flag) != local_operand_flag) return null;
+    return raw & ~local_operand_flag;
+}
 
 /// What a word's slot field names.
 pub const WordTarget = union(enum) {
     unlinked,
+    /// A lowered locals operation, with its count or index; no slot.
+    local: u32,
     /// A session or core slot, by directory id.
     slot: SlotId,
     /// A module image root; the slot is found by name once the image is proven
@@ -1682,6 +1700,7 @@ pub const WordTarget = union(enum) {
 pub fn wordTarget(raw: u32) WordTarget {
     if (raw == 0) return .unlinked;
     if (raw & image_root_flag != 0) return .{ .image = @fromBackingInt(raw & ~image_root_flag) };
+    if (localOperand(raw)) |operand| return .{ .local = operand };
     return .{ .slot = @fromBackingInt(raw) };
 }
 
