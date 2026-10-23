@@ -399,6 +399,63 @@ pub fn Kernel(comptime Spec: type) type {
             return evaluator.runDriverAt(&driver);
         }
 
+        /// Runs the kernel for a leaf inside pervasion, where the operands
+        /// belong to the structure being descended. `root` is the caller's
+        /// owner of operand 0 when that operand is the operation's own and
+        /// may be reused; every other operand is only borrowed, so a driver
+        /// retains its own references to them. The result is returned rather
+        /// than pushed.
+        pub fn nested(
+            evaluator: *Machine,
+            operands: Operands,
+            root: ?*heap.OwnedValue,
+            params: Spec.Params,
+            length: usize,
+        ) MachineError!NestedOutcome {
+            var output = try Spec.prepare(evaluator, operands, params, length);
+            if (length > evaluator.remainingKernelFuel()) return .{ .frame = try boxDriver(evaluator, operands, root, params, output, length) };
+            errdefer output.retire(evaluator.releaseDomain());
+            const context = Context{ .evaluator = evaluator };
+            try context.advance(length);
+            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = length }, context);
+            const consumed = adoptedOperand(&output);
+            const result = Spec.finish(&output);
+            if (consumed) |position| {
+                std.debug.assert(position == 0);
+                _ = root.?.take();
+            }
+            return .{ .value = result };
+        }
+
+        noinline fn boxDriver(
+            evaluator: *Machine,
+            operands: Operands,
+            root: ?*heap.OwnedValue,
+            params: Spec.Params,
+            output: Spec.Output,
+            length: usize,
+        ) error{OutOfMemory}!ErasedDriver {
+            const held: Held = .{ .values = operands };
+            const driver = evaluator.allocator().create(Driver) catch |err| {
+                var abandoned = output;
+                abandoned.retire(evaluator.releaseDomain());
+                return err;
+            };
+            // Only now can nothing fail: the driver takes its references.
+            for (held.values, 0..) |item, position| {
+                if (position == 0 and root != null) {
+                    _ = root.?.take();
+                } else heap.retainValue(item);
+            }
+            driver.* = .{
+                .operands = .init(held),
+                .params = params,
+                .output = .init(output),
+                .cursor = flat.FlatCursor.init(length),
+            };
+            return ErasedDriver.of(Driver, driver);
+        }
+
         /// A driver's own references to the operands, less any the result
         /// took over.
         const Held = struct {
@@ -437,6 +494,60 @@ pub fn Kernel(comptime Spec: type) type {
         };
     };
 }
+
+/// What a kernel made of a typed leaf inside pervasion.
+pub const NestedOutcome = union(enum) {
+    /// The leaf finished within the turn.
+    value: Value,
+    /// The leaf continues as a boxed driver, which the caller's frame
+    /// advances and, if abandoned, destroys.
+    frame: ErasedDriver,
+};
+
+/// A kernel driver behind a pointer, for a frame that holds one of many
+/// kernels and must stay small: pervasion moves its frames by value.
+pub const ErasedDriver = struct {
+    context: *anyopaque,
+    advance_fn: *const fn (*anyopaque, *Machine) MachineError!machine.WorkProgress,
+    destroy_fn: *const fn (*anyopaque, *heap.ReleaseDomain, std.mem.Allocator) void,
+
+    fn of(comptime Driver: type, driver: *Driver) ErasedDriver {
+        return .{
+            .context = driver,
+            .advance_fn = struct {
+                fn advance(context: *anyopaque, evaluator: *Machine) MachineError!machine.WorkProgress {
+                    return Driver.advance(evaluator, @ptrCast(@alignCast(context)));
+                }
+            }.advance,
+            .destroy_fn = struct {
+                fn destroy(context: *anyopaque, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+                    const boxed: *Driver = @ptrCast(@alignCast(context));
+                    heap.deinitDriverFields(releases, allocator, boxed);
+                    allocator.destroy(boxed);
+                }
+            }.destroy,
+        };
+    }
+
+    /// One budgeted range. Returns the result when the kernel completes, and
+    /// then the driver is already destroyed.
+    pub fn advance(self: *ErasedDriver, evaluator: *Machine) MachineError!?Value {
+        const progress = try self.advance_fn(self.context, evaluator);
+        return switch (progress) {
+            .stepped => null,
+            .output => |result| result: {
+                self.destroy_fn(self.context, evaluator.releaseDomain(), evaluator.allocator());
+                break :result result;
+            },
+            else => unreachable, // A kernel driver only steps or publishes.
+        };
+    }
+
+    /// Abandons the kernel before it completes.
+    pub fn retire(self: *ErasedDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.destroy_fn(self.context, releases, allocator);
+    }
+};
 
 pub const Context = struct {
     evaluator: *Machine,
