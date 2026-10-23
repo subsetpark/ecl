@@ -27,6 +27,9 @@ test "every idiom entry hits across values empties spines floats and failures" {
             const comparison = if (variant != .empty and (entry.context == .fold1 or
                 (entry.operation == .direct and entry.operation.direct == .fold1)))
                 compareReductionModes(source)
+            else if (variant == .failure and entry.operation == .direct and
+                (entry.operation.direct == .sum or entry.operation.direct == .product))
+                compareTotalFailure(source)
             else
                 compareExecutions(source);
             comparison catch |err| {
@@ -102,6 +105,37 @@ fn compareExecutions(source: []const u8) !void {
         defer generic_display.deinit();
         try std.testing.expectEqualStrings(generic_display.bytes(), automatic_display.bytes());
     }
+}
+
+/// A recognized `sum`/`product` fault must carry the definition's kind,
+/// message, word, and element index; its trace and column may differ.
+fn compareTotalFailure(source: []const u8) !void {
+    try compareExecutions(source);
+    var automatic_heap: SessionHeap = .init;
+    defer retireHeap(&automatic_heap);
+    var generic_heap: SessionHeap = .init;
+    defer retireHeap(&generic_heap);
+    var automatic = try execute(source, .automatic, automatic_heap.allocator());
+    defer automatic.deinit();
+    var generic = try execute(source, .generic_only, generic_heap.allocator());
+    defer generic.deinit();
+    const automatic_failure = automatic.failure orelse return error.TestUnexpectedResult;
+    const generic_failure = generic.failure orelse return error.TestUnexpectedResult;
+    for ([_][]const u8{ "kind", "msg", "word" }) |name| {
+        const key: ecl.value.Value = .{ .symbol = try ecl.intern.intern(name) };
+        try expectValueEquivalent(
+            (try ecl.dict.get(generic_failure, key)).?,
+            (try ecl.dict.get(automatic_failure, key)).?,
+        );
+    }
+    const data_key: ecl.value.Value = .{ .symbol = try ecl.intern.intern("data") };
+    const index_key: ecl.value.Value = .{ .symbol = try ecl.intern.intern("index") };
+    const generic_data = (try ecl.dict.get(generic_failure, data_key)).?;
+    const automatic_data = (try ecl.dict.get(automatic_failure, data_key)).?;
+    const generic_index = try ecl.dict.get(generic_data, index_key);
+    const automatic_index = try ecl.dict.get(automatic_data, index_key);
+    try std.testing.expectEqual(generic_index != null, automatic_index != null);
+    if (generic_index) |expected| try expectValueEquivalent(expected, automatic_index.?);
 }
 
 fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {

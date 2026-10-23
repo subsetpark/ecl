@@ -382,6 +382,14 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
 /// is the active word, so a fault names `+` or `*` at that literal, as the
 /// definition's own reduction would.
 fn totalCapture(lookup: env.FrozenLookup, phrase: Value, operation: DirectOp, matched: Capture) ?Capture {
+    const empty = list.atUnchecked(phrase, 2);
+    if (empty != .list or empty.list.length() != 2) return null;
+    const pop = list.atUnchecked(empty, 0);
+    const seed = list.atUnchecked(empty, 1);
+    if (pop != .word or !frozenWordMatches(lookup, pop.word, .{ .spelling = "pop" })) return null;
+    const expected_seed: i64 = if (operation == .sum) 0 else 1;
+    if (seed != .int or seed.int != expected_seed) return null;
+
     const reduction = list.atUnchecked(phrase, 3);
     if (reduction != .list or reduction.list.length() != 2) return null;
     const quoted = list.atUnchecked(reduction, 0);
