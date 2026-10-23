@@ -785,6 +785,18 @@ test "locals: the reserved backend words behave and blame as before" {
         .{ .name = "locals under zip-with", .source = "[1 2] [10 20] (|x y| y x -) zip-with", .expected = "[9 18]" },
         .{ .name = "a list is one value", .source = "[] (|x| x) call", .expected = "()" },
     });
+    // Every read shares one word name; its index is what it says. Quotations
+    // that read different locals are different values and different keys.
+    try support.expectStacks(&.{
+        .{ .name = "different reads do not match", .source = "(|a b| a) (|a b| b) match?", .expected = "0" },
+        .{ .name = "different bind counts do not match", .source = "(|a| a) (|a b| a) match?", .expected = "0" },
+        .{ .name = "identical locals quotations match", .source = "(|a b| a) (|a b| a) match?", .expected = "1" },
+        .{
+            .name = "different reads are separate keys",
+            .source = "{} (|a b| a) 1 dict.put (|a b| b) 2 dict.put dup dict.keys len swap (|a b| a) at",
+            .expected = "2 1",
+        },
+    });
     try support.expectErrors(&.{
         .{ .name = "binding blames the load word", .source = "(|x| x) call", .kind = "underflow", .word = "_ll" },
         .{ .name = "binding inside a definition traces both", .source = "(|x| x) 'f def f", .kind = "underflow", .word = "_ll" },
