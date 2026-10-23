@@ -82,8 +82,9 @@ interpretation.
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
 name. Word occurrences retain where their names are to be looked up, while lookup
-remains late: each retains its name's slot in the root it was written in and
-resolves the binding at execution time.
+remains late within a unit: each retains its name's slot in the root it was
+written in and resolves the binding at execution time, against the bindings its
+unit observes.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration owns the
@@ -347,19 +348,26 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-Lookup is late. A word occurrence selects only a name slot (see Bindings and
-scope). Each execution reads the slot's current binding; the occurrence retains
-no binding, body, value, or module generation. Replacing a binding in a root
-affects existing code at its next execution, including code already running
-and the bodies of open-ended loops such as `times`, `while`, and `linrec` in
-progress. The combinators that iterate over a finite collection (`each`,
-`zip-with`, `for`, `fold`, `fold1`, `scan`, and `infra`) are atomic under the
-bindings of plain words instead: a call takes the binding of each plain word
-written in its quotation once, at that word's first execution in the call, and
-its later applications reuse it, so a replacement made while the call runs
-takes effect at its next call. Qualified words, words written in a module image, and words
-dispatched by `execute` are looked up at each execution, so a module
-registered during the call is seen by its later applications. A
+Lookup is late within a unit. A word occurrence selects only a name slot (see
+Bindings and scope). Each execution reads the slot's binding as the executing
+unit observes it; the occurrence retains no binding, body, value, or module
+generation. A unit observes the session bindings that existed when it was
+created, together with the definitions it makes itself, and never a session
+definition made by another unit after its creation. Only top-level units
+define (definition is `'domain` inside combinator applications, `@attempt`, and
+tasks), so each REPL line, script, and loaded file sees every earlier
+definition, and replacing a binding affects existing code at its next execution
+in the defining unit and in every unit created afterwards. A task keeps the
+session bindings that existed when it was spawned; global definitions are never
+a channel between running units. Because no definition can occur inside a
+combinator application, the session bindings a combinator call observes do not
+change while it runs. Core is frozen, so it needs no such rule. A module image
+is immutable once registered; before that only its construction body defines
+in it, and a task that body spawned reads the image as it stands at each
+execution, so it may observe a definition the body makes after the spawn,
+including during one combinator call. Qualified words and words dispatched by `execute` look up the current
+registration at each execution, so a module registered during a call is seen by
+its later applications. A
 module image is immutable
 after construction; replacing an image in a registration does not retarget
 words belonging to the former image. Executing a word whose root has retired is
@@ -609,7 +617,8 @@ in it. A slot yields the root's own binding for that name when there is one,
 and otherwise core's binding for that name; with neither it is an
 `'undefined-word` error at execution. Defining a name in a root fills its slot
 and removing the name empties it, so every occurrence linked to the slot
-observes the change at its next execution. A word read before its name is
+observes the change at its next execution in a unit that can observe it (see
+Core evaluation). A word read before its name is
 defined links to an empty slot that a later definition fills.
 
 Session-authored code may therefore shadow core definitions. A module image

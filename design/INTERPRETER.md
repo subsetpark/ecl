@@ -593,15 +593,19 @@ defined links to an empty slot that a later definition fills.
 An environment is its root's slot table: one slot per name the root has bound
 or a word in it has linked, made on first need and kept until the root
 retires. A binding cell is stable, while its immutable payload snapshot may be
-replaced. A name's first binding gives its slot a cell and every later binding,
-including one after removal, replaces that cell's payload, so the cell's
-identity never changes; removing the name only clears the slot's bound flag,
-and the cell keeps its last payload until the name is bound again or the root
-retires. Binding and removal are constant-time under the root's writer lock.
+replaced. A name's first binding gives its slot a cell and every later binding
+replaces that cell's payload, so the cell's identity never changes. Removal
+publishes a payload that binds nothing and clears the slot's bound flag.
+Binding and removal are constant-time under the root's writer lock.
 Enumeration and lookup by name read the table without a lock; enumeration is
-not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
-cell's current payload, so a redefinition reaches every existing occurrence at
-its next execution, including open-ended loop bodies already running.
+not a snapshot, and may report names bound while it runs. Executing a word
+reads its slot and loads the payload the executing unit observes. A
+redefinition therefore reaches every occurrence at its next execution in the
+defining unit, including open-ended loop bodies that unit is running, and in
+every unit created afterwards; a unit that already exists and cannot define
+keeps the session view of its creation. A unit keeps the session and core
+resolutions it makes in a table keyed by slot id, valid while its view number
+(its pin, or the session version for a unit that may define) is unchanged.
 
 A finite iteration's call owns a plan for its quotation, reached through the
 application frame and used only while that exact quotation is the running
@@ -609,17 +613,12 @@ code. Its entries are paged by word position under fixed-fanout nodes, as
 many levels as the quotation's length needs; each node and page is allocated
 and cleared by the first entry that needs it, and a retired plan is freed a
 node or page per release-domain turn, so no step does work in proportion to
-the quotation. An entry keeps the word's resolution from its first
-execution in the call, with a lease that holds references, and, for a word that
-offers a phrase to recognition, the retained phrase and the registry entry its
-pattern matched. Later applications reuse both and still check the matched
-entry against their own operands. An entry is used only when the dispatched
-word is the form at the executing position, so a word a primitive dispatches
-at that position resolves as usual. A resolution carrying a module home,
-generation, or pin is never kept, so qualified and module-homed words stay
-late-bound through the call-site path, and a module the same unit registers
-mid-call reaches the call's later applications. The plan's lease keeps a
-replaced snapshot alive until the call ends.
+the quotation. For a word that offers a phrase to recognition, an entry keeps
+the retained phrase and the registry entry its pattern matched, from its first
+offer in the call. Later applications reuse it and still check the matched
+entry against their own operands. Bindings need no plan: no binding a call
+observes changes while it runs, and the unit's resolution table already
+serves every repeated word.
 
 A binding payload is one closed choice:
 
@@ -628,18 +627,39 @@ A binding payload is one closed choice:
 - a validated native callable.
 
 Effect metadata, documentation, visibility, source slices, and module-local
-diagnostic identity travel in the same snapshot. Writers build before taking
-the publication lock, validate and swap in constant time, and retire the old
-snapshot after unlocking. Reclamation is epoch-based, in the read-side form
-of Fraser's EBR and userspace RCU: a word dispatch opens a read section that
-records the domain's epoch, borrows the current snapshot with one load and no
-references, and clears the record when it has retained whatever it keeps (a
-scheduled body, an effect, a native call). A replaced snapshot retires once no
-open section predates its replacement. A slice that is not dispatching never
-delays reclamation; a thread descheduled inside a dispatch does until it runs
-again, the scheme's known limit, against which a robust scheme such as
-interval-based reclamation would trade a per-read reservation. Readers outside
-a slice, such as reflection, acquire counted leases instead.
+diagnostic identity travel in the same snapshot. A snapshot records the
+binding version that published it, and a removal is published as a snapshot
+with no binding. Publication makes a fully built snapshot visible at a version
+newer than every live pin, and a pin taken afterwards observes it.
+
+A unit that cannot define pins the version current at its creation and reads a
+session slot's newest snapshot at or before it, walking back through the chain
+only for a name redefined since. A pinned reader counts itself on the cell
+before it touches a snapshot, because one published after its pin may retire
+under it. A unit that may define reads the current snapshot, so it sees its
+own definitions. Module images and core are not versioned: core is frozen, an
+image is frozen once registered, and before that it changes only under its
+constructing unit. A task that unit spawned reads the image live, through a
+counted lease per dispatch until the image is frozen, so a replaced module
+snapshot retires as soon as its counted readers finish and no pin ever keeps
+one.
+
+A replaced session snapshot stays in its chain only while a live pin falls
+within the versions it was current for; otherwise it is unlinked at once. Live
+pins form a list in version order, and a kept snapshot waits on the newest pin
+older than its replacement, the last that can observe it, so publication
+decides with one comparison. Ending a pin is constant-time: it hands what it
+held to the next older pin, and the release domain settles the handover a
+bounded batch per turn, keeping each snapshot that pin observes and retiring
+the rest. A long-running task therefore retains one snapshot per session name
+it can observe rather than every intermediate definition. An unlinked snapshot
+retires through the release domain once no counted reader is copying it or
+walking past it. A session dispatch holds no count past its lookup: a pinned
+unit's pin keeps what it found, and a unit reading current bindings takes one
+load and no announcement. The only unpinned reader of a changing root is the
+unit that replaces it, which does so only by running code, after its dispatch
+has retained what it keeps. Readers outside a unit, such as completion,
+acquire counted leases.
 
 Slots are reached two ways, and their lifetimes follow. A session or core slot
 has an id in a lock-free directory whose ids are never reused; those roots

@@ -625,6 +625,7 @@ const WordsDriver = struct {
             .state = .init(.{ .visible = .init(reflection.VisibleNameCursor.init(
                 .{ .scope = evaluator.currentScope() },
                 evaluator.currentEnv().coreView(),
+                evaluator.unit.bindingPin(),
             )) }),
         };
     }

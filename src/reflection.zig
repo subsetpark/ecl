@@ -47,10 +47,13 @@ pub const VisibleNameCursor = struct {
     retained_scope: ?*env.Scope,
     core: env.EnvironmentView,
     phase: Phase,
+    /// The binding version the reader observes in a session root.
+    pin: ?u64,
 
     pub fn init(
         root: VisibleNameRoot,
         core: env.EnvironmentView,
+        pin: ?u64,
     ) VisibleNameCursor {
         return switch (root) {
             .scope => |scope| result: {
@@ -59,15 +62,17 @@ pub const VisibleNameCursor = struct {
                     .retained_scope = scope,
                     .core = core,
                     .phase = .{ .scopes = .{ .current = scope } },
+                    .pin = pin,
                 };
             },
             .environment => |environment| .{
                 .retained_scope = null,
                 .core = core,
                 .phase = .{ .direct = .{
-                    .cursor = environment.nameCursor(),
+                    .cursor = environment.nameCursor().at(pin),
                     .after = .core,
                 } },
+                .pin = pin,
             },
         };
     }
@@ -117,7 +122,7 @@ pub const VisibleNameCursor = struct {
                     break :result .pending;
                 };
                 self.phase = .{ .direct = .{
-                    .cursor = environment.nameCursor(),
+                    .cursor = environment.nameCursor().at(if (current.isSession()) self.pin else null),
                     .after = .core,
                 } };
                 break :result .pending;

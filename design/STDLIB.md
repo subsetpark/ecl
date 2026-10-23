@@ -3466,6 +3466,13 @@ registers.
 `( task -- )` — Request cancellation; the task's result becomes
 `{'err {'kind 'cancelled …}}`. No-op when already terminal.
 
+### cancel-self
+`( -- )` — Request cancellation of the current task, exactly as `task.cancel`
+does with its handle. It is only a request: execution continues, and the task
+observes it at its next safe point. `'domain` outside a task. There is
+deliberately no way to obtain the current task's handle, so a task's result
+can never retain its own task.
+
 ### pending
 `( -- tasks )` — Pending descendant tasks in deterministic spawn
 preorder.

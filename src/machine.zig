@@ -2545,6 +2545,13 @@ pub const Unit = struct {
     /// Whether this unit's root activation may define. False for a task,
     /// which runs in its spawner's scope without being a root of its own.
     root_defining: bool = true,
+    /// The binding version a unit that cannot define observes for its whole
+    /// life: bindings published after it was created are invisible to it.
+    /// Null for a unit that may define, which reads current bindings and
+    /// so sees its own definitions.
+    binding_pin: ?*heap.ReleaseDomain.BindingPin = null,
+    /// Resolutions of session and core words in this unit's view of bindings.
+    binding_cache: BindingCache = .{},
     /// Protected invocation may start this child at one selected registered
     /// module generation. The Unit lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
@@ -3038,7 +3045,16 @@ pub const Unit = struct {
         return self.driver_slot_busy;
     }
 
+    /// The binding version this unit observes, or null when it reads the
+    /// current bindings.
+    pub fn bindingPin(self: *const Unit) ?u64 {
+        const pin = self.binding_pin orelse return null;
+        return pin.version;
+    }
+
     pub fn deinit(self: *Unit) void {
+        if (self.binding_pin) |pin| self.environment.bindingDomain().unpinBindings(pin);
+        self.binding_cache.deinit(self.allocator);
         self.module_call_sites.deinit(self.releases);
         if (self.current) |current| self.releases.releaseHeader(current.code);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
@@ -3109,18 +3125,7 @@ pub fn PathActionDriver(
 
 pub const Machine = struct {
     unit: *Unit,
-    /// Present while this machine runs inside a slice, which lets a dispatch
-    /// read a binding without taking references to it, inside a read section.
-    slice: ?*heap.ReleaseDomain.SliceRecord = null,
 
-    /// Opens a binding read section: until the matching `endBindingRead`,
-    /// bindings this slice borrows stay valid. Nests.
-    pub fn beginBindingRead(self: *Machine) void {
-        if (self.slice) |slice| slice.beginRead();
-    }
-    pub fn endBindingRead(self: *Machine) void {
-        if (self.slice) |slice| slice.endRead();
-    }
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -6159,24 +6164,28 @@ pub const Machine = struct {
         name: u32,
         written: ?*env.Scope,
         borrow_pin: *?modules.GenerationPin,
-        retain: bool,
         out: *Resolution,
     ) bool {
-        const cell = slot.current() orelse return false;
-        // A borrow lasts only for this dispatch; a lease kept past it holds
-        // references. Each branch writes the lease in place: choosing it
-        // inside one initializer built it in a temporary and copied it over.
-        if (self.slice != null and !retain)
-            out.lease = cell.borrow(self.slice.?)
-        else
-            out.lease = cell.load();
+        // The root's own binding as this unit observes it, else core's. Only
+        // session bindings are versioned (`Scope.isSession`).
+        const pin = if (written != null and written.?.isSession()) self.unit.bindingPin() else null;
+        // A task reading an image still under construction counts its lease:
+        // the constructor may replace the binding during the dispatch, and no
+        // pin keeps a module image's snapshots.
+        const counted = self.unit.binding_pin != null and written != null and written.?.isUnderConstruction();
+        const own = slot.cell.load(.acquire);
+        const from_core = own == null or !leaseInto(own.?, pin, counted, &out.lease);
+        if (from_core) {
+            const core = slot.coreCell() orelse return false;
+            if (!leaseInto(core, null, false, &out.lease)) return false;
+        }
         out.execution_generation = null;
         out.home = null;
         out.trace_word = .plain(name);
         out.origin = .core;
         out.defining_scope = null;
         out.call_site_cache = null;
-        if (written == null or cell == slot.coreCell()) {
+        if (written == null or from_core) {
             // Core alone is the chain, and a private core binding is not
             // reachable by a plain word.
             if (out.lease.spec().visibility == .private) {
@@ -6198,6 +6207,20 @@ pub const Machine = struct {
         }
         out.borrow_pin = borrow_pin.*;
         borrow_pin.* = null;
+        return true;
+    }
+
+    /// The number that determines this unit's view of session bindings: its
+    /// pin, or the current binding version for a unit that may define.
+    fn bindingView(self: *const Machine) u64 {
+        return self.unit.bindingPin() orelse self.unit.environment.bindingDomain().binding_version.load(.acquire);
+    }
+
+    /// Leases into `out` what `cell` holds for a reader pinned at `pin`, and
+    /// returns false when it holds nothing then. An uncounted borrow lasts for
+    /// this dispatch; anything kept past it is retained on its own.
+    fn leaseInto(cell: *env.BindingCell, pin: ?u64, counted: bool, out: *env.BindingLease) bool {
+        out.* = (if (counted) cell.load(pin) else cell.borrow(pin)) orelse return false;
         return true;
     }
 
@@ -6281,7 +6304,7 @@ pub const Machine = struct {
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
-        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, false, out);
+        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, out);
     }
 
     /// The plan of the finite iteration applying the running code, when that
@@ -6303,26 +6326,27 @@ pub const Machine = struct {
         return try plan.entry(self.unit.allocator, self.unit.active_index);
     }
 
-    /// The entry for `word` when it is the form at the executing position. A
-    /// word a primitive dispatches, as `execute` does, runs at that
-    /// primitive's position and takes no entry: the position's binding is the
-    /// primitive's.
-    fn planEntryFor(self: *Machine, word: value.WordRef) error{OutOfMemory}!?*PlanEntry {
-        const plan = self.applicationPlan() orelse return null;
-        const form = list.atUnchecked(.{ .list = plan.code }, self.unit.active_index);
-        if (form != .word or form.word.name != word.name or form.word.slot != word.slot) return null;
-        return try plan.entry(self.unit.allocator, self.unit.active_index);
-    }
-
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
-        const plan_entry = try self.planEntryFor(word);
-        if (plan_entry) |entry| if (entry.resolution) |*planned| return executeResolved(self, planned);
+        // A session or core word resolved before in this unit's view.
+        const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
+        const view = self.bindingView();
+        if (cacheable) if (self.unit.binding_cache.find(word.slot, view)) |cached| {
+            var resolved: Resolution = .{
+                .lease = .{ .releases = self.unit.releases, .held = .{ .borrowed = cached.spec } },
+                .execution_generation = null,
+                .home = null,
+                .trace_word = cached.trace_word,
+                .origin = cached.origin,
+                .defining_scope = cached.defining_scope,
+            };
+            return executeResolved(self, &resolved);
+        };
         // A word built at run time without a slot links where it executes.
         const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
-        // Bindings borrowed below stay valid until the dispatch has taken
-        // whatever it keeps: a scheduled body, an effect, a native call.
-        self.beginBindingRead();
-        defer self.endBindingRead();
+        // A binding borrowed below stays valid for the dispatch: a unit that
+        // may define replaces bindings only by running code, which starts
+        // after the dispatch has retained what it keeps (a scheduled body, an
+        // effect, a native call); any other unit's pin keeps what it observes.
         var borrow_pin: ?modules.GenerationPin = null;
         errdefer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
@@ -6330,17 +6354,21 @@ pub const Machine = struct {
         const written = target.written;
         // SAFETY: read only after `slotResolution` returns true, which initializes it.
         var slot_resolution: Resolution = undefined;
-        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, plan_entry != null, &slot_resolution) else false) {
-            // A finite iteration's call keeps the binding for its later
-            // applications. One carrying a module home, generation, or pin
-            // belongs to this dispatch alone.
-            if (plan_entry) |entry| if (slot_resolution.home == null and slot_resolution.borrow_pin == null and
-                slot_resolution.execution_generation == null)
-            {
-                entry.resolution = slot_resolution;
-                return executeResolved(self, &entry.resolution.?);
-            };
+        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, &slot_resolution) else false) {
             defer slot_resolution.deinit(self.unit.allocator);
+            if (cacheable and slot_resolution.home == null and slot_resolution.borrow_pin == null and
+                slot_resolution.execution_generation == null and slot_resolution.lease.held == .borrowed and
+                slot_resolution.lease.traceWord() == null)
+            {
+                try self.unit.binding_cache.put(self.unit.allocator, .{
+                    .slot = word.slot,
+                    .view = view,
+                    .spec = slot_resolution.lease.spec(),
+                    .trace_word = slot_resolution.trace_word,
+                    .origin = slot_resolution.origin,
+                    .defining_scope = slot_resolution.defining_scope,
+                });
+            }
             try executeResolved(self, &slot_resolution);
             return;
         }
@@ -6358,7 +6386,6 @@ pub const Machine = struct {
                 self.releaseDomain(),
                 self.unit.module_access,
                 cached_site,
-                self.slice,
             )) {
                 .absent => {},
                 .stale => {
@@ -6857,10 +6884,7 @@ pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     // the previous one already polled cancellation, and every driver polls
     // before it draws.
     unit.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
-    const domain = unit.environment.bindingDomain();
-    const slice = try domain.enterSlice();
-    defer domain.exitSlice(slice);
-    var evaluator = Machine{ .unit = unit, .slice = slice };
+    var evaluator = Machine{ .unit = unit };
     const status = loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
@@ -7931,7 +7955,6 @@ const ModuleCallSiteCache = struct {
         releases: *heap.ReleaseDomain,
         access: *const modules.ExecutionAccess,
         found: ?usize,
-        slice: ?*const heap.ReleaseDomain.SliceRecord,
     ) CallSiteCacheLookup {
         const slot_index = found orelse return .absent;
         const candidate = &(self.entries[slot_index] orelse return .absent);
@@ -7941,7 +7964,9 @@ const ModuleCallSiteCache = struct {
             self.entries[slot_index] = null;
             return .stale;
         };
-        const lease = if (slice) |held| qualified.cell.borrow(held) else qualified.cell.load();
+        // A module image is frozen once registered, so its bindings need no
+        // version.
+        const lease = qualified.cell.borrow(null).?;
         const home = execution.home(access);
         return .{ .hit = .{
             .lease = lease,
@@ -8031,8 +8056,6 @@ pub const LookupChain = enum {
 /// What one finite-iteration call has decided for a word position of its
 /// quotation, kept for the rest of the call.
 pub const PlanEntry = struct {
-    /// The word's binding, from its first execution in the call.
-    resolution: ?Resolution = null,
     /// For a word that offers a phrase to idiom recognition, the first phrase
     /// it offered in the call and what recognition made of it.
     offered: ?OfferedMatch = null,
@@ -8156,7 +8179,6 @@ const PlanTree = struct {
 
     fn retirePage(self: *PlanTree, releases: *heap.ReleaseDomain, held: *Page) void {
         for (held) |*planned| {
-            if (planned.resolution) |*resolution| resolution.deinit(self.allocator);
             if (planned.offered) |offered| releases.releaseHeader(offered.phrase);
         }
         self.allocator.destroy(held);
@@ -8192,6 +8214,79 @@ const PlanTree = struct {
             self.stack_len += 1;
         }
         return false;
+    }
+};
+
+/// A unit's resolutions of session and core words, keyed by slot id.
+///
+/// A unit's view of those bindings is one number: its pin, or for a unit that
+/// may define, the binding version, which only its own definitions advance
+/// for the session. A resolution made in a view therefore holds while the view
+/// number is unchanged, and its borrowed specification stays valid as long:
+/// a pin keeps what it observes, and a defining unit's view moves on before
+/// anything it replaced can retire. Words whose resolution depends on more
+/// than the slot and the view are not kept: module image words (root liveness
+/// and home are the running activation's), module-local bindings (their home
+/// is the caller's), and qualified words (the registry is live).
+pub const BindingCache = struct {
+    pub const Entry = struct {
+        slot: u32,
+        view: u64,
+        spec: *const env.BindingSpec,
+        trace_word: intern.TraceWord,
+        origin: ResolutionOrigin,
+        defining_scope: ?*env.Scope,
+    };
+    entries: []?Entry = &.{},
+    count: usize = 0,
+    /// 64 minus log2 of the table size, for multiplicative hashing.
+    shift: u6 = 0,
+
+    fn deinit(self: *BindingCache, allocator: std.mem.Allocator) void {
+        allocator.free(self.entries);
+        self.* = .{};
+    }
+    fn home(self: *const BindingCache, slot: u32) usize {
+        return @intCast((@as(u64, slot) *% 0x9E3779B97F4A7C15) >> self.shift);
+    }
+    /// The entry for `slot` made in view `view`, if any.
+    pub fn find(self: *const BindingCache, slot: u32, view: u64) ?*const Entry {
+        if (self.entries.len == 0) return null;
+        const mask = self.entries.len - 1;
+        var index = self.home(slot);
+        while (true) : (index = (index + 1) & mask) {
+            const entry = if (self.entries[index]) |*held| held else return null;
+            if (entry.slot == slot) return if (entry.view == view) entry else null;
+        }
+    }
+    /// Records `entry`, replacing one for the same slot.
+    pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) error{OutOfMemory}!void {
+        if ((self.count + 1) * 4 > self.entries.len * 3) try self.grow(allocator);
+        self.insert(entry);
+    }
+    fn insert(self: *BindingCache, entry: Entry) void {
+        const mask = self.entries.len - 1;
+        var index = self.home(entry.slot);
+        while (true) : (index = (index + 1) & mask) {
+            if (self.entries[index]) |*existing| {
+                if (existing.slot != entry.slot) continue;
+                existing.* = entry;
+                return;
+            }
+            self.entries[index] = entry;
+            self.count += 1;
+            return;
+        }
+    }
+    fn grow(self: *BindingCache, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+        const old = self.entries;
+        const fresh = try allocator.alloc(?Entry, @max(16, old.len * 2));
+        @memset(fresh, null);
+        self.entries = fresh;
+        self.shift = @intCast(64 - @as(u7, std.math.log2_int(usize, fresh.len)));
+        self.count = 0;
+        for (old) |kept| if (kept) |entry| self.insert(entry);
+        allocator.free(old);
     }
 };
 
@@ -8425,6 +8520,8 @@ pub const ResolutionCursor = struct {
     /// report `.qualified` instead, because a dotted name never searched the
     /// activation's own chain at all.
     plain_chain: LookupChain,
+    /// The binding version the resolving unit observes.
+    binding_pin: ?u64,
     generation: ?modules.GenerationLease = null,
     /// The reference this dispatch's borrow acquired, if it had to acquire one.
     /// It rides here so the pin taken at the borrow is the *only* one: it is
@@ -8476,6 +8573,7 @@ pub const ResolutionCursor = struct {
             .work = .{ .dot = intern.lastDotCursor(spelling) },
             .scope = written,
             .plain_chain = lookupChainFor(written),
+            .binding_pin = evaluator.unit.bindingPin(),
         };
     }
 
@@ -8608,7 +8706,7 @@ pub const ResolutionCursor = struct {
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
                     } else {
-                        self.work = .{ .lexical = .init(self.core, self.scope, self.word) };
+                        self.work = .{ .lexical = .init(self.core, self.scope, self.word, self.binding_pin) };
                         self.phase = .lexical;
                     }
                     break :result .pending;
@@ -8722,7 +8820,7 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unresolved = .core } };
                     };
-                    self.work = .{ .lexical = .init(self.core, null, export_name) };
+                    self.work = .{ .lexical = .init(self.core, null, export_name, null) };
                     self.phase = .lexical;
                     break :result .pending;
                 },
@@ -8781,6 +8879,8 @@ pub const ShadowCursor = struct {
     work: Work,
     scope: ?*env.Scope,
     current_home: ?*modules.ModuleHome,
+    /// The binding version the resolving unit observes.
+    binding_pin: ?u64,
     seen_winner: bool = false,
     found: poll_api.ChunkList(intern.TraceWord),
     output: ?[]intern.TraceWord = null,
@@ -8797,6 +8897,7 @@ pub const ShadowCursor = struct {
             .work = .{ .dot = intern.dotCursor(intern.get(word)) },
             .scope = evaluator.unit.current.?.resolutionScope(),
             .found = .init(evaluator.unit.allocator),
+            .binding_pin = evaluator.unit.bindingPin(),
         };
     }
     pub fn deinit(self: *ShadowCursor) void {
@@ -8821,7 +8922,7 @@ pub const ShadowCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = self.takeOutput() };
                     }
-                    self.work = .{ .lexical = .init(self.core, self.scope, self.word) };
+                    self.work = .{ .lexical = .init(self.core, self.scope, self.word, self.binding_pin) };
                     self.phase = .lexical;
                     break :result .pending;
                 },

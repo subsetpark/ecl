@@ -24,6 +24,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 pub const words = [_]env.BuiltinWord{
     .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "( task -- result ) Wait for a task and return its success or error result." },
     .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "( task -- ) Request cancellation of a task, doing nothing if it is already complete." },
+    .{ .name = "cancel-self", .primitive = cancelSelf, .effect = "--", .doc = "( -- ) Request cancellation of the current task, as task.cancel does with its handle; it is observed at the next safe point. 'domain outside a task." },
     .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
     .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
     .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
@@ -323,6 +324,11 @@ fn cancel(evaluator: *Machine) MachineError!void {
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
     scheduler(evaluator).cancelOwned(task.take());
+}
+
+fn cancelSelf(evaluator: *Machine) MachineError!void {
+    if (!scheduler(evaluator).cancelScopeOwner(scope(evaluator)))
+        return evaluator.fail(.domain, "task.cancel-self is legal only inside a task");
 }
 
 fn tasks(evaluator: *Machine) MachineError!void {

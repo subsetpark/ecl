@@ -2014,6 +2014,9 @@ pub const WorkerScheduler = enum(usize) {
         // the generation pin below keeps alive. It may not define there.
         unit.execution_scope = parent_scope;
         unit.root_defining = false;
+        // It also keeps the bindings that exist now, whatever its spawner
+        // defines later.
+        unit.binding_pin = try unit.environment.bindingDomain().pinBindings();
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;
@@ -2308,6 +2311,16 @@ pub const WorkerScheduler = enum(usize) {
         self.releaseDomain().releaseValue(task);
         if (enqueue_cancellation) self.enqueueCancellation(cell);
         notifyCancellation(self);
+    }
+
+    /// Requests cancellation of the task that owns `scope`, as cancelling its
+    /// handle would. False for the root scope, which no task owns.
+    pub fn cancelScopeOwner(self: *const WorkerScheduler, scope: *TaskScope) bool {
+        const cell = scope.owner orelse return false;
+        std.debug.assert(cell.scheduler == self);
+        if (beginExternalCancellation(cell)) self.enqueueCancellation(cell);
+        notifyCancellation(self);
+        return true;
     }
 
     pub fn installTasksDriver(
