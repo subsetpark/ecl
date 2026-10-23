@@ -3123,77 +3123,51 @@ const TypedAccumulator = union(enum) {
     real: f64,
 };
 
-const TypedReduceState = struct {
-    input: TypedOperand,
-    /// Present for `scan`, whose result is the sequence of accumulators.
-    output: ?TypedOutput,
+/// What a sequential reduction's kernel needs besides its list: the seed and
+/// the list index the reduction starts from.
+const ReduceParams = struct {
+    initial: Value,
+    cursor_start: usize,
+};
+
+/// A sequential reduction's result as it builds: the accumulator, and for
+/// `scan` the sequence of accumulators. Position 0 of the kernel is list
+/// index `base`.
+const ReduceOutput = struct {
     accumulator: TypedAccumulator,
-    cursor: flat.FlatCursor,
+    /// Present for `scan`, whose result is the sequence of accumulators.
+    scan: ?TypedOutput,
+    base: usize,
 
-    pub fn retire(self: *TypedReduceState, releases: *heap.ReleaseDomain) void {
-        self.input.release(releases);
-        if (self.output) |*output| output.retire(releases);
-        self.output = null;
+    pub fn retire(self: *ReduceOutput, releases: *heap.ReleaseDomain) void {
+        if (self.scan) |*output| output.retire(releases);
+        self.scan = null;
     }
 };
 
-const TypedReduceStep = *const fn (*TypedReduceState, support.Context) MachineError!void;
+const RunReduce = *const fn (*Machine, [1]*heap.OwnedValue, ReduceParams, usize) MachineError!void;
 
-const TypedReduceDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    /// A sequential reduce over a leaf of any length has to be able to yield,
-    /// so the driver is earned; its creation is not, and for a short fold that
-    /// was the whole cost. It qualifies for the slot on lifetime as well as
-    /// size: it lives for one reduction and releases the slot when it
-    /// publishes, rather than spanning an iteration the way a combinator's own
-    /// driver does.
-    pub const inline_driver = true;
-
-    state: heap.Owned(TypedReduceState),
-    step: TypedReduceStep,
-    /// The recognized combinator's three stack values — list, initial
-    /// accumulator, quotation — are released when the result is published, the
-    /// same accounting the boxed reduction driver used.
-    consumed: usize,
-
-    pub fn advance(evaluator: *Machine, self: *TypedReduceDriver) MachineError!machine.WorkProgress {
-        const context = support.Context{ .evaluator = evaluator };
-        const state = self.state.borrowMut();
-        try self.step(state, context);
-        if (!state.cursor.complete()) return .stepped;
-        state.input.release(evaluator.releaseDomain());
-        const result: Value = if (state.output) |*output|
-            output.finish()
-        else switch (state.accumulator) {
-            .integer => |number| .{ .int = number },
-            .real => |number| .{ .float = number },
-        };
-        state.output = null;
-        // The recognized combinator's own stack values go through the machine's
-        // discard, which is the only sanctioned bulk release outside it.
-        evaluator.discard(self.consumed);
-        return .{ .output = result };
-    }
-};
-
-fn reduceStep(
+fn reduceKernel(
     comptime operation: BinaryOp,
     comptime accumulator_class: Number,
     comptime element_class: Number,
     comptime scan: bool,
-) TypedReduceStep {
+    /// The seed changes class, so the first remaining element takes one
+    /// scalar step before the loop.
+    comptime seeded: bool,
+) type {
     const Staging = flat.Block(accumulator_class.Element());
     return struct {
-        fn accumulated(state: *const TypedReduceState) accumulator_class.Element() {
+        fn accumulated(output: *const ReduceOutput) accumulator_class.Element() {
             return switch (accumulator_class) {
                 .byte => unreachable,
-                .integer => state.accumulator.integer,
-                .real => state.accumulator.real,
+                .integer => output.accumulator.integer,
+                .real => output.accumulator.real,
             };
         }
 
-        fn store(state: *TypedReduceState, element: accumulator_class.Element()) void {
-            state.accumulator = switch (accumulator_class) {
+        fn store(output: *ReduceOutput, element: accumulator_class.Element()) void {
+            output.accumulator = switch (accumulator_class) {
                 .byte => unreachable,
                 .integer => .{ .integer = element },
                 .real => .{ .real = element },
@@ -3208,8 +3182,8 @@ fn reduceStep(
         const unchecked = accumulator_class == .real and
             (operation == .add or operation == .sub or operation == .mul);
 
-        fn uncheckedBlock(state: *TypedReduceState, elements: []const element_class.Element(), piece: flat.Chunk, block: *Staging) bool {
-            var accumulator = accumulated(state);
+        fn uncheckedBlock(output: *ReduceOutput, elements: []const element_class.Element(), piece: flat.Chunk, block: *Staging) bool {
+            var accumulator = accumulated(output);
             for (piece.start..piece.end) |index| {
                 const element: f64 = switch (element_class) {
                     .byte, .integer => @floatFromInt(elements[index]),
@@ -3224,21 +3198,20 @@ fn reduceStep(
                 if (scan) block.items[index - piece.start] = accumulator;
             }
             if (std.math.isNan(accumulator)) return false;
-            store(state, accumulator);
+            store(output, accumulator);
             if (scan) block.len = piece.len();
             return true;
         }
 
-        fn step(state: *TypedReduceState, context: support.Context) MachineError!void {
-            const range = try state.cursor.nextRange(context) orelse return;
-            const elements = state.input.slice(element_class);
+        /// Folds list indices `range` into the accumulator, in order.
+        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, context: support.Context) MachineError!void {
             var block = Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
                 block.reset();
-                if (unchecked and uncheckedBlock(state, elements, piece, &block)) {
-                    if (scan) state.output.?.store(accumulator_class, piece.start, block.written());
+                if (unchecked and uncheckedBlock(output, elements, piece, &block)) {
+                    if (scan) output.scan.?.store(accumulator_class, piece.start, block.written());
                     offset += piece.len();
                     continue;
                 }
@@ -3250,7 +3223,7 @@ fn reduceStep(
                     // and was most of a float reduction's cost.
                     const next = @call(.always_inline, scalarBinary, .{
                         operation,
-                        accumulator_class.boxed(accumulated(state)),
+                        accumulator_class.boxed(accumulated(output)),
                         element_class.boxed(elements[index]),
                     }) catch |fault| {
                         // A sequential fold's first fault is the fault: there is
@@ -3261,17 +3234,74 @@ fn reduceStep(
                         const diagnostic = scalarDiagnostic(fault);
                         return context.fail(diagnostic.kind, diagnostic.message);
                     };
-                    store(state, accumulator_class.unboxed(next));
+                    store(output, accumulator_class.unboxed(next));
                     if (scan) {
-                        block.items[index - piece.start] = accumulated(state);
+                        block.items[index - piece.start] = accumulated(output);
                         block.len = index - piece.start + 1;
                     }
                 }
-                if (scan) state.output.?.store(accumulator_class, piece.start, block.written());
+                if (scan) output.scan.?.store(accumulator_class, piece.start, block.written());
                 offset += piece.len();
             }
         }
-    }.step;
+
+        /// The reduction as a `support.Kernel`. Its positions are the list
+        /// indices after the seed: a seed that changes class takes one scalar
+        /// step from the first remaining element before the loop.
+        const Spec = struct {
+            pub const arity = 1;
+            pub const Params = ReduceParams;
+            pub const Output = ReduceOutput;
+
+            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: ReduceParams, _: usize) MachineError!Output {
+                const input = operands[0];
+                const seed = if (seeded) first: {
+                    // Charge even this single step to the shared budget: many
+                    // short reductions must not evade cancellation. Do not
+                    // pre-cast initial; mixed numeric comparisons in particular
+                    // would lose information.
+                    try evaluator.advanceKernel(1);
+                    break :first scalarBinary(operation, params.initial, list.atUnchecked(input, params.cursor_start)) catch |fault| {
+                        const diagnostic = scalarDiagnostic(fault);
+                        return evaluator.fail(diagnostic.kind, diagnostic.message);
+                    };
+                } else params.initial;
+                var output: Output = .{
+                    .accumulator = switch (accumulator_class) {
+                        .byte => unreachable,
+                        .integer => .{ .integer = seed.int },
+                        .real => .{ .real = seed.float },
+                    },
+                    .scan = null,
+                    .base = params.cursor_start + @intFromBool(seeded),
+                };
+                if (scan) {
+                    output.scan = try freshOutput(accumulator_class, evaluator, @intCast(input.list.length()));
+                    if (seeded) output.scan.?.store(accumulator_class, params.cursor_start, &.{accumulator_class.unboxed(seed)});
+                }
+                return output;
+            }
+
+            pub fn chunk(_: ReduceParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                return accumulate(
+                    output,
+                    heap.leafElements(element_class.kind(), operands[0].list),
+                    .{ .start = output.base + range.start, .end = output.base + range.end },
+                    context,
+                );
+            }
+
+            pub fn finish(output: *Output) Value {
+                if (scan) return output.scan.?.finish();
+                return switch (output.accumulator) {
+                    .integer => |number| .{ .int = number },
+                    .real => |number| .{ .float = number },
+                };
+            }
+        };
+
+        const run = support.Kernel(Spec).run;
+    };
 }
 
 /// Whether a recognized `fold`/`scan` over these operands is a typed sequential
@@ -3290,8 +3320,8 @@ const NumericReducePlan = opaque {
         accumulator: Number,
         element: Number,
         scan: bool,
-        seed_step: ?ScalarBinary,
-        step: TypedReduceStep,
+        seeded: bool,
+        run: RunReduce,
     };
 
     fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
@@ -3308,12 +3338,13 @@ const NumericReducePlan = opaque {
                         if (comptime binaryResult(selected, out.?, candidate_element) != out) continue;
                         inline for ([_]bool{ false, true }) |candidate_scan| {
                             if (accumulator == candidate_accumulator and element == candidate_element and scan == candidate_scan) {
+                                const seeded = comptime out.? != candidate_accumulator;
                                 const data = comptime Data{
                                     .accumulator = out.?,
                                     .element = candidate_element,
                                     .scan = candidate_scan,
-                                    .seed_step = if (out.? == candidate_accumulator) null else selectScalar(selected),
-                                    .step = reduceStep(selected, out.?, candidate_element, candidate_scan),
+                                    .seeded = seeded,
+                                    .run = reduceKernel(selected, out.?, candidate_element, candidate_scan, seeded).run,
                                 };
                                 break :blk @ptrCast(&data);
                             }
@@ -3325,50 +3356,24 @@ const NumericReducePlan = opaque {
         };
     }
 
-    /// Borrows the caller's values. Acquired readers and output are consumed
-    /// locally on preparation failure, and by runDriver on either outcome.
-    /// The combinator handles empty folds/scans and singleton fold1 before
-    /// entry, so cursor_start always identifies a remaining input element.
+    /// The recognized combinator's `consumed` stack values (the list, then
+    /// any seed and quotation) are popped into owners, as an operation pops
+    /// its operands, and the list is the kernel's operand; the rest are
+    /// released after the result is pushed. `initial` is a scalar or the
+    /// list's own element, valid while the list is held. The combinator
+    /// handles empty folds/scans and singleton fold1 before entry, so
+    /// cursor_start always identifies a remaining input element.
     fn start(self: *const NumericReducePlan, evaluator: *Machine, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
         const data: *const Data = @ptrCast(@alignCast(self));
-        const length: usize = @intCast(input.list.length());
-        const seed = if (data.seed_step) |step| first: {
-            // Charge even this single step to the shared budget: many short
-            // reductions must not evade cancellation. Do not pre-cast initial;
-            // mixed numeric comparisons in particular would lose information.
-            try evaluator.advanceKernel(1);
-            break :first step(initial, list.atUnchecked(input, cursor_start)) catch |fault| {
-                const diagnostic = scalarDiagnostic(fault);
-                return evaluator.fail(diagnostic.kind, diagnostic.message);
-            };
-        } else initial;
-        var state = TypedReduceState{
-            .input = acquireOperand(data.element, input),
-            .output = null,
-            .accumulator = switch (data.accumulator) {
-                .byte => unreachable,
-                .integer => .{ .integer = seed.int },
-                .real => .{ .real = seed.float },
-            },
-            .cursor = .{ .index = cursor_start + @intFromBool(data.seed_step != null), .length = length },
-        };
-        var held_locally = true;
-        errdefer if (held_locally) state.retire(evaluator.releaseDomain());
-        if (data.scan) state.output = switch (data.accumulator) {
-            .byte => unreachable,
-            inline else => |out| (try acquireOutput(evaluator, out, null, length)).output,
-        };
-        if (data.scan and data.seed_step != null) switch (data.accumulator) {
-            .byte => unreachable,
-            .integer => state.output.?.store(.integer, cursor_start, &.{seed.int}),
-            .real => state.output.?.store(.real, cursor_start, &.{seed.float}),
-        };
-        held_locally = false;
-        return evaluator.runDriver(TypedReduceDriver{
-            .state = .init(state),
-            .step = data.step,
-            .consumed = consumed,
-        });
+        std.debug.assert(consumed >= 1 and consumed <= 3);
+        var popped: [3]heap.OwnedValue = undefined;
+        var count: usize = 0;
+        defer for (popped[0..count]) |*owner| owner.deinit();
+        while (count != consumed) : (count += 1) popped[count] = try evaluator.popValue();
+        const list_owner = &popped[consumed - 1];
+        std.debug.assert(list_owner.borrow().list == input.list);
+        const first = cursor_start + @intFromBool(data.seeded);
+        try data.run(evaluator, .{list_owner}, .{ .initial = initial, .cursor_start = cursor_start }, @as(usize, @intCast(input.list.length())) - first);
     }
 };
 

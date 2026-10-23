@@ -1350,7 +1350,7 @@ fn startReduction(
 }
 
 const ReductionDriver = struct {
-    /// Like `numeric.TypedReduceDriver`, it lives for one reduction and
+    /// Like a typed kernel's driver, it lives for one reduction and
     /// releases the slot when it publishes, so it qualifies for the slot on
     /// lifetime; a fold whose rows apply directly would otherwise spend its
     /// largest fixed cost on this driver's allocation.
