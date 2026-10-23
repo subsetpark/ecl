@@ -6400,6 +6400,32 @@ pub const Machine = struct {
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
     }
 
+    /// What `word` dispatches to in this unit's view, through the dispatch
+    /// cache, filled on a miss exactly as dispatch fills it. Null for a word
+    /// the cache does not hold (a local, a qualified or module word, one that
+    /// resolves to nothing a plain word may run).
+    pub fn cachedResolution(self: *Machine, word: value.WordRef) error{OutOfMemory}!?BindingCache.Entry {
+        if (word.slot == 0 or env.wordTarget(word.slot) != .slot) return null;
+        const view = self.bindingView();
+        if (self.unit.binding_cache.find(word.slot, view)) |cached| return cached.*;
+        // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
+        var resolved: Resolution = undefined;
+        if (!self.peekSlotWord(word, &resolved)) return null;
+        defer resolved.deinit(self.unit.allocator);
+        if (resolved.home != null or resolved.borrow_pin != null or resolved.execution_generation != null or
+            resolved.lease.held != .borrowed or resolved.lease.traceWord() != null) return null;
+        const entry: BindingCache.Entry = .{
+            .slot = word.slot,
+            .view = view,
+            .spec = resolved.lease.spec(),
+            .trace_word = resolved.trace_word,
+            .origin = resolved.origin,
+            .defining_scope = resolved.defining_scope,
+        };
+        try self.unit.binding_cache.put(self.unit.allocator, entry);
+        return entry;
+    }
+
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         // A session or core word resolved before in this unit's view.

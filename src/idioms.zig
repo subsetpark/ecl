@@ -443,6 +443,27 @@ const LiveWord = struct {
     body: ?*value.ListHandle,
 };
 
+/// A following word, resolved as its own dispatch would resolve it: through
+/// the unit's dispatch cache, so a phrase that runs on every iteration pays
+/// one cache probe rather than a slot resolution. A word the cache does not
+/// hold is resolved in full. Either way it must be the trusted binding
+/// expected, from a slot on core or the running root.
+fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind) error{OutOfMemory}!?LiveWord {
+    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
+    if (cached.origin != .core and cached.origin != .standard_library) return null;
+    const spec = cached.spec;
+    switch (binding) {
+        .builtin => if (spec.binding != .builtin) return null,
+        .source => if (spec.binding != .word) return null,
+    }
+    return .{
+        .trace_word = cached.trace_word,
+        .idiom = spec.direct_idiom,
+        .body = if (spec.binding == .word) env.quotationHeader(spec.binding.word) else null,
+    };
+}
+
 /// Resolves `word` where the phrase runs and returns it only when it is the
 /// trusted binding expected. A word that resolves to nothing a plain word may
 /// run, or whose root has retired, is simply not that binding; generic
@@ -661,13 +682,38 @@ comptime {
     }
 }
 
+/// Phrase words' interned names, interned on first use: each entry's head,
+/// then its following words. The intern table is one per process and never
+/// reset, so an id once learned stays valid.
+const max_following = blk: {
+    var longest: usize = 0;
+    for (registry) |entry| longest = @max(longest, entry.following.len);
+    break :blk longest;
+};
+var phrase_atoms: [registry.len][1 + max_following]std.atomic.Value(u32) = @splat(@splat(.init(unknown_atom)));
+const unknown_atom = std.math.maxInt(u32);
+
+/// Position 0 is the head; position n is following word n - 1.
+fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
+    const cell = &phrase_atoms[entry][position];
+    const cached = cell.load(.monotonic);
+    if (cached != unknown_atom) return cached;
+    const spelling = if (position == 0)
+        registry[entry].source_word.?
+    else
+        registry[entry].following[position - 1].spelling;
+    const id = try intern.intern(spelling);
+    cell.store(id, .monotonic);
+    return id;
+}
+
 /// A kernel word's primitive asks whether the words after it continue one of
 /// its phrases (see `kernel_support.headed`). Only the word being dispatched
 /// can head one: a primitive reached any other way declines, as does a unit
 /// that runs generic code only.
 pub fn applyHeaded(evaluator: *Machine, first: u16) MachineError!bool {
     if (evaluator.unit.inherited.idiom_mode == .generic_only) return false;
-    if (!std.mem.eql(u8, intern.get(evaluator.unit.active_word.atom()), registry[first].source_word.?)) return false;
+    if (evaluator.unit.active_word.atom() != try phraseAtom(first, 0)) return false;
     return try applyPhrase(evaluator, first) == .applied;
 }
 
@@ -688,8 +734,8 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         var last: ?LiveWord = null;
         const matched = for (entry.following, 0..) |expected, offset| {
             const form = forms.at(@intCast(offset));
-            if (form != .word or !std.mem.eql(u8, intern.get(form.word.name), expected.spelling)) break false;
-            last = liveWord(evaluator, form.word, expected.binding, null) orelse break false;
+            if (form != .word or form.word.name != try phraseAtom(index, offset + 1)) break false;
+            last = try followingWord(evaluator, form.word, expected.binding) orelse break false;
         } else true;
         if (!matched) continue;
         const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
