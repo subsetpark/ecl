@@ -1,6 +1,7 @@
 //! Canonical, representation-exposing value rendering.
 
 const std = @import("std");
+const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
@@ -100,7 +101,12 @@ pub const RenderCursor = struct {
                     try self.writeByte(writer, '\'');
                     try self.pushBytes(intern.get(id));
                 },
-                .word => |id| try self.pushBytes(intern.get(id.name)),
+                .word => |id| {
+                    // A lowered locals operation shows its count or index
+                    // before its name; the reader does not read this back.
+                    if (env.localOperand(id.slot)) |operand| try self.writeFmt(writer, "{d} ", .{operand});
+                    try self.pushBytes(intern.get(id.name));
+                },
                 .list => |header| switch (header.kind()) {
                     .leaf_char1, .leaf_char2, .leaf_char4 => {
                         if (self.style == .display and header.length() > display_list_limit) {

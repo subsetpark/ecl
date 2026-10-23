@@ -1,6 +1,7 @@
 //! Iterative, representation-independent structural equality and hashing.
 
 const std = @import("std");
+const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
@@ -74,7 +75,10 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         // resolution metadata outside its identity as a value: `(dup)`
         // written in a module and `(dup)` written at the session are the same
         // datum, and `match?` has always said so.
-        .word => |reference| reference.name == b.word.name,
+        // A lowered locals operation's count or index is part of what it
+        // says, unlike resolution metadata.
+        .word => |reference| reference.name == b.word.name and
+            std.meta.eql(env.localOperand(reference.slot), env.localOperand(b.word.slot)),
         .task => |header| header == b.task,
         .port => |header| header == b.port,
         // Image identity, never structural traversal: two references to one
@@ -683,7 +687,7 @@ pub fn scalarHash(item: Value) ?u64 {
         .float => |number| numericHash(number),
         .char => |codepoint| characterHash(codepoint),
         .symbol => |id| mix(0x5359_4d42, id),
-        .word => |id| mix(0x574f_5244, id.name),
+        .word => |id| mix(0x574f_5244, id.name) ^ (if (env.localOperand(id.slot)) |operand| mix(0x4c4f_4341, operand) else 0),
         .task => |header| mix(0x5441_534b, @intFromPtr(header)),
         .port => |header| mix(0x504f_5254, @intFromPtr(header)),
         .module => |header| mix(0x4d4f_4455, @intFromPtr(header)),

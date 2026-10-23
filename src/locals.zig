@@ -1,6 +1,7 @@
 //! Reader-time lowering of locals declarations into ordinary point-free forms.
 
 const std = @import("std");
+const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
@@ -91,7 +92,7 @@ pub const LowerCursor = struct {
             index: usize,
             cursor: intern.InternInsertionCursor,
         },
-        size: struct { words: Words, index: usize = 0, count: usize = 4 },
+        size: struct { words: Words, index: usize = 0, count: usize = 2 },
         allocate_output: struct { words: Words, count: usize },
         allocate_values: struct { words: Words, forms: []SpannedValue },
         output: Output,
@@ -346,13 +347,8 @@ pub const LowerCursor = struct {
             // so nothing between here and the declaration had to see past them.
             switch (output.epilogue_step) {
                 0 => {
-                    self.atom(output, .{ .int = @intCast(self.names.len) });
+                    self.atom(output, .{ .word = .{ .name = output.words[2], .slot = env.localOperandSlot(@intCast(self.names.len)) } });
                     output.epilogue_step = 1;
-                    return .pending;
-                },
-                1 => {
-                    self.atom(output, .{ .word = .{ .name = output.words[2] } });
-                    output.epilogue_step = 2;
                     return .pending;
                 },
                 else => {},
@@ -363,13 +359,7 @@ pub const LowerCursor = struct {
             return .{ .complete = .{ .forms = forms, .values = values } };
         }
         if (self.local_indices[output.body_index]) |index| {
-            if (output.body_step == 0) {
-                self.atom(output, .{ .int = @intCast(index) });
-                output.body_step = 1;
-                return .pending;
-            }
-            self.atom(output, .{ .word = .{ .name = output.words[1] } });
-            output.body_step = 0;
+            self.atom(output, .{ .word = .{ .name = output.words[1], .slot = env.localOperandSlot(@intCast(index)) } });
             output.body_index += 1;
             return .pending;
         }
@@ -448,8 +438,7 @@ pub const LowerCursor = struct {
             },
             .size => |*size| result: {
                 if (size.index != self.body.len) {
-                    const additional: usize = if (self.local_indices[size.index] != null) 2 else 1;
-                    size.count = std.math.add(usize, size.count, additional) catch
+                    size.count = std.math.add(usize, size.count, 1) catch
                         return error.OutOfMemory;
                     size.index += 1;
                     break :result .pending;
@@ -485,13 +474,8 @@ pub const LowerCursor = struct {
             .output => |*output| result: {
                 switch (output.prefix_step) {
                     0 => {
-                        self.atom(output, .{ .int = @intCast(self.names.len) });
+                        self.atom(output, .{ .word = .{ .name = output.words[0], .slot = env.localOperandSlot(@intCast(self.names.len)) } });
                         output.prefix_step = 1;
-                        break :result .pending;
-                    },
-                    1 => {
-                        self.atom(output, .{ .word = .{ .name = output.words[0] } });
-                        output.prefix_step = 2;
                         break :result .pending;
                     },
                     else => {},

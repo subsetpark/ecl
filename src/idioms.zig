@@ -1351,6 +1351,7 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
 fn slotOnRunningRoot(evaluator: *machine.Machine, slot_id: u32) bool {
     const root_id: u32 = switch (env.wordTarget(slot_id)) {
         .unlinked => return true,
+        .local => return false,
         .image => |scope| @backingInt(scope),
         .slot => |id| root: {
             const slot = evaluator.unit.environment.slot(id) orelse return false;

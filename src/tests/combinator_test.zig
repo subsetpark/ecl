@@ -771,10 +771,11 @@ test "combinators: cached body words spend no kernel polls per element" {
 }
 
 test "locals: the reserved backend words behave and blame as before" {
-    // `_ll`, `_gl`, and `_dl` are reserved from every publication, so they are
-    // bound to their primitives without a lookup. Values, nesting, sharing a
-    // body between applications, and the blamed word on failure are what a
-    // program can observe of that.
+    // The reader lowers `|a b|` into single-form locals operations named
+    // `_ll`, `_gl`, and `_dl`. The names stay reserved from every publication,
+    // and are not words a program can write: only the lowering produces the
+    // operations. Values, nesting, sharing a body between applications, and
+    // the blamed word on failure are what a program can observe.
     try support.expectStacks(&.{
         .{ .name = "read twice", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
         .{ .name = "two names", .source = "3 4 (|a b| b a -) call", .expected = "1" },
@@ -789,12 +790,7 @@ test "locals: the reserved backend words behave and blame as before" {
         .{ .name = "binding inside a definition traces both", .source = "(|x| x) 'f def f", .kind = "underflow", .word = "_ll" },
         .{ .name = "the backend names stay reserved", .source = "(|x| x) '_gl def", .kind = "domain", .word = "def" },
         .{ .name = "nor can they be unset", .source = "'_ll unset", .kind = "domain", .word = "unset" },
-        .{ .name = "a direct read outside any locals blames the read word", .source = "0 _gl", .kind = "domain", .word = "_gl" },
-    });
-    // The lowered spelling is callable as written; nothing about direct
-    // binding hides the words.
-    try support.expectStacks(&.{
-        .{ .name = "lowered form called directly", .source = "1 1 _ll 0 _gl 1 _dl", .expected = "1" },
+        .{ .name = "the names are not words a program can write", .source = "0 _gl", .kind = "undefined-word", .word = "_gl" },
     });
 }
 
