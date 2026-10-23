@@ -6738,7 +6738,11 @@ pub const Machine = struct {
     }
 };
 
-pub const RunStatus = enum { completed, yielded, parked };
+/// Why a slice returned. `exhausted` means the turn's quantum ran out with
+/// work still runnable: the unit can continue at once. `yielded` means it
+/// stopped for something outside itself (a wait, settlement, unfinished
+/// cleanup, or backpressure), so its executor should let other work run.
+pub const RunStatus = enum { completed, exhausted, yielded, parked };
 
 /// A non-owning child-launch projection. The decoded owner remains alive until
 /// the scheduler has retained the quotation and initial operands into the new
@@ -6945,7 +6949,7 @@ pub fn run(unit: *Unit, code: *Header) MachineError!void {
         _ = unit.releases.advance(kernel_poll_quantum);
         switch (status) {
             .completed => return,
-            .yielded => {},
+            .exhausted, .yielded => {},
             .parked => unreachable,
         }
     }
@@ -6956,7 +6960,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
     while (true) {
         // Completion and output delivery may spend the last unit too. Never
         // enter another driver, continuation, or Eval with an empty allowance.
-        if (!turn_core.mayDispatch(self.unit.kernel_budget)) return .yielded;
+        if (!turn_core.mayDispatch(self.unit.kernel_budget)) return .exhausted;
         // Admission reserves progress, not a whole instruction quantum of
         // allocation after pressure rises. Complete at least one transition
         // before yielding so a granted waiter cannot repeatedly lose its turn.
@@ -7028,7 +7032,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
                             };
                             switch (decision.action) {
                                 .resume_driver => continue,
-                                .end_turn => return .yielded,
+                                .end_turn => return .exhausted,
+                                .surrender => return .yielded,
                                 .park => return .parked,
                             }
                         },
@@ -7088,7 +7093,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 try startFailure(self);
                 continue;
             }
-            return .yielded;
+            return .exhausted;
         }
         // A frame continuation may replace its native-stack tail with an
         // owned driver. Let that driver run before dispatching the parent
