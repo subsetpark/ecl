@@ -473,7 +473,7 @@ pub const PervadeCursor = struct {
             return .framed;
         }
         if (node.left == .list or node.right == .list) {
-            if (try buildNestedTypedBinary(
+            if (try startNestedBinary(
                 evaluator,
                 node.operation,
                 node.left,
@@ -540,7 +540,7 @@ pub const PervadeCursor = struct {
             return .framed;
         }
         if (node.operand == .list) {
-            if (try buildNestedTypedUnary(evaluator, node.operation, node.operand, .{})) |typed|
+            if (try startNestedUnary(evaluator, node.operation, node.operand, .{})) |typed|
                 return self.runTyped(typed);
             const count: usize = @intCast(node.operand.list.length());
             var values = try heap.OwnedValueBuffer.init(self.releases, count);
@@ -1522,10 +1522,9 @@ fn failTypedScalar(
     return context.fail(diagnostic.kind, diagnostic.message);
 }
 
-/// A character binary operation: `step` for a state embedded in pervasion,
-/// and `Spec` for `support.Kernel`. Both run the same pieces and replay. A
-/// fixed result is one int per position; a dynamic one is a codepoint whose
-/// storage width a profiling pass decides before the fill.
+/// A character binary operation as a `support.Kernel` spec. A fixed result is
+/// one int per position; a dynamic one is a codepoint whose storage width a
+/// profiling pass decides before the fill.
 fn charKernel(
     comptime operation: BinaryOp,
     comptime left_class: FlatScalarClass,
@@ -1670,8 +1669,9 @@ fn nextPiece(comptime vector: bool, range: flat.Chunk, offset: usize) flat.Chunk
     return flat.blockRange(range, offset);
 }
 
-/// A binary typed operation: `step` is one charged chunk of its driver, and
-/// `direct` the whole operation when it fits the remaining budget.
+/// A binary typed operation: one range loop (`runPieces`) and its replay, as
+/// a `support.Kernel` spec run at top level (`run`) or inside pervasion
+/// (`nested`).
 fn binaryKernel(
     comptime operation: BinaryOp,
     comptime left_class: Number,
@@ -1924,8 +1924,7 @@ fn binaryKernel(
     };
 }
 
-/// A unary typed operation: `step` is one charged chunk of its driver, and
-/// `direct` the whole operation when it fits the remaining budget.
+/// A unary typed operation; see `binaryKernel`.
 fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type {
     const out = comptime unaryResult(operation, operand_class);
     const policy = comptime unaryLoopPolicy(operation, operand_class);
@@ -2047,14 +2046,13 @@ fn freshOutput(comptime out: Number, evaluator: *Machine, length: usize) error{O
     };
 }
 
-/// Static selection binds the element classes, output width, and monomorphic
-/// step together. Preparation runs once outside the operation/type expansion;
-/// callers cannot supply a step independently of its storage contract.
 /// Runs a plan's operation through `support.Kernel`, inline or as a driver.
 const RunBinary = *const fn (*Machine, [2]*heap.OwnedValue, NumericParams, usize) MachineError!void;
 /// Runs a plan's operation for a leaf inside pervasion; see `support.Kernel`.
 const NestedBinary = *const fn (*Machine, [2]Value, ?*heap.OwnedValue, NumericParams, usize) MachineError!support.NestedOutcome;
 
+/// Static selection binds the element classes, output width, and kernel
+/// together, so no caller can pair a kernel with another storage contract.
 const NumericBinaryPlan = opaque {
     const Data = struct {
         left: Number,
@@ -2196,7 +2194,7 @@ const CharacterBinaryPlan = opaque {
     }
 };
 
-fn buildNestedTypedCharBinary(
+fn startNestedCharBinary(
     evaluator: *Machine,
     operation: BinaryOp,
     left_item: Value,
@@ -2280,7 +2278,7 @@ fn rejectUnsupportedFlatUnary(
     return false;
 }
 
-fn buildNestedTypedNumericBinary(
+fn startNestedNumericBinary(
     evaluator: *Machine,
     operation: BinaryOp,
     left_item: Value,
@@ -2312,7 +2310,7 @@ fn buildNestedTypedNumericBinary(
 /// A typed leaf inside pervasion. `root`, when present, owns `left` and is
 /// the operation's own operand, so its buffer may become the output; every
 /// other leaf is only borrowed from the structure being descended.
-fn buildNestedTypedBinary(
+fn startNestedBinary(
     evaluator: *Machine,
     operation: BinaryOp,
     left: Value,
@@ -2323,8 +2321,8 @@ fn buildNestedTypedBinary(
     // The builders are disjoint: numeric needs both operands numeric, and
     // character needs one character operand. The common numeric row is tried
     // first so it does not pay the character classification.
-    if (try buildNestedTypedNumericBinary(evaluator, operation, left, right, root, report)) |typed| return typed;
-    if (try buildNestedTypedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
+    if (try startNestedNumericBinary(evaluator, operation, left, right, root, report)) |typed| return typed;
+    if (try startNestedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;
 }
@@ -2358,7 +2356,7 @@ const NumericUnaryPlan = opaque {
     }
 };
 
-fn buildNestedTypedUnary(
+fn startNestedUnary(
     evaluator: *Machine,
     operation: UnaryOp,
     operand: Value,
@@ -2577,8 +2575,8 @@ pub fn typedBinaryCandidate(operation: BinaryOp, left: Value, right: Value) bool
 /// reordered, blocked out of order, or reassociated — float sums stay
 /// bit-identical to the generic route by construction rather than by policy. The
 /// accumulator's class must reach a fixpoint after at most one scalar step.
-/// That step retains the original seed's semantics; the driver then owns only
-/// a stable accumulator and needs one monomorphic loop.
+/// That step retains the original seed's semantics; the kernel then carries
+/// only a stable accumulator and needs one monomorphic loop.
 const TypedAccumulator = union(enum) {
     integer: i64,
     real: f64,
@@ -3066,7 +3064,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime class: Number) type {
     const Element = class.Element();
     const Staging = flat.Block(Element);
     return struct {
-        /// See `reduceStep`: float `+ - *` fault only on a NaN result, so a
+        /// See `reduceKernel`: float `+ - *` fault only on a NaN result, so a
         /// clean unchecked block needs no per-element test.
         const unchecked = class == .real and
             (operation == .add or operation == .sub or operation == .mul);

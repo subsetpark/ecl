@@ -1096,10 +1096,22 @@ They decide output width before the first write or retain enough evidence to
 report the same first fault. Ordered folds and stable comparisons preserve
 their semantic order in typed storage.
 
-Flat inputs are borrowed through retaining `LeafReader` capabilities. Outputs
-are built through single-publication `LeafWriter`s or through a claimed unique
-input whose element width is compatible. Mutable access and its ownership proof
-arrive together as one capability.
+Flat inputs are borrowed through retaining `LeafReader` capabilities, or, in a
+kernel run by `support.Kernel`, read as `heap.leafElements` views under the
+references the executor holds: the caller's while the kernel runs inline, the
+driver's own once it continues past its turn. Outputs are built through
+single-publication `LeafWriter`s or through a claimed unique input whose
+element width is compatible. Mutable access and its ownership proof arrive
+together as one capability.
+
+`support.Kernel` is the one place that decides whether a typed kernel runs
+inline or as a driver. A kernel defines what one range computes; the executor
+charges it, holds its operands, abandons its output on a fault, and publishes
+it, so the decision and its bookkeeping are written once. Inside pervasion a
+kernel that cannot finish in its turn is boxed behind a small type-erased
+driver in the cursor's frame. Only the operation's own root operand may become
+the output there: an element held only by its spine would pass the
+uniqueness claim, and reusing it would take the spine's buffer.
 
 Faulted blocks replay through shared scalar semantics before any block output
 is published. Replay reads retained input capabilities in logical order; a
