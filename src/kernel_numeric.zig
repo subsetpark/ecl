@@ -1311,6 +1311,26 @@ const FlatScalarClass = enum {
     fn isCharacter(self: FlatScalarClass) bool {
         return self != .byte and self != .integer;
     }
+
+    fn kind(comptime self: FlatScalarClass) value.HeapKind {
+        return switch (self) {
+            .byte => .leaf_u8,
+            .integer => .leaf_i64,
+            .char1 => .leaf_char1,
+            .char2 => .leaf_char2,
+            .char4 => .leaf_char4,
+        };
+    }
+
+    /// A scalar operand as this class's element: an int for the numeric
+    /// classes, a codepoint for the character ones.
+    fn unboxed(comptime self: FlatScalarClass, item: Value) self.Element() {
+        return switch (self) {
+            .byte => @intCast(item.int),
+            .integer => item.int,
+            .char1, .char2, .char4 => @intCast(item.char),
+        };
+    }
 };
 
 fn characterFlatClass(character: Character) FlatScalarClass {
@@ -1605,16 +1625,6 @@ const FixedCharState = struct {
 
 const FixedCharStep = *const fn (*FixedCharState, support.Context) MachineError!void;
 
-const FixedCharDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    state: heap.Owned(FixedCharState),
-    step: FixedCharStep,
-
-    pub fn advance(evaluator: *Machine, self: *FixedCharDriver) MachineError!machine.WorkProgress {
-        return advanceFixedCharState(evaluator, self.state.borrowMut(), self.step);
-    }
-};
-
 fn advanceFixedCharState(
     evaluator: *Machine,
     state: *FixedCharState,
@@ -1628,78 +1638,177 @@ fn advanceFixedCharState(
     return .{ .output = state.output.finish() };
 }
 
-fn fixedCharStep(
+/// A character binary operation: `step` for a state embedded in pervasion,
+/// and `Spec` for `support.Kernel`. Both run the same pieces and replay. A
+/// fixed result is one int per position; a dynamic one is a codepoint whose
+/// storage width a profiling pass decides before the fill.
+fn charKernel(
     comptime operation: BinaryOp,
     comptime left_class: FlatScalarClass,
     comptime right_class: FlatScalarClass,
     comptime shape: Shape,
-) FixedCharStep {
-    const Loops = flat.CheckedFamily(left_class.Element(), right_class.Element(), i64);
+    comptime dynamic: bool,
+) type {
+    const Out = if (dynamic) u32 else i64;
+    const Loops = flat.CheckedFamily(left_class.Element(), right_class.Element(), Out);
     const body = struct {
-        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!i64 {
+        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!Out {
             const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return error.Fault;
-            return result.int;
+            return if (dynamic) result.char else result.int;
         }
     }.run;
     return struct {
-        fn leftValue(state: *const FixedCharState, index: usize) left_class.Element() {
-            return if (shape == .scalar_leaf)
-                switch (left_class) {
-                    .byte => @intCast(state.left.scalar.int),
-                    .integer => state.left.scalar.int,
-                    .char1, .char2, .char4 => @intCast(state.left.scalar.char),
-                }
-            else
-                state.left.slice(left_class)[index];
+        const Left = if (shape == .scalar_leaf) left_class.Element() else []const left_class.Element();
+        const Right = if (shape == .leaf_scalar) right_class.Element() else []const right_class.Element();
+
+        /// One staged piece; nothing is stored when it faults.
+        fn runPiece(left: Left, right: Right, piece: flat.Chunk, block: *Loops.Staging) flat.CheckedStatus {
+            return switch (shape) {
+                .leaf_leaf => Loops.binary(body, left, right, piece, block),
+                .leaf_scalar => Loops.binaryScalarRight(body, left, right, piece, block),
+                .scalar_leaf => Loops.binaryScalarLeft(body, left, right, piece, block),
+                .leaf_only => unreachable,
+            };
         }
 
-        fn rightValue(state: *const FixedCharState, index: usize) right_class.Element() {
-            return if (shape == .leaf_scalar)
-                switch (right_class) {
-                    .byte => @intCast(state.right.scalar.int),
-                    .integer => state.right.scalar.int,
-                    .char1, .char2, .char4 => @intCast(state.right.scalar.char),
-                }
-            else
-                state.right.slice(right_class)[index];
+        fn stateLeft(operand: *const FlatScalarOperand) Left {
+            return if (shape == .scalar_leaf) left_class.unboxed(operand.scalar) else operand.slice(left_class);
         }
 
-        fn step(state: *FixedCharState, context: support.Context) MachineError!void {
+        fn stateRight(operand: *const FlatScalarOperand) Right {
+            return if (shape == .leaf_scalar) right_class.unboxed(operand.scalar) else operand.slice(right_class);
+        }
+
+        fn valueLeft(item: Value) Left {
+            return if (shape == .scalar_leaf) left_class.unboxed(item) else heap.leafElements(left_class.kind(), item.list);
+        }
+
+        fn valueRight(item: Value) Right {
+            return if (shape == .leaf_scalar) right_class.unboxed(item) else heap.leafElements(right_class.kind(), item.list);
+        }
+
+        noinline fn replay(context: support.Context, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
+            for (piece.start..piece.end) |index| {
+                const a = if (shape == .scalar_leaf) left else left[index];
+                const b = if (shape == .leaf_scalar) right else right[index];
+                _ = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch |fault|
+                    return failTypedScalar(context, report, fault, index);
+            }
+            unreachable;
+        }
+
+        fn fixedStep(state: *FixedCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             var block = Loops.Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
-                const status = switch (shape) {
-                    .leaf_leaf => Loops.binary(
-                        body,
-                        state.left.slice(left_class),
-                        state.right.slice(right_class),
-                        piece,
-                        &block,
-                    ),
-                    .leaf_scalar => Loops.binaryScalarRight(
-                        body,
-                        state.left.slice(left_class),
-                        rightValue(state, piece.start),
-                        piece,
-                        &block,
-                    ),
-                    .scalar_leaf => Loops.binaryScalarLeft(
-                        body,
-                        leftValue(state, piece.start),
-                        state.right.slice(right_class),
-                        piece,
-                        &block,
-                    ),
-                    .leaf_only => unreachable,
-                };
-                if (status == .faulted) return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
+                if (runPiece(stateLeft(&state.left), stateRight(&state.right), piece, &block) == .faulted)
+                    return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
                 state.output.writeRange(piece.start, block.written());
                 offset += piece.len();
             }
         }
-    }.step;
+
+        fn dynamicStep(state: *DynamicCharState, context: support.Context) MachineError!void {
+            const range = try state.cursor.nextRange(context) orelse return;
+            var block = Loops.Staging.init();
+            var offset: usize = 0;
+            while (offset != range.len()) {
+                const piece = flat.blockRange(range, offset);
+                if (runPiece(stateLeft(&state.left), stateRight(&state.right), piece, &block) == .faulted)
+                    return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
+                if (state.phase == .profile) {
+                    for (block.written()) |codepoint| state.max_codepoint = @max(state.max_codepoint, codepoint);
+                } else state.writer.?.borrowMut().writeCodepoints(piece.start, block.written());
+                offset += piece.len();
+            }
+        }
+
+        /// The fixed operation as a `support.Kernel`.
+        const FixedSpec = struct {
+            pub const arity = 2;
+            pub const Params = FaultReport;
+            pub const Output = heap.LeafWriter(.leaf_i64);
+
+            pub fn prepare(evaluator: *Machine, _: [2]Value, _: FaultReport, length: usize) error{OutOfMemory}!Output {
+                return .init(evaluator.allocator(), length);
+            }
+
+            pub fn chunk(report: FaultReport, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                const left = valueLeft(operands[0]);
+                const right = valueRight(operands[1]);
+                var block = Loops.Staging.init();
+                var offset: usize = 0;
+                while (offset != range.len()) {
+                    const piece = flat.blockRange(range, offset);
+                    if (runPiece(left, right, piece, &block) == .faulted) return replay(context, report, left, right, piece);
+                    output.writeRange(piece.start, block.written());
+                    offset += piece.len();
+                }
+            }
+
+            pub fn finish(output: *Output) Value {
+                return output.finish();
+            }
+        };
+
+        /// The dynamic operation as a `support.Kernel` of twice the length:
+        /// positions below `length / 2` profile the widest codepoint, and the
+        /// rest fill a writer of that width, made when the fill begins. The
+        /// profile charges and faults exactly as the fill would.
+        const DynamicSpec = struct {
+            pub const arity = 2;
+            pub const Params = FaultReport;
+            pub const Output = struct {
+                count: usize,
+                max_codepoint: u32 = 0,
+                writer: ?flat.CodepointWriter = null,
+
+                pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                    if (self.writer) |*writer| writer.retire(releases);
+                    self.writer = null;
+                }
+            };
+
+            pub fn prepare(_: *Machine, _: [2]Value, _: FaultReport, length: usize) error{OutOfMemory}!Output {
+                return .{ .count = length / 2 };
+            }
+
+            pub fn chunk(report: FaultReport, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                const left = valueLeft(operands[0]);
+                const right = valueRight(operands[1]);
+                if (range.start < output.count)
+                    try pass(report, left, right, output, .{ .start = range.start, .end = @min(range.end, output.count) }, context, true);
+                if (range.end > output.count) {
+                    if (output.writer == null)
+                        output.writer = try flat.CodepointWriter.init(context.allocator(), output.count, output.max_codepoint);
+                    const start = @max(range.start, output.count) - output.count;
+                    try pass(report, left, right, output, .{ .start = start, .end = range.end - output.count }, context, false);
+                }
+            }
+
+            fn pass(report: FaultReport, left: Left, right: Right, output: *Output, range: flat.Chunk, context: support.Context, profile: bool) MachineError!void {
+                var block = Loops.Staging.init();
+                var offset: usize = 0;
+                while (offset != range.len()) {
+                    const piece = flat.blockRange(range, offset);
+                    if (runPiece(left, right, piece, &block) == .faulted) return replay(context, report, left, right, piece);
+                    if (profile) {
+                        for (block.written()) |codepoint| output.max_codepoint = @max(output.max_codepoint, codepoint);
+                    } else output.writer.?.writeCodepoints(piece.start, block.written());
+                    offset += piece.len();
+                }
+            }
+
+            pub fn finish(output: *Output) Value {
+                return output.writer.?.finish();
+            }
+        };
+
+        const Spec = if (dynamic) DynamicSpec else FixedSpec;
+        const run = support.Kernel(Spec).run;
+    };
 }
 
 const DynamicCharState = struct {
@@ -1724,16 +1833,6 @@ const DynamicCharState = struct {
 
 const DynamicCharStep = *const fn (*DynamicCharState, support.Context) MachineError!void;
 
-const DynamicCharDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    state: heap.Owned(DynamicCharState),
-    step: DynamicCharStep,
-
-    pub fn advance(evaluator: *Machine, self: *DynamicCharDriver) MachineError!machine.WorkProgress {
-        return advanceDynamicCharState(evaluator, self.state.borrowMut(), self.step);
-    }
-};
-
 fn advanceDynamicCharState(
     evaluator: *Machine,
     state: *DynamicCharState,
@@ -1755,82 +1854,6 @@ fn advanceDynamicCharState(
     state.left.release(evaluator.releaseDomain());
     state.right.release(evaluator.releaseDomain());
     return .{ .output = state.writer.?.borrowMut().finish() };
-}
-
-fn dynamicCharStep(
-    comptime operation: BinaryOp,
-    comptime left_class: FlatScalarClass,
-    comptime right_class: FlatScalarClass,
-    comptime shape: Shape,
-) DynamicCharStep {
-    const Loops = flat.CheckedFamily(left_class.Element(), right_class.Element(), u32);
-    const body = struct {
-        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!u32 {
-            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return error.Fault;
-            return result.char;
-        }
-    }.run;
-    return struct {
-        fn leftValue(state: *const DynamicCharState, index: usize) left_class.Element() {
-            return if (shape == .scalar_leaf)
-                switch (left_class) {
-                    .byte => @intCast(state.left.scalar.int),
-                    .integer => state.left.scalar.int,
-                    .char1, .char2, .char4 => @intCast(state.left.scalar.char),
-                }
-            else
-                state.left.slice(left_class)[index];
-        }
-
-        fn rightValue(state: *const DynamicCharState, index: usize) right_class.Element() {
-            return if (shape == .leaf_scalar)
-                switch (right_class) {
-                    .byte => @intCast(state.right.scalar.int),
-                    .integer => state.right.scalar.int,
-                    .char1, .char2, .char4 => @intCast(state.right.scalar.char),
-                }
-            else
-                state.right.slice(right_class)[index];
-        }
-
-        fn step(state: *DynamicCharState, context: support.Context) MachineError!void {
-            const range = try state.cursor.nextRange(context) orelse return;
-            var block = Loops.Staging.init();
-            var offset: usize = 0;
-            while (offset != range.len()) {
-                const piece = flat.blockRange(range, offset);
-                const status = switch (shape) {
-                    .leaf_leaf => Loops.binary(
-                        body,
-                        state.left.slice(left_class),
-                        state.right.slice(right_class),
-                        piece,
-                        &block,
-                    ),
-                    .leaf_scalar => Loops.binaryScalarRight(
-                        body,
-                        state.left.slice(left_class),
-                        rightValue(state, piece.start),
-                        piece,
-                        &block,
-                    ),
-                    .scalar_leaf => Loops.binaryScalarLeft(
-                        body,
-                        leftValue(state, piece.start),
-                        state.right.slice(right_class),
-                        piece,
-                        &block,
-                    ),
-                    .leaf_only => unreachable,
-                };
-                if (status == .faulted) return replayCharacterBinary(&state.left, &state.right, state.report, context, piece, selectScalar(operation));
-                if (state.phase == .profile) {
-                    for (block.written()) |codepoint| state.max_codepoint = @max(state.max_codepoint, codepoint);
-                } else state.writer.?.borrowMut().writeCodepoints(piece.start, block.written());
-                offset += piece.len();
-            }
-        }
-    }.step;
 }
 
 const TypedState = struct {
@@ -2596,6 +2619,8 @@ const CharacterBinaryPlan = opaque {
         right: FlatScalarClass,
         shape: Shape,
         step: Step,
+        /// The executor's entry; a dynamic kernel's work is twice its length.
+        run: RunBinary,
     };
 
     fn select(operation: BinaryOp, left: FlatScalarClass, right: FlatScalarClass, shape: Shape) ?*const CharacterBinaryPlan {
@@ -2625,14 +2650,13 @@ const CharacterBinaryPlan = opaque {
                     if (comptime candidate_shape == .scalar_leaf and candidate_left != .integer and candidate_left != .char4) continue;
                     if (comptime candidate_shape == .leaf_scalar and candidate_right != .integer and candidate_right != .char4) continue;
                     if (candidate_left == left and candidate_right == right and candidate_shape == shape) {
+                        const Kernel = comptime charKernel(operation, candidate_left, candidate_right, candidate_shape, !fixed);
                         const data = comptime Data{
                             .left = candidate_left,
                             .right = candidate_right,
                             .shape = candidate_shape,
-                            .step = if (fixed)
-                                .{ .fixed = fixedCharStep(operation, candidate_left, candidate_right, candidate_shape) }
-                            else
-                                .{ .dynamic = dynamicCharStep(operation, candidate_left, candidate_right, candidate_shape) },
+                            .step = if (fixed) .{ .fixed = Kernel.fixedStep } else .{ .dynamic = Kernel.dynamicStep },
+                            .run = Kernel.run,
                         };
                         return @ptrCast(&data);
                     }
@@ -2935,19 +2959,41 @@ fn startTypedBinary(
 ) MachineError!bool {
     if (try startNumericBinary(evaluator, operation, left, right, report)) return true;
     // The numeric kernel classified exactly as the numeric builder does, so
-    // what remains is the character builder's, as in `buildNestedTypedBinary`.
-    // An empty result's representation is the generic route's to choose, and
-    // so is a pair no plan admits; the builder declines both.
-    const typed = (try buildNestedTypedCharBinary(evaluator, operation, left.borrow(), right.borrow(), report)) orelse {
-        _ = try rejectUnsupportedFlatBinary(evaluator, operation, left.borrow(), right.borrow(), report);
+    // what remains is the character kernels', classified as the character
+    // builder does. An empty result's representation is the generic route's
+    // to choose, and so is a pair no plan admits.
+    if (try startCharacterBinary(evaluator, operation, left, right, report)) return true;
+    _ = try rejectUnsupportedFlatBinary(evaluator, operation, left.borrow(), right.borrow(), report);
+    return false;
+}
+
+fn startCharacterBinary(
+    evaluator: *Machine,
+    operation: BinaryOp,
+    left: *heap.OwnedValue,
+    right: *heap.OwnedValue,
+    report: FaultReport,
+) MachineError!bool {
+    const left_item = left.borrow();
+    const right_item = right.borrow();
+    const left_leaf = leafFlatScalarClass(left_item);
+    const right_leaf = leafFlatScalarClass(right_item);
+    const shape: Shape = if (left_leaf != null and right_leaf != null)
+        .leaf_leaf
+    else if (left_leaf != null and scalarFlatScalarClass(right_item) != null)
+        .leaf_scalar
+    else if (right_leaf != null and scalarFlatScalarClass(left_item) != null)
+        .scalar_leaf
+    else
         return false;
-    };
-    // runDriver consumes the payload on both success and failure.
-    try switch (typed) {
-        .numeric => unreachable, // The character builder builds no numeric state.
-        .fixed_char => |payload| evaluator.runDriver(FixedCharDriver{ .state = .init(payload.state), .step = payload.step }),
-        .dynamic_char => |payload| evaluator.runDriver(DynamicCharDriver{ .state = .init(payload.state), .step = payload.step }),
-    };
+    const left_class = left_leaf orelse scalarFlatScalarClass(left_item).?;
+    const right_class = right_leaf orelse scalarFlatScalarClass(right_item).?;
+    if (!left_class.isCharacter() and !right_class.isCharacter()) return false;
+    const length = try conformingLength(evaluator, shape, left_item, right_item);
+    if (length == 0) return false;
+    const plan = CharacterBinaryPlan.select(operation, left_class, right_class, shape) orelse return false;
+    const data: *const CharacterBinaryPlan.Data = @ptrCast(@alignCast(plan));
+    try data.run(evaluator, .{ left, right }, report, if (data.step == .dynamic) 2 * length else length);
     return true;
 }
 
