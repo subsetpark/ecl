@@ -96,7 +96,7 @@ pub const Operation = union(enum) {
                 // `at` gathers with a list index; `cat`, `take`, `drop`, `in?`,
                 // and `reshape` each read two operands whose representations
                 // both matter.
-                .at, .cat, .take, .drop, .in_word, .reshape, .cut => .two,
+                .at, .cat, .take, .drop, .in_word, .reshape, .cut, .rotate => .two,
                 .where, .first_where, .raze, .reverse, .first, .rest, .range, .shape, .len, .flip => .one,
             },
             .order => |operation| switch (operation) {
@@ -472,6 +472,7 @@ const sequence_rows = [_]Row{
             Operation{ .sequence = .cat },
             Operation{ .sequence = .take },
             Operation{ .sequence = .drop },
+            Operation{ .sequence = .rotate },
         }),
         .left = all_leaves,
         .right = union2(all_leaves, any_atom),
@@ -484,6 +485,7 @@ const sequence_rows = [_]Row{
             Operation{ .sequence = .cat },
             Operation{ .sequence = .take },
             Operation{ .sequence = .drop },
+            Operation{ .sequence = .rotate },
         }),
         .left = union2(any_atom, union2(spine, dictionary)),
         .right = any_operand,
@@ -495,6 +497,7 @@ const sequence_rows = [_]Row{
             Operation{ .sequence = .cat },
             Operation{ .sequence = .take },
             Operation{ .sequence = .drop },
+            Operation{ .sequence = .rotate },
         }),
         .left = all_leaves,
         .right = union2(spine, dictionary),

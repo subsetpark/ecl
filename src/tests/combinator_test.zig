@@ -348,6 +348,16 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .expected = "10",
         },
         .{
+            .name = "while checkpoint follows a growing stack",
+            .source = "0 (dup 3 <) (dup 1 +) while",
+            .expected = "0 1 2 3",
+        },
+        .{
+            .name = "while checkpoint follows a shrinking stack",
+            .source = "1 2 3 4 (dup 1 >) (pop) while",
+            .expected = "1",
+        },
+        .{
             .name = "while stack rollback preserves environment effects",
             .source = "0 (1 'while-guard-effect set 0) () while while-guard-effect",
             .expected = "0 1",
@@ -1179,4 +1189,23 @@ test "bindings: a unit's cached resolutions follow its own definitions" {
     try expectFreshStack("(1 +) 'inc def 0 3 (inc) times (10 +) 'inc def 3 (inc) times", "33");
     // Shadowing a core word after using it, and removing the shadow.
     try expectFreshStack("1 2 + (pop pop 42) '+ def 1 2 + '+ undef 1 2 +", "3 42 3");
+}
+
+test "while restores a checkpoint deeper than one turn's budget" {
+    // 100,000 operands exceed a turn's 65,536 units, so capture and restore
+    // suspend under a driver; a condition that consumes the stack still
+    // leaves it as it found it.
+    try expectFreshStack(
+        "[] (100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await 'ok at last",
+        "100001",
+    );
+}
+
+test "while abandons a checkpoint deeper than one turn's budget" {
+    // A failing condition abandons the loop with 100,001 operands saved; the
+    // checkpoint goes to the release domain whole, and nothing leaks.
+    try expectFreshStack(
+        "[] (100000 (7) times 0 (dup 'x +) () while) @spawn task.await 'err at 'kind at",
+        "'type",
+    );
 }

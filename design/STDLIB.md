@@ -1111,8 +1111,8 @@ Equivalent to `swap (swap) dip`.
 `( list count -- list )` — Rotate top-level element order left by a
 count, wrapping cyclically; a negative count rotates right, counts
 beyond the length wrap, and the empty list is returned unchanged.
-Defined in ecl as a modular index permutation (the K lineage's
-composed form; APL/J make dyadic reverse a primitive).
+Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K
+composes it from an index permutation). The count must be an int.
 
 #### Examples
 

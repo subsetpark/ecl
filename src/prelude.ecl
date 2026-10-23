@@ -305,12 +305,6 @@
  "Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds.")
 (swap (pop) (raise) if) 'assert def
 
-### def rotate
-(list count -- rotated :
- "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty
-  list is returned unchanged.")
-(|xs n| xs dup len range n + dup len mod dup len + dup len mod at) 'rotate def
-
 ### def windows
 (list width -- windows : "Return every overlapping window of a positive width.")
 (() stencil) 'windows def

@@ -67,22 +67,207 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     defer condition.deinit();
     if (body.borrow() != .list or condition.borrow() != .list)
         return evaluator.typeError("two quotations/lists");
-    const first_condition = condition.borrow().list;
-    var checkpoint = try GuardCheckpoint.init(evaluator);
-    try evaluator.startDriver(GuardSnapshotDriver{
-        .control = .init(.{
-            .checkpoint = .init(checkpoint.take()),
-            .selector = .{ .while_loop = .{
-                .condition = .init(condition.take().list),
-                .body = .init(body.take().list),
-            } },
-            .site = evaluator.applicationSite(),
-            .word = evaluator.activeWordId(),
-            .provenance_target = try evaluator.applicationProvenanceTarget(),
-        }),
-        .target = .{ .predicate = first_condition },
-    });
+    const provenance_target = try evaluator.applicationProvenanceTarget();
+    const state = try evaluator.allocator().create(WhileState);
+    state.* = .{
+        .condition = .init(condition.take().list),
+        .body = .init(body.take().list),
+        .checkpoint = .init(.{}),
+        .site = evaluator.applicationSite(),
+        .word = evaluator.activeWordId(),
+        .provenance_target = provenance_target,
+        .phase = .condition,
+    };
+    var owned = heap.Owned(*WhileState).init(state);
+    state.checkpoint.borrowMut().beginCapture();
+    if (!(state.checkpoint.borrowMut().advance(evaluator) catch |err| {
+        owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        return err;
+    })) return evaluator.startDriver(WhileStartDriver{ .state = owned });
+    try evaluator.beginInlineApplication(owned.take().application(state.condition.borrow()));
 }
+
+/// The operand stack a `while` condition starts from, retained, so the
+/// condition's own stack result can be discarded. One buffer serves the whole
+/// loop while it is deep enough; capture and restore advance as far as the
+/// turn's budget allows. The buffer is a heap list, so abandoning it retires
+/// one root through the release domain rather than walking the saved stack.
+const WhileCheckpoint = struct {
+    values: ?heap.ListBuilder(.generic_spine) = null,
+    depth: usize = 0,
+    index: usize = 0,
+    phase: enum { idle, release, capture, discard, restore } = .idle,
+
+    fn beginCapture(self: *WhileCheckpoint) void {
+        self.phase = .release;
+        self.index = 0;
+    }
+    fn beginRestore(self: *WhileCheckpoint) void {
+        self.phase = .discard;
+        self.index = 0;
+    }
+    /// Advances the capture or restore in hand; true once it is finished.
+    fn advance(self: *WhileCheckpoint, evaluator: *Machine) error{OutOfMemory}!bool {
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.phase) {
+            .release => {
+                const depth = evaluator.available();
+                if (self.values) |*buffer| {
+                    if (buffer.capacity() < depth) {
+                        buffer.retirePartial(evaluator.releaseDomain());
+                        self.values = null;
+                    } else if (buffer.len() != 0) {
+                        const last = buffer.len() - 1;
+                        const item = buffer.items()[last];
+                        buffer.setLen(last);
+                        evaluator.releaseDomain().releaseValue(item);
+                        continue;
+                    }
+                }
+                if (self.values == null)
+                    self.values = try heap.ListBuilder(.generic_spine).init(evaluator.allocator(), 0, depth);
+                self.depth = depth;
+                self.phase = .capture;
+            },
+            .capture => if (self.index != self.depth) {
+                const item = evaluator.visibleOperandBorrowed(self.index);
+                heap.retainValue(item);
+                self.values.?.items()[self.index] = item;
+                self.values.?.setLen(self.index + 1);
+                self.index += 1;
+            } else {
+                self.phase = .idle;
+                return true;
+            },
+            .discard => if (evaluator.available() != 0) evaluator.discard(1) else {
+                _ = try evaluator.reserveStack(self.depth);
+                self.phase = .restore;
+            },
+            .restore => if (self.index != self.depth) {
+                try evaluator.pushBorrowed(self.values.?.items()[self.index]);
+                self.index += 1;
+            } else {
+                self.phase = .idle;
+                return true;
+            },
+            .idle => unreachable,
+        };
+        return false;
+    }
+    pub fn retire(self: *WhileCheckpoint, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        if (self.values) |*buffer| buffer.retirePartial(releases);
+        self.values = null;
+    }
+};
+
+/// One `while` loop's application state, alive for the whole loop. Each
+/// condition or body that finishes resumes it: a condition's result is popped
+/// and the checkpoint restored, a body's stack becomes the next checkpoint,
+/// and the next quotation is applied. Capture and restore run where they are
+/// needed; only work the turn's budget cannot cover stands up a driver, under
+/// which the loop suspends until it is done.
+const WhileState = struct {
+    condition: heap.Owned(*Header),
+    body: heap.Owned(*Header),
+    checkpoint: heap.Owned(WhileCheckpoint),
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    provenance_target: ?*const machine.ApplicationProvenanceTarget,
+    /// The quotation that last finished, or the work a suspension completes.
+    phase: enum { condition, body, captured, restored_true, restored_false },
+
+    fn application(self: *WhileState, quotation: *Header) Application {
+        return machine.typedApplication(self, quotation, self.site, 0);
+    }
+    fn conditionStep(self: *WhileState) ApplicationStep {
+        self.phase = .condition;
+        return .{ .apply = .{ .quotation = self.condition.borrow(), .seeded = 0 } };
+    }
+    fn bodyStep(self: *WhileState) ApplicationStep {
+        self.phase = .body;
+        return .{ .apply = .{
+            .quotation = self.body.borrow(),
+            .seeded = 0,
+            .provenance = if (self.provenance_target) |target| .{ .selected_target = target } else .boundary,
+        } };
+    }
+    /// Runs the checkpoint work in hand, or suspends under a driver that
+    /// finishes it and resumes the loop in `pending`.
+    fn finishWork(
+        self: *WhileState,
+        evaluator: *Machine,
+        pending: @FieldType(WhileState, "phase"),
+    ) MachineError!?ApplicationStep {
+        if (try self.checkpoint.borrowMut().advance(evaluator)) return self.resumeAfter(pending);
+        self.phase = pending;
+        try evaluator.startDriver(WhileWorkDriver{ .state = self });
+        return evaluator.suspendInlineApplication();
+    }
+    fn resumeAfter(self: *WhileState, finished: @FieldType(WhileState, "phase")) ?ApplicationStep {
+        return switch (finished) {
+            .captured => self.conditionStep(),
+            .restored_true => self.bodyStep(),
+            .restored_false => null,
+            .condition, .body => unreachable,
+        };
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *WhileState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.word);
+        evaluator.chargeContinuationStep();
+        switch (self.phase) {
+            .condition => {
+                var predicate = try evaluator.popValue();
+                defer predicate.deinit();
+                const selected = try boolValue(evaluator, &predicate);
+                self.checkpoint.borrowMut().beginRestore();
+                return self.finishWork(evaluator, if (selected) .restored_true else .restored_false);
+            },
+            .body => {
+                self.checkpoint.borrowMut().beginCapture();
+                return self.finishWork(evaluator, .captured);
+            },
+            .captured, .restored_true, .restored_false => |finished| return self.resumeAfter(finished),
+        }
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// Finishes a loop's first capture when the turn ran out, then applies the
+/// condition.
+const WhileStartDriver = struct {
+    state: heap.Owned(*WhileState),
+
+    pub fn advance(evaluator: *Machine, self: *WhileStartDriver) MachineError!machine.WorkProgress {
+        const state = self.state.borrow();
+        evaluator.setActiveWord(state.word);
+        try evaluator.pollKernel();
+        if (!try state.checkpoint.borrowMut().advance(evaluator)) return .stepped;
+        _ = self.state.take();
+        evaluator.retireDriver(self);
+        try evaluator.beginInlineApplication(state.application(state.condition.borrow()));
+        return .detached;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// Finishes checkpoint work for a suspended loop, whose application frame
+/// owns the state; the loop resumes once this completes.
+const WhileWorkDriver = struct {
+    state: *WhileState,
+
+    pub fn advance(evaluator: *Machine, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
+        evaluator.setActiveWord(self.state.word);
+        try evaluator.pollKernel();
+        return if (try self.state.checkpoint.borrowMut().advance(evaluator)) .completed else .stepped;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
 
 const TimesState = struct {
     quotation: heap.Owned(*Header),
@@ -262,10 +447,6 @@ const GuardControl = struct {
             clauses: heap.Owned(Value),
             pair_index: usize = 0,
         },
-        while_loop: struct {
-            condition: heap.Owned(*Header),
-            body: heap.Owned(*Header),
-        },
     },
     site: machine.ApplicationSite,
     word: intern.TraceWord,
@@ -282,16 +463,6 @@ const GuardControl = struct {
                     break :next .{ .action = list.atUnchecked(state.clauses.borrow(), count - 1).list };
                 break :next .{ .predicate = list.atUnchecked(state.clauses.borrow(), state.pair_index).list };
             },
-            .while_loop => |*state| if (selected)
-                .{ .action = state.body.borrow() }
-            else
-                .done,
-        };
-    }
-    fn afterAction(self: *GuardControl) ?*Header {
-        return switch (self.selector) {
-            .cond => null,
-            .while_loop => |*state| state.condition.borrow(),
         };
     }
     pub fn retire(
@@ -302,10 +473,6 @@ const GuardControl = struct {
         self.checkpoint.deinit(releases, allocator);
         switch (self.selector) {
             .cond => |*state| state.clauses.deinit(releases, allocator),
-            .while_loop => |*state| {
-                state.body.deinit(releases, allocator);
-                state.condition.deinit(releases, allocator);
-            },
         }
     }
 };
@@ -411,15 +578,8 @@ const GuardActionState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
+        // A `cond` action is the clause's whole result.
         evaluator.setActiveWord(self.control.borrow().word);
-        const condition = self.control.borrowMut().afterAction() orelse return null;
-        var checkpoint = try GuardCheckpoint.init(evaluator);
-        self.control.borrowMut().checkpoint.deinit(evaluator.releaseDomain(), evaluator.allocator());
-        self.control.borrowMut().checkpoint = .init(checkpoint.take());
-        try evaluator.startDriver(GuardSnapshotDriver{
-            .control = .init(self.control.take()),
-            .target = .{ .predicate = condition },
-        });
         return null;
     }
     pub const ownership: heap.DriverOwnership = .fields;
