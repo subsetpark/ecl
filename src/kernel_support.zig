@@ -338,6 +338,8 @@ pub const RandomOp = enum {
 /// - `chunk(params, operands, *Output, range, context)`: computes one range,
 ///   reporting its first fault.
 /// - `finish(*Output) Value`: publishes the result.
+/// - optional `adopted(*const Output) ?usize`: the operand whose buffer the
+///   result took over, whose reference therefore becomes the result's.
 ///
 /// Operands are `Value` views, stable while their references are held, so a
 /// slice is re-derived for every range.
@@ -364,7 +366,16 @@ pub fn Kernel(comptime Spec: type) type {
             const context = Context{ .evaluator = evaluator };
             try context.advance(length);
             try Spec.chunk(params, operands, &output, .{ .start = 0, .end = length }, context);
-            return evaluator.pushOwned(Spec.finish(&output));
+            const consumed = adoptedOperand(&output);
+            const result = Spec.finish(&output);
+            // The result republished an operand's buffer, so that operand's
+            // reference is the result's now, not the caller's to release.
+            if (consumed) |position| _ = owners[position].take();
+            return evaluator.pushOwned(result);
+        }
+
+        fn adoptedOperand(output: *const Spec.Output) ?usize {
+            return if (@hasDecl(Spec, "adopted")) Spec.adopted(output) else null;
         }
 
         /// Kept out of line, so the common inline path carries none of the
@@ -376,8 +387,8 @@ pub fn Kernel(comptime Spec: type) type {
             output: Spec.Output,
             length: usize,
         ) MachineError!void {
-            // SAFETY: the loop below writes every element before any is read.
-            var held: Held = undefined;
+            // SAFETY: the loop below writes every value before any is read.
+            var held: Held = .{ .values = undefined };
             inline for (&held.values, owners) |*operand, owner| operand.* = owner.take();
             var driver = Driver{
                 .operands = .init(held),
@@ -388,12 +399,16 @@ pub fn Kernel(comptime Spec: type) type {
             return evaluator.runDriverAt(&driver);
         }
 
-        /// A driver's own references to the operands.
+        /// A driver's own references to the operands, less any the result
+        /// took over.
         const Held = struct {
             values: Operands,
+            consumed: ?usize = null,
 
             pub fn retire(self: *Held, releases: *heap.ReleaseDomain) void {
-                for (self.values) |item| releases.releaseValue(item);
+                for (self.values, 0..) |item, position| {
+                    if (self.consumed != position) releases.releaseValue(item);
+                }
             }
         };
 
@@ -416,6 +431,7 @@ pub fn Kernel(comptime Spec: type) type {
                     try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, context);
                 if (!self.cursor.complete()) return .stepped;
                 var finished = self.output.take();
+                self.operands.borrowMut().consumed = adoptedOperand(&finished);
                 return .{ .output = Spec.finish(&finished) };
             }
         };

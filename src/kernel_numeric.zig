@@ -1859,20 +1859,6 @@ const TypedState = struct {
 
 const TypedStep = *const fn (*TypedState, support.Context) MachineError!void;
 
-const TypedDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    /// Installed only to resume an operation longer than the rest of its
-    /// turn, and released when it publishes.
-    pub const inline_driver = true;
-
-    state: heap.Owned(TypedState),
-    step: TypedStep,
-
-    pub fn advance(evaluator: *Machine, self: *TypedDriver) MachineError!machine.WorkProgress {
-        return advanceTypedState(evaluator, self.state.borrowMut(), self.step);
-    }
-};
-
 fn advanceTypedState(
     evaluator: *Machine,
     state: *TypedState,
@@ -2216,53 +2202,46 @@ fn binaryKernel(
             return null;
         }
 
-        /// The whole operation within the caller's call, for operands whose
-        /// length the remaining budget already covers. It computes what the
-        /// driver would, through the same loops and the same replay, without
-        /// building a driver state: operands are read in place under the
-        /// caller's references, and the output is the left operand's buffer
-        /// when that is solely owned, or a fresh one.
-        fn direct(
-            evaluator: *Machine,
-            left: *heap.OwnedValue,
-            right: *heap.OwnedValue,
-            length: usize,
-            report: FaultReport,
-        ) MachineError!void {
-            const context = support.Context{ .evaluator = evaluator };
-            try context.advance(length);
-            const left_operand: Left = if (shape == .scalar_leaf)
-                left_class.unboxed(left.borrow())
-            else
-                heap.leafElements(left_class.kind(), left.borrow().list);
-            const right_operand: Right = if (shape == .leaf_scalar)
-                right_class.unboxed(right.borrow())
-            else
-                heap.leafElements(right_class.kind(), right.borrow().list);
-            const adoption = if (shape == .scalar_leaf)
-                null
-            else
-                heap.UniqueLeafAdoption(out.kind()).claim(left.borrow().list, length);
-            var output: TypedOutput = if (adoption) |claimed| switch (out) {
-                .byte => .{ .reuse_bytes = claimed },
-                .integer => .{ .reuse_ints = claimed },
-                .real => .{ .reuse_reals = claimed },
-            } else switch (out) {
-                .byte => .{ .fresh_bytes = try .init(evaluator.allocator(), length) },
-                .integer => .{ .fresh_ints = try .init(evaluator.allocator(), length) },
-                .real => .{ .fresh_reals = try .init(evaluator.allocator(), length) },
-            };
-            const placement: flat.Placement = if (adoption != null) .over_operands else .fresh;
-            if (runPieces(left_operand, right_operand, &output, placement, .{ .start = 0, .end = length })) |faulted| {
-                output.retire(evaluator.releaseDomain());
-                return replayDirect(context, report, left_operand, right_operand, faulted);
+        /// The operation as a `support.Kernel`: its output is the left
+        /// operand's buffer when that is solely owned, or a fresh one.
+        const Spec = struct {
+            pub const arity = 2;
+            pub const Params = FaultReport;
+            pub const Output = KernelOutput;
+
+            pub fn prepare(evaluator: *Machine, operands: [2]Value, _: FaultReport, length: usize) error{OutOfMemory}!Output {
+                if (shape != .scalar_leaf) {
+                    if (heap.UniqueLeafAdoption(out.kind()).claim(operands[0].list, length)) |claimed| return .{
+                        .typed = switch (out) {
+                            .byte => .{ .reuse_bytes = claimed },
+                            .integer => .{ .reuse_ints = claimed },
+                            .real => .{ .reuse_reals = claimed },
+                        },
+                        .adopted = true,
+                    };
+                }
+                return .{ .typed = try freshOutput(out, evaluator, length), .adopted = false };
             }
-            const result = output.finish();
-            // An adopted buffer republished the left operand's list, so its
-            // reference is now the result's.
-            if (adoption != null) _ = left.take();
-            return evaluator.pushOwned(result);
-        }
+
+            pub fn chunk(report: FaultReport, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                const left: Left = if (shape == .scalar_leaf)
+                    left_class.unboxed(operands[0])
+                else
+                    heap.leafElements(left_class.kind(), operands[0].list);
+                const right: Right = if (shape == .leaf_scalar)
+                    right_class.unboxed(operands[1])
+                else
+                    heap.leafElements(right_class.kind(), operands[1].list);
+                const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
+                if (runPieces(left, right, &output.typed, placement, range)) |faulted|
+                    return replayDirect(context, report, left, right, faulted);
+            }
+
+            pub const finish = KernelOutput.finish;
+            pub const adopted = KernelOutput.adoptedOperand;
+        };
+
+        const run = support.Kernel(Spec).run;
 
         noinline fn replayDirect(context: support.Context, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
@@ -2344,29 +2323,35 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
             return null;
         }
 
-        /// The whole operation within the caller's call; see `binaryKernel`.
-        fn direct(evaluator: *Machine, operand: *heap.OwnedValue, length: usize, report: FaultReport) MachineError!void {
-            const context = support.Context{ .evaluator = evaluator };
-            try context.advance(length);
-            const elements = heap.leafElements(operand_class.kind(), operand.borrow().list);
-            const adoption = heap.UniqueLeafAdoption(out.kind()).claim(operand.borrow().list, length);
-            var output: TypedOutput = if (adoption) |claimed| switch (out) {
-                .byte => .{ .reuse_bytes = claimed },
-                .integer => .{ .reuse_ints = claimed },
-                .real => .{ .reuse_reals = claimed },
-            } else switch (out) {
-                .byte => .{ .fresh_bytes = try .init(evaluator.allocator(), length) },
-                .integer => .{ .fresh_ints = try .init(evaluator.allocator(), length) },
-                .real => .{ .fresh_reals = try .init(evaluator.allocator(), length) },
-            };
-            if (runPieces(elements, &output, .{ .start = 0, .end = length })) |faulted| {
-                output.retire(evaluator.releaseDomain());
-                return replayDirect(context, report, elements, faulted);
+        /// The operation as a `support.Kernel`; see `binaryKernel`.
+        const Spec = struct {
+            pub const arity = 1;
+            pub const Params = FaultReport;
+            pub const Output = KernelOutput;
+
+            pub fn prepare(evaluator: *Machine, operands: [1]Value, _: FaultReport, length: usize) error{OutOfMemory}!Output {
+                if (heap.UniqueLeafAdoption(out.kind()).claim(operands[0].list, length)) |claimed| return .{
+                    .typed = switch (out) {
+                        .byte => .{ .reuse_bytes = claimed },
+                        .integer => .{ .reuse_ints = claimed },
+                        .real => .{ .reuse_reals = claimed },
+                    },
+                    .adopted = true,
+                };
+                return .{ .typed = try freshOutput(out, evaluator, length), .adopted = false };
             }
-            const result = output.finish();
-            if (adoption != null) _ = operand.take();
-            return evaluator.pushOwned(result);
-        }
+
+            pub fn chunk(report: FaultReport, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                const elements = heap.leafElements(operand_class.kind(), operands[0].list);
+                if (runPieces(elements, &output.typed, range)) |faulted|
+                    return replayDirect(context, report, elements, faulted);
+            }
+
+            pub const finish = KernelOutput.finish;
+            pub const adopted = KernelOutput.adoptedOperand;
+        };
+
+        const run = support.Kernel(Spec).run;
 
         noinline fn replayDirect(context: support.Context, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
@@ -2375,6 +2360,33 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
             }
             unreachable;
         }
+    };
+}
+
+/// A numeric kernel's result: a typed output, which may be its first
+/// operand's buffer taken over in place.
+const KernelOutput = struct {
+    typed: TypedOutput,
+    adopted: bool,
+
+    pub fn retire(self: *KernelOutput, releases: *heap.ReleaseDomain) void {
+        self.typed.retire(releases);
+    }
+
+    fn finish(self: *KernelOutput) Value {
+        return self.typed.finish();
+    }
+
+    fn adoptedOperand(self: *const KernelOutput) ?usize {
+        return if (self.adopted) 0 else null;
+    }
+};
+
+fn freshOutput(comptime out: Number, evaluator: *Machine, length: usize) error{OutOfMemory}!TypedOutput {
+    return switch (out) {
+        .byte => .{ .fresh_bytes = try .init(evaluator.allocator(), length) },
+        .integer => .{ .fresh_ints = try .init(evaluator.allocator(), length) },
+        .real => .{ .fresh_reals = try .init(evaluator.allocator(), length) },
     };
 }
 
@@ -2443,7 +2455,8 @@ const OperandOwners = struct {
 /// Static selection binds the element classes, output width, and monomorphic
 /// step together. Preparation runs once outside the operation/type expansion;
 /// callers cannot supply a step independently of its storage contract.
-const DirectBinary = *const fn (*Machine, *heap.OwnedValue, *heap.OwnedValue, usize, FaultReport) MachineError!void;
+/// Runs a plan's operation through `support.Kernel`, inline or as a driver.
+const RunBinary = *const fn (*Machine, [2]*heap.OwnedValue, FaultReport, usize) MachineError!void;
 
 const NumericBinaryPlan = opaque {
     const Data = struct {
@@ -2452,7 +2465,7 @@ const NumericBinaryPlan = opaque {
         shape: Shape,
         out: Number,
         step: TypedStep,
-        direct: DirectBinary,
+        run: RunBinary,
     };
 
     fn select(operation: BinaryOp, left: Number, right: Number, shape: Shape) ?*const NumericBinaryPlan {
@@ -2495,7 +2508,7 @@ const NumericBinaryPlan = opaque {
                         .shape = candidate_shape,
                         .out = out,
                         .step = Kernel.step,
-                        .direct = Kernel.direct,
+                        .run = Kernel.run,
                     };
                     table[@backingInt(candidate_left)][@backingInt(candidate_right)][@backingInt(candidate_shape)] =
                         @ptrCast(&data);
@@ -2549,15 +2562,6 @@ const NumericBinaryPlan = opaque {
         } };
     }
 };
-
-fn startTypedDriver(
-    evaluator: *Machine,
-    state: TypedState,
-    step: TypedStep,
-) MachineError!bool {
-    try evaluator.runDriver(TypedDriver{ .state = .init(state), .step = step });
-    return true;
-}
 
 fn leafFlatScalarClass(item: Value) ?FlatScalarClass {
     if (leafNumber(item)) |number| return switch (number) {
@@ -2810,10 +2814,10 @@ fn buildNestedTypedBinary(
 
 /// A closed operation/class pair binds the loop and its output representation.
 /// Both nested and direct pervasion share preparation and ownership transfer.
-const DirectUnary = *const fn (*Machine, *heap.OwnedValue, usize, FaultReport) MachineError!void;
+const RunUnary = *const fn (*Machine, [1]*heap.OwnedValue, FaultReport, usize) MachineError!void;
 
 const NumericUnaryPlan = opaque {
-    const Data = struct { input: Number, out: Number, step: TypedStep, direct: DirectUnary };
+    const Data = struct { input: Number, out: Number, step: TypedStep, run: RunUnary };
 
     fn select(operation: UnaryOp, input: Number) *const NumericUnaryPlan {
         return switch (operation) {
@@ -2825,7 +2829,7 @@ const NumericUnaryPlan = opaque {
                             .input = candidate,
                             .out = unaryResult(selected, candidate),
                             .step = Kernel.step,
-                            .direct = Kernel.direct,
+                            .run = Kernel.run,
                         };
                         break :blk @ptrCast(&data);
                     }
@@ -2885,10 +2889,10 @@ fn buildNestedTypedUnary(
     return try NumericUnaryPlan.select(operation, class).prepare(evaluator, operand, null, length, report);
 }
 
-/// A numeric operation the remaining budget covers runs to completion here,
-/// with no driver state. It classifies exactly as the numeric builder does,
-/// so a pair it declines reaches that builder unchanged.
-fn directNumericBinary(
+/// A numeric operation runs through its plan's kernel, inline or as a
+/// driver. It classifies exactly as the numeric builder does, so a pair it
+/// declines reaches the builder unchanged.
+fn startNumericBinary(
     evaluator: *Machine,
     operation: BinaryOp,
     left: *heap.OwnedValue,
@@ -2908,7 +2912,7 @@ fn directNumericBinary(
     else
         return false;
     const length = try conformingLength(evaluator, shape, left_item, right_item);
-    if (length == 0 or length > evaluator.remainingKernelFuel()) return false;
+    if (length == 0) return false;
     const plan = NumericBinaryPlan.select(
         operation,
         left_leaf orelse scalarNumber(left_item).?,
@@ -2916,7 +2920,7 @@ fn directNumericBinary(
         shape,
     ) orelse return false;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    try data.direct(evaluator, left, right, length, report);
+    try data.run(evaluator, .{ left, right }, report, length);
     return true;
 }
 
@@ -2929,20 +2933,18 @@ fn startTypedBinary(
     right: *heap.OwnedValue,
     report: FaultReport,
 ) MachineError!bool {
-    if (try directNumericBinary(evaluator, operation, left, right, report)) return true;
+    if (try startNumericBinary(evaluator, operation, left, right, report)) return true;
+    // The numeric kernel classified exactly as the numeric builder does, so
+    // what remains is the character builder's, as in `buildNestedTypedBinary`.
     // An empty result's representation is the generic route's to choose, and
     // so is a pair no plan admits; the builder declines both.
-    const typed = (try buildNestedTypedBinary(
-        evaluator,
-        operation,
-        left.borrow(),
-        right.borrow(),
-        .{ .left = left, .right = right },
-        report,
-    )) orelse return false;
+    const typed = (try buildNestedTypedCharBinary(evaluator, operation, left.borrow(), right.borrow(), report)) orelse {
+        _ = try rejectUnsupportedFlatBinary(evaluator, operation, left.borrow(), right.borrow(), report);
+        return false;
+    };
     // runDriver consumes the payload on both success and failure.
     try switch (typed) {
-        .numeric => |payload| evaluator.runDriver(TypedDriver{ .state = .init(payload.state), .step = payload.step }),
+        .numeric => unreachable, // The character builder builds no numeric state.
         .fixed_char => |payload| evaluator.runDriver(FixedCharDriver{ .state = .init(payload.state), .step = payload.step }),
         .dynamic_char => |payload| evaluator.runDriver(DynamicCharDriver{ .state = .init(payload.state), .step = payload.step }),
     };
@@ -2960,15 +2962,9 @@ fn startTypedUnary(
         return rejectUnsupportedFlatUnary(evaluator, operation, item, report);
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
-    const plan = NumericUnaryPlan.select(operation, class);
-    if (length <= evaluator.remainingKernelFuel()) {
-        const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(plan));
-        try data.direct(evaluator, operand, length, report);
-        return true;
-    }
-    const typed = try plan.prepare(evaluator, item, operand, length, report);
-    // runDriver consumes the state on both success and failure.
-    return startTypedDriver(evaluator, typed.numeric.state, typed.numeric.step);
+    const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
+    try data.run(evaluator, .{operand}, report, length);
+    return true;
 }
 
 /// Recognized-idiom entries.
