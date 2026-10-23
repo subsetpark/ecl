@@ -639,27 +639,27 @@ before it touches a snapshot, because one published after its pin may retire
 under it. A unit that may define reads the current snapshot, so it sees its
 own definitions. Module images and core are not versioned: core is frozen, an
 image is frozen once registered, and before that it changes only under its
-constructing unit, while tasks that unit spawned read it live.
+constructing unit. A task that unit spawned reads the image live, through a
+counted lease per dispatch until the image is frozen, so a replaced module
+snapshot retires as soon as its counted readers finish and no pin ever keeps
+one.
 
-A replaced snapshot stays in its chain only while a live pin may observe it;
-otherwise it is unlinked at once. In the session a pin observes the snapshots
-whose versions it falls within. In a module image under construction, read
-live by tasks its constructor spawned, every pin older than the replacement
-may still be dispatching it. Live pins form a list in version order, and a
-kept snapshot waits on the newest pin older than its replacement, the last
-that can observe it, so publication decides with one comparison. Ending a pin
-is constant-time: it hands what it held to the next older pin, and the release
-domain settles the handover a bounded batch per turn, keeping each snapshot
-that pin observes and retiring the rest. A long-running task therefore retains
-one snapshot per name it can observe rather than every intermediate
-definition. An unlinked snapshot retires through the release domain once no
-counted reader is copying it or walking past it. Neither kind of dispatch
-holds a count past its lookup: a pinned unit's pin keeps what it found, and a
-unit reading current bindings takes one load and no announcement. The only
-unpinned reader of a changing root is the unit that replaces it, which does so
-only by running code, after its dispatch has retained what it keeps; a task
-reading a module image live is protected by its pin. Readers outside a unit,
-such as completion, acquire counted leases.
+A replaced session snapshot stays in its chain only while a live pin falls
+within the versions it was current for; otherwise it is unlinked at once. Live
+pins form a list in version order, and a kept snapshot waits on the newest pin
+older than its replacement, the last that can observe it, so publication
+decides with one comparison. Ending a pin is constant-time: it hands what it
+held to the next older pin, and the release domain settles the handover a
+bounded batch per turn, keeping each snapshot that pin observes and retiring
+the rest. A long-running task therefore retains one snapshot per session name
+it can observe rather than every intermediate definition. An unlinked snapshot
+retires through the release domain once no counted reader is copying it or
+walking past it. A session dispatch holds no count past its lookup: a pinned
+unit's pin keeps what it found, and a unit reading current bindings takes one
+load and no announcement. The only unpinned reader of a changing root is the
+unit that replaces it, which does so only by running code, after its dispatch
+has retained what it keeps. Readers outside a unit, such as completion,
+acquire counted leases.
 
 Slots are reached two ways, and their lifetimes follow. A session or core slot
 has an id in a lock-free directory whose ids are never reused; those roots

@@ -512,17 +512,17 @@ pub const BindingCell = struct {
     /// Publishes `spec`, or the name's removal when null, as the cell's next
     /// snapshot.
     ///
-    /// The snapshot it replaces stays in the chain while a live pin may
-    /// observe it; otherwise it leaves the chain now and retires once no
-    /// counted reader holds it. Its other readers cannot: the unit replacing
-    /// it reads only current bindings, and does so after its dispatches have
-    /// retained what they keep.
+    /// In a versioned root (the session) the snapshot it replaces stays in
+    /// the chain while a live pin falls within it; otherwise it leaves the
+    /// chain now and retires once no counted reader holds it. Its uncounted
+    /// readers cannot: a pinned unit's pin keeps what it observes, and the
+    /// unit replacing it reads only current bindings, and does so after its
+    /// dispatches have retained what they keep.
     ///
-    /// In a versioned root (the session) a pin observes a snapshot it falls
-    /// within. Any other root that changes is a module image under
-    /// construction, read live by tasks its constructor spawned, so there
-    /// every pin older than the replacement protects the snapshot: such a
-    /// task may still be dispatching it.
+    /// Any other root that changes is a module image under construction. Its
+    /// constructor reads it as the session's definer does, and a task that
+    /// constructor spawned reads it through counted leases
+    /// (`Scope.isUnderConstruction`), so no pin keeps its snapshots.
     fn replace(
         self: *BindingCell,
         allocator: std.mem.Allocator,
@@ -537,8 +537,8 @@ pub const BindingCell = struct {
         replaced.next = snapshot;
         replaced.cell = self;
         self.retain();
-        replaced.kept.since = if (versioned) replaced.since else 0;
-        const retire = !releases.keepBindingLocked(&replaced.kept);
+        replaced.kept.since = replaced.since;
+        const retire = !versioned or !releases.keepBindingLocked(&replaced.kept);
         if (retire) replaced.unlinkLocked();
         self.snapshots = snapshot;
         self.publisher.publish(snapshot);
@@ -1049,15 +1049,22 @@ pub const Scope = struct {
         return cell.id;
     }
 
-    /// Whether this scope is a module image's root, so a diagnostic can name
-    /// the chain a word actually searched rather than the one the running
-    /// activation would have.
-    /// The one root whose bindings change while other units run: core is
-    /// frozen, and a module image is private to the unit constructing it
-    /// until registration, and frozen after.
+    /// The one root whose bindings are versioned for pinned units: core is
+    /// frozen, and a module image is frozen once registered.
     pub fn isSession(self: *const Scope) bool {
         return self.storage == .session;
     }
+    /// Whether this scope is a module image still under construction, whose
+    /// constructor may replace a binding while a task it spawned reads it.
+    pub fn isUnderConstruction(self: *const Scope) bool {
+        return switch (self.storage) {
+            .module_root => |environment| !environment.frozen.load(.acquire),
+            else => false,
+        };
+    }
+    /// Whether this scope is a module image's root, so a diagnostic can name
+    /// the chain a word actually searched rather than the one the running
+    /// activation would have.
     pub fn isModuleRoot(self: *const Scope) bool {
         return self.storage == .module_root;
     }

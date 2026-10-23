@@ -6169,11 +6169,15 @@ pub const Machine = struct {
         // The root's own binding as this unit observes it, else core's. Only
         // session bindings are versioned (`Scope.isSession`).
         const pin = if (written != null and written.?.isSession()) self.unit.bindingPin() else null;
+        // A task reading an image still under construction counts its lease:
+        // the constructor may replace the binding during the dispatch, and no
+        // pin keeps a module image's snapshots.
+        const counted = self.unit.binding_pin != null and written != null and written.?.isUnderConstruction();
         const own = slot.cell.load(.acquire);
-        const from_core = own == null or !leaseInto(own.?, pin, &out.lease);
+        const from_core = own == null or !leaseInto(own.?, pin, counted, &out.lease);
         if (from_core) {
             const core = slot.coreCell() orelse return false;
-            if (!leaseInto(core, null, &out.lease)) return false;
+            if (!leaseInto(core, null, false, &out.lease)) return false;
         }
         out.execution_generation = null;
         out.home = null;
@@ -6212,11 +6216,11 @@ pub const Machine = struct {
         return self.unit.bindingPin() orelse self.unit.environment.bindingDomain().binding_version.load(.acquire);
     }
 
-    /// Borrows into `out` what `cell` holds for a reader pinned at `pin`, and
-    /// returns false when it holds nothing then. The borrow lasts for this
-    /// dispatch; anything kept past it is retained on its own.
-    fn leaseInto(cell: *env.BindingCell, pin: ?u64, out: *env.BindingLease) bool {
-        out.* = cell.borrow(pin) orelse return false;
+    /// Leases into `out` what `cell` holds for a reader pinned at `pin`, and
+    /// returns false when it holds nothing then. An uncounted borrow lasts for
+    /// this dispatch; anything kept past it is retained on its own.
+    fn leaseInto(cell: *env.BindingCell, pin: ?u64, counted: bool, out: *env.BindingLease) bool {
+        out.* = (if (counted) cell.load(pin) else cell.borrow(pin)) orelse return false;
         return true;
     }
 
@@ -8251,7 +8255,7 @@ pub const BindingCache = struct {
         const mask = self.entries.len - 1;
         var index = self.home(slot);
         while (true) : (index = (index + 1) & mask) {
-            const entry = &(self.entries[index] orelse return null);
+            const entry = if (self.entries[index]) |*held| held else return null;
             if (entry.slot == slot) return if (entry.view == view) entry else null;
         }
     }

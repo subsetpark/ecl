@@ -915,6 +915,9 @@ test "session: a module body's redefinitions are not kept for the image's life" 
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
         defer runtime.deinit();
+        // An unrelated task runs throughout; its pin must not keep what a
+        // module body replaces.
+        try expectOk(&runtime, "[] ((1) () while) @spawn 'background set");
         // A module word may define while its body runs, so recursion through
         // one redefines `x` once per level.
         const body = "((1) 'x def (dup 0 = (pop) (1 - (2) 'x def r) if) 'r def ";
@@ -924,9 +927,10 @@ test "session: a module body's redefinitions are not kept for the image's life" 
         const few = counting.total_requested_bytes - before;
         try expectOk(&runtime, "[] " ++ body ++ "4096 r) 'redefined-many @defm");
         const many = counting.total_requested_bytes - before - few;
-        // With no task to observe them, replaced snapshots retire as they go:
-        // the image holds its final bindings, whatever it redefined on the way.
+        // Replaced snapshots retire as they go: the image holds its final
+        // bindings, whatever it redefined on the way.
         try std.testing.expect(many <= few + 4096);
+        try expectOk(&runtime, "background task.cancel");
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
