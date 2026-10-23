@@ -1155,3 +1155,13 @@ test "bindings: a unit's cached resolutions follow its own definitions" {
     // Shadowing a core word after using it, and removing the shadow.
     try expectFreshStack("1 2 + (pop pop 42) '+ def 1 2 + '+ undef 1 2 +", "3 42 3");
 }
+
+test "while restores a checkpoint deeper than one turn's budget" {
+    // 100,000 operands exceed a turn's 65,536 units, so capture and restore
+    // suspend under a driver; a condition that consumes the stack still
+    // leaves it as it found it.
+    try expectFreshStack(
+        "[] (100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await 'ok at last",
+        "100001",
+    );
+}
