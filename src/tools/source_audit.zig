@@ -234,6 +234,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditDynamicContextSpelling() or failed;
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
+    failed = auditKernelDriverStarts() or failed;
     if (failed) return error.SourceAuditFailed;
 }
 
@@ -879,6 +880,121 @@ const unbounded_allowance_users = [_][]const u8{
 const kernel_quantum_users = [_][]const u8{
     "machine.zig", "scheduler.zig", "kernel_support.zig", "prelude.zig", "native_call.zig",
 };
+
+/// Kernel files start drivers only through `support.Kernel`, which decides
+/// once whether a typed kernel runs inline or as a driver and owns the
+/// charging, operand holding, and fault cleanup around it. The functions
+/// below are the exceptions, each for a reason:
+/// - `structural`: it drives work the executor does not model, such as boxed
+///   spines, dicts, quotations, or a cursor over nested structure.
+/// - `typed_pending`: a typed kernel not yet moved onto the executor.
+/// The rule holds both ways: a new driver start elsewhere fails, and so does
+/// an exception that no longer starts one.
+const kernel_driver_files = [_][]const u8{
+    "kernel_numeric.zig", "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig",
+    "kernel_random.zig",  "kernel_storage.zig",  "idioms.zig",
+};
+
+const KernelDriverException = struct {
+    file: []const u8,
+    function: []const u8,
+    reason: enum { structural, typed_pending },
+};
+
+const kernel_driver_exceptions = [_]KernelDriverException{
+    .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive", .reason = .structural },
+    .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive", .reason = .structural },
+    .{ .file = "kernel_numeric.zig", .function = "reduceGroups", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "atPrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "wherePrimitive", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "firstWherePrimitive", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "inPrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "startTypedMembership", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "razePrimitive", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "takePrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "rotatePrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "installOne", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "installCat", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "rangePrimitive", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "shapePrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "flipPrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "reshapePrimitive", .reason = .structural },
+    .{ .file = "kernel_sequence.zig", .function = "startTypedMatrix", .reason = .typed_pending },
+    .{ .file = "kernel_sequence.zig", .function = "cutPrimitive", .reason = .structural },
+    .{ .file = "kernel_order.zig", .function = "cmpPrimitive", .reason = .structural },
+    .{ .file = "kernel_order.zig", .function = "startTypedStringCompare", .reason = .typed_pending },
+    .{ .file = "kernel_order.zig", .function = "startGrade", .reason = .structural },
+    .{ .file = "kernel_order.zig", .function = "startTypedGrade", .reason = .typed_pending },
+    .{ .file = "kernel_order.zig", .function = "distinctPrimitive", .reason = .typed_pending },
+    .{ .file = "kernel_order.zig", .function = "groupPrimitive", .reason = .structural },
+    .{ .file = "kernel_order.zig", .function = "groupColumnsPrimitive", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "strPrimitive", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "hasPrimitive", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "putImpl", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "startTypedListPut", .reason = .typed_pending },
+    .{ .file = "kernel_dict_text.zig", .function = "startTypedVectorPutDriver", .reason = .typed_pending },
+    .{ .file = "kernel_dict_text.zig", .function = "fromListsForModule", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "delPrimitive", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "startTypedDel", .reason = .typed_pending },
+    .{ .file = "kernel_dict_text.zig", .function = "mergePrimitive", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "splitPrimitive", .reason = .typed_pending },
+    .{ .file = "kernel_dict_text.zig", .function = "joinPrimitive", .reason = .structural },
+    .{ .file = "kernel_dict_text.zig", .function = "formatPrimitive", .reason = .structural },
+    .{ .file = "kernel_random.zig", .function = "randInts", .reason = .typed_pending },
+    .{ .file = "idioms.zig", .function = "install", .reason = .structural },
+    .{ .file = "idioms.zig", .function = "applyLengthEach", .reason = .structural },
+    .{ .file = "idioms.zig", .function = "applyMatchEach", .reason = .structural },
+    .{ .file = "idioms.zig", .function = "applyMatchFind", .reason = .structural },
+    .{ .file = "idioms.zig", .function = "startReduction", .reason = .structural },
+};
+
+fn auditKernelDriverStarts() bool {
+    const sources = comptime blk: {
+        var result: [kernel_driver_files.len][:0]const u8 = undefined;
+        for (kernel_driver_files, 0..) |file, index| result[index] = @embedFile("../" ++ file);
+        break :blk result;
+    };
+    var seen: [kernel_driver_exceptions.len]bool = @splat(false);
+    var failed = false;
+    for (kernel_driver_files, sources) |file, source| {
+        var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
+        defer tree.deinit(std.heap.page_allocator);
+        if (tree.errors.len != 0) return true;
+        for (0..tree.nodes.len) |raw_node| {
+            const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
+            if (tree.nodeTag(node) != .fn_decl) continue;
+            var buffer: [1]std.zig.Ast.Node.Index = undefined;
+            const prototype = tree.fullFnProto(&buffer, node) orelse continue;
+            const name_token = prototype.name_token orelse continue;
+            const name = tree.tokenSlice(name_token);
+            const body = tree.nodeData(node).node_and_node[1];
+            const starts = for (tree.firstToken(body)..tree.lastToken(body)) |token| {
+                const spelling = tree.tokenSlice(@intCast(token));
+                const is_start = std.mem.eql(u8, spelling, "runDriver") or
+                    std.mem.eql(u8, spelling, "runDriverAt") or
+                    std.mem.eql(u8, spelling, "startDriver");
+                if (is_start and std.mem.eql(u8, tree.tokenSlice(@intCast(token + 1)), "(")) break true;
+            } else false;
+            if (!starts) continue;
+            const listed = for (kernel_driver_exceptions, 0..) |exception, index| {
+                if (std.mem.eql(u8, exception.file, file) and std.mem.eql(u8, exception.function, name)) {
+                    seen[index] = true;
+                    break true;
+                }
+            } else false;
+            if (!listed) {
+                std.log.err("{s}: `{s}` starts a driver directly; run typed kernels through `support.Kernel`, or list the function in kernel_driver_exceptions with its reason", .{ file, name });
+                failed = true;
+            }
+        }
+    }
+    for (kernel_driver_exceptions, seen) |exception, found| {
+        if (found) continue;
+        std.log.err("{s}: kernel_driver_exceptions lists `{s}`, which no longer starts a driver; remove it", .{ exception.file, exception.function });
+        failed = true;
+    }
+    return failed;
+}
 
 fn auditWorkBudgetIssuers() bool {
     const minted = [_][]const []const u8{
