@@ -1178,9 +1178,8 @@ primitive reached other than as the word being dispatched declines. The followin
 are checked where the phrase runs, through
 the running unit's bindings, so a user definition of `sum` takes effect at its
 next execution and the phrase then runs as written. A word reached other than
-from a source position, a phrase split across a definition, a shape the fold
-cannot take, or work the remaining budget cannot cover runs the words as
-written. A fault inside the phrase is reported as the last following word's
+from a source position, a phrase split across a definition, or a shape the fold
+cannot take runs the words as written. A fault inside the phrase is reported as the last following word's
 own recognition reports it.
 
 The `(len) each` list idiom reads stored child lengths into a typed result
