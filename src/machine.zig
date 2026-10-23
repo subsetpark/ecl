@@ -3335,18 +3335,25 @@ pub const Machine = struct {
     /// been installed.
     pub fn runDriver(self: *Machine, initial: anytype) MachineError!void {
         var pending = initial;
-        if (!turn_core.mayDispatch(self.unit.kernel_budget)) return self.startDriver(pending);
-        const progress = @TypeOf(pending).advance(self, &pending) catch |err| {
-            heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending);
+        return self.runDriverAt(&pending);
+    }
+
+    /// `runDriver` over a driver its caller built in place, which consumes
+    /// the driver's fields exactly as `runDriver` does without copying it.
+    pub fn runDriverAt(self: *Machine, pending: anytype) MachineError!void {
+        const Driver = @typeInfo(@TypeOf(pending)).pointer.child;
+        if (!turn_core.mayDispatch(self.unit.kernel_budget)) return self.startDriver(pending.*);
+        const progress = Driver.advance(self, pending) catch |err| {
+            heap.deinitDriverFields(self.unit.releases, self.unit.allocator, pending);
             return err;
         };
         switch (progress) {
-            .stepped => return self.startDriver(pending),
+            .stepped => return self.startDriver(pending.*),
             .output => |item| {
-                heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending);
+                heap.deinitDriverFields(self.unit.releases, self.unit.allocator, pending);
                 return self.pushOwned(item);
             },
-            .completed => heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending),
+            .completed => heap.deinitDriverFields(self.unit.releases, self.unit.allocator, pending),
             .yielded, .reserved_output, .detached, .failed => unreachable,
         }
     }
@@ -5416,7 +5423,13 @@ pub const Machine = struct {
     }
     /// Consumes `item`. The stack owns it on success; the release domain owns
     /// its constant-time retirement if stack growth fails.
-    pub fn pushOwned(self: *Machine, item: Value) error{OutOfMemory}!void {
+    pub inline fn pushOwned(self: *Machine, item: Value) error{OutOfMemory}!void {
+        // A push is a capacity test and a store; only growth is a call.
+        const stack = &self.unit.stack;
+        if (stack.items.len == stack.capacity) return self.pushOwnedGrowing(item);
+        stack.appendAssumeCapacity(item);
+    }
+    fn pushOwnedGrowing(self: *Machine, item: Value) error{OutOfMemory}!void {
         self.unit.stack.append(self.unit.allocator, item) catch {
             self.unit.releases.releaseValue(item);
             return error.OutOfMemory;
