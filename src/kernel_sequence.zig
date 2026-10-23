@@ -97,7 +97,7 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
         if (collection.borrow() == .list and index.borrow().list.length() != 0) {
             const count: usize = @intCast(index.borrow().list.length());
             const values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
-            return evaluator.startDriver(FlatGatherDriver{
+            return evaluator.runDriver(FlatGatherDriver{
                 .source = .init(collection.take()),
                 .indices = .init(index.take()),
                 .values = .init(values),
@@ -129,7 +129,7 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
             collection.borrow().dict,
             index.borrow(),
         );
-        return evaluator.startDriver(DictAtDriver{
+        return evaluator.runDriver(DictAtDriver{
             .collection = .init(collection.take()),
             .key = .init(index.take()),
             .cursor = .init(find),
@@ -141,7 +141,7 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
         collection.borrow(),
         index.borrow(),
     );
-    try evaluator.startDriver(IndexDriver{
+    try evaluator.runDriver(IndexDriver{
         .collection = .init(collection.take()),
         .index = .init(index.take()),
         .cursor = .init(cursor),
@@ -377,7 +377,7 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
         heap.LeafReader(.leaf_i64).acquire(counts.borrow().list)
     else
         null;
-    try evaluator.startDriver(WhereDriver{
+    try evaluator.runDriver(WhereDriver{
         .counts = .init(counts.take()),
         .reader = if (reader) |acquired| .init(acquired) else null,
     });
@@ -575,14 +575,14 @@ fn firstWherePrimitive(evaluator: *Machine) MachineError!void {
     inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate| {
         if (kind == candidate) {
             const Driver = TypedFirstWhereDriver(candidate);
-            return evaluator.startDriver(Driver{
+            return evaluator.runDriver(Driver{
                 .counts = .init(heap.LeafReader(candidate).acquire(counts.borrow().list)),
                 .cursor = .init(count),
                 .count = count,
             });
         }
     }
-    try evaluator.startDriver(FirstWhereDriver{
+    try evaluator.runDriver(FirstWhereDriver{
         .counts = .init(counts.take()),
     });
 }
@@ -674,7 +674,7 @@ fn inPrimitive(evaluator: *Machine) MachineError!void {
         needle.borrow(),
         collection.borrow(),
     );
-    try evaluator.startDriver(MembershipDriver{
+    try evaluator.runDriver(MembershipDriver{
         .needle = .init(needle.take()),
         .collection = .init(collection.take()),
         .cursor = .init(cursor),
@@ -923,7 +923,7 @@ fn startTypedMembership(evaluator: *Machine, needle: Value, haystack: Value) Mac
         inline for (leaf_kinds) |candidate_haystack| {
             if (haystack_kind == candidate_haystack) {
                 const Driver = ScalarMembershipDriver(candidate_haystack);
-                try evaluator.startDriver(Driver{
+                try evaluator.runDriver(Driver{
                     .haystack = .init(heap.LeafReader(candidate_haystack).acquire(haystack.list)),
                     .needle = needle,
                     .cursor = kernel_flat.FlatCursor.init(@intCast(haystack.list.length())),
@@ -955,7 +955,7 @@ fn startTypedMembership(evaluator: *Machine, needle: Value, haystack: Value) Mac
                     .table = .init(table),
                 };
                 held_locally = false;
-                try evaluator.startDriver(driver);
+                try evaluator.runDriver(driver);
                 return true;
             }
         };
@@ -1172,7 +1172,7 @@ const MembershipCursor = struct {
 fn razePrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
-    try evaluator.startDriver(RazeDriver{ .collection = .init(collection.take()) });
+    try evaluator.runDriver(RazeDriver{ .collection = .init(collection.take()) });
 }
 
 /// The element class a raze's typed result is chosen from.
@@ -1436,7 +1436,7 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
         result_count,
     )) return;
     const values = try evaluator.allocator().alloc(Value, result_count);
-    try evaluator.startDriver(TakeDriver{
+    try evaluator.runDriver(TakeDriver{
         .collection = .init(collection.take()),
         .values = .init(values),
         .source_index = start,
@@ -1539,7 +1539,7 @@ const ListCopyDriver = struct {
             end - start,
         )) return;
         const values = try evaluator.allocator().alloc(Value, end - start);
-        try evaluator.startDriver(ListCopyDriver{
+        try evaluator.runDriver(ListCopyDriver{
             .left = .init(collection.take()),
             .start = start,
             .end = end,
@@ -1565,7 +1565,7 @@ const ListCopyDriver = struct {
             left_count + right_count,
         )) return;
         const values = try evaluator.allocator().alloc(Value, left_count + right_count);
-        try evaluator.startDriver(ListCopyDriver{
+        try evaluator.runDriver(ListCopyDriver{
             .left = .init(left.take()),
             .right = .init(right.take()),
             .start = 0,
@@ -1617,7 +1617,7 @@ fn rangePrimitive(evaluator: *Machine) MachineError!void {
     // A known-width producer selects its builder before filling: `range` is
     // exactly the shape that never needed a boxed intermediate.
     const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count);
-    try evaluator.startDriver(RangeDriver{
+    try evaluator.runDriver(RangeDriver{
         .writer = .init(writer),
         .cursor = kernel_flat.FlatCursor.init(count),
     });
@@ -1735,7 +1735,7 @@ fn shapePrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const cursor = try ShapeCursor.init(evaluator.allocator(), collection.borrow());
-    try evaluator.startDriver(ShapeDriver{
+    try evaluator.runDriver(ShapeDriver{
         .collection = .init(collection.take()),
         .cursor = .init(cursor),
     });
@@ -1780,7 +1780,7 @@ fn flipPrimitive(evaluator: *Machine) MachineError!void {
         FlipDriver.leafKind(list.atUnchecked(source, 0).list.kind())
     else
         null;
-    try evaluator.startDriver(FlipDriver{
+    try evaluator.runDriver(FlipDriver{
         .collection = .init(collection.take()),
         .validation = validation,
         .leaf_kind = leaf_kind,
@@ -2059,7 +2059,7 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
     errdefer if (dimensions_owner) |owned| evaluator.allocator().free(owned);
     const ravel = try RavelCursor.init(evaluator.allocator(), collection.borrow(), null);
     dimensions_owner = null;
-    try evaluator.startDriver(ReshapeDriver{
+    try evaluator.runDriver(ReshapeDriver{
         .collection = .init(collection.take()),
         .shape_value = .init(shape_value.take()),
         .dimensions = .init(dimensions),
@@ -2093,7 +2093,7 @@ fn startTypedMatrix(
                 .columns = columns,
             };
             held_locally = false;
-            try evaluator.startDriver(driver);
+            try evaluator.runDriver(driver);
             return true;
         }
     }
@@ -2405,7 +2405,7 @@ fn cutPrimitive(evaluator: *Machine) MachineError!void {
     defer collection.deinit();
     if (collection.borrow() != .list or starts.borrow() != .list)
         return evaluator.typeError("a list and a list of integer start indices");
-    try evaluator.startDriver(CutDriver{
+    try evaluator.runDriver(CutDriver{
         .collection = .init(collection.take()),
         .starts = .init(starts.take()),
     });
@@ -2660,7 +2660,7 @@ fn startTypedCopy(
                     driver.indices = .init(heap.LeafReader(candidate_index).acquire(vector.list));
                 }
                 held_locally = false;
-                try evaluator.startDriver(driver);
+                try evaluator.runDriver(driver);
                 return true;
             }
         }
