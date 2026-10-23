@@ -157,43 +157,30 @@ fn randInts(evaluator: *Machine) MachineError!void {
     // Every element of a draw vector is an int: the output representation is
     // known before the first draw, so the fill writes the typed buffer directly
     // and nothing is profiled afterwards.
-    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), @intCast(count));
-    try evaluator.startDriver(DrawDriver{
-        .state = state,
-        .bound = bound,
-        .writer = .init(writer),
-        .cursor = flat.FlatCursor.init(@intCast(count)),
-    });
+    try support.Kernel(DrawKernel).run(evaluator, .{}, .{ .state = state, .bound = bound }, @intCast(count));
 }
 
 /// Fills an exact-size typed draw vector under the ordinary kernel budget.
 /// Because element `i` comes from counter `+ i`, a resumed fill needs no replay
-/// of what earlier turns produced, and because every element is an int the fill
-/// writes `leaf_i64` storage directly rather than boxing a cell per draw and
-/// profiling the result afterwards.
-const DrawDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    state: State,
-    bound: u64,
-    writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
-    cursor: flat.FlatCursor,
+/// of what earlier ranges produced, and because every element is an int the
+/// fill writes `leaf_i64` storage directly rather than boxing a cell per draw
+/// and profiling the result afterwards.
+const DrawKernel = struct {
+    pub const arity = 0;
+    pub const Params = struct { state: State, bound: u64 };
+    pub const Output = heap.LeafWriter(.leaf_i64);
 
-    pub fn advance(evaluator: *Machine, self: *DrawDriver) MachineError!machine.WorkProgress {
-        const context = support.Context{ .evaluator = evaluator };
-        var block: [flat.block_size]i64 = undefined;
-        const range = try self.cursor.nextRange(context) orelse
-            return .{ .output = self.writer.borrowMut().finish() };
-        var offset: usize = 0;
-        while (offset != range.len()) {
-            const piece = flat.blockRange(range, offset);
-            for (piece.start..piece.end) |index| {
-                block[index - piece.start] = @bitCast(boundedDraw(self.state, index, self.bound));
-            }
-            self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
-            offset += piece.len();
-        }
-        if (!self.cursor.complete()) return .stepped;
-        return .{ .output = self.writer.borrowMut().finish() };
+    pub fn prepare(evaluator: *Machine, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
+        return .init(evaluator.allocator(), length);
+    }
+
+    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
+        for (output.unpublishedRange(range.start, range.len()), range.start..) |*slot, index|
+            slot.* = @bitCast(boundedDraw(params.state, index, params.bound));
+    }
+
+    pub fn finish(output: *Output) Value {
+        return output.finish();
     }
 };
 

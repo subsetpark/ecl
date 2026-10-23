@@ -1635,34 +1635,26 @@ fn rangePrimitive(evaluator: *Machine) MachineError!void {
         return evaluator.fail(.overflow, "range length exceeds addressable size");
     // A known-width producer selects its builder before filling: `range` is
     // exactly the shape that never needed a boxed intermediate.
-    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count);
-    try evaluator.runDriver(RangeDriver{
-        .writer = .init(writer),
-        .cursor = kernel_flat.FlatCursor.init(count),
-    });
+    try support.Kernel(RangeKernel).run(evaluator, .{}, {}, count);
 }
 
-/// Fills the typed result buffer in place, one charged chunk at a time. There is
-/// no intermediate: the element type was known before the first store.
-const RangeDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
-    cursor: kernel_flat.FlatCursor,
+/// Fills the typed result buffer in place. There is no intermediate: the
+/// element type was known before the first store.
+const RangeKernel = struct {
+    pub const arity = 0;
+    pub const Params = void;
+    pub const Output = heap.LeafWriter(.leaf_i64);
 
-    pub fn advance(evaluator: *Machine, self: *RangeDriver) MachineError!machine.WorkProgress {
-        const context = support.Context{ .evaluator = evaluator };
-        var block: [kernel_flat.block_size]i64 = undefined;
-        if (try self.cursor.nextRange(context)) |range| {
-            var offset: usize = 0;
-            while (offset != range.len()) {
-                const piece = kernel_flat.blockRange(range, offset);
-                for (piece.start..piece.end) |index| block[index - piece.start] = @intCast(index);
-                self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
-                offset += piece.len();
-            }
-        }
-        if (!self.cursor.complete()) return .stepped;
-        return .{ .output = self.writer.borrowMut().finish() };
+    pub fn prepare(evaluator: *Machine, _: [0]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        return .init(evaluator.allocator(), length);
+    }
+
+    pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        for (output.unpublishedRange(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
+    }
+
+    pub fn finish(output: *Output) Value {
+        return output.finish();
     }
 };
 

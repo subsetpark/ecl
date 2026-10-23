@@ -340,6 +340,9 @@ pub const RandomOp = enum {
 /// - `finish(*Output) Value`: publishes the result.
 /// - optional `adopted(*const Output) ?usize`: the operand whose buffer the
 ///   result took over, whose reference therefore becomes the result's.
+/// - optional `done(*const Output) bool`: the kernel can finish before its
+///   last position, as a search does. It then runs range by range, charged
+///   for each range as it goes, and stops as soon as `done` holds.
 ///
 /// Operands are `Value` views, stable while their references are held, so a
 /// slice is re-derived for every range.
@@ -359,7 +362,8 @@ pub fn Kernel(comptime Spec: type) type {
             var operands: Operands = undefined;
             inline for (&operands, owners) |*operand, owner| operand.* = owner.borrow();
             var output = try Spec.prepare(evaluator, operands, params, length);
-            if (length > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, length);
+            if (comptime early) return runEarly(evaluator, owners, operands, params, output, length);
+            if (length > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, .init(length));
             // An unfinished result is abandoned exactly as its `heap.Owned`
             // disposal would abandon it in a driver.
             errdefer output.retire(evaluator.releaseDomain());
@@ -370,12 +374,45 @@ pub fn Kernel(comptime Spec: type) type {
             const result = Spec.finish(&output);
             // The result republished an operand's buffer, so that operand's
             // reference is the result's now, not the caller's to release.
-            if (consumed) |position| _ = owners[position].take();
+            if (comptime @hasDecl(Spec, "adopted")) if (consumed) |position| {
+                _ = owners[position].take();
+            };
             return evaluator.pushOwned(result);
         }
 
         fn adoptedOperand(output: *const Spec.Output) ?usize {
             return if (@hasDecl(Spec, "adopted")) Spec.adopted(output) else null;
+        }
+
+        const early = @hasDecl(Spec, "done");
+
+        /// A kernel that can finish before its last position runs one charged
+        /// range at a time, as its driver would, so it pays only for what it
+        /// reads. A turn that runs out first continues as the driver from the
+        /// same position.
+        fn runEarly(
+            evaluator: *Machine,
+            owners: Owners,
+            operands: Operands,
+            params: Spec.Params,
+            prepared: Spec.Output,
+            length: usize,
+        ) MachineError!void {
+            var output = prepared;
+            var cursor = flat.FlatCursor.init(length);
+            const context = Context{ .evaluator = evaluator };
+            while (!cursor.complete() and !Spec.done(&output)) {
+                if (evaluator.remainingKernelFuel() == 0) return startDriver(evaluator, owners, params, output, cursor);
+                const range = (cursor.nextRange(context) catch |err| {
+                    output.retire(evaluator.releaseDomain());
+                    return err;
+                }).?;
+                Spec.chunk(params, operands, &output, range, context) catch |err| {
+                    output.retire(evaluator.releaseDomain());
+                    return err;
+                };
+            }
+            return evaluator.pushOwned(Spec.finish(&output));
         }
 
         /// Kept out of line, so the common inline path carries none of the
@@ -385,7 +422,7 @@ pub fn Kernel(comptime Spec: type) type {
             owners: Owners,
             params: Spec.Params,
             output: Spec.Output,
-            length: usize,
+            cursor: flat.FlatCursor,
         ) MachineError!void {
             // SAFETY: the loop below writes every value before any is read.
             var held: Held = .{ .values = undefined };
@@ -394,7 +431,7 @@ pub fn Kernel(comptime Spec: type) type {
                 .operands = .init(held),
                 .params = params,
                 .output = .init(output),
-                .cursor = flat.FlatCursor.init(length),
+                .cursor = cursor,
             };
             return evaluator.runDriverAt(&driver);
         }
@@ -412,6 +449,7 @@ pub fn Kernel(comptime Spec: type) type {
             params: Spec.Params,
             length: usize,
         ) MachineError!NestedOutcome {
+            comptime std.debug.assert(!early); // Pervasion's leaves read every position.
             var output = try Spec.prepare(evaluator, operands, params, length);
             if (length > evaluator.remainingKernelFuel()) return .{ .frame = try boxDriver(evaluator, operands, root, params, output, length) };
             errdefer output.retire(evaluator.releaseDomain());
@@ -486,7 +524,8 @@ pub fn Kernel(comptime Spec: type) type {
                 const context = Context{ .evaluator = evaluator };
                 if (try self.cursor.nextRange(context)) |range|
                     try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, context);
-                if (!self.cursor.complete()) return .stepped;
+                const finished_early = if (comptime early) Spec.done(self.output.borrowMut()) else false;
+                if (!self.cursor.complete() and !finished_early) return .stepped;
                 var finished = self.output.take();
                 self.operands.borrowMut().consumed = adoptedOperand(&finished);
                 return .{ .output = Spec.finish(&finished) };
