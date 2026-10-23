@@ -47,11 +47,11 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
-    return struct {
+    return support.headed(operation.spelling(), struct {
         fn run(evaluator: *Machine) MachineError!void {
             return primitive(evaluator, operation);
         }
-    }.run;
+    }.run);
 }
 
 fn primitive(evaluator: *Machine, comptime operation: Op) MachineError!void {
@@ -2597,11 +2597,65 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
         pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
             const context = support.Context{ .evaluator = evaluator };
             if (try self.cursor.nextRange(context)) |range| {
-                const source = self.source.borrow().slice();
-                // Nothing reads the result before it is published, so each
-                // shape writes its range in place, with no staging block.
-                const out: []Element = self.writer.borrowMut().unpublishedRange(range.start, range.len());
-                switch (self.shape) {
+                try copyRange(
+                    context,
+                    self.shape,
+                    self.source.borrow().slice(),
+                    if (self.other) |*other| other.borrow().slice() else null,
+                    if (self.indices) |*indices| indices.borrow().slice() else null,
+                    self.writer.borrowMut().unpublishedRange(range.start, range.len()),
+                    range,
+                );
+            }
+            if (!self.cursor.complete()) return .stepped;
+            // The readers retire with the driver's fields, before the output
+            // is pushed, on both the in-place and the installed path.
+            return .{ .output = self.writer.borrowMut().finish() };
+        }
+
+        /// The whole copy within the caller's call, for a length the remaining
+        /// budget already covers: the driver's copy, charged as its one range
+        /// would be, with operands read in place under the caller's
+        /// references and no driver state. Nothing is consumed; the caller
+        /// releases its operands after the result is pushed.
+        fn direct(
+            evaluator: *Machine,
+            source: Value,
+            other: ?Value,
+            indices: ?Value,
+            shape: CopyShape,
+            length: usize,
+        ) MachineError!void {
+            const context = support.Context{ .evaluator = evaluator };
+            try context.advance(length);
+            var writer = try heap.LeafWriter(kind).init(evaluator.allocator(), length);
+            errdefer writer.retirePartial(evaluator.releaseDomain());
+            try copyRange(
+                context,
+                shape,
+                heap.leafElements(kind, source.list),
+                if (other) |right| heap.leafElements(kind, right.list) else null,
+                if (indices) |vector| heap.leafElements(index_kind, vector.list) else null,
+                writer.unpublishedRange(0, length),
+                .{ .start = 0, .end = length },
+            );
+            return evaluator.pushOwned(writer.finish());
+        }
+
+        /// Copies `range` of the result into `out`. Nothing reads the result
+        /// before it is published, so each shape writes its range in place,
+        /// with no staging block.
+        fn copyRange(
+            context: support.Context,
+            shape: CopyShape,
+            source: []const Element,
+            other: ?[]const Element,
+            gather_indices: ?[]const Index,
+            out: []Element,
+            range: kernel_flat.Chunk,
+        ) MachineError!void {
+            {
+                switch (shape) {
                     .contiguous => |contiguous| @memcpy(out, source[contiguous.start + range.start ..][0..out.len]),
                     .reversed => |reversed| for (out, range.start..) |*slot, index| {
                         slot.* = source[reversed.end - index - 1];
@@ -2617,14 +2671,14 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
                         }
                     },
                     .concat => |concat| {
-                        const right = self.other.?.borrow().slice();
+                        const right = other.?;
                         const split = @min(out.len, concat.left_count -| range.start);
                         if (split != 0) @memcpy(out[0..split], source[range.start..][0..split]);
                         const right_start = (range.start + split) -| concat.left_count;
                         @memcpy(out[split..], right[right_start..][0 .. out.len - split]);
                     },
                     .gather => {
-                        const indices = self.indices.?.borrow().slice()[range.start..range.end];
+                        const indices = gather_indices.?[range.start..range.end];
                         if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
                             .negative => context.fail(.domain, "at index is negative"),
                             .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
@@ -2633,10 +2687,6 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
                     },
                 }
             }
-            if (!self.cursor.complete()) return .stepped;
-            // The readers retire with the driver's fields, before the output
-            // is pushed, on both the in-place and the installed path.
-            return .{ .output = self.writer.borrowMut().finish() };
         }
     };
 }
@@ -2670,6 +2720,10 @@ fn startTypedCopy(
         inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
             if (candidate == source_kind and candidate_index == index_kind) {
                 const Driver = TypedCopyDriver(candidate, candidate_index);
+                if (length <= evaluator.remainingKernelFuel()) {
+                    try Driver.direct(evaluator, source, other, indices, shape, length);
+                    return true;
+                }
                 var writer = try heap.LeafWriter(candidate).init(evaluator.allocator(), length);
                 // Ownership passes to the driver below; a failing `startDriver`
                 // retires the driver's fields, so this guard covers only the window

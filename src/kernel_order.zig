@@ -36,7 +36,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
-    return struct {
+    return support.headed(operation.spelling(), struct {
         fn run(evaluator: *Machine) MachineError!void {
             return switch (operation) {
                 .cmp => cmpPrimitive(evaluator),
@@ -46,7 +46,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
                 .group_columns => groupColumnsPrimitive(evaluator),
             };
         }
-    }.run;
+    }.run);
 }
 
 fn cmpPrimitive(evaluator: *Machine) MachineError!void {

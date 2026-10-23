@@ -5,6 +5,8 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
+const idioms = @import("idioms.zig");
+const env = @import("env.zig");
 const poll = @import("poll.zig");
 const WorkBudget = poll.WorkBudget;
 
@@ -12,6 +14,24 @@ pub const Value = value.Value;
 pub const HeapKind = value.HeapKind;
 pub const Machine = machine.Machine;
 pub const MachineError = machine.MachineError;
+
+/// A kernel word's primitive, wrapped when the idiom registry has phrases it
+/// heads: the wrapper first asks whether the words after it continue one,
+/// which then runs in its place. A word that heads no phrase keeps its
+/// primitive unchanged, so it pays nothing. Every kernel family binds its
+/// words through this, so a phrase entry is the only change a new phrase
+/// needs, and recognition compares the same pointer the binding holds.
+pub fn headed(comptime spelling: []const u8, comptime primitive: env.PrimitiveImpl) env.PrimitiveImpl {
+    const found = comptime idioms.firstPhraseEntry(spelling);
+    if (found == null) return primitive;
+    const first = found.?;
+    return struct {
+        fn run(evaluator: *Machine) MachineError!void {
+            if (try evaluator.continuesPhrase(first)) return;
+            return @call(.always_inline, primitive, .{evaluator});
+        }
+    }.run;
+}
 
 pub const max_depth: usize = 256;
 

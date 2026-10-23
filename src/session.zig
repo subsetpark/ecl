@@ -260,6 +260,7 @@ const SessionCore = struct {
     idiom_mode: machine.IdiomMode = .automatic,
     native_diagnostics: bool = false,
     last_idiom_hits: u64 = 0,
+    last_phrase_hits: u64 = 0,
 
     fn moduleAccess(self: *const SessionCore) *const modules.ExecutionAccess {
         return @ptrCast(&self.module_access_seal);
@@ -608,7 +609,7 @@ pub const Session = enum(usize) {
                 .ecl_path = core.ecl_path,
                 .module_snapshot = core.module_snapshot,
                 .idiom_mode = core.idiom_mode,
-                .phrase_recognizer = .{ .offered = idioms.tryApply, .trusted = idioms.applyTrusted },
+                .phrase_recognizer = .{ .offered = idioms.tryApply, .trusted = idioms.applyTrusted, .headed = idioms.applyHeaded },
                 .freeze_recognizer = idioms.freeze_recognizer,
                 .phase = .{ .runtime = .{
                     .native_loader = core.native_owner.loader(),
@@ -640,6 +641,7 @@ pub const Session = enum(usize) {
             core.last_root_execution_metrics = unit.root_execution_metrics;
         core.requested_exit = unit.exitStatus();
         core.last_idiom_hits = unit.idiom_hits;
+        core.last_phrase_hits = unit.phrase_hits;
         unit.deinit();
     }
 
@@ -922,6 +924,9 @@ pub const Session = enum(usize) {
     fn lastIdiomHitsForTest(self: *const Session) u64 {
         return self.coreState().last_idiom_hits;
     }
+    fn lastPhraseHitsForTest(self: *const Session) u64 {
+        return self.coreState().last_phrase_hits;
+    }
     pub fn writeOutputLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeOutput(bytes, true);
     }
@@ -972,6 +977,7 @@ pub const Session = enum(usize) {
     pub const setIdiomMode = testOnly(setIdiomModeForTest);
     pub const lastMaxFrames = testOnly(lastMaxFramesForTest);
     pub const lastIdiomHits = testOnly(lastIdiomHitsForTest);
+    pub const lastPhraseHits = testOnly(lastPhraseHitsForTest);
     pub const define = testOnly(defineForTest);
     pub const schedulerWorkerThreadCount = testOnly(schedulerWorkerThreadCountForTest);
     pub const schedulerTimerThreadCount = testOnly(schedulerTimerThreadCountForTest);

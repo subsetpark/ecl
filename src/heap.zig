@@ -69,6 +69,17 @@ pub fn LeafReader(comptime kind_value: HeapKind) type {
     };
 }
 
+/// A typed leaf's elements, borrowed: valid only while the caller holds a
+/// reference to `handle`, and never retained past that reference. A kernel
+/// that finishes within its call reads its operands here instead of
+/// acquiring a reader it would release before returning.
+pub fn leafElements(comptime kind_value: HeapKind, handle: *ListHandle) []const LeafElement(kind_value) {
+    requireLeafRepresentation(kind_value, "leafElements");
+    std.debug.assert(listKind(handle) == kind_value);
+    const items = payloadItems(LeafElement(kind_value), mutableHeader(handle));
+    return items[0..@intCast(listLength(handle))];
+}
+
 /// A write capability over one freshly allocated typed output buffer.
 ///
 /// It owns its allocation, exposes only bounded ranges, and publishes through

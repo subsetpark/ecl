@@ -27,10 +27,17 @@ pub const DirectOp = enum {
     dip,
     str_format,
     fold1,
+    sum,
+    product,
+    /// `reshape` continued by `sum` or `product`: the fold over the rows a
+    /// two-axis reshape would build, without building them.
+    reshape_sum,
+    reshape_product,
 
     pub fn spelling(self: DirectOp) []const u8 {
         return switch (self) {
             .str_format => "str.format",
+            .reshape_sum, .reshape_product => "reshape",
             else => @tagName(self),
         };
     }
@@ -58,6 +65,9 @@ pub const ExpectedWord = struct {
     spelling: []const u8,
     binding: BindingKind = .builtin,
     origin: ExpectedOrigin = .trusted,
+    /// The word a fault inside the entry names, at the top-level position of
+    /// the phrase that holds it, as the definition's own execution would.
+    active: bool = false,
 };
 pub const PatternAtom = union(enum) {
     /// A non-word value, which becomes the operation's constant operand.
@@ -65,9 +75,13 @@ pub const PatternAtom = union(enum) {
     /// `partial` prefixes onto its quotation.
     constant,
     literal,
-    quotation_word: ExpectedWord,
+    /// An int literal equal to this value.
+    int: i64,
+    /// The entry's own operation word, which is also its active word.
     operation,
     word: ExpectedWord,
+    /// A quotation literal whose forms match this pattern exactly.
+    quotation: []const PatternAtom,
 };
 pub const RegistryEntry = struct {
     context: Context,
@@ -75,6 +89,9 @@ pub const RegistryEntry = struct {
     operation: Operation,
     constant_left: bool = false,
     source_word: ?[]const u8 = null,
+    /// Words that must follow the head in the code it runs from, checked
+    /// where it runs. The phrase consumes them when it applies.
+    following: []const ExpectedWord = &.{},
 };
 
 const operation_pattern = [_]PatternAtom{.operation};
@@ -86,7 +103,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 };
 const sort_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "grade" } },
+    .{ .word = .{ .spelling = "grade", .active = true } },
     .{ .word = .{ .spelling = "at" } },
 };
 const neg_pattern = [_]PatternAtom{ .literal, .{ .word = .{ .spelling = "*" } } };
@@ -139,7 +156,7 @@ const first_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "at" } },
 };
 const find_pattern = [_]PatternAtom{
-    .{ .quotation_word = .{ .spelling = "match?" } },
+    .{ .quotation = &.{.{ .word = .{ .spelling = "match?" } }} },
     .{ .word = .{ .spelling = "partial", .binding = .source } },
     .{ .word = .{ .spelling = "each" } },
     .{ .word = .{ .spelling = "first-where" } },
@@ -174,6 +191,23 @@ const str_format_pattern = [_]PatternAtom{
         .origin = .candidate_module,
     } },
 };
+/// `sum` and `product`: `dup empty? (pop seed) ((op) fold1) if`. The
+/// reduction's operator is the active word, so a fault names `+` or `*` at
+/// that literal, as the definition's own reduction would.
+fn totalPattern(comptime seed: i64, comptime operator: []const u8) [5]PatternAtom {
+    return .{
+        .{ .word = .{ .spelling = "dup" } },
+        .{ .word = .{ .spelling = "empty?", .binding = .source } },
+        .{ .quotation = &.{ .{ .word = .{ .spelling = "pop" } }, .{ .int = seed } } },
+        .{ .quotation = &.{
+            .{ .quotation = &.{.{ .word = .{ .spelling = operator, .active = true } }} },
+            .{ .word = .{ .spelling = "fold1", .binding = .source } },
+        } },
+        .{ .word = .{ .spelling = "if" } },
+    };
+}
+const sum_pattern = totalPattern(0, "+");
+const product_pattern = totalPattern(1, "*");
 const fold1_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
     .{ .word = .{ .spelling = "uncons", .binding = .source } },
@@ -184,7 +218,7 @@ const fold1_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 16]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 2]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
@@ -272,6 +306,8 @@ pub const registry = blk: {
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .dip, .pattern = &dip_pattern },
         .{ .operation = .str_format, .pattern = &str_format_pattern },
+        .{ .operation = .sum, .pattern = &sum_pattern },
+        .{ .operation = .product, .pattern = &product_pattern },
     }) |direct| {
         entries[index] = .{
             .context = .direct,
@@ -281,6 +317,19 @@ pub const registry = blk: {
                 "format"
             else
                 direct.operation.spelling(),
+        };
+        index += 1;
+    }
+    for ([_]struct { operation: DirectOp, total: []const u8 }{
+        .{ .operation = .reshape_sum, .total = "sum" },
+        .{ .operation = .reshape_product, .total = "product" },
+    }) |phrase| {
+        entries[index] = .{
+            .context = .direct,
+            .pattern = &.{},
+            .operation = .{ .direct = phrase.operation },
+            .source_word = "reshape",
+            .following = &.{.{ .spelling = phrase.total, .binding = .source }},
         };
         index += 1;
     }
@@ -325,7 +374,8 @@ const direct_names = blk: {
     var names: [registry.len][]const u8 = undefined;
     var count: usize = 0;
     for (registry) |entry| {
-        if (entry.context != .direct) continue;
+        // A phrase head asks from its own primitive; nothing freezes for it.
+        if (entry.context != .direct or entry.following.len != 0) continue;
         const name = entry.source_word.?;
         const seen = for (names[0..count]) |existing| {
             if (std.mem.eql(u8, existing, name)) break true;
@@ -349,8 +399,8 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
     const phrase: Value = .{ .list = env.quotationHeader(body) };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
-        if (phrase.list.length() != entry.pattern.len) continue;
-        const capture = matchFrozen(lookup, phrase, entry) orelse continue;
+        if (entry.following.len != 0) continue;
+        const capture = matchPhrase(.{ .frozen = lookup }, phrase, entry) orelse continue;
         return .{
             .entry = @intCast(index),
             .constant = capture.constant,
@@ -361,47 +411,132 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
     return null;
 }
 
-/// The atom-by-atom match `IdiomDriver` performs, over a frozen environment.
-fn matchFrozen(lookup: env.FrozenLookup, phrase: Value, entry: RegistryEntry) ?Capture {
+/// How a pattern word's binding is checked: against a frozen environment,
+/// once, when a trusted definition is recognized; or where the phrase runs,
+/// when a quotation is offered.
+const WordGuard = union(enum) {
+    frozen: env.FrozenLookup,
+    live: *Machine,
+
+    fn matches(
+        self: WordGuard,
+        word: value.WordRef,
+        binding: BindingKind,
+        primitive: ?env.PrimitiveImpl,
+        origin: ExpectedOrigin,
+    ) bool {
+        switch (self) {
+            .frozen => |lookup| return frozenBindingMatches(lookup, word, binding, primitive, origin),
+            .live => |evaluator| {
+                std.debug.assert(origin == .trusted);
+                return liveWord(evaluator, word, binding, primitive) != null;
+            },
+        }
+    }
+};
+
+/// What a trusted word resolved to where a phrase runs.
+const LiveWord = struct {
+    trace_word: intern.TraceWord,
+    /// The word's own frozen recognition and body, for a source word.
+    idiom: ?env.DirectIdiom,
+    body: ?*value.ListHandle,
+};
+
+/// A following word, resolved as its own dispatch would resolve it: through
+/// the unit's dispatch cache, so a phrase that runs on every iteration pays
+/// one cache probe rather than a slot resolution. A word the cache does not
+/// hold is resolved in full. Either way it must be the trusted binding
+/// expected, from a slot on core or the running root.
+fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind) error{OutOfMemory}!?LiveWord {
+    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
+    if (cached.origin != .core and cached.origin != .standard_library) return null;
+    const spec = cached.spec;
+    switch (binding) {
+        .builtin => if (spec.binding != .builtin) return null,
+        .source => if (spec.binding != .word) return null,
+    }
+    return .{
+        .trace_word = cached.trace_word,
+        .idiom = spec.direct_idiom,
+        .body = if (spec.binding == .word) env.quotationHeader(spec.binding.word) else null,
+    };
+}
+
+/// Resolves `word` where the phrase runs and returns it only when it is the
+/// trusted binding expected. A word that resolves to nothing a plain word may
+/// run, or whose root has retired, is simply not that binding; generic
+/// execution reports any error. A frozen binding outlives the call that
+/// matched it, so what it returns stays valid for the call.
+fn liveWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
+    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
+    var resolved: machine.Resolution = undefined;
+    if (!evaluator.peekSlotWord(word, &resolved)) return null;
+    defer resolved.deinit(evaluator.allocator());
+    if (resolved.origin != .core and resolved.origin != .standard_library) return null;
+    const spec = resolved.lease.spec();
+    switch (binding) {
+        .builtin => if (spec.binding != .builtin or (primitive != null and spec.binding.builtin != primitive.?)) return null,
+        .source => if (spec.binding != .word) return null,
+    }
+    return .{
+        .trace_word = resolved.trace_word,
+        .idiom = spec.direct_idiom,
+        .body = if (spec.binding == .word) env.quotationHeader(spec.binding.word) else null,
+    };
+}
+
+/// The one atom matcher, shared by every site; only the guard differs. The
+/// phrase matches when every atom does, at every nesting level.
+fn matchPhrase(guard: WordGuard, phrase: Value, entry: RegistryEntry) ?Capture {
     var capture: Capture = .{};
-    for (entry.pattern, 0..) |atom, atom_index| {
+    if (!matchAtoms(guard, phrase, entry.pattern, entry.operation, &capture, null)) return null;
+    return capture;
+}
+
+/// `top` is the top-level position of the quotation holding a nested
+/// pattern: a capture records where in the phrase a fault is reported.
+fn matchAtoms(
+    guard: WordGuard,
+    phrase: Value,
+    pattern: []const PatternAtom,
+    operation: Operation,
+    capture: *Capture,
+    top: ?u32,
+) bool {
+    if (phrase != .list or phrase.list.length() != pattern.len) return false;
+    for (pattern, 0..) |atom, atom_index| {
         const actual = list.atUnchecked(phrase, atom_index);
+        const site: u32 = top orelse @intCast(atom_index);
         switch (atom) {
             .constant => {
-                if (capture.constant != null or actual == .word) return null;
+                if (capture.constant != null or actual == .word) return false;
                 capture.constant = actual;
             },
-            .literal => if (actual == .word) return null,
-            .quotation_word => |expected| {
-                if (actual != .list or actual.list.length() != 1) return null;
-                const quoted = list.atUnchecked(actual, 0);
-                if (quoted != .word or !frozenWordMatches(lookup, quoted.word, expected)) return null;
-            },
+            .literal => if (actual == .word) return false,
+            .int => |expected| if (actual != .int or actual.int != expected) return false,
+            .quotation => |inner| if (!matchAtoms(guard, actual, inner, operation, capture, site)) return false,
             .operation => {
-                if (actual != .word) return null;
-                const word = actual.word;
-                if (!std.mem.eql(u8, intern.get(word.name), entry.operation.spelling())) return null;
-                const binding = operationBinding(entry.operation);
-                const primitive = if (binding == .builtin) operationPrimitive(entry.operation) else null;
-                if (!frozenBindingMatches(lookup, word, binding, primitive, .trusted)) return null;
-                capture.active_word = word.name;
-                capture.active_index = @intCast(atom_index);
+                if (actual != .word or !std.mem.eql(u8, intern.get(actual.word.name), operation.spelling())) return false;
+                const binding = operationBinding(operation);
+                const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
+                if (!guard.matches(actual.word, binding, primitive, .trusted)) return false;
+                capture.active_word = actual.word.name;
+                capture.active_index = site;
             },
             .word => |expected| {
-                if (actual != .word or !frozenWordMatches(lookup, actual.word, expected)) return null;
-                if (std.mem.eql(u8, expected.spelling, "grade")) {
+                if (actual != .word or !std.mem.eql(u8, intern.get(actual.word.name), expected.spelling)) return false;
+                if (!guard.matches(actual.word, expected.binding, null, expected.origin)) return false;
+                if (expected.active) {
                     capture.active_word = actual.word.name;
-                    capture.active_index = @intCast(atom_index);
+                    capture.active_index = site;
                 }
             },
         }
     }
-    return capture;
-}
-
-fn frozenWordMatches(lookup: env.FrozenLookup, word: value.WordRef, expected: ExpectedWord) bool {
-    if (!std.mem.eql(u8, intern.get(word.name), expected.spelling)) return false;
-    return frozenBindingMatches(lookup, word, expected.binding, null, expected.origin);
+    return true;
 }
 
 /// The binding guard, decided once. A trusted word may resolve in the frozen
@@ -447,7 +582,7 @@ pub fn tryApply(
             .active_word = offered.active_word,
             .active_index = offered.active_index,
         }, decline);
-    return matchOffered(evaluator, .{ .candidate = candidate, .entries = entries }, decline, request, planned);
+    return matchOffered(evaluator, candidate, entries, decline, request, planned);
 }
 
 /// What an offered match runs if it declines: still the caller's source while
@@ -525,6 +660,142 @@ pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError
     return .applied;
 }
 
+/// The first registry entry headed by the kernel word `spelling`, or null
+/// when it heads none. A head's entries are consecutive (checked below).
+pub fn firstPhraseEntry(comptime spelling: []const u8) ?u16 {
+    @setEvalBranchQuota(100_000);
+    for (registry, 0..) |entry, index| {
+        if (entry.following.len != 0 and std.mem.eql(u8, entry.source_word.?, spelling)) return index;
+    }
+    return null;
+}
+
+comptime {
+    for (registry, 0..) |entry, index| {
+        if (entry.following.len == 0) continue;
+        if (entry.context != .direct) @compileError("a phrase entry must be direct");
+        const first = firstPhraseEntry(entry.source_word.?).?;
+        for (registry[first..index]) |between| {
+            if (between.following.len == 0 or !std.mem.eql(u8, between.source_word.?, entry.source_word.?))
+                @compileError("phrase entries of one head must be consecutive: " ++ entry.source_word.?);
+        }
+    }
+}
+
+/// Phrase words' interned names, interned on first use: each entry's head,
+/// then its following words. The intern table is one per process and never
+/// reset, so an id once learned stays valid.
+const max_following = blk: {
+    var longest: usize = 0;
+    for (registry) |entry| longest = @max(longest, entry.following.len);
+    break :blk longest;
+};
+var phrase_atoms: [registry.len][1 + max_following]std.atomic.Value(u32) = @splat(@splat(.init(unknown_atom)));
+const unknown_atom = std.math.maxInt(u32);
+
+/// Position 0 is the head; position n is following word n - 1.
+fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
+    const cell = &phrase_atoms[entry][position];
+    const cached = cell.load(.monotonic);
+    if (cached != unknown_atom) return cached;
+    const spelling = if (position == 0)
+        registry[entry].source_word.?
+    else
+        registry[entry].following[position - 1].spelling;
+    const id = try intern.intern(spelling);
+    cell.store(id, .monotonic);
+    return id;
+}
+
+/// A kernel word's primitive asks whether the words after it continue one of
+/// its phrases (see `kernel_support.headed`). Only the word being dispatched
+/// can head one: a primitive reached any other way declines, as does a unit
+/// that runs generic code only.
+pub fn applyHeaded(evaluator: *Machine, first: u16) MachineError!bool {
+    if (evaluator.unit.inherited.idiom_mode == .generic_only) return false;
+    if (evaluator.unit.active_word.atom() != try phraseAtom(first, 0)) return false;
+    return try applyPhrase(evaluator, first) == .applied;
+}
+
+/// A builtin head continued by the words after it. Each entry the head
+/// heads is tried in registry order; the first whose following words are
+/// the expected trusted bindings, here, and whose operands admit it, applies
+/// and consumes those words. A fault is reported as the last following word
+/// would report it when it runs alone: its own recognition names the active
+/// word and the site in its body, and the word is the trace parent.
+fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutcome {
+    const name = registry[first].source_word.?;
+    var index = first;
+    while (index < registry.len) : (index += 1) {
+        const entry = registry[index];
+        if (entry.following.len == 0 or !std.mem.eql(u8, entry.source_word.?, name)) break;
+        const count: u32 = @intCast(entry.following.len);
+        const forms = evaluator.followingForms(count) orelse return .declined;
+        var last: ?LiveWord = null;
+        const matched = for (entry.following, 0..) |expected, offset| {
+            const form = forms.at(@intCast(offset));
+            if (form != .word or form.word.name != try phraseAtom(index, offset + 1)) break false;
+            last = try followingWord(evaluator, form.word, expected.binding) orelse break false;
+        } else true;
+        if (!matched) continue;
+        const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
+        const owner = last.?;
+        const idiom = owner.idiom orelse continue;
+        evaluator.unit.idiom_hits += 1;
+        evaluator.unit.phrase_hits += 1;
+        evaluator.skipFollowingForms(count);
+        _ = evaluator.commitDirectIdiomTrace();
+        if (idiom.active_word) |word| evaluator.setActiveWord(.plain(word));
+        const stack = evaluator.unit.stack.items;
+        const result = numeric.foldLeafColumns(
+            evaluator,
+            columnOperation(entry.operation.direct),
+            stack[stack.len - 2],
+            shape.rows,
+            shape.columns,
+        ) catch |err| {
+            if (err == error.Ecl) {
+                if (idiom.active_index) |site| evaluator.setFailureSite(owner.body.?, site);
+                evaluator.setFailureTraceParent(owner.trace_word);
+            }
+            return err;
+        };
+        popRelease(evaluator, 2);
+        try evaluator.pushOwned(result);
+        return .applied;
+    }
+    return .declined;
+}
+
+fn columnOperation(operation: DirectOp) numeric.BinaryOp {
+    return switch (operation) {
+        .reshape_sum => .add,
+        .reshape_product => .mul,
+        else => unreachable,
+    };
+}
+
+/// The rows and columns of `list [rows columns] reshape` when its fold over
+/// rows can run on the list itself: a two-axis shape of positive ints whose
+/// volume is the list's length, a numeric leaf the operation keeps typed, and
+/// work the remaining budget covers. Anything else runs the words as written.
+fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usize, columns: usize } {
+    if (evaluator.available() < 2) return null;
+    const stack = evaluator.unit.stack.items;
+    const shape = stack[stack.len - 1];
+    const input = stack[stack.len - 2];
+    if (shape != .list or shape.list.length() != 2 or input != .list) return null;
+    const rows_value = list.atUnchecked(shape, 0);
+    const columns_value = list.atUnchecked(shape, 1);
+    if (rows_value != .int or columns_value != .int or rows_value.int < 1 or columns_value.int < 1) return null;
+    const rows = std.math.cast(usize, rows_value.int) orelse return null;
+    const columns = std.math.cast(usize, columns_value.int) orelse return null;
+    const volume = std.math.mul(usize, rows, columns) catch return null;
+    if (volume != input.list.length() or volume > evaluator.remainingKernelFuel()) return null;
+    if (!numeric.columnFoldCandidate(columnOperation(operation), input)) return null;
+    return .{ .rows = rows, .columns = columns };
+}
+
 fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, capture: Capture) MachineError!void {
     const direct_parent = if (selected.context == .direct or selected.context == .fold1)
         evaluator.commitDirectIdiomTrace()
@@ -545,173 +816,37 @@ fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, ca
 }
 
 /// Matches an offered phrase against the registry entries of its context and
-/// length. The work is bounded by the registry's shape and each pattern word
-/// is one slot read, so the whole match runs where the combinator applies.
-const Matcher = struct {
-    candidate: Candidate,
-    entries: []const u16,
-    entry_index: usize = 0,
-    atom_index: usize = 0,
-    capture: Capture = .{},
-    expected: ?env.PrimitiveImpl = null,
-    expected_binding: BindingKind = .builtin,
-
-    /// The registry index of the entry whose pattern the phrase matched, or
-    /// null once every entry has been rejected. Whether it applies is the
-    /// caller's to decide against the operands.
-    const Step = union(enum) { progressed, done: ?u16 };
-
-    fn phraseSite(self: *const Matcher) machine.ErrorSite {
-        return .{ .code = self.candidate.phrase.list, .index = @intCast(self.atom_index) };
-    }
-    fn rejectEntry(self: *Matcher) void {
-        self.entry_index += 1;
-        self.atom_index = 0;
-        self.capture = .{};
-        self.expected = null;
-        self.expected_binding = .builtin;
-    }
-    /// Whether the resolved word is the trusted binding the atom expects.
-    fn accept(self: *Matcher, resolved: *const machine.Resolution) void {
-        const binding_matches = switch (self.expected_binding) {
-            .builtin => resolved.lease.spec().binding == .builtin and
-                (self.expected == null or resolved.lease.spec().binding.builtin == self.expected.?),
-            .source => resolved.lease.spec().binding == .word,
-        };
-        const origin_matches = resolved.origin == .core or resolved.origin == .standard_library;
-        if (!origin_matches or !binding_matches) return self.rejectEntry();
-        self.atom_index += 1;
-        self.expected = null;
-        self.expected_binding = .builtin;
-    }
-    /// Resolves a pattern word through its slot. A word that resolves to
-    /// nothing a plain word may run, or whose root has retired, is simply not
-    /// the expected binding; generic execution reports any error.
-    fn resolve(self: *Matcher, evaluator: *Machine, word: value.WordRef) Step {
-        // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
-        var resolved: machine.Resolution = undefined;
-        if (!evaluator.peekSlotWord(word, &resolved)) {
-            self.rejectEntry();
-            return .progressed;
-        }
-        defer resolved.deinit(evaluator.allocator());
-        self.accept(&resolved);
-        return .progressed;
-    }
-    fn expectWord(
-        self: *Matcher,
-        evaluator: *Machine,
-        word: value.WordRef,
-        expected_word: ExpectedWord,
-    ) Step {
-        std.debug.assert(expected_word.origin == .trusted);
-        if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling) or
-            !slotOnRunningRoot(evaluator, word.slot))
-        {
-            self.rejectEntry();
-            return .progressed;
-        }
-        self.expected_binding = expected_word.binding;
-        self.expected = null;
-        return self.resolve(evaluator, word);
-    }
-    fn step(self: *Matcher, evaluator: *Machine) Step {
-        if (self.entry_index == self.entries.len) return .{ .done = null };
-        const entry = registry[self.entries[self.entry_index]];
-        if (self.atom_index == entry.pattern.len)
-            return .{ .done = self.entries[self.entry_index] };
-        const actual = list.atUnchecked(self.candidate.phrase, self.atom_index);
-        switch (entry.pattern[self.atom_index]) {
-            .constant => {
-                if (self.capture.constant != null or actual == .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.capture.constant = actual;
-                self.atom_index += 1;
-            },
-            .literal => {
-                if (actual == .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.atom_index += 1;
-            },
-            .quotation_word => |expected_word| {
-                if (actual != .list or actual.list.length() != 1) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                const quoted = list.atUnchecked(actual, 0);
-                if (quoted != .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                return self.expectWord(evaluator, quoted.word, expected_word);
-            },
-            .operation => {
-                if (actual != .word or
-                    !std.mem.eql(u8, intern.get(actual.word.name), entry.operation.spelling()) or
-                    !slotOnRunningRoot(evaluator, actual.word.slot))
-                {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                self.capture.active_word = actual.word.name;
-                self.capture.active_index = @intCast(self.atom_index);
-                self.expected_binding = operationBinding(entry.operation);
-                self.expected = if (self.expected_binding == .builtin)
-                    operationPrimitive(entry.operation)
-                else
-                    null;
-                return self.resolve(evaluator, actual.word);
-            },
-            .word => |expected_word| {
-                if (actual != .word) {
-                    self.rejectEntry();
-                    return .progressed;
-                }
-                // Recorded before resolving: a cached answer advances the
-                // atom at once.
-                if (std.mem.eql(u8, expected_word.spelling, "grade")) {
-                    self.capture.active_word = actual.word.name;
-                    self.capture.active_index = @intCast(self.atom_index);
-                }
-                return self.expectWord(evaluator, actual.word, expected_word);
-            },
-        }
-        return .progressed;
-    }
-};
-
-/// Matches the phrase, then applies the selected entry or declines.
-/// Matches the phrase, records the match in the running finite iteration's
-/// plan when it has room, then applies the matched entry or declines.
+/// length, records the match in the running finite iteration's plan when it
+/// has room, then applies the matched entry or declines. The work is bounded
+/// by the registry's shape and each pattern word is one slot read, so the
+/// whole match runs where the combinator applies.
 fn matchOffered(
     evaluator: *Machine,
-    matcher: Matcher,
+    candidate: Candidate,
+    entries: []const u16,
     decline: Decline,
     request: machine.IdiomRequest,
     planned: ?*machine.PlanEntry,
 ) MachineError!void {
-    var matching = matcher;
-    const matched = while (true) switch (matching.step(evaluator)) {
-        .progressed => {},
-        .done => |entry| break entry,
-    };
+    var capture: Capture = .{};
+    const matched: ?u16 = for (entries) |index| {
+        if (matchPhrase(.{ .live = evaluator }, candidate.phrase, registry[index])) |found| {
+            capture = found;
+            break index;
+        }
+    } else null;
     if (planned) |entry| if (entry.offered == null) {
-        const phrase = matching.candidate.phrase;
-        heap.retainValue(phrase);
+        heap.retainValue(candidate.phrase);
         entry.offered = .{
             .request = request,
-            .phrase = phrase.list,
+            .phrase = candidate.phrase.list,
             .entry = matched,
-            .constant = matching.capture.constant,
-            .active_word = matching.capture.active_word,
-            .active_index = matching.capture.active_index,
+            .constant = capture.constant,
+            .active_word = capture.active_word,
+            .active_index = capture.active_index,
         };
     };
-    return applyMatched(evaluator, matching.candidate.phrase, matched, matching.capture, decline);
+    return applyMatched(evaluator, candidate.phrase, matched, capture, decline);
 }
 
 /// Applies a matched entry when this application's operands admit it, and
@@ -753,6 +888,10 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
             .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
+            // Any other operand reaches the definition, so its error is the
+            // definition's.
+            .sum, .product => evaluator.available() >= 1 and stack[stack.len - 1] == .list,
+            .reshape_sum, .reshape_product => unreachable, // See `applyPhrase`.
             else => evaluator.available() >= 1,
         },
     };
@@ -793,7 +932,22 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .reverse => sequence.reverseForIdiom(evaluator),
         .dip => combinators.dipForIdiom(evaluator),
         .str_format => dict_text.formatForIdiom(evaluator),
+        .sum => applyTotal(evaluator, .add, 0),
+        .product => applyTotal(evaluator, .mul, 1),
+        .reshape_sum, .reshape_product => unreachable, // See `applyPhrase`.
     };
+}
+
+/// `sum`/`product` over a list: the empty seed, or `(op) fold1` without the
+/// definition's dispatch. The list is the reduction's only consumed value.
+fn applyTotal(evaluator: *Machine, operation: numeric.BinaryOp, empty: i64) MachineError!void {
+    const stack = evaluator.unit.stack.items;
+    const input = stack[stack.len - 1];
+    if (input.list.length() == 0) {
+        popRelease(evaluator, 1);
+        return evaluator.pushOwned(.{ .int = empty });
+    }
+    return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
 }
 
 fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!void {
@@ -1134,6 +1288,21 @@ fn applyReduction(
     const stack = evaluator.unit.stack.items;
     const input = stack[stack.len - consumed];
     const initial = if (from_first) list.atUnchecked(input, 0) else stack[stack.len - 2];
+    return startReduction(evaluator, operation, scan, input, initial, start, consumed);
+}
+
+/// `consumed` stack values lie under the result: the list is the deepest,
+/// and `start` is 1 when `initial` is its first element.
+fn startReduction(
+    evaluator: *Machine,
+    operation: numeric.BinaryOp,
+    scan: bool,
+    input: Value,
+    initial: Value,
+    start: usize,
+    consumed: usize,
+) MachineError!void {
+    const from_first = start == 1;
     std.debug.assert(input == .list);
     const count: usize = @intCast(input.list.length());
     if (count == start) {
@@ -1176,6 +1345,12 @@ fn applyReduction(
 }
 
 const ReductionDriver = struct {
+    /// Like `numeric.TypedReduceDriver`, it lives for one reduction and
+    /// releases the slot when it publishes, so it qualifies for the slot on
+    /// lifetime; a fold whose rows apply directly would otherwise spend its
+    /// largest fixed cost on this driver's allocation.
+    pub const inline_driver = true;
+
     consumed: usize,
     operation: numeric.BinaryOp,
     scan: bool,
@@ -1194,6 +1369,27 @@ const ReductionDriver = struct {
         self: *ReductionDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
+        // A fold whose accumulator and next row are typed leaves of one class
+        // and length applies whole rows here, each charged before it runs,
+        // without a cursor or a machine turn per row. Anything else, and any
+        // row the remaining budget cannot pay for, takes the cursor below.
+        if (!self.scan) while (!self.cursor.isPresent() and self.initialized < self.input.list.length()) {
+            const accumulator = self.accumulator.borrowMut();
+            const owned = accumulator.* == .owned;
+            switch (try numeric.foldLeafRow(
+                evaluator,
+                self.operation,
+                accumulator.value(),
+                owned,
+                list.atUnchecked(self.input, self.initialized),
+            )) {
+                .declined => break,
+                .in_place => |next| accumulator.* = .{ .owned = next },
+                .fresh => |next| accumulator.replaceOwned(evaluator.releaseDomain(), next),
+            }
+            self.initialized += 1;
+            if (evaluator.remainingKernelFuel() == 0) return .stepped;
+        };
         if (!self.materializing and self.initialized < self.input.list.length()) {
             if (!self.cursor.isPresent()) {
                 const row = list.atUnchecked(self.input, self.initialized);
