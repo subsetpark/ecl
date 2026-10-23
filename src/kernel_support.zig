@@ -214,6 +214,7 @@ pub const SequenceOp = enum {
     flip,
     reshape,
     cut,
+    rotate,
 
     pub fn spelling(self: SequenceOp) []const u8 {
         return switch (self) {
@@ -234,6 +235,7 @@ pub const SequenceOp = enum {
             .flip => "flip",
             .reshape => "reshape",
             .cut => "cut",
+            .rotate => "rotate",
         };
     }
 };

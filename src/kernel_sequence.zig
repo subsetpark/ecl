@@ -41,6 +41,7 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
         .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Transpose a rectangular list." },
         .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
         .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into pieces that begin at each nondecreasing start index and end at the next; elements before the first start are dropped." },
+        .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty list is returned unchanged." },
         .reverse, .first, .rest => null,
     };
 }
@@ -72,6 +73,7 @@ fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
         .flip => flipPrimitive(evaluator),
         .reshape => reshapePrimitive(evaluator),
         .cut => cutPrimitive(evaluator),
+        .rotate => rotatePrimitive(evaluator),
     };
 }
 
@@ -1441,6 +1443,38 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
         .values = .init(values),
         .source_index = start,
         .source_count = source_count,
+        .materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values)),
+    });
+}
+
+/// A rotation is a cyclic copy of the whole list from the element the count
+/// lands on, so it shares `take`'s typed and boxed copy paths.
+fn rotatePrimitive(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or count_value.borrow() != .int) {
+        return evaluator.typeError("a list and an integer count");
+    }
+    const count: usize = @intCast(collection.borrow().list.length());
+    if (count == 0) return evaluator.pushOwned(collection.take());
+    const start: usize = @intCast(@mod(count_value.borrow().int, @as(i64, @intCast(count))));
+    if (try startTypedCopy(
+        evaluator,
+        collection.borrow(),
+        null,
+        null,
+        .{ .cyclic = .{ .start = start } },
+        count,
+    )) return;
+    const values = try evaluator.allocator().alloc(Value, count);
+    try evaluator.runDriver(TakeDriver{
+        .collection = .init(collection.take()),
+        .values = .init(values),
+        .source_index = start,
+        .source_count = count,
         .materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values)),
     });
 }
