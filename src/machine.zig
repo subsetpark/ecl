@@ -2549,7 +2549,7 @@ pub const Unit = struct {
     /// life: bindings published after it was created are invisible to it.
     /// Null for a unit that may define, which reads current bindings and
     /// so sees its own definitions.
-    binding_pin: ?u64 = null,
+    binding_pin: ?*heap.ReleaseDomain.BindingPin = null,
     /// Resolutions of session and core words in this unit's view of bindings.
     binding_cache: BindingCache = .{},
     /// Protected invocation may start this child at one selected registered
@@ -3048,7 +3048,8 @@ pub const Unit = struct {
     /// The binding version this unit observes, or null when it reads the
     /// current bindings.
     pub fn bindingPin(self: *const Unit) ?u64 {
-        return self.binding_pin;
+        const pin = self.binding_pin orelse return null;
+        return pin.version;
     }
 
     pub fn deinit(self: *Unit) void {
@@ -6208,7 +6209,7 @@ pub const Machine = struct {
     /// The number that determines this unit's view of session bindings: its
     /// pin, or the current binding version for a unit that may define.
     fn bindingView(self: *const Machine) u64 {
-        return self.unit.binding_pin orelse self.unit.environment.bindingDomain().binding_version.load(.acquire);
+        return self.unit.bindingPin() orelse self.unit.environment.bindingDomain().binding_version.load(.acquire);
     }
 
     /// Borrows into `out` what `cell` holds for a reader pinned at `pin`, and
@@ -6355,7 +6356,7 @@ pub const Machine = struct {
                 slot_resolution.execution_generation == null and slot_resolution.lease.held == .borrowed and
                 slot_resolution.lease.traceWord() == null)
             {
-                self.unit.binding_cache.put(self.unit.allocator, .{
+                try self.unit.binding_cache.put(self.unit.allocator, .{
                     .slot = word.slot,
                     .view = view,
                     .spec = slot_resolution.lease.spec(),
@@ -8254,10 +8255,9 @@ pub const BindingCache = struct {
             if (entry.slot == slot) return if (entry.view == view) entry else null;
         }
     }
-    /// Records `entry`, replacing one for the same slot. Failing to grow only
-    /// leaves the word uncached.
-    pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) void {
-        if ((self.count + 1) * 4 > self.entries.len * 3) self.grow(allocator) catch return;
+    /// Records `entry`, replacing one for the same slot.
+    pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) error{OutOfMemory}!void {
+        if ((self.count + 1) * 4 > self.entries.len * 3) try self.grow(allocator);
         self.insert(entry);
     }
     fn insert(self: *BindingCache, entry: Entry) void {

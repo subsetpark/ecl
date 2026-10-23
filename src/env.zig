@@ -385,7 +385,6 @@ const BindingSnapshot = struct {
     /// Set while a pin still observes this replaced snapshot.
     kept: heap.ReleaseDomain.KeptBinding = .{
         .since = 0,
-        .until = 0,
         .unlink_fn = unlinkKept,
         .retire_fn = retireKept,
     },
@@ -513,16 +512,17 @@ pub const BindingCell = struct {
     /// Publishes `spec`, or the name's removal when null, as the cell's next
     /// snapshot.
     ///
-    /// In a versioned root (the session) the snapshot it replaces stays in the
-    /// chain while a live pin observes it; otherwise it leaves the chain now
-    /// and retires once no counted reader holds it. Its other readers cannot:
-    /// the unit replacing it reads only current bindings, and does so after
-    /// its dispatches have retained what they keep.
+    /// The snapshot it replaces stays in the chain while a live pin may
+    /// observe it; otherwise it leaves the chain now and retires once no
+    /// counted reader holds it. Its other readers cannot: the unit replacing
+    /// it reads only current bindings, and does so after its dispatches have
+    /// retained what they keep.
     ///
-    /// Any other root is read live by the unit building it and by tasks that
-    /// unit spawned, with no pin to protect them, so a snapshot it replaces
-    /// stays until the cell is torn down. Only a module body redefining its
-    /// own words replaces one.
+    /// In a versioned root (the session) a pin observes a snapshot it falls
+    /// within. Any other root that changes is a module image under
+    /// construction, read live by tasks its constructor spawned, so there
+    /// every pin older than the replacement protects the snapshot: such a
+    /// task may still be dispatching it.
     fn replace(
         self: *BindingCell,
         allocator: std.mem.Allocator,
@@ -535,16 +535,11 @@ pub const BindingCell = struct {
         const version = releases.beginBindingPublication();
         snapshot.since = version;
         replaced.next = snapshot;
-        const retire = versioned and !releases.pinnedWithinLocked(replaced.since, version);
-        if (versioned) {
-            replaced.cell = self;
-            self.retain();
-            if (retire) replaced.unlinkLocked() else {
-                replaced.kept.since = replaced.since;
-                replaced.kept.until = version;
-                releases.keepBindingLocked(&replaced.kept);
-            }
-        }
+        replaced.cell = self;
+        self.retain();
+        replaced.kept.since = if (versioned) replaced.since else 0;
+        const retire = !releases.keepBindingLocked(&replaced.kept);
+        if (retire) replaced.unlinkLocked();
         self.snapshots = snapshot;
         self.publisher.publish(snapshot);
         releases.endBindingPublication(version);
@@ -557,9 +552,8 @@ pub const BindingCell = struct {
     ) bool {
         std.debug.assert(self.references.load(.acquire) == 0);
         std.debug.assert(self.publisher.quiescent());
-        // A retiring root has no readers left. Its chain holds the current
-        // snapshot and, for an unversioned root, every one it replaced; a
-        // versioned root's replaced snapshots hold this cell and are gone.
+        // A retiring root has no readers left. Its chain holds only the
+        // current snapshot: every replaced one holds this cell, and is gone.
         var cursor = self.publisher.currentOwned();
         self.publisher.publish(null);
         while (cursor) |snapshot| {
@@ -583,12 +577,13 @@ pub const BindingCell = struct {
     /// The specification a reader pinned at `pin` observes, or the current one
     /// for a null pin; null when the root binds nothing for the name then.
     fn observed(self: *const BindingCell, pin: ?u64) ?*const BindingSpec {
-        const current = self.publisher.current.load(.seq_cst) orelse return null;
-        const version = pin orelse return current.specPointer();
-        // The pin keeps what it observes; only a name redefined since needs a
-        // walk, which passes snapshots an unlink may retire. The reader count
-        // holds them until the walk ends.
-        if (current.since <= version) return current.specPointer();
+        const version = pin orelse {
+            const current = self.publisher.current.load(.seq_cst) orelse return null;
+            return current.specPointer();
+        };
+        // The pin keeps what it observes, but not a snapshot published after
+        // it, which an unlink may retire at any moment: the reader count
+        // holds every snapshot this reader touches until it has found its own.
         var lease = self.publisher.acquire();
         defer _ = lease.deinit();
         const found = (lease.snapshot orelse return null).observedAt(version) orelse return null;

@@ -907,6 +907,30 @@ test "session: a pinned task keeps only the snapshot it observes" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
+test "session: a module body's redefinitions are not kept for the image's life" {
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+        defer runtime.deinit();
+        // A module word may define while its body runs, so recursion through
+        // one redefines `x` once per level.
+        const body = "((1) 'x def (dup 0 = (pop) (1 - (2) 'x def r) if) 'r def ";
+        try expectOk(&runtime, "[] " ++ body ++ "64 r) 'redefined-warm @defm");
+        const before = counting.total_requested_bytes;
+        try expectOk(&runtime, "[] " ++ body ++ "64 r) 'redefined-few @defm");
+        const few = counting.total_requested_bytes - before;
+        try expectOk(&runtime, "[] " ++ body ++ "4096 r) 'redefined-many @defm");
+        const many = counting.total_requested_bytes - before - few;
+        // With no task to observe them, replaced snapshots retire as they go:
+        // the image holds its final bindings, whatever it redefined on the way.
+        try std.testing.expect(many <= few + 4096);
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
+}
+
 test "env: a replaced interior remains valid only through its binding lease" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();

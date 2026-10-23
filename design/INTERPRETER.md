@@ -593,19 +593,19 @@ defined links to an empty slot that a later definition fills.
 An environment is its root's slot table: one slot per name the root has bound
 or a word in it has linked, made on first need and kept until the root
 retires. A binding cell is stable, while its immutable payload snapshot may be
-replaced. A name's first binding gives its slot a cell and every later binding,
-including one after removal, replaces that cell's payload, so the cell's
-identity never changes; removing the name only clears the slot's bound flag,
-and the cell keeps its last payload until the name is bound again or the root
-retires. Binding and removal are constant-time under the root's writer lock.
+replaced. A name's first binding gives its slot a cell and every later binding
+replaces that cell's payload, so the cell's identity never changes. Removal
+publishes a payload that binds nothing and clears the slot's bound flag.
+Binding and removal are constant-time under the root's writer lock.
 Enumeration and lookup by name read the table without a lock; enumeration is
-not a snapshot, and may report names bound while it runs. Executing a word reads its slot and loads the
-payload the executing unit observes, so a redefinition reaches every existing
-occurrence at its next execution in that unit and in every unit created
-afterwards, including open-ended loop bodies already running. A unit keeps
-the session and core resolutions it makes in a table keyed by slot id, valid
-while its view number (its pin, or the session version for a unit that may
-define) is unchanged.
+not a snapshot, and may report names bound while it runs. Executing a word
+reads its slot and loads the payload the executing unit observes. A
+redefinition therefore reaches every occurrence at its next execution in the
+defining unit, including open-ended loop bodies that unit is running, and in
+every unit created afterwards; a unit that already exists and cannot define
+keeps the session view of its creation. A unit keeps the session and core
+resolutions it makes in a table keyed by slot id, valid while its view number
+(its pin, or the session version for a unit that may define) is unchanged.
 
 A finite iteration's call owns a plan for its quotation, reached through the
 application frame and used only while that exact quotation is the running
@@ -629,31 +629,37 @@ A binding payload is one closed choice:
 Effect metadata, documentation, visibility, source slices, and module-local
 diagnostic identity travel in the same snapshot. A snapshot records the
 binding version that published it, and a removal is published as a snapshot
-with no binding. Writers build before taking the publication lock, stamp the
-next version under the release domain's binding lock, publish, and only then
-advance the version, so a reader that announced an older version may still
-reach what was replaced and one that announces later reaches the publication.
+with no binding. Publication makes a fully built snapshot visible at a version
+newer than every live pin, and a pin taken afterwards observes it.
 
 A unit that cannot define pins the version current at its creation and reads a
 session slot's newest snapshot at or before it, walking back through the chain
-only for a name redefined since. A unit that may define reads the current
-snapshot, so it sees its own definitions. Module images and core are not
-versioned: an image is private to its constructing unit until registration and
-frozen after, and core is frozen.
+only for a name redefined since. A pinned reader counts itself on the cell
+before it touches a snapshot, because one published after its pin may retire
+under it. A unit that may define reads the current snapshot, so it sees its
+own definitions. Module images and core are not versioned: core is frozen, an
+image is frozen once registered, and before that it changes only under its
+constructing unit, while tasks that unit spawned read it live.
 
-A replaced session snapshot stays in its chain only while some live pin falls
-within the versions it was current for; otherwise it is unlinked at once.
-Kept snapshots are rechecked whenever a pin ends, so a long-running task
-retains one snapshot per name it can observe rather than every intermediate
+A replaced snapshot stays in its chain only while a live pin may observe it;
+otherwise it is unlinked at once. In the session a pin observes the snapshots
+whose versions it falls within. In a module image under construction, read
+live by tasks its constructor spawned, every pin older than the replacement
+may still be dispatching it. Live pins form a list in version order, and a
+kept snapshot waits on the newest pin older than its replacement, the last
+that can observe it, so publication decides with one comparison. Ending a pin
+is constant-time: it hands what it held to the next older pin, and the release
+domain settles the handover a bounded batch per turn, keeping each snapshot
+that pin observes and retiring the rest. A long-running task therefore retains
+one snapshot per name it can observe rather than every intermediate
 definition. An unlinked snapshot retires through the release domain once no
-counted reader is copying it or walking past it. Dispatch reads with one load
-and no announcement: a pinned unit's pin keeps what it observes, and the only
-unpinned reader of a session binding is the unit that replaces it, which does
-so only by running code, after its dispatch has retained what it keeps.
-Readers outside a unit, such as completion, acquire counted leases. A module
-image under construction is read live by the unit building it and by tasks it
-spawned, so its replaced snapshots stay in the chain until the cell is torn
-down.
+counted reader is copying it or walking past it. Neither kind of dispatch
+holds a count past its lookup: a pinned unit's pin keeps what it found, and a
+unit reading current bindings takes one load and no announcement. The only
+unpinned reader of a changing root is the unit that replaces it, which does so
+only by running code, after its dispatch has retained what it keeps; a task
+reading a module image live is protected by its pin. Readers outside a unit,
+such as completion, acquire counted leases.
 
 Slots are reached two ways, and their lifetimes follow. A session or core slot
 has an id in a lock-free directory whose ids are never reused; those roots

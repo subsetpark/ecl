@@ -360,10 +360,12 @@ definition, and replacing a binding affects existing code at its next execution
 in the defining unit and in every unit created afterwards. A task keeps the
 session bindings that existed when it was spawned; global definitions are never
 a channel between running units. Because no definition can occur inside a
-combinator application, the bindings a combinator call observes do not change
-while it runs. Core is frozen, and a module image is private to the unit
-constructing it until registration and immutable after, so neither needs this
-rule. Qualified words and words dispatched by `execute` look up the current
+combinator application, the session bindings a combinator call observes do not
+change while it runs. Core is frozen, so it needs no such rule. A module image
+is immutable once registered; before that only its construction body defines
+in it, and a task that body spawned reads the image as it stands at each
+execution, so it may observe a definition the body makes after the spawn,
+including during one combinator call. Qualified words and words dispatched by `execute` look up the current
 registration at each execution, so a module registered during a call is seen by
 its later applications. A
 module image is immutable

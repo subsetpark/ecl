@@ -1132,6 +1132,17 @@ test "bindings: a task keeps the bindings that existed when it was spawned" {
     try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn (2) 'f def (3) 'f def 'f undef (4) 'f def task.await", "{'ok [1]}");
     // A name first defined after the spawn is undefined in the task.
     try expectFreshStack("[] (20 clock.sleep g) @spawn (5) 'g def task.await 'err at 'kind at", "'undefined-word");
+    // Two tasks pinned together: the later one ends first, and the earlier
+    // one still observes the binding they shared.
+    try expectFreshStack(
+        "(1) 'f def [] (40 clock.sleep f) @spawn [] (20 clock.sleep f) @spawn (2) 'f def task.await swap task.await",
+        "{'ok [1]} {'ok [1]}",
+    );
+    // Pinned apart: each keeps its own binding, whichever ends first.
+    try expectFreshStack(
+        "(1) 'f def [] (40 clock.sleep f) @spawn (2) 'f def [] (20 clock.sleep f) @spawn (3) 'f def task.await swap task.await",
+        "{'ok [2]} {'ok [1]}",
+    );
 }
 
 test "bindings: a task spawned after a definition observes it" {
