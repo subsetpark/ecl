@@ -1979,7 +1979,9 @@ pub const ReleaseDomain = struct {
         }
     }
 
-    pub fn releaseValue(self: *ReleaseDomain, item: Value) void {
+    /// Inline because most released values are immediates, for which the
+    /// whole release is the tag test.
+    pub inline fn releaseValue(self: *ReleaseDomain, item: Value) void {
         if (item.heapHeader()) |header| self.releaseHeader(header);
     }
 

@@ -54,7 +54,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
     }.run;
 }
 
-fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
+fn primitive(evaluator: *Machine, comptime operation: Op) MachineError!void {
     return switch (operation) {
         .at => atPrimitive(evaluator),
         .where => wherePrimitive(evaluator),
@@ -90,9 +90,9 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     {
         if (try startTypedCopy(
             evaluator,
-            collection.borrow(),
+            &collection,
             null,
-            index.borrow(),
+            &index,
             .gather,
             @intCast(index.borrow().list.length()),
         )) return;
@@ -1408,10 +1408,8 @@ pub fn restForIdiom(evaluator: *Machine) MachineError!void {
 }
 
 fn takePrimitive(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var count_value = try evaluator.popValue();
+    var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
-    var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list or count_value.borrow() != .int) {
         return evaluator.typeError("a list and an integer count");
@@ -1431,7 +1429,7 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
         (source_count - (result_count % source_count)) % source_count;
     if (try startTypedCopy(
         evaluator,
-        collection.borrow(),
+        &collection,
         null,
         null,
         .{ .cyclic = .{ .start = start } },
@@ -1450,10 +1448,8 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
 /// A rotation is a cyclic copy of the whole list from the element the count
 /// lands on, so it shares `take`'s typed and boxed copy paths.
 fn rotatePrimitive(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var count_value = try evaluator.popValue();
+    var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
-    var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list or count_value.borrow() != .int) {
         return evaluator.typeError("a list and an integer count");
@@ -1463,7 +1459,7 @@ fn rotatePrimitive(evaluator: *Machine) MachineError!void {
     const start: usize = @intCast(@mod(count_value.borrow().int, @as(i64, @intCast(count))));
     if (try startTypedCopy(
         evaluator,
-        collection.borrow(),
+        &collection,
         null,
         null,
         .{ .cyclic = .{ .start = start } },
@@ -1514,10 +1510,8 @@ const TakeDriver = struct {
 };
 
 fn dropPrimitive(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var count_value = try evaluator.popValue();
+    var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
-    var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list or count_value.borrow() != .int) {
         return evaluator.typeError("a list and an integer count");
@@ -1566,7 +1560,7 @@ const ListCopyDriver = struct {
     ) MachineError!void {
         if (try startTypedCopy(
             evaluator,
-            collection.borrow(),
+            collection,
             null,
             null,
             if (reverse) .{ .reversed = .{ .end = end } } else .{ .contiguous = .{ .start = start } },
@@ -1592,8 +1586,8 @@ const ListCopyDriver = struct {
     ) MachineError!void {
         if (try startTypedCopy(
             evaluator,
-            left.borrow(),
-            right.borrow(),
+            left,
+            right,
             null,
             .{ .concat = .{ .left_count = left_count } },
             left_count + right_count,
@@ -2074,7 +2068,7 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
             );
             if (try startTypedCopy(
                 evaluator,
-                collection.borrow(),
+                &collection,
                 null,
                 null,
                 .{ .cyclic = .{ .start = 0 } },
@@ -2640,28 +2634,29 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
                 }
             }
             if (!self.cursor.complete()) return .stepped;
-            self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            if (self.other) |*other| other.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            self.other = null;
-            if (self.indices) |*indices| indices.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            self.indices = null;
+            // The readers retire with the driver's fields, before the output
+            // is pushed, on both the in-place and the installed path.
             return .{ .output = self.writer.borrowMut().finish() };
         }
     };
 }
 
-/// Starts a typed copy when every operand shares one leaf representation.
-/// Returns false without consuming anything when they do not, which is the
-/// registry's generic classification for a mixed-representation move.
+/// Starts a typed copy when every operand shares one leaf representation,
+/// moving each operand's reference into the driver's readers. Returns false
+/// without consuming anything when they do not, which is the registry's
+/// generic classification for a mixed-representation move.
 fn startTypedCopy(
     evaluator: *Machine,
-    source: Value,
-    other: ?Value,
-    indices: ?Value,
+    source_owner: *heap.OwnedValue,
+    other_owner: ?*heap.OwnedValue,
+    indices_owner: ?*heap.OwnedValue,
     shape: CopyShape,
     length: usize,
 ) MachineError!bool {
     if (length == 0) return false;
+    const source = source_owner.borrow();
+    const other: ?Value = if (other_owner) |owner| owner.borrow() else null;
+    const indices: ?Value = if (indices_owner) |owner| owner.borrow() else null;
     if (source != .list) return false;
     const source_kind = source.list.kind();
     if (other) |right| {
@@ -2682,19 +2677,19 @@ fn startTypedCopy(
                 var held_locally = true;
                 errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
                 var driver = Driver{
-                    .source = .init(heap.LeafReader(candidate).acquire(source.list)),
+                    .source = .init(heap.LeafReader(candidate).adopt(source_owner.take().list)),
                     .writer = .init(writer),
                     .shape = shape,
                     .cursor = kernel_flat.FlatCursor.init(length),
                 };
-                if (other) |right| {
-                    driver.other = .init(heap.LeafReader(candidate).acquire(right.list));
+                if (other_owner) |right| {
+                    driver.other = .init(heap.LeafReader(candidate).adopt(right.take().list));
                 }
-                if (indices) |vector| {
-                    driver.indices = .init(heap.LeafReader(candidate_index).acquire(vector.list));
+                if (indices_owner) |vector| {
+                    driver.indices = .init(heap.LeafReader(candidate_index).adopt(vector.take().list));
                 }
                 held_locally = false;
-                try evaluator.runDriver(driver);
+                try evaluator.runDriverAt(&driver);
                 return true;
             }
         }
