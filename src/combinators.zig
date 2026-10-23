@@ -67,6 +67,7 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     defer condition.deinit();
     if (body.borrow() != .list or condition.borrow() != .list)
         return evaluator.typeError("two quotations/lists");
+    const provenance_target = try evaluator.applicationProvenanceTarget();
     const state = try evaluator.allocator().create(WhileState);
     state.* = .{
         .condition = .init(condition.take().list),
@@ -74,11 +75,7 @@ fn whileWord(evaluator: *Machine) MachineError!void {
         .checkpoint = .init(.{}),
         .site = evaluator.applicationSite(),
         .word = evaluator.activeWordId(),
-        .provenance_target = evaluator.applicationProvenanceTarget() catch |err| {
-            var owned = heap.Owned(*WhileState).init(state);
-            owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            return err;
-        },
+        .provenance_target = provenance_target,
         .phase = .condition,
     };
     var owned = heap.Owned(*WhileState).init(state);
@@ -92,9 +89,11 @@ fn whileWord(evaluator: *Machine) MachineError!void {
 
 /// The operand stack a `while` condition starts from, retained, so the
 /// condition's own stack result can be discarded. One buffer serves the whole
-/// loop; capture and restore advance as far as the turn's budget allows.
+/// loop while it is deep enough; capture and restore advance as far as the
+/// turn's budget allows. The buffer is a heap list, so abandoning it retires
+/// one root through the release domain rather than walking the saved stack.
 const WhileCheckpoint = struct {
-    values: std.ArrayList(Value) = .empty,
+    values: ?heap.ListBuilder(.generic_spine) = null,
     depth: usize = 0,
     index: usize = 0,
     phase: enum { idle, release, capture, discard, restore } = .idle,
@@ -111,15 +110,30 @@ const WhileCheckpoint = struct {
     fn advance(self: *WhileCheckpoint, evaluator: *Machine) error{OutOfMemory}!bool {
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.phase) {
-            .release => if (self.values.pop()) |item| evaluator.releaseDomain().releaseValue(item) else {
-                self.depth = evaluator.available();
-                try self.values.ensureTotalCapacity(evaluator.allocator(), self.depth);
+            .release => {
+                const depth = evaluator.available();
+                if (self.values) |*buffer| {
+                    if (buffer.capacity() < depth) {
+                        buffer.retirePartial(evaluator.releaseDomain());
+                        self.values = null;
+                    } else if (buffer.len() != 0) {
+                        const last = buffer.len() - 1;
+                        const item = buffer.items()[last];
+                        buffer.setLen(last);
+                        evaluator.releaseDomain().releaseValue(item);
+                        continue;
+                    }
+                }
+                if (self.values == null)
+                    self.values = try heap.ListBuilder(.generic_spine).init(evaluator.allocator(), 0, depth);
+                self.depth = depth;
                 self.phase = .capture;
             },
             .capture => if (self.index != self.depth) {
                 const item = evaluator.visibleOperandBorrowed(self.index);
                 heap.retainValue(item);
-                self.values.appendAssumeCapacity(item);
+                self.values.?.items()[self.index] = item;
+                self.values.?.setLen(self.index + 1);
                 self.index += 1;
             } else {
                 self.phase = .idle;
@@ -130,7 +144,7 @@ const WhileCheckpoint = struct {
                 self.phase = .restore;
             },
             .restore => if (self.index != self.depth) {
-                try evaluator.pushBorrowed(self.values.items[self.index]);
+                try evaluator.pushBorrowed(self.values.?.items()[self.index]);
                 self.index += 1;
             } else {
                 self.phase = .idle;
@@ -140,9 +154,9 @@ const WhileCheckpoint = struct {
         };
         return false;
     }
-    pub fn retire(self: *WhileCheckpoint, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.values.items) |item| releases.releaseValue(item);
-        self.values.deinit(allocator);
+    pub fn retire(self: *WhileCheckpoint, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
+        if (self.values) |*buffer| buffer.retirePartial(releases);
+        self.values = null;
     }
 };
 

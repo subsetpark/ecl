@@ -348,6 +348,16 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .expected = "10",
         },
         .{
+            .name = "while checkpoint follows a growing stack",
+            .source = "0 (dup 3 <) (dup 1 +) while",
+            .expected = "0 1 2 3",
+        },
+        .{
+            .name = "while checkpoint follows a shrinking stack",
+            .source = "1 2 3 4 (dup 1 >) (pop) while",
+            .expected = "1",
+        },
+        .{
             .name = "while stack rollback preserves environment effects",
             .source = "0 (1 'while-guard-effect set 0) () while while-guard-effect",
             .expected = "0 1",
@@ -1163,5 +1173,14 @@ test "while restores a checkpoint deeper than one turn's budget" {
     try expectFreshStack(
         "[] (100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await 'ok at last",
         "100001",
+    );
+}
+
+test "while abandons a checkpoint deeper than one turn's budget" {
+    // A failing condition abandons the loop with 100,001 operands saved; the
+    // checkpoint goes to the release domain whole, and nothing leaks.
+    try expectFreshStack(
+        "[] (100000 (7) times 0 (dup 'x +) () while) @spawn task.await 'err at 'kind at",
+        "'type",
     );
 }
