@@ -42,7 +42,7 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
-    return struct {
+    return support.headed(operation.spelling(), struct {
         fn run(evaluator: *Machine) MachineError!void {
             return switch (operation) {
                 .put => putPrimitive(evaluator),
@@ -53,7 +53,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
                 .format => formatPrimitive(evaluator),
             };
         }
-    }.run;
+    }.run);
 }
 
 fn strPrimitive(evaluator: *Machine) MachineError!void {

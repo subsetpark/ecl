@@ -1754,6 +1754,7 @@ pub const TrustedCall = struct {
     body: *Header,
     idiom: env.DirectIdiom,
 };
+
 /// What a trusted call's recognition decided. `declined` runs the body as any
 /// source word runs; `offered` stands for a combinator, whose quotation is
 /// offered with the body as its fallback.
@@ -1924,6 +1925,9 @@ pub const FallbackSource = struct {
 pub const PhraseRecognizer = struct {
     offered: *const fn (*Machine, IdiomRequest, FallbackSource) MachineError!void,
     trusted: *const fn (*Machine, TrustedCall) MachineError!TrustedOutcome,
+    /// Given the first registry entry a kernel word heads: true when one of
+    /// its phrases applied and consumed its following words.
+    headed: *const fn (*Machine, u16) MachineError!bool,
 };
 
 pub const ParkRequest = union(enum) {
@@ -2535,6 +2539,8 @@ pub const Unit = struct {
     effect_check_index: ?EffectCheckIndex = null,
     terminal: TerminalState = .evaluating,
     idiom_hits: u64 = 0,
+    /// The idiom hits that were phrases continued by following words.
+    phrase_hits: u64 = 0,
     scheduler: ?*const anyopaque = null,
     task_scope: ?*anyopaque = null,
     is_root_unit: bool = true,
@@ -5529,6 +5535,38 @@ pub const Machine = struct {
     ) void {
         std.debug.assert(self.unit.native == .idle);
         self.unit.installTaskJoinCleanup(.init(.inputOnly(tasks), disposition));
+    }
+    /// Whether the words after a phrase head continue a recognized phrase,
+    /// which then ran in its place.
+    pub fn continuesPhrase(self: *Machine, first_entry: u16) MachineError!bool {
+        const recognizer = self.unit.inherited.phrase_recognizer orelse return false;
+        return recognizer.headed(self, first_entry);
+    }
+    /// The forms after the dispatching word in its own code, when it was
+    /// dispatched from a source position and `count` of them follow. A word
+    /// reached any other way (an invocation, a replay) has no phrase after it.
+    pub fn followingForms(self: *const Machine, count: u32) ?FollowingForms {
+        const current = self.unit.current orelse return null;
+        const next = switch (current.position) {
+            .source => |index| index,
+            .invocation, .replay, .redispatch => return null,
+        };
+        if (next == 0 or next - 1 != self.unit.active_index) return null;
+        if (@as(u64, next) + count > current.code.length()) return null;
+        return .{ .code = current.code, .start = next };
+    }
+    pub const FollowingForms = struct {
+        code: *Header,
+        start: u32,
+
+        pub fn at(self: FollowingForms, offset: u32) Value {
+            return list.atUnchecked(.{ .list = self.code }, self.start + offset);
+        }
+    };
+    /// Consumes `count` following forms that a recognized phrase executed.
+    pub fn skipFollowingForms(self: *Machine, count: u32) void {
+        const current = &self.unit.current.?;
+        current.position = .{ .source = current.position.source + count };
     }
     pub fn commitDirectIdiomTrace(self: *Machine) intern.TraceWord {
         const parent = self.unit.active_word;

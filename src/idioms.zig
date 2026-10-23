@@ -29,10 +29,15 @@ pub const DirectOp = enum {
     fold1,
     sum,
     product,
+    /// `reshape` continued by `sum` or `product`: the fold over the rows a
+    /// two-axis reshape would build, without building them.
+    reshape_sum,
+    reshape_product,
 
     pub fn spelling(self: DirectOp) []const u8 {
         return switch (self) {
             .str_format => "str.format",
+            .reshape_sum, .reshape_product => "reshape",
             else => @tagName(self),
         };
     }
@@ -84,6 +89,9 @@ pub const RegistryEntry = struct {
     operation: Operation,
     constant_left: bool = false,
     source_word: ?[]const u8 = null,
+    /// Words that must follow the head in the code it runs from, checked
+    /// where it runs. The phrase consumes them when it applies.
+    following: []const ExpectedWord = &.{},
 };
 
 const operation_pattern = [_]PatternAtom{.operation};
@@ -210,7 +218,7 @@ const fold1_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 2]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     index += 1;
@@ -312,6 +320,19 @@ pub const registry = blk: {
         };
         index += 1;
     }
+    for ([_]struct { operation: DirectOp, total: []const u8 }{
+        .{ .operation = .reshape_sum, .total = "sum" },
+        .{ .operation = .reshape_product, .total = "product" },
+    }) |phrase| {
+        entries[index] = .{
+            .context = .direct,
+            .pattern = &.{},
+            .operation = .{ .direct = phrase.operation },
+            .source_word = "reshape",
+            .following = &.{.{ .spelling = phrase.total, .binding = .source }},
+        };
+        index += 1;
+    }
     std.debug.assert(index == entries.len);
     break :blk entries;
 };
@@ -353,7 +374,8 @@ const direct_names = blk: {
     var names: [registry.len][]const u8 = undefined;
     var count: usize = 0;
     for (registry) |entry| {
-        if (entry.context != .direct) continue;
+        // A phrase head asks from its own primitive; nothing freezes for it.
+        if (entry.context != .direct or entry.following.len != 0) continue;
         const name = entry.source_word.?;
         const seen = for (names[0..count]) |existing| {
             if (std.mem.eql(u8, existing, name)) break true;
@@ -377,6 +399,7 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
     const phrase: Value = .{ .list = env.quotationHeader(body) };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
+        if (entry.following.len != 0) continue;
         const capture = matchPhrase(.{ .frozen = lookup }, phrase, entry) orelse continue;
         return .{
             .entry = @intCast(index),
@@ -406,25 +429,43 @@ const WordGuard = union(enum) {
             .frozen => |lookup| return frozenBindingMatches(lookup, word, binding, primitive, origin),
             .live => |evaluator| {
                 std.debug.assert(origin == .trusted);
-                if (!slotOnRunningRoot(evaluator, word.slot)) return false;
-                // A word that resolves to nothing a plain word may run, or whose
-                // root has retired, is simply not the expected binding; generic
-                // execution reports any error.
-                // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
-                var resolved: machine.Resolution = undefined;
-                if (!evaluator.peekSlotWord(word, &resolved)) return false;
-                defer resolved.deinit(evaluator.allocator());
-                const spec = resolved.lease.spec();
-                const binding_matches = switch (binding) {
-                    .builtin => spec.binding == .builtin and
-                        (primitive == null or spec.binding.builtin == primitive.?),
-                    .source => spec.binding == .word,
-                };
-                return binding_matches and (resolved.origin == .core or resolved.origin == .standard_library);
+                return liveWord(evaluator, word, binding, primitive) != null;
             },
         }
     }
 };
+
+/// What a trusted word resolved to where a phrase runs.
+const LiveWord = struct {
+    trace_word: intern.TraceWord,
+    /// The word's own frozen recognition and body, for a source word.
+    idiom: ?env.DirectIdiom,
+    body: ?*value.ListHandle,
+};
+
+/// Resolves `word` where the phrase runs and returns it only when it is the
+/// trusted binding expected. A word that resolves to nothing a plain word may
+/// run, or whose root has retired, is simply not that binding; generic
+/// execution reports any error. A frozen binding outlives the call that
+/// matched it, so what it returns stays valid for the call.
+fn liveWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
+    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
+    var resolved: machine.Resolution = undefined;
+    if (!evaluator.peekSlotWord(word, &resolved)) return null;
+    defer resolved.deinit(evaluator.allocator());
+    if (resolved.origin != .core and resolved.origin != .standard_library) return null;
+    const spec = resolved.lease.spec();
+    switch (binding) {
+        .builtin => if (spec.binding != .builtin or (primitive != null and spec.binding.builtin != primitive.?)) return null,
+        .source => if (spec.binding != .word) return null,
+    }
+    return .{
+        .trace_word = resolved.trace_word,
+        .idiom = spec.direct_idiom,
+        .body = if (spec.binding == .word) env.quotationHeader(spec.binding.word) else null,
+    };
+}
 
 /// The one atom matcher, shared by every site; only the guard differs. The
 /// phrase matches when every atom does, at every nesting level.
@@ -598,6 +639,117 @@ pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError
     return .applied;
 }
 
+/// The first registry entry headed by the kernel word `spelling`, or null
+/// when it heads none. A head's entries are consecutive (checked below).
+pub fn firstPhraseEntry(comptime spelling: []const u8) ?u16 {
+    @setEvalBranchQuota(100_000);
+    for (registry, 0..) |entry, index| {
+        if (entry.following.len != 0 and std.mem.eql(u8, entry.source_word.?, spelling)) return index;
+    }
+    return null;
+}
+
+comptime {
+    for (registry, 0..) |entry, index| {
+        if (entry.following.len == 0) continue;
+        if (entry.context != .direct) @compileError("a phrase entry must be direct");
+        const first = firstPhraseEntry(entry.source_word.?).?;
+        for (registry[first..index]) |between| {
+            if (between.following.len == 0 or !std.mem.eql(u8, between.source_word.?, entry.source_word.?))
+                @compileError("phrase entries of one head must be consecutive: " ++ entry.source_word.?);
+        }
+    }
+}
+
+/// A kernel word's primitive asks whether the words after it continue one of
+/// its phrases (see `kernel_support.headed`). Only the word being dispatched
+/// can head one: a primitive reached any other way declines, as does a unit
+/// that runs generic code only.
+pub fn applyHeaded(evaluator: *Machine, first: u16) MachineError!bool {
+    if (evaluator.unit.inherited.idiom_mode == .generic_only) return false;
+    if (!std.mem.eql(u8, intern.get(evaluator.unit.active_word.atom()), registry[first].source_word.?)) return false;
+    return try applyPhrase(evaluator, first) == .applied;
+}
+
+/// A builtin head continued by the words after it. Each entry the head
+/// heads is tried in registry order; the first whose following words are
+/// the expected trusted bindings, here, and whose operands admit it, applies
+/// and consumes those words. A fault is reported as the last following word
+/// would report it when it runs alone: its own recognition names the active
+/// word and the site in its body, and the word is the trace parent.
+fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutcome {
+    const name = registry[first].source_word.?;
+    var index = first;
+    while (index < registry.len) : (index += 1) {
+        const entry = registry[index];
+        if (entry.following.len == 0 or !std.mem.eql(u8, entry.source_word.?, name)) break;
+        const count: u32 = @intCast(entry.following.len);
+        const forms = evaluator.followingForms(count) orelse return .declined;
+        var last: ?LiveWord = null;
+        const matched = for (entry.following, 0..) |expected, offset| {
+            const form = forms.at(@intCast(offset));
+            if (form != .word or !std.mem.eql(u8, intern.get(form.word.name), expected.spelling)) break false;
+            last = liveWord(evaluator, form.word, expected.binding, null) orelse break false;
+        } else true;
+        if (!matched) continue;
+        const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
+        const owner = last.?;
+        const idiom = owner.idiom orelse continue;
+        evaluator.unit.idiom_hits += 1;
+        evaluator.unit.phrase_hits += 1;
+        evaluator.skipFollowingForms(count);
+        _ = evaluator.commitDirectIdiomTrace();
+        if (idiom.active_word) |word| evaluator.setActiveWord(.plain(word));
+        const stack = evaluator.unit.stack.items;
+        const result = numeric.foldLeafColumns(
+            evaluator,
+            columnOperation(entry.operation.direct),
+            stack[stack.len - 2],
+            shape.rows,
+            shape.columns,
+        ) catch |err| {
+            if (err == error.Ecl) {
+                if (idiom.active_index) |site| evaluator.setFailureSite(owner.body.?, site);
+                evaluator.setFailureTraceParent(owner.trace_word);
+            }
+            return err;
+        };
+        popRelease(evaluator, 2);
+        try evaluator.pushOwned(result);
+        return .applied;
+    }
+    return .declined;
+}
+
+fn columnOperation(operation: DirectOp) numeric.BinaryOp {
+    return switch (operation) {
+        .reshape_sum => .add,
+        .reshape_product => .mul,
+        else => unreachable,
+    };
+}
+
+/// The rows and columns of `list [rows columns] reshape` when its fold over
+/// rows can run on the list itself: a two-axis shape of positive ints whose
+/// volume is the list's length, a numeric leaf the operation keeps typed, and
+/// work the remaining budget covers. Anything else runs the words as written.
+fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usize, columns: usize } {
+    if (evaluator.available() < 2) return null;
+    const stack = evaluator.unit.stack.items;
+    const shape = stack[stack.len - 1];
+    const input = stack[stack.len - 2];
+    if (shape != .list or shape.list.length() != 2 or input != .list) return null;
+    const rows_value = list.atUnchecked(shape, 0);
+    const columns_value = list.atUnchecked(shape, 1);
+    if (rows_value != .int or columns_value != .int or rows_value.int < 1 or columns_value.int < 1) return null;
+    const rows = std.math.cast(usize, rows_value.int) orelse return null;
+    const columns = std.math.cast(usize, columns_value.int) orelse return null;
+    const volume = std.math.mul(usize, rows, columns) catch return null;
+    if (volume != input.list.length() or volume > evaluator.remainingKernelFuel()) return null;
+    if (!numeric.columnFoldCandidate(columnOperation(operation), input)) return null;
+    return .{ .rows = rows, .columns = columns };
+}
+
 fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, capture: Capture) MachineError!void {
     const direct_parent = if (selected.context == .direct or selected.context == .fold1)
         evaluator.commitDirectIdiomTrace()
@@ -693,6 +845,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             // Any other operand reaches the definition, so its error is the
             // definition's.
             .sum, .product => evaluator.available() >= 1 and stack[stack.len - 1] == .list,
+            .reshape_sum, .reshape_product => unreachable, // See `applyPhrase`.
             else => evaluator.available() >= 1,
         },
     };
@@ -735,6 +888,7 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .str_format => dict_text.formatForIdiom(evaluator),
         .sum => applyTotal(evaluator, .add, 0),
         .product => applyTotal(evaluator, .mul, 1),
+        .reshape_sum, .reshape_product => unreachable, // See `applyPhrase`.
     };
 }
 

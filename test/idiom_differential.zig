@@ -27,13 +27,19 @@ test "every idiom entry hits across values empties spines floats and failures" {
             const comparison = if (variant != .empty and (entry.context == .fold1 or
                 (entry.operation == .direct and entry.operation.direct == .fold1)))
                 compareReductionModes(source)
-            else if (variant == .failure and entry.operation == .direct and
-                (entry.operation.direct == .sum or entry.operation.direct == .product))
+            else if (variant == .failure and entry.operation == .direct and switch (entry.operation.direct) {
+                .sum, .product, .reshape_sum, .reshape_product => true,
+                else => false,
+            })
                 compareTotalFailure(source)
             else
                 compareExecutions(source);
             comparison catch |err| {
                 std.log.err("idiom {d} variant {s} failed for `{s}`", .{ index, @tagName(variant), source });
+                return err;
+            };
+            if (entry.following.len != 0) expectPhraseHits(source, 1) catch |err| {
+                std.log.err("phrase {d} variant {s} did not fuse `{s}`", .{ index, @tagName(variant), source });
                 return err;
             };
         }
@@ -209,14 +215,16 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             },
         ),
         .match, .length => unreachable,
-        .direct => |operation| std.fmt.allocPrint(
-            allocator,
-            "{s} {s}",
-            .{
+        .direct => |operation| direct: {
+            var result: std.ArrayList(u8) = .empty;
+            errdefer result.deinit(allocator);
+            try result.print(allocator, "{s} {s}", .{
                 directInput(operation, variant),
                 if (operation == .str_format) operation.spelling() else entry.source_word.?,
-            },
-        ),
+            });
+            for (entry.following) |word| try result.print(allocator, " {s}", .{word.spelling});
+            break :direct result.toOwnedSlice(allocator);
+        },
     };
 }
 
@@ -420,6 +428,19 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .failure => "[1 'bad] (+)",
         },
         .sort => sortInput(variant),
+        // The shape follows the list; `empty` is the single-row case, which
+        // the fold returns unchanged.
+        .reshape_sum, .reshape_product => switch (variant) {
+            .atom => "[1 2 3 4 5 6] [2 3]",
+            .empty => "[1 2 3] [1 3]",
+            .spine => "[1 2 3 4 5 6] [3 2]",
+            .float => "[0.1 -0.0 0.2 -0.0] [2 2]",
+            // Overflow in column 1 of the second row.
+            .failure => if (operation == .reshape_sum)
+                "[1 9223372036854775807 1 1] [2 2]"
+            else
+                "[1 4611686018427387904 1 4] [2 2]",
+        },
         // A non-list operand declines to the definition, so the failure
         // variant faults inside the recognized reduction.
         .sum, .product => switch (variant) {
@@ -619,6 +640,18 @@ test "idioms: an ordinary module with stdlib's shape cannot inherit its recognit
     try std.testing.expectEqualStrings("\"ordinary\"", display.bytes());
 }
 
+/// Phrase hits, unlike idiom hits, distinguish a fused `reshape sum` from an
+/// unfused `reshape` followed by a recognized `sum`: both score one idiom hit.
+fn expectPhraseHits(source: []const u8, expected: u64) !void {
+    var heap: SessionHeap = .init;
+    defer retireHeap(&heap);
+    var run = try execute(source, .automatic, heap.allocator());
+    defer run.deinit();
+    if (expected != run.runtime.lastPhraseHits())
+        std.log.err("phrase hit count for {s}: expected {d}, got {d}", .{ source, expected, run.runtime.lastPhraseHits() });
+    try std.testing.expectEqual(expected, run.runtime.lastPhraseHits());
+}
+
 fn expectHits(source: []const u8, expected: u64) !void {
     var heap: SessionHeap = .init;
     defer retireHeap(&heap);
@@ -718,4 +751,50 @@ test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
     try expectHits("[0 0 1] 0 (or) fold", 1);
     try expectHits("[1 0 1] (and) fold1", 1);
     try expectHits("[0 0 1] (or) fold1", 1);
+}
+
+test "idioms: a phrase matches alike inline, inside combinators, and in definitions" {
+    // Recognition happens where the phrase's first word executes, so where
+    // the code came from cannot change the outcome: each form fuses once and
+    // agrees with generic execution. A fused failure is compared field by
+    // field in the registry test, as a recognized `sum`'s trace differs.
+    const fused = [_][]const u8{
+        "[1 2 3 4 5 6] [2 3] reshape sum",
+        "[1.5 2.5 3.5 4.5] [2 2] reshape product",
+        "[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each",
+        "([1 2 3 4 5 6] [2 3] reshape sum) call",
+        "[2 3] ([1 2 3 4 5 6] swap reshape sum) partial call",
+        "([2 3] reshape sum) 'columns def [1 2 3 4 5 6] columns",
+    };
+    for (fused) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("phrase differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    for (fused) |source| try expectPhraseHits(source, 1);
+    try expectHits("[1 2 3 4 5 6] [2 3] reshape sum", 1);
+    try expectHits("[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each", 1);
+
+    // Words that do not continue the phrase run as written: a user `sum`
+    // shadows the trusted one; a shape the fold cannot take (cycling, three
+    // axes, a generic list) or a phrase split across a definition reaches
+    // `sum` itself, which is recognized on its own.
+    const declined = [_][]const u8{
+        "(pop 99) 'sum def [1 2 3 4] [2 2] reshape sum",
+        "[1 2 3] [2 2] reshape sum",
+        "[1 2 3 4 5 6 7 8] [2 2 2] reshape sum",
+        "[1 2.5 3 4] [2 2] reshape sum",
+        "([2 2] reshape) 'rows def [1 2 3 4] rows sum",
+    };
+    for (declined) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("declined phrase differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    for (declined) |source| try expectPhraseHits(source, 0);
+    try expectHits("(pop 99) 'sum def [1 2 3 4] [2 2] reshape sum", 0);
+    try expectHits("[1 2 3] [2 2] reshape sum", 1);
+    try expectHits("([2 2] reshape) 'rows def [1 2 3 4] rows sum", 1);
 }

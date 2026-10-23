@@ -47,11 +47,11 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
-    return struct {
+    return support.headed(operation.spelling(), struct {
         fn run(evaluator: *Machine) MachineError!void {
             return primitive(evaluator, operation);
         }
-    }.run;
+    }.run);
 }
 
 fn primitive(evaluator: *Machine, comptime operation: Op) MachineError!void {

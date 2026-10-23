@@ -36,6 +36,23 @@ pub const Registry = struct {
     pub const entries = @import("idioms.zig").registry;
 };
 
+// Every phrase head must be a kernel word: only kernel families bind their
+// primitives through `support.headed`, so a head outside them would never ask.
+comptime {
+    @setEvalBranchQuota(100_000);
+    for (Registry.entries) |entry| {
+        if (entry.following.len == 0) continue;
+        var kernel = false;
+        for (std.meta.tags(std.meta.Tag(Operation))) |family| {
+            const Family = @FieldType(Operation, @tagName(family));
+            for (std.meta.tags(Family)) |operation| {
+                if (std.mem.eql(u8, operation.spelling(), entry.source_word.?)) kernel = true;
+            }
+        }
+        if (!kernel) @compileError("phrase head is not a kernel word: " ++ entry.source_word.?);
+    }
+}
+
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try numeric.install(core);
     try sequence.install(core);

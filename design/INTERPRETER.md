@@ -1146,6 +1146,31 @@ grow with the environment, and if it cannot finish the environment is not
 published. A quotation offered to a combinator is still checked when it is
 offered, in the scope chain it runs in, since user scopes can change.
 
+Every site uses one matcher over one table; only how a pattern word's binding
+is checked differs, once against the frozen environment or where the phrase
+runs. A pattern may nest a quotation and match it atom by atom. Recognition
+always happens when a frozen word executes, whether the code around it was
+written inline, passed to a combinator, built by `partial`, or held in a
+definition, so a phrase cannot be recognized in one of those places and missed
+in another.
+
+A builtin can head a phrase continued by the words after it in the same code:
+`list [rows columns] reshape sum` folds the columns of the list's one buffer
+instead of building the rows `sum` would fold. Every kernel family binds its
+words through one comptime wrapper derived from the table: a word that heads
+phrases asks, as its primitive starts, whether the words after it continue
+one, as a combinator offers its quotation; every other word keeps its
+primitive unchanged and pays nothing. A phrase entry is the only change a new
+phrase needs, and a head that is not a kernel word fails to compile. A
+primitive reached other than as the word being dispatched declines. The following words
+are checked where the phrase runs, through
+the running unit's bindings, so a user definition of `sum` takes effect at its
+next execution and the phrase then runs as written. A word reached other than
+from a source position, a phrase split across a definition, a shape the fold
+cannot take, or work the remaining budget cannot cover runs the words as
+written. A fault inside the phrase is reported as the last following word's
+own recognition reports it.
+
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.

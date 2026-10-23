@@ -56,13 +56,13 @@ fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
 }
 
 fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
-    return struct {
+    return support.headed(operation.spelling(), struct {
         fn run(evaluator: *Machine) MachineError!void {
             // Each operation already has its own specialized copy, so
             // inlining it removes only the trampoline.
             return @call(.always_inline, binaryPrimitive, .{ evaluator, operation });
         }
-    }.run;
+    }.run);
 }
 
 pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
@@ -86,11 +86,11 @@ fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
 }
 
 fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {
-    return struct {
+    return support.headed(operation.spelling(), struct {
         fn run(evaluator: *Machine) MachineError!void {
             return @call(.always_inline, unaryPrimitive, .{ evaluator, operation });
         }
-    }.run;
+    }.run);
 }
 
 pub fn unaryPrimitiveFor(comptime operation: UnaryOp) env.PrimitiveImpl {
@@ -3376,6 +3376,121 @@ pub fn foldLeafRow(
             else
                 rowFoldStep(selected, selected_class).run(evaluator, accumulator, accumulator_owned, row, length),
         },
+    };
+}
+
+/// The accumulator class of a fold over rows of `element` leaves: what the
+/// first step produces, when every later step keeps it. Bytes accumulate as
+/// integers; there is no byte arithmetic result.
+fn columnAccumulator(comptime operation: BinaryOp, comptime element: Number) ?Number {
+    const first = binaryResult(operation, element, element) orelse return null;
+    if (first == .byte) return null;
+    if (binaryResult(operation, first, element) != first) return null;
+    return first;
+}
+
+/// Whether `foldLeafColumns` takes this operation over this operand: a
+/// nonempty numeric leaf whose fold over rows keeps one accumulator class.
+pub fn columnFoldCandidate(operation: BinaryOp, input: Value) bool {
+    const class = leafNumber(input) orelse return false;
+    if (input.list.length() == 0) return false;
+    return switch (operation) {
+        inline else => |selected| switch (class) {
+            inline else => |selected_class| comptime columnAccumulator(selected, selected_class) != null,
+        },
+    };
+}
+
+/// The fold over the rows of `input` laid out as `rows` × `columns`,
+/// computed from slices of its one buffer: what reshaping it and folding the
+/// rows computes, with the same association, the same element arithmetic,
+/// the same result representation, and the same first fault at the same
+/// column index, but without building the rows. The caller guards with
+/// `columnFoldCandidate` and has checked that `rows · columns` is the input's
+/// length and fits the remaining budget.
+pub fn foldLeafColumns(evaluator: *Machine, operation: BinaryOp, input: Value, rows: usize, columns: usize) MachineError!Value {
+    return switch (operation) {
+        inline else => |selected| switch (leafNumber(input).?) {
+            inline else => |selected_class| if (comptime columnAccumulator(selected, selected_class) == null)
+                unreachable
+            else
+                columnFold(selected, selected_class).run(evaluator, input, rows, columns),
+        },
+    };
+}
+
+fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
+    const accumulator = columnAccumulator(operation, element).?;
+    const Out = accumulator.Element();
+    return struct {
+        fn run(evaluator: *Machine, input: Value, rows: usize, width: usize) MachineError!Value {
+            try evaluator.advanceKernel(rows * width);
+            const elements = heap.leafElements(element.kind(), input.list);
+            // A single row is the fold's unchanged first element: a copy of
+            // that row in its own representation.
+            if (rows == 1) {
+                var single = try heap.LeafWriter(element.kind()).init(evaluator.allocator(), width);
+                single.writeRange(0, elements[0..width]);
+                return single.finish();
+            }
+            var writer = try heap.LeafWriter(accumulator.kind()).init(evaluator.allocator(), width);
+            errdefer writer.retirePartial(evaluator.releaseDomain());
+            const out = writer.unpublishedRange(0, width);
+            try step(element, evaluator, elements[0..width], elements[width..][0..width], out);
+            for (2..rows) |row| try step(accumulator, evaluator, out, elements[row * width ..][0..width], out);
+            return writer.finish();
+        }
+
+        /// `left op right` into `out`, which may alias `left`: each block is
+        /// computed from operands not yet stored over, then stored. Float
+        /// `+ - *` run unchecked and replay checked only on a NaN, as
+        /// `rowFoldStep` does.
+        fn step(
+            comptime left_class: Number,
+            evaluator: *Machine,
+            left: []const left_class.Element(),
+            right: []const element.Element(),
+            out: []Out,
+        ) MachineError!void {
+            const unchecked = accumulator == .real and left_class == .real and element == .real and
+                (operation == .add or operation == .sub or operation == .mul);
+            var block: [flat.block_size]Out = undefined;
+            var start: usize = 0;
+            while (start != out.len) {
+                const end = @min(start + flat.block_size, out.len);
+                if (unchecked) {
+                    var clean = true;
+                    for (start..end, 0..) |index, slot| {
+                        const next = switch (operation) {
+                            .add => left[index] + right[index],
+                            .sub => left[index] - right[index],
+                            .mul => left[index] * right[index],
+                            else => unreachable,
+                        };
+                        clean = clean and !std.math.isNan(next);
+                        block[slot] = next;
+                    }
+                    if (clean) {
+                        @memcpy(out[start..end], block[0 .. end - start]);
+                        start = end;
+                        continue;
+                    }
+                }
+                for (start..end, 0..) |index, slot| {
+                    const next = @call(.always_inline, scalarBinary, .{
+                        operation,
+                        left_class.boxed(left[index]),
+                        element.boxed(right[index]),
+                    }) catch |fault| {
+                        const diagnostic = scalarDiagnostic(fault);
+                        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
+                    };
+                    block[slot] = accumulator.unboxed(next);
+                }
+                @memcpy(out[start..end], block[0 .. end - start]);
+                start = end;
+            }
+        }
     };
 }
 
