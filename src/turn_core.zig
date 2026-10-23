@@ -28,7 +28,14 @@ pub const Outcome = union(enum) {
     yielded: Yield,
 };
 
-pub const Action = enum { resume_driver, end_turn, park };
+pub const Action = enum {
+    resume_driver,
+    /// The budget is spent and the work is still runnable.
+    end_turn,
+    /// The driver stopped for something outside its own work.
+    surrender,
+    park,
+};
 
 pub const Decision = struct {
     action: Action,
@@ -77,7 +84,7 @@ pub fn afterDriver(
             .wait, .settle => if (park_requested)
                 error.InvalidTurn
             else
-                .{ .action = .end_turn, .poll_cancellation = false },
+                .{ .action = .surrender, .poll_cancellation = false },
         },
     };
 }
@@ -153,7 +160,7 @@ test "every driver outcome has one decision, and inconsistent ones are refused" 
                         try std.testing.expectEqual(remaining, budget.remaining);
                         try std.testing.expect(!decision.poll_cancellation);
                         try std.testing.expectEqual(
-                            @as(Action, if (reason == .park) .park else .end_turn),
+                            @as(Action, if (reason == .park) .park else .surrender),
                             decision.action,
                         );
                     },

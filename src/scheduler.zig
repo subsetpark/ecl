@@ -2240,6 +2240,14 @@ pub const WorkerScheduler = enum(usize) {
                         };
                     return;
                 },
+                // An exhausted root continues without a host yield; another
+                // executor still gets its turn because admission is released
+                // and re-acquired in FIFO order. A cooperative root also
+                // serves one queued turn. Only a root that stopped for
+                // something outside itself offers the processor.
+                .exhausted => if (state_.config.isCooperative()) {
+                    _ = self.runNextCooperative();
+                },
                 .yielded => if (!state_.config.isCooperative() or !self.runNextCooperative())
                     std.Thread.yield() catch @panic("scheduler root yield failed"),
                 .parked => self.handleRootPark(unit) catch |err| {
@@ -2568,7 +2576,7 @@ pub const WorkerScheduler = enum(usize) {
         const result = machine.runSlice(unit);
         self.releaseAdmission(&cell.admission);
         if (result) |status| switch (status) {
-            .yielded => {
+            .exhausted, .yielded => {
                 std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
                 const decision = unitDecision(cell.policy, .yield);
                 cell.policy = decision.next;

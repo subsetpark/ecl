@@ -1227,7 +1227,11 @@ while the budget lasts; a driver that must wait for another unit, the host, or
 a slot's turn ends it. Bounded host I/O transfers explicitly end the turn even
 without parking; compute progress and host yields are distinct driver results.
 A cursor of many small steps therefore costs one turn rather than one per
-step, and a wait never spends the budget polling. Work
+step, and a wait never spends the budget polling. A slice reports the two
+endings apart: an exhausted unit is still runnable, so the root starts its next
+turn without offering its host thread, while a root that stopped to wait,
+settle, or relieve backpressure yields the thread. Root fairness comes from
+releasing and re-acquiring admission each turn, not from the host yield. Work
 that must finish regardless of cancellation, such as a failure unwind or a
 completion's cleanup or retirement and output delivery after state publication,
 draws on the budget but always ends the turn when it is spent rather than
