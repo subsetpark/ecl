@@ -3431,7 +3431,7 @@ fn columnAccumulator(comptime operation: BinaryOp, comptime element: Number) ?Nu
     return first;
 }
 
-/// Whether `foldLeafColumns` takes this operation over this operand: a
+/// Whether `foldColumns` takes this operation over this operand: a
 /// nonempty numeric leaf whose fold over rows keeps one accumulator class.
 pub fn columnFoldCandidate(operation: BinaryOp, input: Value) bool {
     const class = leafNumber(input) orelse return false;
@@ -3444,44 +3444,102 @@ pub fn columnFoldCandidate(operation: BinaryOp, input: Value) bool {
 }
 
 /// The fold over the rows of `input` laid out as `rows` × `columns`,
-/// computed from slices of its one buffer: what reshaping it and folding the
-/// rows computes, with the same association, the same element arithmetic,
-/// the same result representation, and the same first fault at the same
-/// column index, but without building the rows. The caller guards with
-/// `columnFoldCandidate` and has checked that `rows · columns` is the input's
-/// length and fits the remaining budget.
-pub fn foldLeafColumns(evaluator: *Machine, operation: BinaryOp, input: Value, rows: usize, columns: usize) MachineError!Value {
+/// computed from its one buffer through `support.Kernel`: what reshaping it
+/// and folding the rows computes, with the same association, the same
+/// element arithmetic, the same result representation, and the same first
+/// fault at the same column index, but without building the rows. The
+/// result is pushed; the caller releases `input` as on any decline. The
+/// caller guards with `columnFoldCandidate` and has checked that
+/// `rows · columns` is the input's length.
+pub fn foldColumns(evaluator: *Machine, operation: BinaryOp, input: *heap.OwnedValue, rows: usize, columns: usize) MachineError!void {
+    @setEvalBranchQuota(10_000);
+    const shape: ColumnShape = .{ .rows = rows, .width = columns };
     return switch (operation) {
-        inline else => |selected| switch (leafNumber(input).?) {
+        inline else => |selected| switch (leafNumber(input.borrow()).?) {
             inline else => |selected_class| if (comptime columnAccumulator(selected, selected_class) == null)
                 unreachable
+            else if (rows == 1)
+                support.Kernel(columnFold(selected, selected_class).CopySpec).run(evaluator, .{input}, shape, columns)
             else
-                columnFold(selected, selected_class).run(evaluator, input, rows, columns),
+                support.Kernel(columnFold(selected, selected_class).FoldSpec).run(evaluator, .{input}, shape, rows * columns),
         },
     };
 }
+
+const ColumnShape = struct { rows: usize, width: usize };
 
 fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
     const accumulator = columnAccumulator(operation, element).?;
     const Out = accumulator.Element();
     return struct {
-        fn run(evaluator: *Machine, input: Value, rows: usize, width: usize) MachineError!Value {
-            try evaluator.advanceKernel(rows * width);
-            const elements = heap.leafElements(element.kind(), input.list);
-            // A single row is the fold's unchanged first element: a copy of
-            // that row in its own representation.
-            if (rows == 1) {
-                var single = try heap.LeafWriter(element.kind()).init(evaluator.allocator(), width);
-                single.writeRange(0, elements[0..width]);
-                return single.finish();
+        /// A single row is the fold's unchanged first element: a copy of
+        /// that row in its own representation.
+        const CopySpec = struct {
+            pub const arity = 1;
+            pub const Params = ColumnShape;
+            pub const Output = heap.LeafWriter(element.kind());
+
+            pub fn prepare(evaluator: *Machine, _: [1]Value, shape: ColumnShape, _: usize) error{OutOfMemory}!Output {
+                return .init(evaluator.allocator(), shape.width);
             }
-            var writer = try heap.LeafWriter(accumulator.kind()).init(evaluator.allocator(), width);
-            errdefer writer.retirePartial(evaluator.releaseDomain());
-            const out = writer.unpublishedRange(0, width);
-            try step(element, evaluator, elements[0..width], elements[width..][0..width], out);
-            for (2..rows) |row| try step(accumulator, evaluator, out, elements[row * width ..][0..width], out);
-            return writer.finish();
-        }
+
+            pub fn chunk(_: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
+                output.writeRange(range.start, heap.leafElements(element.kind(), operands[0].list)[range.start..range.end]);
+            }
+
+            pub fn finish(output: *Output) Value {
+                return output.finish();
+            }
+        };
+
+        /// Positions are the input's, row by row: row 0 seeds each column's
+        /// accumulator, and every later row folds into it, so each column
+        /// folds in row order however the positions are split into ranges.
+        /// Seeding converts row 0 to the accumulator class; a step from it is
+        /// the same arithmetic on the same values as one from the row.
+        const FoldSpec = struct {
+            pub const arity = 1;
+            pub const Params = ColumnShape;
+            pub const Output = heap.LeafWriter(accumulator.kind());
+
+            pub fn prepare(evaluator: *Machine, _: [1]Value, shape: ColumnShape, _: usize) error{OutOfMemory}!Output {
+                return .init(evaluator.allocator(), shape.width);
+            }
+
+            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                const width = shape.width;
+                const elements = heap.leafElements(element.kind(), operands[0].list);
+                const columns = output.unpublishedRange(0, width);
+                var position = range.start;
+                // Rows 0 and 1 in one step, as `foldLeafRow` folds a first
+                // pair, whenever the range holds both whole.
+                if (position == 0 and range.end >= 2 * width) {
+                    try step(element, context.evaluator, elements[0..width], elements[width..][0..width], columns, 0);
+                    position = 2 * width;
+                }
+                var row = position / width;
+                var column = position % width;
+                while (position != range.end) {
+                    const count = @min(range.end - position, width - column);
+                    const target = columns[column..][0..count];
+                    const items = elements[position..][0..count];
+                    if (row == 0) {
+                        for (target, items) |*slot, item| slot.* = switch (accumulator) {
+                            .byte => unreachable,
+                            .integer => if (element == .real) unreachable else @intCast(item),
+                            .real => if (element == .real) item else @floatFromInt(item),
+                        };
+                    } else try step(accumulator, context.evaluator, target, items, target, column);
+                    position += count;
+                    row += 1;
+                    column = 0;
+                }
+            }
+
+            pub fn finish(output: *Output) Value {
+                return output.finish();
+            }
+        };
 
         /// `left op right` into `out`, which may alias `left`: each block is
         /// computed from operands not yet stored over, then stored. Float
@@ -3493,6 +3551,8 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
             left: []const left_class.Element(),
             right: []const element.Element(),
             out: []Out,
+            /// The column of `out[0]`, which is where a fault is reported.
+            base: usize,
         ) MachineError!void {
             const unchecked = accumulator == .real and left_class == .real and element == .real and
                 (operation == .add or operation == .sub or operation == .mul);
@@ -3525,7 +3585,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                         element.boxed(right[index]),
                     }) catch |fault| {
                         const diagnostic = scalarDiagnostic(fault);
-                        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
+                        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, base + index);
                     };
                     block[slot] = accumulator.unboxed(next);
                 }
