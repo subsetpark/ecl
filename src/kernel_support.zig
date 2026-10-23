@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
+const flat = @import("kernel_flat.zig");
 const idioms = @import("idioms.zig");
 const env = @import("env.zig");
 const poll = @import("poll.zig");
@@ -321,6 +322,106 @@ pub const RandomOp = enum {
 /// bare `pollKernel` with a private budget instead is invisible to that
 /// accounting, which is what this type exists to prevent: typed cursors accept
 /// only the narrow `Context` capability.
+/// A typed kernel: `length` result positions computed range by range. A
+/// kernel defines only what one range computes; when it runs inline or as a
+/// driver, how it is charged, who holds its operands, and what happens to
+/// its output when it fails are this executor's, written once.
+///
+/// `Spec` declares:
+/// - `arity`: how many values it reads. Each spec names exactly its own, so
+///   no call carries an operand it does not use.
+/// - `Params`: what it needs besides its operands.
+/// - `Output`: the result being built; `retire(releases)` abandons it
+///   unfinished, which is also its `heap.Owned` disposal in a driver.
+/// - `prepare(evaluator, operands, params, length) !Output`: allocates or
+///   adopts the result before any range runs.
+/// - `chunk(params, operands, *Output, range, context)`: computes one range,
+///   reporting its first fault.
+/// - `finish(*Output) Value`: publishes the result.
+///
+/// Operands are `Value` views, stable while their references are held, so a
+/// slice is re-derived for every range.
+pub fn Kernel(comptime Spec: type) type {
+    return struct {
+        pub const Operands = [Spec.arity]Value;
+        /// The caller's references to the operands.
+        pub const Owners = [Spec.arity]*heap.OwnedValue;
+
+        /// Runs the kernel. When the remaining budget covers `length`, every
+        /// range runs here as one, charged as one, with the operands read
+        /// under the caller's references, which the caller releases after
+        /// the result is pushed. Otherwise the references move into a driver
+        /// that computes one budgeted range per step.
+        pub fn run(evaluator: *Machine, owners: Owners, params: Spec.Params, length: usize) MachineError!void {
+            // SAFETY: the loop below writes every element before any is read.
+            var operands: Operands = undefined;
+            inline for (&operands, owners) |*operand, owner| operand.* = owner.borrow();
+            var output = try Spec.prepare(evaluator, operands, params, length);
+            if (length > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, length);
+            // An unfinished result is abandoned exactly as its `heap.Owned`
+            // disposal would abandon it in a driver.
+            errdefer output.retire(evaluator.releaseDomain());
+            const context = Context{ .evaluator = evaluator };
+            try context.advance(length);
+            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = length }, context);
+            return evaluator.pushOwned(Spec.finish(&output));
+        }
+
+        /// Kept out of line, so the common inline path carries none of the
+        /// driver's construction.
+        noinline fn startDriver(
+            evaluator: *Machine,
+            owners: Owners,
+            params: Spec.Params,
+            output: Spec.Output,
+            length: usize,
+        ) MachineError!void {
+            // SAFETY: the loop below writes every element before any is read.
+            var held: Held = undefined;
+            inline for (&held.values, owners) |*operand, owner| operand.* = owner.take();
+            var driver = Driver{
+                .operands = .init(held),
+                .params = params,
+                .output = .init(output),
+                .cursor = flat.FlatCursor.init(length),
+            };
+            return evaluator.runDriverAt(&driver);
+        }
+
+        /// A driver's own references to the operands.
+        const Held = struct {
+            values: Operands,
+
+            pub fn retire(self: *Held, releases: *heap.ReleaseDomain) void {
+                for (self.values) |item| releases.releaseValue(item);
+            }
+        };
+
+        /// The kernel past its turn: it owns its operands and output and
+        /// computes one budgeted range per step.
+        pub const Driver = struct {
+            pub const ownership: heap.DriverOwnership = .fields;
+            /// It lives for one operation and releases the slot when it
+            /// publishes.
+            pub const inline_driver = true;
+
+            operands: heap.Owned(Held),
+            params: Spec.Params,
+            output: heap.Owned(Spec.Output),
+            cursor: flat.FlatCursor,
+
+            pub fn advance(evaluator: *Machine, self: *Driver) MachineError!machine.WorkProgress {
+                const context = Context{ .evaluator = evaluator };
+                if (try self.cursor.nextRange(context)) |range|
+                    try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, context);
+                if (!self.cursor.complete()) return .stepped;
+                var finished = self.output.take();
+                return .{ .output = Spec.finish(&finished) };
+            }
+        };
+    };
+}
+
 pub const Context = struct {
     evaluator: *Machine,
 

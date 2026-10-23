@@ -88,12 +88,10 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     if (index.borrow() == .list and
         (index.borrow().list.kind() == .leaf_u8 or index.borrow().list.kind() == .leaf_i64))
     {
-        if (try startTypedCopy(
+        if (try startTypedGather(
             evaluator,
             &collection,
-            null,
             &index,
-            .gather,
             @intCast(index.borrow().list.length()),
         )) return;
         if (collection.borrow() == .list and index.borrow().list.length() != 0) {
@@ -1427,11 +1425,9 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
         0
     else
         (source_count - (result_count % source_count)) % source_count;
-    if (try startTypedCopy(
+    if (try startTypedSlice(
         evaluator,
         &collection,
-        null,
-        null,
         .{ .cyclic = .{ .start = start } },
         result_count,
     )) return;
@@ -1457,11 +1453,9 @@ fn rotatePrimitive(evaluator: *Machine) MachineError!void {
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0) return evaluator.pushOwned(collection.take());
     const start: usize = @intCast(@mod(count_value.borrow().int, @as(i64, @intCast(count))));
-    if (try startTypedCopy(
+    if (try startTypedSlice(
         evaluator,
         &collection,
-        null,
-        null,
         .{ .cyclic = .{ .start = start } },
         count,
     )) return;
@@ -1558,11 +1552,9 @@ const ListCopyDriver = struct {
         end: usize,
         reverse: bool,
     ) MachineError!void {
-        if (try startTypedCopy(
+        if (try startTypedSlice(
             evaluator,
             collection,
-            null,
-            null,
             if (reverse) .{ .reversed = .{ .end = end } } else .{ .contiguous = .{ .start = start } },
             end - start,
         )) return;
@@ -1584,12 +1576,11 @@ const ListCopyDriver = struct {
         left_count: usize,
         right_count: usize,
     ) MachineError!void {
-        if (try startTypedCopy(
+        if (try startTypedConcat(
             evaluator,
             left,
             right,
-            null,
-            .{ .concat = .{ .left_count = left_count } },
+            left_count,
             left_count + right_count,
         )) return;
         const values = try evaluator.allocator().alloc(Value, left_count + right_count);
@@ -2066,11 +2057,9 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
                 .domain,
                 "reshape cannot fill a non-empty shape from empty data",
             );
-            if (try startTypedCopy(
+            if (try startTypedSlice(
                 evaluator,
                 &collection,
-                null,
-                null,
                 .{ .cyclic = .{ .start = 0 } },
                 count,
             )) return;
@@ -2579,68 +2568,63 @@ const leaf_kinds = [_]value.HeapKind{
     .leaf_symbol,
 };
 
-fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+/// The typed copy kernels: one representation for every source and the
+/// result. Each names exactly its operands: one source for a contiguous,
+/// reversed, or cyclic copy; two for a concatenation; a source and its index
+/// vector for a gather.
+fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     const Index = heap.LeafElement(index_kind);
     return struct {
-        const Self = @This();
-        pub const ownership: heap.DriverOwnership = .fields;
+        fn prepareWriter(evaluator: *Machine, length: usize) error{OutOfMemory}!heap.LeafWriter(kind) {
+            return .init(evaluator.allocator(), length);
+        }
 
-        source: heap.Owned(heap.LeafReader(kind)),
-        other: ?heap.Owned(heap.LeafReader(kind)) = null,
-        /// A typed index vector, pinned for the gather's whole life.
-        indices: ?heap.Owned(heap.LeafReader(index_kind)) = null,
-        writer: heap.Owned(heap.LeafWriter(kind)),
-        shape: CopyShape,
-        cursor: kernel_flat.FlatCursor,
+        fn finishWriter(output: *heap.LeafWriter(kind)) Value {
+            return output.finish();
+        }
 
-        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            if (try self.cursor.nextRange(context)) |range| {
-                try copyRange(
-                    context,
-                    self.shape,
-                    self.source.borrow().slice(),
-                    if (self.other) |*other| other.borrow().slice() else null,
-                    if (self.indices) |*indices| indices.borrow().slice() else null,
-                    self.writer.borrowMut().unpublishedRange(range.start, range.len()),
-                    range,
-                );
+        const Single = struct {
+            pub const arity = 1;
+            pub const Params = CopyShape;
+            pub const Output = heap.LeafWriter(kind);
+
+            pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
+                return prepareWriter(evaluator, length);
             }
-            if (!self.cursor.complete()) return .stepped;
-            // The readers retire with the driver's fields, before the output
-            // is pushed, on both the in-place and the installed path.
-            return .{ .output = self.writer.borrowMut().finish() };
-        }
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, null, output.unpublishedRange(range.start, range.len()), range);
+            }
+            pub const finish = finishWriter;
+        };
 
-        /// The whole copy within the caller's call, for a length the remaining
-        /// budget already covers: the driver's copy, charged as its one range
-        /// would be, with operands read in place under the caller's
-        /// references and no driver state. Nothing is consumed; the caller
-        /// releases its operands after the result is pushed.
-        fn direct(
-            evaluator: *Machine,
-            source: Value,
-            other: ?Value,
-            indices: ?Value,
-            shape: CopyShape,
-            length: usize,
-        ) MachineError!void {
-            const context = support.Context{ .evaluator = evaluator };
-            try context.advance(length);
-            var writer = try heap.LeafWriter(kind).init(evaluator.allocator(), length);
-            errdefer writer.retirePartial(evaluator.releaseDomain());
-            try copyRange(
-                context,
-                shape,
-                heap.leafElements(kind, source.list),
-                if (other) |right| heap.leafElements(kind, right.list) else null,
-                if (indices) |vector| heap.leafElements(index_kind, vector.list) else null,
-                writer.unpublishedRange(0, length),
-                .{ .start = 0, .end = length },
-            );
-            return evaluator.pushOwned(writer.finish());
-        }
+        const Concat = struct {
+            pub const arity = 2;
+            pub const Params = CopyShape;
+            pub const Output = heap.LeafWriter(kind);
+
+            pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
+                return prepareWriter(evaluator, length);
+            }
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(kind, operands[1].list), null, output.unpublishedRange(range.start, range.len()), range);
+            }
+            pub const finish = finishWriter;
+        };
+
+        const Gather = struct {
+            pub const arity = 2;
+            pub const Params = CopyShape;
+            pub const Output = heap.LeafWriter(kind);
+
+            pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
+                return prepareWriter(evaluator, length);
+            }
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.unpublishedRange(range.start, range.len()), range);
+            }
+            pub const finish = finishWriter;
+        };
 
         /// Copies `range` of the result into `out`. Nothing reads the result
         /// before it is published, so each shape writes its range in place,
@@ -2654,96 +2638,109 @@ fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.Hea
             out: []Element,
             range: kernel_flat.Chunk,
         ) MachineError!void {
-            {
-                switch (shape) {
-                    .contiguous => |contiguous| @memcpy(out, source[contiguous.start + range.start ..][0..out.len]),
-                    .reversed => |reversed| for (out, range.start..) |*slot, index| {
-                        slot.* = source[reversed.end - index - 1];
-                    },
-                    .cyclic => |cyclic| {
-                        var from = (cyclic.start + range.start) % source.len;
-                        var written: usize = 0;
-                        while (written != out.len) {
-                            const run = @min(source.len - from, out.len - written);
-                            @memcpy(out[written..][0..run], source[from..][0..run]);
-                            written += run;
-                            from = 0;
-                        }
-                    },
-                    .concat => |concat| {
-                        const right = other.?;
-                        const split = @min(out.len, concat.left_count -| range.start);
-                        if (split != 0) @memcpy(out[0..split], source[range.start..][0..split]);
-                        const right_start = (range.start + split) -| concat.left_count;
-                        @memcpy(out[split..], right[right_start..][0 .. out.len - split]);
-                    },
-                    .gather => {
-                        const indices = gather_indices.?[range.start..range.end];
-                        if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
-                            .negative => context.fail(.domain, "at index is negative"),
-                            .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
-                        };
-                        for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
-                    },
-                }
+            switch (shape) {
+                .contiguous => |contiguous| @memcpy(out, source[contiguous.start + range.start ..][0..out.len]),
+                .reversed => |reversed| for (out, range.start..) |*slot, index| {
+                    slot.* = source[reversed.end - index - 1];
+                },
+                .cyclic => |cyclic| {
+                    var from = (cyclic.start + range.start) % source.len;
+                    var written: usize = 0;
+                    while (written != out.len) {
+                        const run = @min(source.len - from, out.len - written);
+                        @memcpy(out[written..][0..run], source[from..][0..run]);
+                        written += run;
+                        from = 0;
+                    }
+                },
+                .concat => |concat| {
+                    const right = other.?;
+                    const split = @min(out.len, concat.left_count -| range.start);
+                    if (split != 0) @memcpy(out[0..split], source[range.start..][0..split]);
+                    const right_start = (range.start + split) -| concat.left_count;
+                    @memcpy(out[split..], right[right_start..][0 .. out.len - split]);
+                },
+                .gather => {
+                    const indices = gather_indices.?[range.start..range.end];
+                    if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
+                        .negative => context.fail(.domain, "at index is negative"),
+                        .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
+                    };
+                    for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
+                },
             }
         }
     };
 }
 
-/// Starts a typed copy when every operand shares one leaf representation,
-/// moving each operand's reference into the driver's readers. Returns false
+/// A typed copy starts when every operand shares one leaf representation,
+/// through the kernel executor (`support.Kernel`). Each start returns false
 /// without consuming anything when they do not, which is the registry's
-/// generic classification for a mixed-representation move.
-fn startTypedCopy(
+/// generic classification for a mixed-representation move. The caller knows
+/// its copy's shape, so each shape has its own start and names exactly its
+/// operands.
+fn startTypedSlice(evaluator: *Machine, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {
+    if (length == 0) return false;
+    const source = source_owner.borrow();
+    if (source != .list) return false;
+    const source_kind = source.list.kind();
+    inline for (leaf_kinds) |candidate| {
+        if (candidate == source_kind) {
+            try support.Kernel(CopyKernels(candidate, .leaf_i64).Single).run(evaluator, .{source_owner}, shape, length);
+            return true;
+        }
+    }
+    return false;
+}
+
+fn startTypedConcat(
+    evaluator: *Machine,
+    left_owner: *heap.OwnedValue,
+    right_owner: *heap.OwnedValue,
+    left_count: usize,
+    length: usize,
+) MachineError!bool {
+    if (length == 0) return false;
+    const left = left_owner.borrow();
+    const right = right_owner.borrow();
+    if (left != .list or right != .list or right.list.kind() != left.list.kind()) return false;
+    const source_kind = left.list.kind();
+    inline for (leaf_kinds) |candidate| {
+        if (candidate == source_kind) {
+            try support.Kernel(CopyKernels(candidate, .leaf_i64).Concat).run(
+                evaluator,
+                .{ left_owner, right_owner },
+                .{ .concat = .{ .left_count = left_count } },
+                length,
+            );
+            return true;
+        }
+    }
+    return false;
+}
+
+fn startTypedGather(
     evaluator: *Machine,
     source_owner: *heap.OwnedValue,
-    other_owner: ?*heap.OwnedValue,
-    indices_owner: ?*heap.OwnedValue,
-    shape: CopyShape,
+    indices_owner: *heap.OwnedValue,
     length: usize,
 ) MachineError!bool {
     if (length == 0) return false;
     const source = source_owner.borrow();
-    const other: ?Value = if (other_owner) |owner| owner.borrow() else null;
-    const indices: ?Value = if (indices_owner) |owner| owner.borrow() else null;
-    if (source != .list) return false;
+    const indices = indices_owner.borrow();
+    if (source != .list or indices != .list) return false;
     const source_kind = source.list.kind();
-    if (other) |right| {
-        if (right != .list or right.list.kind() != source_kind) return false;
-    }
-    const index_kind = if (indices) |vector| index: {
-        if (vector != .list or (vector.list.kind() != .leaf_u8 and vector.list.kind() != .leaf_i64)) return false;
-        break :index vector.list.kind();
-    } else .leaf_i64;
+    const index_kind = indices.list.kind();
+    if (index_kind != .leaf_u8 and index_kind != .leaf_i64) return false;
     inline for (leaf_kinds) |candidate| {
         inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
             if (candidate == source_kind and candidate_index == index_kind) {
-                const Driver = TypedCopyDriver(candidate, candidate_index);
-                if (length <= evaluator.remainingKernelFuel()) {
-                    try Driver.direct(evaluator, source, other, indices, shape, length);
-                    return true;
-                }
-                var writer = try heap.LeafWriter(candidate).init(evaluator.allocator(), length);
-                // Ownership passes to the driver below; a failing `startDriver`
-                // retires the driver's fields, so this guard covers only the window
-                // before the hand-off.
-                var held_locally = true;
-                errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
-                var driver = Driver{
-                    .source = .init(heap.LeafReader(candidate).adopt(source_owner.take().list)),
-                    .writer = .init(writer),
-                    .shape = shape,
-                    .cursor = kernel_flat.FlatCursor.init(length),
-                };
-                if (other_owner) |right| {
-                    driver.other = .init(heap.LeafReader(candidate).adopt(right.take().list));
-                }
-                if (indices_owner) |vector| {
-                    driver.indices = .init(heap.LeafReader(candidate_index).adopt(vector.take().list));
-                }
-                held_locally = false;
-                try evaluator.runDriverAt(&driver);
+                try support.Kernel(CopyKernels(candidate, candidate_index).Gather).run(
+                    evaluator,
+                    .{ source_owner, indices_owner },
+                    .gather,
+                    length,
+                );
                 return true;
             }
         }
