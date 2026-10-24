@@ -1569,7 +1569,7 @@ const DeclarationScan = struct {
     fn add(self: *DeclarationScan, init: std.process.Init, path: []const u8) !void {
         const source = try std.Io.Dir.cwd().readFileAllocOptions(init.io, path, self.arena, .unlimited, .of(u8), 0);
         const tree = try std.zig.Ast.parse(self.arena, source, .{});
-        if (tree.errors.len != 0) return;
+        if (tree.errors.len != 0) return error.ParseFailed;
         const owners = try self.arena.alloc(u32, tree.tokens.len);
         @memset(owners, top);
         const file: u32 = @intCast(self.files.items.len);
