@@ -21,7 +21,6 @@ const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
 const fs_module = @import("stdlib/fs.zig");
 const clock_module = @import("stdlib/clock.zig");
-const time_module = @import("stdlib/time.zig");
 
 /// One complete transport for one embedded module. Each arm carries
 //  everything its publication path needs, so no loader has to repair a
@@ -112,7 +111,10 @@ const modules = [_]Module{
     } } },
     .{ .name = "archive", .entry = .{ .builtin = &archive_module.words } },
     .{ .name = "clock", .entry = .{ .builtin = &clock_module.words } },
-    .{ .name = "time", .entry = .{ .builtin = &time_module.words } },
+    .{ .name = "time", .entry = .{ .source = .{
+        .name = "<stdlib:time>",
+        .text = @embedFile("stdlib/time.ecl"),
+    } } },
     .{ .name = "rng", .entry = .{ .source = .{
         .name = "<stdlib:rng>",
         .text = @embedFile("stdlib/rng.ecl"),

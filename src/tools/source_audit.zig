@@ -72,8 +72,8 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     embeddedGroup(true, &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig", "stdlib/host.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig",   "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
+        "stdlib/clock.zig", "stdlib/source.zig", "stdlib/host.zig",
     }),
     embeddedGroup(true, &.{
         "combinators.zig",
@@ -1266,6 +1266,7 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/table.ecl"),
     @embedFile("../stdlib/rng.ecl"),
     @embedFile("../stdlib/path.ecl"),
+    @embedFile("../stdlib/time.ecl"),
     @embedFile("../stdlib/http/server.ecl"),
     @embedFile("../stdlib/http/request.ecl"),
     @embedFile("../stdlib/http/response.ecl"),
