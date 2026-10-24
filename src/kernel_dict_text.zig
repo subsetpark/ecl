@@ -16,7 +16,7 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-/// The sized-operation taxonomy also includes the hosted `str.format` idiom;
+/// The text family also includes the hosted `str.format` idiom;
 /// every other text operation is installed directly in core.
 const Op = support.TextOp;
 
@@ -239,7 +239,7 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
         },
         .list => {
             if (key.borrow() == .list) {
-                if (try startTypedVectorPut(evaluator, &collection, key.borrow(), new_value.borrow())) return;
+                if (try startTypedVectorPut(evaluator, &collection, &key, &new_value)) return;
                 const count: usize = @intCast(collection.borrow().list.length());
                 const values = try evaluator.allocator().alloc(Value, count);
                 var actions = poll.ChunkStack(PutAction).init(evaluator.allocator());
@@ -436,37 +436,26 @@ fn typedReplacement(comptime kind: value.HeapKind, item: Value) ?heap.LeafElemen
     };
 }
 
-fn TypedListPutDriver(comptime kind: value.HeapKind) type {
+/// A typed copy of a leaf with one element replaced.
+fn ListPutKernel(comptime kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     return struct {
-        const Self = @This();
-        pub const ownership: heap.DriverOwnership = .fields;
+        pub const arity = 1;
+        pub const Params = struct { replacement: Element, index: usize };
+        pub const Output = heap.LeafWriter(kind);
 
-        source: heap.Owned(heap.LeafReader(kind)),
-        writer: heap.Owned(heap.LeafWriter(kind)),
-        replacement: Element,
-        replace_index: usize,
-        cursor: kernel_flat.FlatCursor,
+        pub fn prepare(evaluator: *Machine, _: [1]Value, _: Params, length: usize) error{OutOfMemory}!Output {
+            return .init(evaluator.allocator(), length);
+        }
 
-        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            if (try self.cursor.nextRange(context)) |range| {
-                const source = self.source.borrow().slice();
-                var block: [kernel_flat.block_size]Element = undefined;
-                var offset: usize = 0;
-                while (offset != range.len()) {
-                    const piece = kernel_flat.blockRange(range, offset);
-                    @memcpy(block[0..piece.len()], source[piece.start..piece.end]);
-                    if (self.replace_index >= piece.start and self.replace_index < piece.end) {
-                        block[self.replace_index - piece.start] = self.replacement;
-                    }
-                    self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
-                    offset += piece.len();
-                }
-            }
-            if (!self.cursor.complete()) return .stepped;
-            self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
-            return .{ .output = self.writer.borrowMut().finish() };
+        pub fn chunk(put: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+            const out = output.unpublishedRange(range.start, range.len());
+            @memcpy(out, heap.leafElements(kind, operands[0].list)[range.start..range.end]);
+            if (put.index >= range.start and put.index < range.end) out[put.index - range.start] = put.replacement;
+        }
+
+        pub fn finish(output: *Output) Value {
+            return output.finish();
         }
     };
 }
@@ -495,20 +484,12 @@ fn startTypedListPut(
                 try evaluator.pushOwned(result.take());
                 return true;
             }
-
-            const Driver = TypedListPutDriver(candidate);
-            var writer = try heap.LeafWriter(candidate).init(evaluator.allocator(), count);
-            var held_locally = true;
-            errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
-            const driver = Driver{
-                .source = .init(heap.LeafReader(candidate).acquire(collection.borrow().list)),
-                .writer = .init(writer),
-                .replacement = replacement,
-                .replace_index = replace_index,
-                .cursor = kernel_flat.FlatCursor.init(count),
-            };
-            held_locally = false;
-            try evaluator.startDriver(driver);
+            try support.Kernel(ListPutKernel(candidate)).run(
+                evaluator,
+                .{collection},
+                .{ .replacement = replacement, .index = replace_index },
+                count,
+            );
             return true;
         }
     }
@@ -519,22 +500,7 @@ fn startTypedListPut(
 /// conforming leaf read in the collection's representation. A byte leaf widens
 /// losslessly into an integer collection, since literal and profiled integer
 /// lists are bytes whenever they can be.
-fn VectorReplacement(comptime kind: value.HeapKind) type {
-    return union(enum) {
-        const Self = @This();
-        atom: heap.LeafElement(kind),
-        same: heap.LeafReader(kind),
-        bytes: heap.LeafReader(.leaf_u8),
-
-        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
-            switch (self.*) {
-                .atom => {},
-                .same => |*reader| reader.release(releases),
-                .bytes => |*reader| reader.release(releases),
-            }
-        }
-    };
-}
+const VectorReplacement = enum { atom, same, bytes };
 
 /// The result buffer: a fresh copy, or the collection itself when this put
 /// holds its only reference. Indices are validated before the first store, so
@@ -542,123 +508,110 @@ fn VectorReplacement(comptime kind: value.HeapKind) type {
 fn VectorPutOutput(comptime kind: value.HeapKind) type {
     return union(enum) {
         const Self = @This();
-        fresh: struct { writer: heap.LeafWriter(kind), source: heap.LeafReader(kind) },
-        /// `root` is the collection's reference; publishing republishes that
-        /// same list, so the reference becomes the result's.
-        reuse: struct { adoption: heap.UniqueLeafAdoption(kind), root: Value },
+        fresh: heap.LeafWriter(kind),
+        /// Publishing republishes the collection's own list, so the
+        /// collection's reference becomes the result's.
+        reuse: heap.UniqueLeafAdoption(kind),
 
         fn items(self: *Self, count: usize) []heap.LeafElement(kind) {
             return switch (self.*) {
-                .fresh => |*fresh| fresh.writer.unpublishedRange(0, count),
-                .reuse => |*reuse| reuse.adoption.inPlaceRange(0, count),
+                .fresh => |*writer| writer.unpublishedRange(0, count),
+                .reuse => |*adoption| adoption.inPlaceRange(0, count),
             };
-        }
-
-        fn finish(self: *Self, releases: *heap.ReleaseDomain) Value {
-            switch (self.*) {
-                .fresh => |*fresh| {
-                    fresh.source.release(releases);
-                    return fresh.writer.finish();
-                },
-                .reuse => |*reuse| return reuse.adoption.finish(),
-            }
-        }
-
-        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
-            switch (self.*) {
-                .fresh => |*fresh| {
-                    fresh.writer.retirePartial(releases);
-                    fresh.source.release(releases);
-                },
-                .reuse => |*reuse| {
-                    reuse.adoption.abandon();
-                    releases.releaseValue(reuse.root);
-                },
-            }
         }
     };
 }
 
-/// `put` with a flat typed index vector into a typed leaf: validate every
-/// index, copy the collection unless it is reused, then scatter. Each phase
-/// takes a granted range per transition. Validation reports the first bad
-/// index in selector order, as on the pervasive path.
-fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+/// `put` with a flat typed index vector into a typed leaf, in three phases:
+/// validate every index, copy the collection unless it is reused, then
+/// scatter. Validation reports the first bad index in selector order, as on
+/// the pervasive path. Operand 0 is the collection, operand 1 the indices,
+/// and operand 2, unless the replacement is an atom, the replacement leaf.
+fn VectorPutKernel(
+    comptime kind: value.HeapKind,
+    comptime index_kind: value.HeapKind,
+    comptime replacement: VectorReplacement,
+) type {
     const Element = heap.LeafElement(kind);
     const Index = heap.LeafElement(index_kind);
     return struct {
-        const Self = @This();
-        pub const ownership: heap.DriverOwnership = .fields;
+        pub const arity = if (replacement == .atom) 2 else 3;
+        /// The atom stored at every selected position.
+        pub const Params = if (replacement == .atom) Element else void;
+        pub const Output = struct {
+            phase: enum { validate, copy, scatter } = .validate,
+            result: VectorPutOutput(kind),
+            count: usize,
+            selected: usize,
 
-        indices: heap.Owned(heap.LeafReader(index_kind)),
-        replacement: heap.Owned(VectorReplacement(kind)),
-        output: heap.Owned(VectorPutOutput(kind)),
-        count: usize,
-        phase: enum { validate, copy, scatter } = .validate,
-        position: usize = 0,
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                switch (self.result) {
+                    .fresh => |*writer| writer.retirePartial(releases),
+                    .reuse => |*adoption| adoption.abandon(),
+                }
+            }
+        };
 
-        fn scatter(out: []Element, indices: []const Index, offset: usize, replacement: VectorReplacement(kind)) void {
-            switch (replacement) {
-                .atom => |item| for (indices) |index| {
-                    out[@intCast(index)] = item;
+        pub fn prepare(evaluator: *Machine, operands: [arity]Value, _: Params, _: usize) error{OutOfMemory}!Output {
+            const collection = operands[0].list;
+            const count: usize = @intCast(collection.length());
+            return .{
+                .result = if (heap.UniqueLeafAdoption(kind).claim(collection, count)) |claim|
+                    .{ .reuse = claim }
+                else
+                    .{ .fresh = try heap.LeafWriter(kind).init(evaluator.allocator(), count) },
+                .count = count,
+                .selected = @intCast(operands[1].list.length()),
+            };
+        }
+
+        pub fn chunk(atom: Params, operands: [arity]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            const indices = heap.leafElements(index_kind, operands[1].list);
+            switch (output.phase) {
+                .validate => if (kernel_flat.firstIndexFault(Index, indices[range.start..range.end], output.count)) |fault| return switch (fault.kind) {
+                    .negative => context.fail(.domain, "put index is negative"),
+                    .out_of_bounds => context.fail(.domain, "put index is out of bounds"),
                 },
-                .same => |reader| for (indices, reader.slice()[offset..][0..indices.len]) |index, item| {
-                    out[@intCast(index)] = item;
+                .copy => output.result.fresh.writeRange(range.start, heap.leafElements(kind, operands[0].list)[range.start..range.end]),
+                .scatter => {
+                    const out = output.result.items(output.count);
+                    switch (replacement) {
+                        .atom => for (indices[range.start..range.end]) |index| {
+                            out[@intCast(index)] = atom;
+                        },
+                        .same => for (indices[range.start..range.end], heap.leafElements(kind, operands[2].list)[range.start..range.end]) |index, item| {
+                            out[@intCast(index)] = item;
+                        },
+                        .bytes => for (indices[range.start..range.end], heap.leafElements(.leaf_u8, operands[2].list)[range.start..range.end]) |index, item| {
+                            out[@intCast(index)] = item;
+                        },
+                    }
                 },
-                .bytes => |reader| if (kind == .leaf_i64) {
-                    for (indices, reader.slice()[offset..][0..indices.len]) |index, item| out[@intCast(index)] = item;
-                } else unreachable,
             }
         }
 
-        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            try evaluator.pollKernel();
-            const work = evaluator.workBudget();
-            const indices = self.indices.borrow().slice();
-            while (!work.exhausted()) switch (self.phase) {
-                .validate => {
-                    if (self.position == indices.len) {
-                        self.position = 0;
-                        self.phase = if (self.output.borrow() == .fresh) .copy else .scatter;
-                        continue;
-                    }
-                    const granted = work.take(indices.len - self.position);
-                    const selected = indices[self.position..][0..granted];
-                    if (kernel_flat.firstIndexFault(Index, selected, self.count)) |fault| return switch (fault.kind) {
-                        .negative => evaluator.fail(.domain, "put index is negative"),
-                        .out_of_bounds => evaluator.fail(.domain, "put index is out of bounds"),
-                    };
-                    self.position += granted;
+        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+            switch (output.phase) {
+                .validate => if (output.result == .fresh) {
+                    output.phase = .copy;
+                    return output.count;
                 },
-                .copy => {
-                    if (self.position == self.count) {
-                        self.position = 0;
-                        self.phase = .scatter;
-                        continue;
-                    }
-                    const fresh = &self.output.borrowMut().fresh;
-                    const granted = work.take(self.count - self.position);
-                    fresh.writer.writeRange(self.position, fresh.source.slice()[self.position..][0..granted]);
-                    self.position += granted;
-                },
-                .scatter => {
-                    if (self.position == indices.len) {
-                        self.indices.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.replacement.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        var output = self.output.take();
-                        return .{ .output = output.finish(evaluator.releaseDomain()) };
-                    }
-                    const granted = work.take(indices.len - self.position);
-                    scatter(
-                        self.output.borrowMut().items(self.count),
-                        indices[self.position..][0..granted],
-                        self.position,
-                        self.replacement.borrow(),
-                    );
-                    self.position += granted;
-                },
+                .copy => {},
+                .scatter => return null,
+            }
+            output.phase = .scatter;
+            return output.selected;
+        }
+
+        pub fn adopted(output: *const Output) ?usize {
+            return if (output.result == .reuse) 0 else null;
+        }
+
+        pub fn finish(output: *Output) Value {
+            return switch (output.result) {
+                .fresh => |*writer| writer.finish(),
+                .reuse => |*adoption| adoption.finish(),
             };
-            return .stepped;
         }
     };
 }
@@ -671,64 +624,34 @@ fn TypedVectorPutDriver(comptime kind: value.HeapKind, comptime index_kind: valu
 fn startTypedVectorPut(
     evaluator: *Machine,
     collection: *heap.OwnedValue,
-    selector: Value,
-    replacement: Value,
+    selector: *heap.OwnedValue,
+    replacement: *heap.OwnedValue,
 ) MachineError!bool {
     const kind = collection.borrow().list.kind();
-    const index_kind = selector.list.kind();
+    const index_kind = selector.borrow().list.kind();
     if (index_kind != .leaf_u8 and index_kind != .leaf_i64) return false;
-    const selected: usize = @intCast(selector.list.length());
-    if (replacement == .list and replacement.list.length() != selected) return false;
+    const selected: usize = @intCast(selector.borrow().list.length());
+    if (replacement.borrow() == .list and replacement.borrow().list.length() != selected) return false;
     inline for (put_leaf_kinds) |candidate| {
-        if (kind == candidate) {
-            const Replacement = VectorReplacement(candidate);
-            const typed_replacement: Replacement = switch (replacement) {
-                .list => |items| if (items.kind() == candidate)
-                    .{ .same = heap.LeafReader(candidate).acquire(items) }
-                else if (candidate == .leaf_i64 and items.kind() == .leaf_u8)
-                    .{ .bytes = heap.LeafReader(.leaf_u8).acquire(items) }
-                else
-                    return false,
-                else => .{ .atom = typedReplacement(candidate, replacement) orelse return false },
-            };
-            inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
-                if (index_kind == candidate_index) {
-                    return startTypedVectorPutDriver(candidate, candidate_index, evaluator, collection, selector, typed_replacement);
+        if (kind == candidate) inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
+            if (index_kind == candidate_index) {
+                switch (replacement.borrow()) {
+                    .list => |items| if (items.kind() == candidate)
+                        try support.Kernel(VectorPutKernel(candidate, candidate_index, .same)).run(evaluator, .{ collection, selector, replacement }, {}, selected)
+                    else if (candidate == .leaf_i64 and items.kind() == .leaf_u8)
+                        try support.Kernel(VectorPutKernel(candidate, candidate_index, .bytes)).run(evaluator, .{ collection, selector, replacement }, {}, selected)
+                    else
+                        return false,
+                    else => {
+                        const atom = typedReplacement(candidate, replacement.borrow()) orelse return false;
+                        try support.Kernel(VectorPutKernel(candidate, candidate_index, .atom)).run(evaluator, .{ collection, selector }, atom, selected);
+                    },
                 }
+                return true;
             }
-            unreachable;
-        }
+        };
     }
     return false;
-}
-
-fn startTypedVectorPutDriver(
-    comptime kind: value.HeapKind,
-    comptime index_kind: value.HeapKind,
-    evaluator: *Machine,
-    collection: *heap.OwnedValue,
-    selector: Value,
-    replacement: VectorReplacement(kind),
-) MachineError!bool {
-    var held_replacement = replacement;
-    var replacement_held = true;
-    errdefer if (replacement_held) held_replacement.retire(evaluator.releaseDomain());
-    const count: usize = @intCast(collection.borrow().list.length());
-    const output: VectorPutOutput(kind) = if (heap.UniqueLeafAdoption(kind).claim(collection.borrow().list, count)) |claim|
-        .{ .reuse = .{ .adoption = claim, .root = collection.take() } }
-    else
-        .{ .fresh = .{
-            .writer = try heap.LeafWriter(kind).init(evaluator.allocator(), count),
-            .source = heap.LeafReader(kind).acquire(collection.borrow().list),
-        } };
-    replacement_held = false;
-    try evaluator.startDriver(TypedVectorPutDriver(kind, index_kind){
-        .indices = .init(heap.LeafReader(index_kind).acquire(selector.list)),
-        .replacement = .init(held_replacement),
-        .output = .init(output),
-        .count = count,
-    });
-    return true;
 }
 
 const ListPutDriver = struct {
@@ -933,12 +856,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
         },
         .list => {
             if (key.borrow() == .list) {
-                const selection: ?DelSelection = switch (key.borrow().list.kind()) {
-                    .leaf_u8 => .{ .bytes = heap.LeafReader(.leaf_u8).acquire(key.borrow().list) },
-                    .leaf_i64 => .{ .ints = heap.LeafReader(.leaf_i64).acquire(key.borrow().list) },
-                    else => null,
-                };
-                if (selection) |typed| if (try startTypedDel(evaluator, collection.borrow(), typed)) return;
+                if (try startTypedDel(evaluator, &collection, &key)) return;
                 const count: usize = @intCast(collection.borrow().list.length());
                 const removed = try evaluator.allocator().alloc(bool, count);
                 var removed_owned_locally = true;
@@ -965,7 +883,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
                 return evaluator.fail(.domain, "del index is out of bounds");
             const count: usize = @intCast(collection.borrow().list.length());
             if (index >= count) return evaluator.fail(.domain, "del index is out of bounds");
-            if (try startTypedDel(evaluator, collection.borrow(), .{ .one = index })) return;
+            if (try startTypedDel(evaluator, &collection, &key)) return;
             const values = try evaluator.allocator().alloc(Value, count - 1);
             try evaluator.startDriver(ListDelDriver{
                 .collection = .init(collection.take()),
@@ -1070,142 +988,138 @@ const PervasiveDelDriver = struct {
 
 /// The positions a typed `del` removes: one validated index, or a flat typed
 /// index leaf whose entries are validated as they are marked.
-const DelSelection = union(enum) {
-    one: usize,
-    bytes: heap.LeafReader(.leaf_u8),
-    ints: heap.LeafReader(.leaf_i64),
-
-    pub fn retire(self: *DelSelection, releases: *heap.ReleaseDomain) void {
-        switch (self.*) {
-            .one => {},
-            .bytes => |*reader| reader.release(releases),
-            .ints => |*reader| reader.release(releases),
-        }
-    }
-};
-
-/// `del` from a typed leaf: mark the selected positions in a mask, checking
-/// each granted run of indices at once, then compact the kept elements into a
-/// typed result. One scalar position needs no mask: the result is the two
-/// slices around it. Every phase takes a granted range per transition.
-fn TypedDelDriver(comptime kind: value.HeapKind) type {
+/// `del` of one position from a typed leaf: the result is the two slices
+/// around it, one position per source element.
+fn DelOneKernel(comptime kind: value.HeapKind) type {
     return struct {
-        const Self = @This();
-        pub const ownership: heap.DriverOwnership = .fields;
+        pub const arity = 1;
+        /// The removed position.
+        pub const Params = usize;
+        pub const Output = heap.LeafWriter(kind);
 
-        source: heap.Owned(heap.LeafReader(kind)),
-        selection: heap.Owned(DelSelection),
-        removed: ?heap.Owned([]bool) = null,
-        writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
-        phase: enum { initialize, mark, copy } = .initialize,
-        position: usize = 0,
-        removed_count: usize = 0,
-        destination: usize = 0,
-
-        fn mark(self: *Self, evaluator: *Machine, comptime Index: type, indices: []const Index) MachineError!void {
-            const removed = self.removed.?.borrow();
-            const run = indices[self.position..][0..evaluator.workBudget().take(indices.len - self.position)];
-            if (kernel_flat.firstIndexFault(Index, run, removed.len)) |fault| return switch (fault.kind) {
-                .negative => evaluator.fail(.domain, "del index is negative"),
-                .out_of_bounds => evaluator.fail(.domain, "del index is out of bounds"),
-            };
-            for (run) |index| {
-                const slot = &removed[@intCast(index)];
-                self.removed_count += @intFromBool(!slot.*);
-                slot.* = true;
-            }
-            self.position += run.len;
+        pub fn prepare(evaluator: *Machine, _: [1]Value, _: usize, length: usize) error{OutOfMemory}!Output {
+            return .init(evaluator.allocator(), length - 1);
         }
 
-        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            try evaluator.pollKernel();
-            const work = evaluator.workBudget();
-            const source = self.source.borrow().slice();
-            while (!work.exhausted()) switch (self.phase) {
-                .initialize => {
-                    if (self.selection.borrow() == .one) {
-                        self.removed_count = 1;
-                        self.phase = .copy;
-                        continue;
-                    }
-                    if (self.removed == null) self.removed = .init(try evaluator.allocator().alloc(bool, source.len));
-                    const removed = self.removed.?.borrow();
-                    const granted = work.take(removed.len - self.position);
-                    @memset(removed[self.position..][0..granted], false);
-                    self.position += granted;
-                    if (self.position != removed.len) continue;
-                    self.position = 0;
-                    self.phase = .mark;
-                },
+        pub fn chunk(removed: usize, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+            const source = heap.leafElements(kind, operands[0].list);
+            const left_end = @min(range.end, removed);
+            if (range.start < left_end) output.writeRange(range.start, source[range.start..left_end]);
+            const right_start = @max(range.start, removed + 1);
+            if (right_start < range.end) output.writeRange(right_start - 1, source[right_start..range.end]);
+        }
+
+        pub fn finish(output: *Output) Value {
+            return output.finish();
+        }
+    };
+}
+
+/// `del` of a flat typed index leaf from a typed leaf, in three phases: clear
+/// a mask over the source, mark the selected positions, checking each range
+/// of indices at once, then compact the kept elements into a typed result.
+/// Operand 0 is the collection, operand 1 the indices.
+fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+    const Index = heap.LeafElement(index_kind);
+    return struct {
+        pub const arity = 2;
+        pub const Params = void;
+        pub const Output = struct {
+            allocator: std.mem.Allocator,
+            phase: enum { initialize, mark, copy } = .initialize,
+            removed: []bool,
+            removed_count: usize = 0,
+            selected: usize,
+            writer: ?heap.LeafWriter(kind) = null,
+            destination: usize = 0,
+
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                self.allocator.free(self.removed);
+                if (self.writer) |*writer| writer.retire(releases);
+            }
+        };
+
+        pub fn prepare(evaluator: *Machine, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+            return .{
+                .allocator = evaluator.allocator(),
+                .removed = try evaluator.allocator().alloc(bool, length),
+                .selected = @intCast(operands[1].list.length()),
+            };
+        }
+
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            switch (output.phase) {
+                .initialize => @memset(output.removed[range.start..range.end], false),
                 .mark => {
-                    const length = switch (self.selection.borrowMut().*) {
-                        .one => unreachable,
-                        .bytes => |*reader| length: {
-                            try self.mark(evaluator, u8, reader.slice());
-                            break :length reader.len();
-                        },
-                        .ints => |*reader| length: {
-                            try self.mark(evaluator, i64, reader.slice());
-                            break :length reader.len();
-                        },
+                    const run = heap.leafElements(index_kind, operands[1].list)[range.start..range.end];
+                    if (kernel_flat.firstIndexFault(Index, run, output.removed.len)) |fault| return switch (fault.kind) {
+                        .negative => context.fail(.domain, "del index is negative"),
+                        .out_of_bounds => context.fail(.domain, "del index is out of bounds"),
                     };
-                    if (self.position != length) continue;
-                    self.position = 0;
-                    self.phase = .copy;
+                    for (run) |index| {
+                        const slot = &output.removed[@intCast(index)];
+                        output.removed_count += @intFromBool(!slot.*);
+                        slot.* = true;
+                    }
                 },
                 .copy => {
-                    if (self.writer == null) self.writer = .init(try heap.LeafWriter(kind).init(
-                        evaluator.allocator(),
-                        source.len - self.removed_count,
-                    ));
-                    const writer = self.writer.?.borrowMut();
-                    const end = self.position + work.take(source.len - self.position);
-                    switch (self.selection.borrow()) {
-                        .one => |removed_index| {
-                            const left_end = @min(end, removed_index);
-                            if (self.position < left_end)
-                                writer.writeRange(self.position, source[self.position..left_end]);
-                            const right_start = @max(self.position, removed_index + 1);
-                            if (right_start < end)
-                                writer.writeRange(right_start - 1, source[right_start..end]);
-                        },
-                        .bytes, .ints => {
-                            const removed = self.removed.?.borrow();
-                            const out = writer.unpublishedRange(0, writer.len());
-                            for (source[self.position..end], removed[self.position..end]) |item, gone| {
-                                if (gone) continue;
-                                out[self.destination] = item;
-                                self.destination += 1;
-                            }
-                        },
+                    const writer = &output.writer.?;
+                    const out = writer.unpublishedRange(0, writer.len());
+                    const source = heap.leafElements(kind, operands[0].list);
+                    for (source[range.start..range.end], output.removed[range.start..range.end]) |item, gone| {
+                        if (gone) continue;
+                        out[output.destination] = item;
+                        output.destination += 1;
                     }
-                    self.position = end;
-                    if (self.position != source.len) continue;
-                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.selection.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    return .{ .output = writer.finish() };
                 },
-            };
-            return .stepped;
+            }
+        }
+
+        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+            switch (output.phase) {
+                .initialize => {
+                    output.phase = .mark;
+                    return output.selected;
+                },
+                .mark => {
+                    output.writer = try .init(context.allocator(), output.removed.len - output.removed_count);
+                    output.phase = .copy;
+                    return output.removed.len;
+                },
+                .copy => return null,
+            }
+        }
+
+        pub fn finish(output: *Output) Value {
+            output.allocator.free(output.removed);
+            return output.writer.?.finish();
         }
     };
 }
 
 /// Starts the typed `del` for a typed leaf collection and a validated scalar
-/// position or a flat typed index leaf; false for any other shape.
-fn startTypedDel(evaluator: *Machine, collection: Value, selection: DelSelection) MachineError!bool {
-    var held = selection;
-    const kind = collection.list.kind();
+/// position or a flat byte or integer index leaf; false for any other shape.
+fn startTypedDel(evaluator: *Machine, collection: *heap.OwnedValue, selection: *heap.OwnedValue) MachineError!bool {
+    const kind = collection.borrow().list.kind();
+    const count: usize = @intCast(collection.borrow().list.length());
     inline for (put_leaf_kinds) |candidate| {
         if (kind == candidate) {
-            try evaluator.startDriver(TypedDelDriver(candidate){
-                .source = .init(heap.LeafReader(candidate).acquire(collection.list)),
-                .selection = .init(held),
-            });
+            switch (selection.borrow()) {
+                .int => |index| try support.Kernel(DelOneKernel(candidate)).run(evaluator, .{collection}, @intCast(index), count),
+                .list => |indices| switch (indices.kind()) {
+                    inline .leaf_u8, .leaf_i64 => |index_kind| try support.Kernel(DelManyKernel(candidate, index_kind)).run(
+                        evaluator,
+                        .{ collection, selection },
+                        {},
+                        count,
+                    ),
+                    else => return false,
+                },
+                else => return false,
+            }
             return true;
         }
     }
-    held.retire(evaluator.releaseDomain());
     return false;
 }
 
@@ -1417,27 +1331,200 @@ fn splitPrimitive(evaluator: *Machine) MachineError!void {
     if (!text.borrow().isString() or !separator.borrow().isString()) return evaluator.typeError("two strings");
     const text_len: usize = @intCast(text.borrow().list.length());
     const separator_len: usize = @intCast(separator.borrow().list.length());
-    const capacity = if (separator_len == 0) text_len else text_len + 1;
-    const parts = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), capacity);
+    // The scan has one position per comparison it may make: each candidate
+    // start costs up to one comparison per separator codepoint. An empty
+    // separator makes every codepoint a part, one position each.
+    const scan_length = if (separator_len == 0)
+        text_len
+    else if (separator_len > text_len)
+        0
+    else
+        // No two allocatable strings overflow this.
+        std.math.mul(usize, text_len - separator_len + 1, separator_len) catch
+            return error.OutOfMemory;
     const text_kind = text.borrow().list.kind();
     const separator_kind = separator.borrow().list.kind();
     inline for (char_leaf_kinds) |candidate_text| {
         if (text_kind == candidate_text) inline for (char_leaf_kinds) |candidate_separator| {
-            if (separator_kind == candidate_separator) {
-                const Driver = SplitDriver(candidate_text, candidate_separator);
-                try evaluator.startDriver(Driver{
-                    .text = .init(heap.LeafReader(candidate_text).acquire(text.borrow().list)),
-                    .separator = .init(heap.LeafReader(candidate_separator).acquire(separator.borrow().list)),
-                    .parts = .init(parts),
-                });
-                return;
-            }
+            if (separator_kind == candidate_separator) return support.Kernel(SplitKernel(candidate_text, candidate_separator)).run(
+                evaluator,
+                .{ &text, &separator },
+                {},
+                scan_length,
+            );
         };
     }
     unreachable;
 }
 
 const char_leaf_kinds = [_]value.HeapKind{ .leaf_char1, .leaf_char2, .leaf_char4 };
+
+/// Splits a string at every occurrence of a separator, in three phases: the
+/// scan records each part's bounds, the profile finds each part's widest
+/// codepoint, and the fill writes each part at exactly that width into the
+/// result spine. Operand 0 is the text, operand 1 the separator.
+fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: value.HeapKind) type {
+    const Part = struct { start: usize, end: usize, max_codepoint: u32 = 0 };
+    return struct {
+        pub const arity = 2;
+        pub const Params = void;
+        pub const Output = struct {
+            allocator: std.mem.Allocator,
+            phase: enum { scan, profile, fill } = .scan,
+            text_len: usize,
+            separator_len: usize,
+            /// Room for every part's bounds, at most one more than the
+            /// text's length; the first `part_count` are recorded.
+            parts: []Part,
+            part_count: usize = 0,
+            /// Where the part being scanned starts, and the first candidate
+            /// start not inside a separator already matched.
+            part_start: usize = 0,
+            next_candidate: usize = 0,
+            /// The part a profile or fill is in, and how far into it.
+            part: usize = 0,
+            offset: usize = 0,
+            writer: ?kernel_flat.CodepointWriter = null,
+            spine: ?heap.OwnedValueBuffer = null,
+
+            fn record(self: *Output, part: Part) void {
+                self.parts[self.part_count] = part;
+                self.part_count += 1;
+            }
+
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                self.allocator.free(self.parts);
+                if (self.writer) |*writer| writer.retire(releases);
+                if (self.spine) |*spine| spine.deinit();
+            }
+        };
+
+        pub fn prepare(evaluator: *Machine, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+            const text_len: usize = @intCast(operands[0].list.length());
+            return .{
+                .allocator = evaluator.allocator(),
+                .text_len = text_len,
+                .separator_len = @intCast(operands[1].list.length()),
+                .parts = try evaluator.allocator().alloc(Part, text_len + 1),
+            };
+        }
+
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            const text = heap.leafElements(text_kind, operands[0].list);
+            switch (output.phase) {
+                .scan => scan(output, text, heap.leafElements(separator_kind, operands[1].list), range),
+                .profile => profile(output, text, range.len()),
+                .fill => try fill(output, context, text, range.len()),
+            }
+        }
+
+        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+            switch (output.phase) {
+                .scan => {
+                    if (output.separator_len != 0) output.record(.{
+                        .start = output.part_start,
+                        .end = output.text_len,
+                    });
+                    output.phase = .profile;
+                    return partCodepoints(output);
+                },
+                .profile => {
+                    output.spine = try heap.OwnedValueBuffer.init(context.releaseDomain(), output.part_count);
+                    output.part = 0;
+                    output.offset = 0;
+                    output.phase = .fill;
+                    // A part also costs one position to begin, so an empty
+                    // part is not free.
+                    return partCodepoints(output) + output.part_count;
+                },
+                .fill => return null,
+            }
+        }
+
+        pub fn finish(output: *Output) Value {
+            output.allocator.free(output.parts);
+            return output.spine.?.takeList();
+        }
+
+        /// What the parts hold: the text less every matched separator.
+        fn partCodepoints(output: *const Output) usize {
+            if (output.separator_len == 0) return output.text_len;
+            return output.text_len - (output.part_count - 1) * output.separator_len;
+        }
+
+        fn matchesAt(text: anytype, separator: anytype, start: usize) bool {
+            for (separator, text[start..][0..separator.len]) |expected, actual| {
+                if (@as(u32, expected) != @as(u32, actual)) return false;
+            }
+            return true;
+        }
+
+        /// Tries each candidate start whose first comparison lies in `range`.
+        fn scan(output: *Output, text: anytype, separator: anytype, range: kernel_flat.Chunk) void {
+            if (output.separator_len == 0) {
+                for (range.start..range.end) |index| output.record(.{ .start = index, .end = index + 1 });
+                return;
+            }
+            const width = output.separator_len;
+            var candidate = range.start / width + @intFromBool(range.start % width != 0);
+            while (candidate * width < range.end) : (candidate += 1) {
+                if (candidate < output.next_candidate or !matchesAt(text, separator, candidate)) continue;
+                output.record(.{ .start = output.part_start, .end = candidate });
+                output.part_start = candidate + width;
+                output.next_candidate = candidate + width;
+            }
+        }
+
+        /// Finds the widest codepoint of the next `units` codepoints of the parts.
+        fn profile(output: *Output, text: anytype, units: usize) void {
+            var remaining = units;
+            while (remaining != 0) {
+                const part = &output.parts[output.part];
+                const length = part.end - part.start;
+                if (output.offset == length) {
+                    output.part += 1;
+                    output.offset = 0;
+                    continue;
+                }
+                const take = @min(length - output.offset, remaining);
+                for (text[part.start + output.offset ..][0..take]) |codepoint| part.max_codepoint = @max(part.max_codepoint, codepoint);
+                output.offset += take;
+                remaining -= take;
+            }
+        }
+
+        /// Spends `units` on the fill: one to begin each part, then one per
+        /// codepoint written; a part is appended to the spine once full.
+        fn fill(output: *Output, context: support.Context, text: anytype, units: usize) error{OutOfMemory}!void {
+            var remaining = units;
+            while (true) {
+                if (output.writer) |*writer| {
+                    const part = output.parts[output.part];
+                    const length = part.end - part.start;
+                    if (output.offset == length) {
+                        output.spine.?.appendOwned(writer.finish());
+                        output.writer = null;
+                        output.part += 1;
+                        output.offset = 0;
+                        continue;
+                    }
+                    if (remaining == 0) return;
+                    const take = @min(kernel_flat.block_size, length - output.offset, remaining);
+                    var block: [kernel_flat.block_size]u32 = undefined;
+                    for (text[part.start + output.offset ..][0..take], block[0..take]) |codepoint, *out| out.* = codepoint;
+                    writer.writeCodepoints(output.offset, block[0..take]);
+                    output.offset += take;
+                    remaining -= take;
+                    continue;
+                }
+                if (remaining == 0 or output.part == output.part_count) return;
+                const part = output.parts[output.part];
+                output.writer = try kernel_flat.CodepointWriter.init(context.allocator(), part.end - part.start, part.max_codepoint);
+                remaining -= 1;
+            }
+        }
+    };
+}
 
 const AnyCharReader = union(enum) {
     char1: heap.LeafReader(.leaf_char1),
@@ -1477,151 +1564,6 @@ const AnyCharReader = union(enum) {
         }
     }
 };
-
-fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: value.HeapKind) type {
-    return struct {
-        const Self = @This();
-        pub const ownership: heap.DriverOwnership = .fields;
-
-        text: heap.Owned(heap.LeafReader(text_kind)),
-        separator: heap.Owned(heap.LeafReader(separator_kind)),
-        parts: heap.Owned(heap.OwnedValueBuffer),
-        phase: enum { scan, profile_part, fill_part, materialize_result } = .scan,
-        cursor: usize = 0,
-        start: usize = 0,
-        empty_part_index: usize = 0,
-        scan_complete: bool = false,
-        part_start: usize = 0,
-        part_end: usize = 0,
-        codepoint_index: usize = 0,
-        part_max_codepoint: u32 = 0,
-        part_writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
-        result_materializer: ?heap.Owned(list.ValueMaterializer) = null,
-
-        fn matchesAt(text: anytype, separator: anytype, start: usize) bool {
-            for (separator, text[start..][0..separator.len]) |expected, actual| {
-                if (@as(u32, expected) != @as(u32, actual)) return false;
-            }
-            return true;
-        }
-
-        fn beginPart(self: *Self, start: usize, end: usize) void {
-            self.part_start = start;
-            self.part_end = end;
-            self.codepoint_index = 0;
-            self.part_max_codepoint = 0;
-            self.phase = .profile_part;
-        }
-
-        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            try evaluator.pollKernel();
-            const work = evaluator.workBudget();
-            while (!work.exhausted()) switch (self.phase) {
-                .scan => {
-                    const text_slice = self.text.borrow().slice();
-                    const separator_slice = self.separator.borrow().slice();
-                    const text_len = text_slice.len;
-                    const separator_len = separator_slice.len;
-                    if (self.scan_complete) {
-                        self.result_materializer = .init(.init(
-                            evaluator.allocator(),
-                            self.parts.borrow().values(),
-                        ));
-                        self.phase = .materialize_result;
-                        continue;
-                    }
-                    if (separator_len == 0) {
-                        if (self.empty_part_index == text_len) {
-                            self.scan_complete = true;
-                            continue;
-                        }
-                        const part_index = self.empty_part_index;
-                        self.empty_part_index += 1;
-                        self.beginPart(part_index, part_index + 1);
-                        continue;
-                    }
-                    if (self.cursor > text_len - @min(text_len, separator_len) or
-                        separator_len > text_len - self.cursor)
-                    {
-                        self.scan_complete = true;
-                        self.beginPart(self.start, text_len);
-                        continue;
-                    }
-                    // Try the start positions the budget pays for. A position
-                    // costs up to one comparison per separator codepoint, and
-                    // only the positions actually tried are charged.
-                    const positions = @min(
-                        text_len - separator_len + 1 - self.cursor,
-                        @max(1, work.remaining / separator_len),
-                    );
-                    const first = self.cursor;
-                    const end = self.cursor + positions;
-                    const found = while (self.cursor != end) : (self.cursor += 1) {
-                        if (matchesAt(text_slice, separator_slice, self.cursor)) break self.cursor;
-                    } else null;
-                    const tried = (if (found) |match_start| match_start + 1 else end) - first;
-                    _ = work.take(tried * separator_len);
-                    if (found) |match_start| {
-                        self.cursor = match_start + separator_len;
-                        self.beginPart(self.start, match_start);
-                        self.start = self.cursor;
-                    }
-                },
-                .profile_part => {
-                    const part_len = self.part_end - self.part_start;
-                    const end = self.codepoint_index + work.take(part_len - self.codepoint_index);
-                    while (self.codepoint_index != end) : (self.codepoint_index += 1) {
-                        self.part_max_codepoint = @max(
-                            self.part_max_codepoint,
-                            self.text.borrow().slice()[self.part_start + self.codepoint_index],
-                        );
-                    }
-                    if (self.codepoint_index != part_len) return .stepped;
-                    self.part_writer = .init(try kernel_flat.CodepointWriter.init(
-                        evaluator.allocator(),
-                        part_len,
-                        self.part_max_codepoint,
-                    ));
-                    self.codepoint_index = 0;
-                    self.phase = .fill_part;
-                },
-                .fill_part => {
-                    const part_len = self.part_end - self.part_start;
-                    if (self.codepoint_index == part_len) {
-                        self.parts.borrowMut().appendOwned(self.part_writer.?.borrowMut().finish());
-                        self.part_writer = null;
-                        self.phase = .scan;
-                        if (part_len == 0) _ = work.spend();
-                        continue;
-                    }
-                    var block: [kernel_flat.block_size]u32 = undefined;
-                    const copied = work.take(@min(kernel_flat.block_size, part_len - self.codepoint_index));
-                    for (
-                        self.text.borrow().slice()[self.part_start + self.codepoint_index ..][0..copied],
-                        block[0..copied],
-                    ) |codepoint, *out| out.* = codepoint;
-                    self.part_writer.?.borrowMut().writeCodepoints(
-                        self.codepoint_index,
-                        block[0..copied],
-                    );
-                    self.codepoint_index += copied;
-                },
-                .materialize_result => switch (try self.result_materializer.?.borrowMut().advance(work)) {
-                    .pending => return .stepped,
-                    .complete => |result| {
-                        self.result_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.result_materializer = null;
-                        self.parts.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.text.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.separator.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        return .{ .output = result };
-                    },
-                },
-            };
-            return .stepped;
-        }
-    };
-}
 
 fn joinPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);

@@ -234,6 +234,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditDynamicContextSpelling() or failed;
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
+    failed = auditKernelDriverStarts() or failed;
     if (failed) return error.SourceAuditFailed;
 }
 
@@ -879,6 +880,111 @@ const unbounded_allowance_users = [_][]const u8{
 const kernel_quantum_users = [_][]const u8{
     "machine.zig", "scheduler.zig", "kernel_support.zig", "prelude.zig", "native_call.zig",
 };
+
+/// Kernel files start drivers only through `support.Kernel`, which decides
+/// once whether a typed kernel runs inline or as a driver and owns the
+/// charging, operand holding, and fault cleanup around it. The functions
+/// below are the exceptions, each structural: it drives work the executor
+/// does not model, such as boxed spines, dicts, quotations, or a cursor over
+/// nested structure. A typed path in such a function still goes through the
+/// executor; only its structural path starts a driver itself. The rule holds
+/// both ways: a new driver start elsewhere fails, and so does an exception
+/// that no longer starts one.
+/// Kernel files are chosen from the production classification, so a newly
+/// classified kernel file is audited without a second list. `kernel_support.zig`
+/// is excluded because it owns `support.Kernel`, the one sanctioned start.
+fn isKernelDriverFile(file: []const u8) bool {
+    if (std.mem.eql(u8, file, "kernel_support.zig")) return false;
+    if (std.mem.eql(u8, file, "idioms.zig")) return true;
+    return std.mem.startsWith(u8, file, "kernel_") and std.mem.indexOfAny(u8, file, "/\\") == null;
+}
+
+const KernelDriverException = struct {
+    file: []const u8,
+    function: []const u8,
+};
+
+const kernel_driver_exceptions = [_]KernelDriverException{
+    .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive" },
+    .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive" },
+    .{ .file = "kernel_numeric.zig", .function = "reduceGroups" },
+    .{ .file = "kernel_sequence.zig", .function = "atPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "inPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "razePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "takePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "rotatePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "installOne" },
+    .{ .file = "kernel_sequence.zig", .function = "installCat" },
+    .{ .file = "kernel_sequence.zig", .function = "shapePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "flipPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "reshapePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "cutPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "cmpPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "startGrade" },
+    .{ .file = "kernel_order.zig", .function = "distinctPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "groupPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "groupColumnsPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "strPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "hasPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "putImpl" },
+    .{ .file = "kernel_dict_text.zig", .function = "fromListsForModule" },
+    .{ .file = "kernel_dict_text.zig", .function = "delPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "mergePrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "joinPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "formatPrimitive" },
+    .{ .file = "idioms.zig", .function = "install" },
+    .{ .file = "idioms.zig", .function = "applyLengthEach" },
+    .{ .file = "idioms.zig", .function = "applyMatchEach" },
+    .{ .file = "idioms.zig", .function = "applyMatchFind" },
+    .{ .file = "idioms.zig", .function = "startReduction" },
+};
+
+fn auditKernelDriverStarts() bool {
+    var seen: [kernel_driver_exceptions.len]bool = @splat(false);
+    var failed = false;
+    for (source_groups) |group| {
+        if (!group.production) continue;
+        for (group.files, group.sources) |file, source| {
+            if (!isKernelDriverFile(file)) continue;
+            var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
+            defer tree.deinit(std.heap.page_allocator);
+            if (tree.errors.len != 0) return true;
+            for (0..tree.nodes.len) |raw_node| {
+                const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
+                if (tree.nodeTag(node) != .fn_decl) continue;
+                var buffer: [1]std.zig.Ast.Node.Index = undefined;
+                const prototype = tree.fullFnProto(&buffer, node) orelse continue;
+                const name_token = prototype.name_token orelse continue;
+                const name = tree.tokenSlice(name_token);
+                const body = tree.nodeData(node).node_and_node[1];
+                const starts = for (tree.firstToken(body)..tree.lastToken(body)) |token| {
+                    const spelling = tree.tokenSlice(@intCast(token));
+                    const is_start = std.mem.eql(u8, spelling, "runDriver") or
+                        std.mem.eql(u8, spelling, "runDriverAt") or
+                        std.mem.eql(u8, spelling, "startDriver");
+                    if (is_start and std.mem.eql(u8, tree.tokenSlice(@intCast(token + 1)), "(")) break true;
+                } else false;
+                if (!starts) continue;
+                const listed = for (kernel_driver_exceptions, 0..) |exception, index| {
+                    if (std.mem.eql(u8, exception.file, file) and std.mem.eql(u8, exception.function, name)) {
+                        seen[index] = true;
+                        break true;
+                    }
+                } else false;
+                if (!listed) {
+                    std.log.err("{s}: `{s}` starts a driver directly; run typed kernels through `support.Kernel`, or list the function in kernel_driver_exceptions if its path is structural", .{ file, name });
+                    failed = true;
+                }
+            }
+        }
+    }
+    for (kernel_driver_exceptions, seen) |exception, found| {
+        if (found) continue;
+        std.log.err("{s}: kernel_driver_exceptions lists `{s}`, which no longer starts a driver; remove it", .{ exception.file, exception.function });
+        failed = true;
+    }
+    return failed;
+}
 
 fn auditWorkBudgetIssuers() bool {
     const minted = [_][]const []const u8{

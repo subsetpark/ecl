@@ -1052,17 +1052,10 @@ cursor to validate cell contents. Recursive rectangularity remains the contract
 of `shape`; table conversion supplies the known output width when an empty
 axis cannot carry it in a list value.
 
-When descent reaches a specialized flat leaf, the kernel registry classifies
-the operation and operand representation as one of:
-
-- a reorderable typed loop;
-- bulk data movement;
-- a sequential typed operation whose order is semantically significant; or
-- generic fallback.
-
-The registry is a closed, compile-time-validated table over the operation and
-representation enums. Every added operation or leaf kind must classify each
-reachable combination for the program to compile.
+When descent reaches a specialized flat leaf, a typed kernel runs it through
+`support.Kernel`; any other shape takes the operation's generic path. The
+source audit holds the kernel files to that: a function that starts a driver
+itself fails the build unless it is listed as structural, with its reason.
 
 Unary and binary kernel selection produce opaque static plans binding operand
 classes, result storage, and the specialized loop. Shared preparation acquires the
@@ -1096,10 +1089,25 @@ They decide output width before the first write or retain enough evidence to
 report the same first fault. Ordered folds and stable comparisons preserve
 their semantic order in typed storage.
 
-Flat inputs are borrowed through retaining `LeafReader` capabilities. Outputs
-are built through single-publication `LeafWriter`s or through a claimed unique
-input whose element width is compatible. Mutable access and its ownership proof
-arrive together as one capability.
+Flat inputs are borrowed through retaining `LeafReader` capabilities, or, in a
+kernel run by `support.Kernel`, read as `heap.leafElements` views under the
+references the executor holds: the caller's while the kernel runs inline, the
+driver's own once it continues past its turn. Outputs are built through
+single-publication `LeafWriter`s or through a claimed unique input whose
+element width is compatible. Mutable access and its ownership proof arrive
+together as one capability.
+
+`support.Kernel` is the one place that decides whether a typed kernel runs
+inline or as a driver. A kernel defines what one range computes; the executor
+charges it, holds its operands, abandons its output on a fault, and publishes
+it, so the decision and its bookkeeping are written once. A search declares
+`done` and stops at its answer; a kernel whose work depends on an earlier
+pass, such as `where`'s fill after its count or `grade`'s merge passes,
+declares `next` and runs in phases, each its own position space. Inside pervasion a
+kernel that cannot finish in its turn is boxed behind a small type-erased
+driver in the cursor's frame. Only the operation's own root operand may become
+the output there: an element held only by its spine would pass the
+uniqueness claim, and reusing it would take the spine's buffer.
 
 Faulted blocks replay through shared scalar semantics before any block output
 is published. Replay reads retained input capabilities in logical order; a
@@ -1166,9 +1174,8 @@ primitive reached other than as the word being dispatched declines. The followin
 are checked where the phrase runs, through
 the running unit's bindings, so a user definition of `sum` takes effect at its
 next execution and the phrase then runs as written. A word reached other than
-from a source position, a phrase split across a definition, a shape the fold
-cannot take, or work the remaining budget cannot cover runs the words as
-written. A fault inside the phrase is reported as the last following word's
+from a source position, a phrase split across a definition, or a shape the fold
+cannot take runs the words as written. A fault inside the phrase is reported as the last following word's
 own recognition reports it.
 
 The `(len) each` list idiom reads stored child lengths into a typed result

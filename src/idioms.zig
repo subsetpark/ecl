@@ -746,11 +746,14 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         evaluator.skipFollowingForms(count);
         _ = evaluator.commitDirectIdiomTrace();
         if (idiom.active_word) |word| evaluator.setActiveWord(.plain(word));
-        const stack = evaluator.unit.stack.items;
-        const result = numeric.foldLeafColumns(
+        var shape_owner = try evaluator.popValue();
+        defer shape_owner.deinit();
+        var input = try evaluator.popValue();
+        defer input.deinit();
+        numeric.foldColumns(
             evaluator,
             columnOperation(entry.operation.direct),
-            stack[stack.len - 2],
+            &input,
             shape.rows,
             shape.columns,
         ) catch |err| {
@@ -760,8 +763,10 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
             }
             return err;
         };
-        popRelease(evaluator, 2);
-        try evaluator.pushOwned(result);
+        // A fold past the turn continues as a driver; its fault is reported
+        // the same way.
+        if (idiom.active_index) |site| evaluator.setWorkDriverSite(owner.body.?, site);
+        evaluator.setWorkDriverTraceParent(owner.trace_word);
         return .applied;
     }
     return .declined;
@@ -777,8 +782,8 @@ fn columnOperation(operation: DirectOp) numeric.BinaryOp {
 
 /// The rows and columns of `list [rows columns] reshape` when its fold over
 /// rows can run on the list itself: a two-axis shape of positive ints whose
-/// volume is the list's length, a numeric leaf the operation keeps typed, and
-/// work the remaining budget covers. Anything else runs the words as written.
+/// volume is the list's length, and a numeric leaf the operation keeps typed.
+/// Anything else runs the words as written.
 fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usize, columns: usize } {
     if (evaluator.available() < 2) return null;
     const stack = evaluator.unit.stack.items;
@@ -791,7 +796,7 @@ fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usi
     const rows = std.math.cast(usize, rows_value.int) orelse return null;
     const columns = std.math.cast(usize, columns_value.int) orelse return null;
     const volume = std.math.mul(usize, rows, columns) catch return null;
-    if (volume != input.list.length() or volume > evaluator.remainingKernelFuel()) return null;
+    if (volume != input.list.length()) return null;
     if (!numeric.columnFoldCandidate(columnOperation(operation), input)) return null;
     return .{ .rows = rows, .columns = columns };
 }
@@ -1345,7 +1350,7 @@ fn startReduction(
 }
 
 const ReductionDriver = struct {
-    /// Like `numeric.TypedReduceDriver`, it lives for one reduction and
+    /// Like a typed kernel's driver, it lives for one reduction and
     /// releases the slot when it publishes, so it qualifies for the slot on
     /// lifetime; a fold whose rows apply directly would otherwise spend its
     /// largest fixed cost on this driver's allocation.

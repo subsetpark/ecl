@@ -765,6 +765,9 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         "([1 2 3 4 5 6] [2 3] reshape sum) call",
         "[2 3] ([1 2 3 4 5 6] swap reshape sum) partial call",
         "([2 3] reshape sum) 'columns def [1 2 3 4 5 6] columns",
+        // Past one turn's budget the fold continues as a driver.
+        "300000 range 1.5 + [3 100000] reshape sum",
+        "300000 range 0 * 1 + [100000 3] reshape product",
     };
     for (fused) |source| {
         compareModesExactly(source) catch |err| {
