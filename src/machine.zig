@@ -5194,9 +5194,6 @@ pub const Machine = struct {
         const named = try intern.intern(chain.spelling());
         self.unit.pendingFailure().addData(.scope, .{ .symbol = named });
     }
-    /// What the running activation would have searched, for the callers that
-    /// have no word in hand — reflection, and a miss reported before a word's
-    /// scope is known.
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
     }

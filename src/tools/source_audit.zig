@@ -1478,7 +1478,7 @@ fn installedPrimitiveName(source: []const u8, name: []const u8) bool {
 /// References resolve by name, so a name shared with a reachable declaration
 /// counts as reachable: the rule can miss dead code but never invents it.
 /// Comments are not references; an identifier-shaped string literal is, for
-/// `@hasDecl` and `@field`. Compile-failure fixtures are skipped.
+/// `@hasDecl` and `@field`, and is owned and reached like an identifier. Compile-failure fixtures are skipped.
 fn auditUnreferencedDeclarations(init: std.process.Init) bool {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -1490,21 +1490,49 @@ fn auditUnreferencedDeclarations(init: std.process.Init) bool {
             return true;
         };
         defer directory.close(init.io);
-        var walker = directory.walk(arena) catch return true;
+        var walker = directory.walk(arena) catch |err| {
+            std.log.err("declarations: cannot walk {s}: {s}", .{ root, @errorName(err) });
+            return true;
+        };
         defer walker.deinit();
         while (walker.next(init.io) catch |err| {
             std.log.err("declarations: cannot enumerate {s}: {s}", .{ root, @errorName(err) });
             return true;
         }) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
-            const path = std.fmt.allocPrint(arena, "{s}/{s}", .{ root, entry.path }) catch return true;
+            const path = std.fmt.allocPrint(arena, "{s}/{s}", .{ root, entry.path }) catch |err| {
+                std.log.err("declarations: cannot record {s}/{s}: {s}", .{ root, entry.path, @errorName(err) });
+                return true;
+            };
             if (std.mem.indexOf(u8, path, "zig-cache") != null or
                 std.mem.indexOf(u8, path, "zig-pkg") != null or
                 std.mem.startsWith(u8, path, "test/native/negative/")) continue;
-            scan.add(init, path) catch return true;
+            scan.add(init, path) catch |err| {
+                std.log.err("declarations: cannot scan {s}: {s}", .{ path, @errorName(err) });
+                return true;
+            };
         }
     }
-    scan.add(init, "build.zig") catch return true;
+    var repository = std.Io.Dir.cwd().openDir(init.io, ".", .{ .iterate = true }) catch |err| {
+        std.log.err("declarations: cannot open repository root: {s}", .{@errorName(err)});
+        return true;
+    };
+    defer repository.close(init.io);
+    var iterator = repository.iterate();
+    while (iterator.next(init.io) catch |err| {
+        std.log.err("declarations: cannot enumerate repository root: {s}", .{@errorName(err)});
+        return true;
+    }) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        const path = arena.dupe(u8, entry.name) catch |err| {
+            std.log.err("declarations: cannot record {s}: {s}", .{ entry.name, @errorName(err) });
+            return true;
+        };
+        scan.add(init, path) catch |err| {
+            std.log.err("declarations: cannot scan {s}: {s}", .{ path, @errorName(err) });
+            return true;
+        };
+    }
     return scan.report() catch true;
 }
 
@@ -1530,8 +1558,9 @@ const DeclarationScan = struct {
         first: u32,
         last: u32,
         function: bool,
-        /// A `struct`, `enum`, `union`, or `opaque` type.
-        container: bool,
+        /// Declares a type, or may: a container, or an alias or computed type
+        /// whose initializer is not plainly a value.
+        type_like: bool,
         root: bool,
         comptime_used: bool = false,
         users: std.ArrayList(u32) = .empty,
@@ -1550,7 +1579,7 @@ const DeclarationScan = struct {
 
     /// Records a container's members in source order, outer before inner, so
     /// each token's owner ends as the innermost one.
-    fn collect(self: *DeclarationScan, file: u32, members: []const std.zig.Ast.Node.Index) !void {
+    fn collect(self: *DeclarationScan, file: u32, members: []const std.zig.Ast.Node.Index) error{OutOfMemory}!void {
         const tree = &self.files.items[file].tree;
         const owners = self.files.items[file].owners;
         for (members) |member| {
@@ -1568,6 +1597,7 @@ const DeclarationScan = struct {
                     else
                         false;
                     try self.declare(file, name_token, first, last, true, false, exported);
+                    try self.collectNested(file, first, last);
                 },
                 .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
                     const variable = tree.fullVarDecl(member).?;
@@ -1580,7 +1610,11 @@ const DeclarationScan = struct {
                         tree.fullContainerDecl(&buffer, initializer)
                     else
                         null;
-                    try self.declare(file, variable.ast.mut_token + 1, first, last, false, container != null, exported);
+                    const type_like = container != null or if (variable.ast.init_node.unwrap()) |initializer|
+                        typeExpression(tree.nodeTag(initializer))
+                    else
+                        false;
+                    try self.declare(file, variable.ast.mut_token + 1, first, last, false, type_like, exported);
                     if (container) |declared| try self.collect(file, declared.ast.members);
                 },
                 else => {},
@@ -1588,7 +1622,69 @@ const DeclarationScan = struct {
         }
     }
 
-    fn declare(self: *DeclarationScan, file: u32, name_token: u32, first: u32, last: u32, function: bool, container: bool, exported: bool) !void {
+    /// Initializers that can denote a type. Aliases, `@TypeOf`, and calls to
+    /// type-returning functions look alike to a syntax scan, so only plain
+    /// values are excluded.
+    fn typeExpression(tag: std.zig.Ast.Node.Tag) bool {
+        return switch (tag) {
+            .identifier,
+            .field_access,
+            .call,
+            .call_comma,
+            .call_one,
+            .call_one_comma,
+            .builtin_call,
+            .builtin_call_comma,
+            .builtin_call_two,
+            .builtin_call_two_comma,
+            .optional_type,
+            .error_union,
+            .merge_error_sets,
+            .error_set_decl,
+            .array_type,
+            .array_type_sentinel,
+            .ptr_type_aligned,
+            .ptr_type_sentinel,
+            .ptr_type,
+            .ptr_type_bit_range,
+            .fn_proto,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto_simple,
+            => true,
+            else => false,
+        };
+    }
+
+    /// A function's body can declare the container it returns, and its
+    /// members are declarations too. Takes the outermost containers inside
+    /// `first..last`; `collect` descends into the rest.
+    fn collectNested(self: *DeclarationScan, file: u32, first: u32, last: u32) error{OutOfMemory}!void {
+        const tree = &self.files.items[file].tree;
+        var found: std.ArrayList(std.zig.Ast.Node.Index) = .empty;
+        for (0..tree.nodes.len) |raw| {
+            const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw));
+            var buffer: [2]std.zig.Ast.Node.Index = undefined;
+            if (tree.fullContainerDecl(&buffer, node) == null) continue;
+            const start = tree.firstToken(node);
+            if (start < first or tree.lastToken(node) > last) continue;
+            try found.append(self.arena, node);
+        }
+        std.mem.sort(std.zig.Ast.Node.Index, found.items, tree, struct {
+            fn less(ast: *const std.zig.Ast, a: std.zig.Ast.Node.Index, b: std.zig.Ast.Node.Index) bool {
+                return ast.firstToken(a) < ast.firstToken(b);
+            }
+        }.less);
+        var covered: u32 = 0;
+        for (found.items) |node| {
+            if (tree.firstToken(node) < covered) continue;
+            covered = tree.lastToken(node) + 1;
+            var buffer: [2]std.zig.Ast.Node.Index = undefined;
+            try self.collect(file, tree.fullContainerDecl(&buffer, node).?.ast.members);
+        }
+    }
+
+    fn declare(self: *DeclarationScan, file: u32, name_token: u32, first: u32, last: u32, function: bool, type_like: bool, exported: bool) !void {
         const tree = &self.files.items[file].tree;
         const name = identifierName(tree.tokenSlice(name_token));
         const entry_point = for ([_][]const u8{ "main", "build", "panic", "std_options" }) |root| {
@@ -1602,7 +1698,7 @@ const DeclarationScan = struct {
             .first = first,
             .last = last,
             .function = function,
-            .container = container,
+            .type_like = type_like,
             .root = exported or entry_point,
         });
         @memset(self.files.items[file].owners[first .. last + 1], index);
@@ -1629,17 +1725,14 @@ const DeclarationScan = struct {
         for (self.files.items, 0..) |file, file_index| {
             for (0..file.tree.tokens.len) |raw_token| {
                 const token: u32 = @intCast(raw_token);
-                const named = switch (file.tree.tokenTag(token)) {
+                const named = named: switch (file.tree.tokenTag(token)) {
                     .identifier => identifierName(file.tree.tokenSlice(token)),
                     .string_literal => {
                         const spelling = file.tree.tokenSlice(token);
                         const text = spelling[1 .. spelling.len - 1];
+                        // A name spelled as a string is used by reflection, from wherever it appears.
                         if (!identifierShaped(text)) continue;
-                        // A name spelled as a string is used by reflection, wherever it appears.
-                        if (by_name.get(text)) |candidates| for (candidates.items) |candidate| {
-                            self.declarations.items[candidate].root = true;
-                        };
-                        continue;
+                        break :named text;
                     },
                     else => continue,
                 };
@@ -1676,7 +1769,7 @@ const DeclarationScan = struct {
             if (!checked[index]) {
                 std.log.err("{s}:{d}: `{s}` is never used: nothing outside its own body reaches it", .{ file.path, line, declaration.name });
                 failed = true;
-            } else if (!declaration.function and !declaration.container) {
+            } else if (!declaration.function and !declaration.type_like) {
                 std.log.err("{s}:{d}: `{s}` is reached only by comptime checks; data nothing else uses proves nothing", .{ file.path, line, declaration.name });
                 failed = true;
             }
