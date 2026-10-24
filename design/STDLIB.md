@@ -189,7 +189,7 @@ Errors.
 by `register`: run the body on a fresh environment, then validate the
 canonical module path and register the resulting image under it. The body is
 evaluated before the name is validated, so the two spellings agree on every
-observable outcome.
+observable outcome. Defined in ecl.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore `values (body) 'name @defm`. See
@@ -200,8 +200,8 @@ Modules.
 per element, contract `( a -- b )` enforced per element. Concurrent
 `each`: ordered results, leftmost failure re-raised after cancelling and
 quiescing the remainder. Each child's stack starts with its element deepest;
-`list values (q) @each` adds the shared values above it. See
-Concurrency.
+`list values (q) @each` adds the shared values above it. Defined in ecl over
+`@spawn`, `task.await`, and `task.cancel`. See Concurrency.
 
 ### @module
 `( values body -- module )` — *Unit constructor.* Run the body on a fresh
@@ -1390,7 +1390,7 @@ slot's turn. See [Modules](SPEC.md#modules).
 ### unset
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `undef`; removing a
-local shadow may reveal a parent or core binding.
+local shadow may reveal a parent or core binding. Defined in ecl.
 
 ### update
 `( collection selector quotation -- collection )` — Apply an isolated

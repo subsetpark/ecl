@@ -230,7 +230,11 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   visible inside a nested quotation within the declaring body; referencing
   one there is an error whose message identifies `partial` as construction of
   a reusable capturing quotation. The sugar does not involve `set`; locals and
-  environment assignment are unrelated mechanisms.
+  environment assignment are unrelated mechanisms. A declaration that finds
+  fewer values than it names is an underflow. Opening a word's body, it is
+  that word's arity check: the word is the failing word, as a primitive would
+  be. Opening any other quotation, the local binding fails and no word is
+  blamed.
 
 ## Values and external representations
 

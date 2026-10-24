@@ -208,8 +208,8 @@ test "module registration: @defm is construction followed by registration" {
     try expectStack(&runtime, "seeded-combined.sum seeded-composed.sum", "9 9");
 
     // A failing body produces the same error and registers nothing either way.
-    // Only the reported word differs, because the program wrote a different
-    // word; the kind, message, and trace tail are the same.
+    // Only the trace differs, because the program wrote a different word:
+    // `@defm` is a prelude definition, so it is the failure's trace parent.
     const combined_failure = try renderFailure(
         &runtime,
         &left,
@@ -221,7 +221,17 @@ test "module registration: @defm is construction followed by registration" {
         &right,
         "[] ((1 0 div) call ((2) 'v def)) @module 'ghost-composed register",
     );
-    try std.testing.expectEqualStrings(combined_failure, composed_failure);
+    const combined_trace = "'trace ['div '@defm]";
+    const composed_trace = "'trace ['div]";
+    const combined_at = std.mem.indexOf(u8, combined_failure, combined_trace) orelse
+        return error.TestUnexpectedResult;
+    const composed_at = std.mem.indexOf(u8, composed_failure, composed_trace) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(combined_failure[0..combined_at], composed_failure[0..composed_at]);
+    try std.testing.expectEqualStrings(
+        combined_failure[combined_at + combined_trace.len ..],
+        composed_failure[composed_at + composed_trace.len ..],
+    );
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "ghost-combined.v", &.{"'kind 'undefined-word"});
     try expectErrorContains(&runtime, "ghost-composed.v", &.{"'kind 'undefined-word"});

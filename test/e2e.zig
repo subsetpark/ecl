@@ -1827,13 +1827,13 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "'isolation @attempt", "constructor's values operand", "values (q) @attempt" },
+        .stdout_contains = &.{ "'isolation @attempt", "constructor's values operand" },
     });
     var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] [] (+ +) @each io.pp" });
     defer child.deinit();
     try child.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @each", "constructor's values operand", "list values (q) @each" },
+        .stderr_contains = &.{ "'isolation @spawn", "constructor's values operand" },
     });
     // And the seeding composition that fixes it.
     var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) @attempt io.pp" });
@@ -1852,11 +1852,13 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'type", "@defm expected a symbol name" },
+        // `@defm` is `@module` followed by `register`, so the misplaced symbol
+        // reaches `@module` as its values operand first.
+        .stderr_contains = &.{ "'kind 'type", "@module expected a list", "'trace ['@module '@defm]" },
     });
 
-    // Anonymous construction names nothing, so its isolation advice names the
-    // unseeded spelling rather than a registration.
+    // Anonymous construction names nothing, so its isolation data names the
+    // construction rather than a registration.
     var anonymous_isolation = try run(&.{ build_options.ecl_exe, "-e", "3 [1] (+) @module" });
     defer anonymous_isolation.deinit();
     try anonymous_isolation.expect(.{

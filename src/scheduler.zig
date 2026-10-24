@@ -504,20 +504,11 @@ const WaitSet = struct {
     timer: TimerNode,
     absolute_deadline: ?Deadline = null,
 
-    const JoinRequest = @FieldType(machine.ParkRequest, "join");
     const State = union(enum) {
         initializing: struct {
             request: machine.ParkRequest,
             registrations: usize = 0,
             canonical: usize = 0,
-        },
-        cancelling: struct {
-            join: JoinRequest,
-            index: usize,
-            work: union(enum) {
-                next,
-                active: CancellationCursor,
-            } = .next,
         },
         finding_duplicate: struct {
             request: machine.ParkRequest,
@@ -801,35 +792,8 @@ const WaitSet = struct {
                 const request = initializing.request;
                 self.state = switch (request) {
                     .external, .external_until => .{ .registering_external = request },
-                    .join => |join| if (join.cancel_from) |start|
-                        .{ .cancelling = .{ .join = join, .index = start } }
-                    else
-                        .{ .finding_duplicate = .{ .request = request } },
                     else => .{ .finding_duplicate = .{ .request = request } },
                 };
-            },
-            .cancelling => |*cancelling| switch (cancelling.work) {
-                .active => |*cursor| {
-                    if (!cursor.advance()) return false;
-                    cursor.deinit();
-                    cancelling.work = .next;
-                    cancelling.index += 1;
-                    _ = work.take(cancellation_tree_quantum);
-                },
-                .next => {
-                    const join = cancelling.join;
-                    const count: usize = @intCast(join.tasks.list.length());
-                    if (cancelling.index == count) {
-                        self.state = .{ .finding_duplicate = .{
-                            .request = .{ .join = join },
-                        } };
-                        continue;
-                    }
-                    const cell = taskCell(list.atUnchecked(join.tasks, cancelling.index)).?;
-                    cancelArriving(cell);
-                    cancelling.work = .{ .active = .{ .root = &cell.scope } };
-                    _ = work.spend();
-                },
             },
             .finding_duplicate => |*finding| {
                 if (finding.index == self.registrations.len) {
@@ -928,7 +892,7 @@ const WaitSet = struct {
                 const milliseconds: ?u63 = switch (request) {
                     .deadline => |deadline| deadline.milliseconds,
                     .sleep => |duration| duration,
-                    .task, .any, .join, .external, .external_until => null,
+                    .task, .any, .external, .external_until => null,
                     .close_scope => unreachable,
                 };
                 if (milliseconds) |duration| {
@@ -1008,7 +972,6 @@ const WaitSet = struct {
             },
             .delivering => {},
             .initializing,
-            .cancelling,
             .finding_duplicate,
             .registering,
             .registering_external,
@@ -2982,7 +2945,7 @@ comptime {
 
 fn requestKind(request: machine.ParkRequest) WaitKind {
     return switch (request) {
-        .task, .join => .one,
+        .task => .one,
         .any => .any,
         .deadline => .deadline,
         .sleep => .sleep,
@@ -3159,14 +3122,6 @@ fn unlinkRegistrationLocked(registration: *WaitRegistration) void {
     if (registration.next) |next| next.previous = registration.previous else cell.waiter_last = registration.previous;
     registration.previous = null;
     registration.next = null;
-}
-
-fn cancelArriving(cell: *TaskCell) void {
-    const scheduler_state = cell.scheduler.privateState();
-    std.Io.Threaded.mutexLockUncancelable(&scheduler_state.tree_mutex);
-    _ = cancelOne(cell);
-    std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
-    notifyCancellation(cell.scheduler);
 }
 
 fn beginExternalCancellation(cell: *TaskCell) bool {

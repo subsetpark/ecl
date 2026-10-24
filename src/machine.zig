@@ -18,7 +18,6 @@ const turn_core = @import("turn_core.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
-const task_join_core = @import("task_join_core.zig");
 const resolution_core = @import("resolution_core.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
@@ -163,7 +162,7 @@ const FailureSite = union(enum) {
         self.* = undefined;
     }
 };
-pub const UnitConstructor = enum { spawn, each, @"test" };
+pub const UnitConstructor = enum { spawn, @"test" };
 
 const ErrorDataKey = enum {
     needed,
@@ -1156,6 +1155,11 @@ const Eval = struct {
     /// the third describing different code.
     site: ExecutionSite,
     traced_word: intern.TraceWord,
+    /// The word whose body this is, set only when dispatch entered that body.
+    /// `traced_word` cannot answer this: a tail position clears it, and an
+    /// application may borrow a word for attribution. A locals binder opening
+    /// the body is that word's arity check, so its failure is the word's.
+    body_owner: intern.TraceWord = no_word,
     /// Nominal authority to replace one source effect check's completion
     /// provenance. A non-tail call and every application quotation receive
     /// no authority, so their internal tail calls cannot overwrite the
@@ -1273,19 +1277,13 @@ const OwnedApplication = enum(usize) {
     }
 };
 
-/// A module construction boundary. The body always produces an image; a
-/// `@defm` boundary additionally carries the symbol that image is registered
-/// under the instant construction succeeds, which is what makes the combined
-/// word a driver composition rather than a second publication protocol.
-///
-/// The symbol is unvalidated on purpose. `@defm` must behave as `@module`
-/// followed by `register`, and that composition evaluates the body before any
-/// name is checked, so validating early would skip a body the composition runs.
+/// A module construction boundary. The body always produces an anonymous
+/// image; publication is `register`'s alone, which the prelude's `@defm`
+/// composes after it.
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
-    registration: ?u32,
     provenance: modules.RegistrationProvenance,
-    /// Exact construction body admitted by `@module`/`@defm`. A declaration
+    /// Exact construction body admitted by `@module`. A declaration
     /// is module-level only while this is the current activation; quotations
     /// called by the body may inherit its home but not its declaration site.
     root_code: *Header,
@@ -1938,11 +1936,6 @@ pub const ParkRequest = union(enum) {
     /// and resumes through the `sleep` family, never a task result.
     sleep: u63,
     close_scope: u8,
-    join: struct {
-        tasks: Value,
-        index: u32,
-        cancel_from: ?u32 = null,
-    },
     external: external.ReadinessSource,
     external_until: struct { source: external.ReadinessSource, deadline: @import("scheduler.zig").Deadline },
 
@@ -1952,14 +1945,13 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .any => |item| item,
             .deadline => |deadline| deadline.task,
-            .join => |join| join.tasks,
             .close_scope, .external, .external_until, .sleep => null,
         };
     }
 
     pub fn taskCount(self: ParkRequest) usize {
         return switch (self) {
-            .task, .deadline, .join => 1,
+            .task, .deadline => 1,
             .any => |tasks| @intCast(tasks.list.length()),
             .close_scope, .external, .external_until, .sleep => 0,
         };
@@ -1976,10 +1968,6 @@ pub const ParkRequest = union(enum) {
                 break :single deadline.task;
             },
             .any => |tasks| list.atUnchecked(tasks, index),
-            .join => |join| single: {
-                std.debug.assert(index == 0);
-                break :single list.atUnchecked(join.tasks, join.index);
-            },
             .close_scope, .external, .external_until, .sleep => unreachable,
         };
     }
@@ -2054,7 +2042,7 @@ pub const ParkResume = union(enum) {
         return switch (request) {
             .sleep => .{ .sleep = .io },
             .external, .external_until => .{ .external = .io },
-            .task, .any, .deadline, .join => .{ .task_wait = .io },
+            .task, .any, .deadline => .{ .task_wait = .io },
             .close_scope => unreachable,
         };
     }
@@ -2065,123 +2053,13 @@ pub const ParkResume = union(enum) {
         return switch (request) {
             .sleep => .{ .sleep = .cancelled },
             .external, .external_until => .{ .external = .cancelled },
-            .task, .any, .deadline, .join => .{ .task_wait = .cancelled },
+            .task, .any, .deadline => .{ .task_wait = .cancelled },
             .close_scope => unreachable,
         };
     }
 
     fn deinit(self: ParkResume, releases: *heap.ReleaseDomain) void {
         if (self.ownedValue()) |item| releases.releaseValue(item);
-    }
-};
-
-pub const TaskJoinState = struct {
-    tasks: Value,
-    results: heap.OwnedValueBuffer,
-    policy: task_join_core.Join,
-    ok_id: u32,
-    err_id: u32,
-    raised: ?Value = null,
-};
-
-const TaskJoinTeardown = struct {
-    tasks: Value,
-    results: ?heap.OwnedValueBuffer,
-    raised: ?Value,
-    extra: ?Value,
-    phase: enum { extra, tasks, results, raised, complete } = .extra,
-
-    const Advance = struct { complete: bool, consumed: usize };
-
-    fn init(join: TaskJoinState, extra: ?Value) TaskJoinTeardown {
-        return .{
-            .tasks = join.tasks,
-            .results = join.results,
-            .raised = join.raised,
-            .extra = extra,
-        };
-    }
-
-    fn inputOnly(tasks: Value) TaskJoinTeardown {
-        return .{
-            .tasks = tasks,
-            .results = null,
-            .raised = null,
-            .extra = null,
-        };
-    }
-
-    pub fn advance(self: *TaskJoinTeardown, releases: *heap.ReleaseDomain, budget: usize) Advance {
-        var consumed: usize = 0;
-        while (consumed != budget) {
-            switch (self.phase) {
-                .extra => {
-                    self.phase = .tasks;
-                    if (self.extra) |item| {
-                        self.extra = null;
-                        releases.releaseValue(item);
-                        consumed += 1;
-                    }
-                },
-                .tasks => {
-                    self.phase = .results;
-                    releases.releaseValue(self.tasks);
-                    consumed += 1;
-                },
-                .results => {
-                    if (self.results) |*results| results.deinit();
-                    self.results = null;
-                    self.phase = .raised;
-                    consumed += 1;
-                },
-                .raised => {
-                    self.phase = .complete;
-                    if (self.raised) |raised| {
-                        self.raised = null;
-                        releases.releaseValue(raised);
-                        consumed += 1;
-                    }
-                },
-                .complete => return .{ .complete = true, .consumed = consumed },
-            }
-        }
-        return .{ .complete = self.phase == .complete, .consumed = consumed };
-    }
-};
-
-const TaskJoinCleanupDisposition = enum {
-    continue_evaluation,
-    out_of_memory,
-};
-
-/// The payload and the action to take after releasing it are one state. This
-/// prevents cleanup from completing after its former OOM flag was lost,
-/// duplicated, or observed independently.
-const TaskJoinCleanup = union(enum) {
-    continue_evaluation: TaskJoinTeardown,
-    out_of_memory: TaskJoinTeardown,
-
-    fn init(
-        teardown: TaskJoinTeardown,
-        after: TaskJoinCleanupDisposition,
-    ) TaskJoinCleanup {
-        return switch (after) {
-            .continue_evaluation => .{ .continue_evaluation = teardown },
-            .out_of_memory => .{ .out_of_memory = teardown },
-        };
-    }
-
-    pub fn advance(self: *TaskJoinCleanup, releases: *heap.ReleaseDomain, budget: usize) TaskJoinTeardown.Advance {
-        return switch (self.*) {
-            inline else => |*teardown| teardown.advance(releases, budget),
-        };
-    }
-
-    fn disposition(self: TaskJoinCleanup) TaskJoinCleanupDisposition {
-        return switch (self) {
-            .continue_evaluation => .continue_evaluation,
-            .out_of_memory => .out_of_memory,
-        };
     }
 };
 
@@ -2259,12 +2137,6 @@ pub const StackReplacement = struct {
     }
 };
 
-const TaskJoinCleanupProgress = struct {
-    complete: bool,
-    consumed: usize,
-    disposition: ?TaskJoinCleanupDisposition = null,
-};
-
 /// Type-erased owned continuation for native work that must return to the
 /// scheduler between bounded slices.
 pub const WorkDriver = struct {
@@ -2283,9 +2155,9 @@ pub const WorkDriver = struct {
     }
 };
 
-/// The scheduler-visible native continuation owned by a unit.  A task join
+/// The scheduler-visible native continuation owned by a unit. A work driver
 /// carries its wait request or delivered result in the same variant, so the
-/// evaluator cannot represent an unrelated driver, park, and join at once.
+/// evaluator cannot represent an unrelated driver and park at once.
 pub const NativeContinuation = union(enum) {
     idle,
     work: WorkDriver,
@@ -2293,11 +2165,6 @@ pub const NativeContinuation = union(enum) {
     work_park_resume: struct { driver: WorkDriver, result: ParkResume },
     park_request: ParkRequest,
     park_resume: ParkResume,
-    task_join: TaskJoinState,
-    task_join_request: struct { join: TaskJoinState, request: ParkRequest },
-    task_join_resume: struct { join: TaskJoinState, result: ParkResume },
-    task_join_cleanup: TaskJoinCleanup,
-    work_join_cleanup: struct { driver: WorkDriver, cleanup: TaskJoinCleanup },
 };
 
 fn WorkDriverAdapters(comptime Driver: type) type {
@@ -2735,13 +2602,12 @@ pub const Unit = struct {
         self.terminal = .{ .exit = status };
     }
     pub fn hasParkRequest(self: *const Unit) bool {
-        return self.native == .park_request or self.native == .work_park_request or self.native == .task_join_request;
+        return self.native == .park_request or self.native == .work_park_request;
     }
     pub fn parkRequest(self: *const Unit) ?ParkRequest {
         return switch (self.native) {
             .park_request => |request| request,
             .work_park_request => |state| state.request,
-            .task_join_request => |state| state.request,
             else => null,
         };
     }
@@ -2755,10 +2621,6 @@ pub const Unit = struct {
                 self.native = .{ .work = state.driver };
                 break :result state.request;
             },
-            .task_join_request => |state| result: {
-                self.native = .{ .task_join = state.join };
-                break :result state.request;
-            },
             else => null,
         };
     }
@@ -2766,7 +2628,6 @@ pub const Unit = struct {
         self.native = switch (self.native) {
             .idle => .{ .park_request = request },
             .work => |driver| .{ .work_park_request = .{ .driver = driver, .request = request } },
-            .task_join => |join| .{ .task_join_request = .{ .join = join, .request = request } },
             else => unreachable,
         };
     }
@@ -2774,51 +2635,20 @@ pub const Unit = struct {
         self.native = switch (self.native) {
             .idle => .{ .park_resume = result },
             .work => |driver| .{ .work_park_resume = .{ .driver = driver, .result = result } },
-            .task_join => |join| .{ .task_join_resume = .{ .join = join, .result = result } },
             else => unreachable,
         };
     }
-    const ParkDelivery = struct { result: ParkResume, task_join: bool };
-    fn takeParkResume(self: *Unit) ?ParkDelivery {
+    fn takeParkResume(self: *Unit) ?ParkResume {
         return switch (self.native) {
             .park_resume => |result| delivery: {
                 self.native = .idle;
-                break :delivery .{ .result = result, .task_join = false };
+                break :delivery result;
             },
             .work_park_resume => |state| delivery: {
                 self.native = .{ .work = state.driver };
-                break :delivery .{ .result = state.result, .task_join = false };
-            },
-            .task_join_resume => |state| delivery: {
-                self.native = .{ .task_join = state.join };
-                break :delivery .{ .result = state.result, .task_join = true };
+                break :delivery state.result;
             },
             else => null,
-        };
-    }
-    fn taskJoin(self: *Unit) ?*TaskJoinState {
-        return switch (self.native) {
-            .task_join => |*join| join,
-            else => null,
-        };
-    }
-    fn installTaskJoin(self: *Unit, join: TaskJoinState) void {
-        std.debug.assert(self.native == .idle);
-        self.native = .{ .task_join = join };
-    }
-    fn takeTaskJoin(self: *Unit) ?TaskJoinState {
-        return switch (self.native) {
-            .task_join => |join| result: {
-                self.native = .idle;
-                break :result join;
-            },
-            else => null,
-        };
-    }
-    pub fn hasTaskJoinWork(self: *const Unit) bool {
-        return switch (self.native) {
-            .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => true,
-            else => false,
         };
     }
     pub fn workDriver(self: *Unit) ?*WorkDriver {
@@ -2826,7 +2656,6 @@ pub const Unit = struct {
             .work => |*driver| driver,
             .work_park_request => |*state| &state.driver,
             .work_park_resume => |*state| &state.driver,
-            .work_join_cleanup => |*state| &state.driver,
             else => null,
         };
     }
@@ -2846,10 +2675,6 @@ pub const Unit = struct {
                 self.native = .idle;
                 break :result state.driver;
             },
-            .work_join_cleanup => |state| result: {
-                self.native = .{ .task_join_cleanup = state.cleanup };
-                break :result state.driver;
-            },
             else => null,
         };
     }
@@ -2867,62 +2692,8 @@ pub const Unit = struct {
     }
     pub fn hasWorkDriver(self: *const Unit) bool {
         return self.native == .work or self.native == .work_park_request or
-            self.native == .work_park_resume or self.native == .work_join_cleanup;
+            self.native == .work_park_resume;
     }
-    fn installTaskJoinCleanup(self: *Unit, cleanup: TaskJoinCleanup) void {
-        self.native = switch (self.native) {
-            .idle => .{ .task_join_cleanup = cleanup },
-            .work => |driver| .{ .work_join_cleanup = .{
-                .driver = driver,
-                .cleanup = cleanup,
-            } },
-            else => unreachable,
-        };
-    }
-    fn advanceTaskJoinCleanup(self: *Unit, budget: usize) TaskJoinCleanupProgress {
-        const cleanup = switch (self.native) {
-            .task_join_cleanup => |*pending| pending,
-            else => return .{ .complete = true, .consumed = 0 },
-        };
-        const progress = cleanup.advance(self.releases, budget);
-        if (!progress.complete) return .{ .complete = false, .consumed = progress.consumed };
-        const disposition = cleanup.disposition();
-        self.native = .idle;
-        return .{
-            .complete = true,
-            .consumed = progress.consumed,
-            .disposition = disposition,
-        };
-    }
-    /// Terminal cleanup consumes a deferred OOM instead of delivering it back
-    /// into an evaluator that is already being abandoned.
-    pub fn advanceAbandonedTaskJoinCleanup(self: *Unit, budget: usize) CleanupProgress {
-        switch (self.native) {
-            .task_join => |join| self.native = .{ .task_join_cleanup = .init(
-                .init(join, null),
-                .continue_evaluation,
-            ) },
-            .task_join_request => |state| {
-                state.request.deinit(self.releases);
-                self.native = .{ .task_join_cleanup = .init(
-                    .init(state.join, null),
-                    .continue_evaluation,
-                ) };
-            },
-            .task_join_resume => |state| {
-                state.result.deinit(self.releases);
-                self.native = .{ .task_join_cleanup = .init(
-                    .init(state.join, null),
-                    .continue_evaluation,
-                ) };
-            },
-            .work_join_cleanup => {},
-            else => {},
-        }
-        const progress = self.advanceTaskJoinCleanup(budget);
-        return .{ .complete = progress.complete, .consumed = progress.consumed };
-    }
-
     /// Scheduler-owned teardown of all user-sized evaluator cargo. Each unit
     /// of budget retires at most one continuation, operand, native owner, or
     /// generation pin. Array storage is released by `deinit` after this cursor
@@ -2931,18 +2702,6 @@ pub const Unit = struct {
         std.debug.assert(budget != 0);
         var consumed: usize = 0;
         while (consumed != budget) {
-            if (self.native == .work_join_cleanup) {
-                const driver = self.takeWorkDriver().?;
-                driver.deinit(self.releases, self.allocator);
-                consumed += 1;
-                continue;
-            }
-            if (self.hasTaskJoinWork()) {
-                const progress = self.advanceAbandonedTaskJoinCleanup(budget - consumed);
-                consumed += @max(progress.consumed, 1);
-                if (!progress.complete) return .{ .complete = false, .consumed = consumed };
-                continue;
-            }
             switch (self.native) {
                 .work, .work_park_request, .work_park_resume => {
                     const driver = self.takeWorkDriver().?;
@@ -2963,7 +2722,6 @@ pub const Unit = struct {
                     continue;
                 },
                 .idle => {},
-                .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => unreachable,
             }
             if (self.current) |current| {
                 self.current = null;
@@ -3072,7 +2830,6 @@ pub const Unit = struct {
             },
             .park_request => |request| request.deinit(self.releases),
             .park_resume => |result| result.deinit(self.releases),
-            .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => @panic("task join must be retired resumably before unit teardown"),
         }
         for (self.locals.items) |item| self.releases.releaseValue(item);
         self.locals.deinit(self.allocator);
@@ -3279,14 +3036,8 @@ pub const Machine = struct {
                 .index = self.unit.active_index,
             } else null,
         };
-        self.unit.native = switch (self.unit.native) {
-            .idle => .{ .work = installed },
-            .task_join_cleanup => |cleanup| .{ .work_join_cleanup = .{
-                .driver = installed,
-                .cleanup = cleanup,
-            } },
-            else => unreachable,
-        };
+        std.debug.assert(self.unit.native == .idle);
+        self.unit.native = .{ .work = installed };
     }
     /// Consumes a fully initialized, heap-allocated continuation whose type
     /// explicitly requires address-stable construction. Ordinary drivers use
@@ -5202,6 +4953,25 @@ pub const Machine = struct {
     }
     noinline fn failUnderflow(self: *Machine, count: usize) MachineError {
         @branchHint(.cold);
+        return self.failUnderflowOf(self.activeWordName(), count);
+    }
+    /// A locals binder that cannot take its values. The reader lowered it into
+    /// the reserved `_ll`, which names nothing a program wrote. Opening a
+    /// word's body, the binder is that word's arity check, so the word fails
+    /// as a primitive would: it is the failing word, and its body activation,
+    /// which never got past entry, is not repeated in the trace. Opening any
+    /// other quotation, there is no word to blame, and the binding itself is
+    /// what fails.
+    noinline fn failBinding(self: *Machine, count: usize) MachineError {
+        @branchHint(.cold);
+        const current = &self.unit.current.?;
+        const owner = current.body_owner;
+        self.unit.active_word = owner;
+        if (owner == no_word) return self.failUnderflowOf("local binding", count);
+        current.traced_word = no_word;
+        return self.failUnderflowOf(self.activeWordName(), count);
+    }
+    fn failUnderflowOf(self: *Machine, subject: []const u8, count: usize) MachineError {
         // Underflow against the floor of a unit constructor's substack is the
         // one underflow whose cause is invisible: the values the caller meant
         // to pass are right there and unreachable. Name the isolation and the
@@ -5211,7 +4981,7 @@ pub const Machine = struct {
             .underflow,
             "{s} needs {d} stack value{s}, but found {d}; {s}",
             .{
-                self.activeWordName(),
+                subject,
                 count,
                 if (count == 1) "" else "s",
                 self.available(),
@@ -5221,7 +4991,7 @@ pub const Machine = struct {
             .underflow,
             "{s} needs {d} stack value{s}, but found {d}",
             .{
-                self.activeWordName(),
+                subject,
                 count,
                 if (count == 1) "" else "s",
                 self.available(),
@@ -5251,16 +5021,12 @@ pub const Machine = struct {
                 .attempt => .{
                     .constructor = "@attempt",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values (q) @attempt`",
+                        "pass initial values in the constructor's values operand",
                 },
-                .module => |construction| if (construction.registration == null) .{
+                .module => .{
                     .constructor = "@module",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values (body) @module`",
-                } else .{
-                    .constructor = "@defm",
-                    .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values (body) 'name @defm`",
+                        "pass initial values in the constructor's values operand",
                 },
                 .state => null,
             };
@@ -5270,12 +5036,7 @@ pub const Machine = struct {
             .spawn => .{
                 .constructor = "@spawn",
                 .advice = "the child unit's stack is isolated from the caller's stack — " ++
-                    "pass initial values in the constructor's values operand: `values (q) @spawn`",
-            },
-            .each => .{
-                .constructor = "@each",
-                .advice = "the child unit's stack is isolated from the caller's stack — " ++
-                    "pass shared initial values in the constructor's values operand: `list values (q) @each`",
+                    "pass initial values in the constructor's values operand",
             },
             .@"test" => .{
                 .constructor = "@test",
@@ -5456,50 +5217,6 @@ pub const Machine = struct {
         self.unit.installParkRequest(request);
     }
 
-    pub fn beginTaskJoinOwned(
-        self: *Machine,
-        tasks: Value,
-    ) MachineError!void {
-        std.debug.assert(tasks == .list);
-        if (self.unit.state_application != null) {
-            self.releaseDomain().releaseValue(tasks);
-            return self.fail(.domain, "a within application cannot park");
-        }
-        std.debug.assert(self.unit.native == .idle);
-        const ok_id = intern.intern("ok") catch {
-            self.beginTaskJoinInputCleanup(tasks, .out_of_memory);
-            return;
-        };
-        const err_id = intern.intern("err") catch {
-            self.beginTaskJoinInputCleanup(tasks, .out_of_memory);
-            return;
-        };
-        const count: usize = @intCast(tasks.list.length());
-        const results = heap.OwnedValueBuffer.init(self.unit.releases, count) catch {
-            self.beginTaskJoinInputCleanup(tasks, .out_of_memory);
-            return;
-        };
-        const started = task_join_core.start(@intCast(count));
-        self.unit.installTaskJoin(.{
-            .tasks = tasks,
-            .results = results,
-            .policy = started.next,
-            .ok_id = ok_id,
-            .err_id = err_id,
-        });
-        switch (started.command.next) {
-            .request => |index| requestTaskJoin(self, index, null),
-            .finish => try finishTaskJoin(self),
-        }
-    }
-    fn beginTaskJoinInputCleanup(
-        self: *Machine,
-        tasks: Value,
-        disposition: TaskJoinCleanupDisposition,
-    ) void {
-        std.debug.assert(self.unit.native == .idle);
-        self.unit.installTaskJoinCleanup(.init(.inputOnly(tasks), disposition));
-    }
     /// Whether the words after a phrase head continue a recognized phrase,
     /// which then ran in its place.
     pub fn continuesPhrase(self: *Machine, first_entry: u16) MachineError!bool {
@@ -5993,11 +5710,9 @@ pub const Machine = struct {
         });
     }
     /// Opens a construction boundary. The body evaluates against a fresh
-    /// anonymous image; `registration`, when present, is the name that image
-    /// is published under the instant the body succeeds.
+    /// anonymous image, which the boundary returns as a value.
     pub fn moduleOwned(
         self: *Machine,
-        registration: ?u32,
         input: OwnedUnitInput,
     ) MachineError!void {
         var owned = input;
@@ -6027,7 +5742,6 @@ pub const Machine = struct {
                 if (owned.seedHeader() == null) {
                     return self.openImageBoundary(
                         &candidate,
-                        registration,
                         provenance,
                         word,
                         runnable.take(),
@@ -6037,7 +5751,6 @@ pub const Machine = struct {
                     .state = .init(.{ .open = .{
                         .target = .init(.{ .image = .{
                             .candidate = candidate.move(),
-                            .registration = registration,
                             .provenance = provenance,
                         } }),
                         .body = .init(runnable.take()),
@@ -6066,7 +5779,6 @@ pub const Machine = struct {
                     .state = .init(.{ .rescope = .{
                         .target = .init(.{ .image = .{
                             .candidate = candidate.move(),
-                            .registration = registration,
                             .provenance = provenance,
                         } }),
                         .cursor = .init(cursor.take()),
@@ -6086,7 +5798,6 @@ pub const Machine = struct {
     fn openImageBoundary(
         self: *Machine,
         candidate: *modules.OwnedImage,
-        registration: ?u32,
         provenance: modules.RegistrationProvenance,
         word: intern.TraceWord,
         body_header: *Header,
@@ -6105,7 +5816,6 @@ pub const Machine = struct {
         try self.openBoundary(
             .{ .module = .{
                 .image = candidate.move(),
-                .registration = registration,
                 .provenance = provenance,
                 .root_code = body_header,
             } },
@@ -6342,7 +6052,7 @@ pub const Machine = struct {
             return self.readLocal(operand);
         }
         if (name == locals.load) {
-            try self.require(operand);
+            if (self.available() < operand) return self.failBinding(operand);
             return self.bindLocals(operand);
         }
         if (name == locals.drop) {
@@ -6987,17 +6697,9 @@ fn loop(self: *Machine) MachineError!RunStatus {
         switch (self.unit.native) {
             // Nothing native is pending: no cleanup, resumption, park
             // request, or work driver precedes the next evaluation step.
-            .idle, .task_join => {},
+            .idle => {},
             else => {
-                if (self.unit.native == .task_join_cleanup) {
-                    const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
-                    if (!cleanup.complete) return .yielded;
-                    if (cleanup.disposition.? == .out_of_memory) return error.OutOfMemory;
-                    continue;
-                }
-                if (self.unit.native == .park_resume or self.unit.native == .work_park_resume or
-                    self.unit.native == .task_join_resume)
-                {
+                if (self.unit.native == .park_resume or self.unit.native == .work_park_resume) {
                     resumePark(self) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Ecl => {
@@ -7073,11 +6775,6 @@ fn loop(self: *Machine) MachineError!RunStatus {
                         .detached => continue,
                         .failed => {
                             clearWorkDriver(self.unit);
-                            if (self.unit.native == .task_join_cleanup) {
-                                const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
-                                std.debug.assert(cleanup.complete);
-                                std.debug.assert(cleanup.disposition.? == .continue_evaluation);
-                            }
                             return error.Ecl;
                         },
                     }
@@ -7161,10 +6858,9 @@ fn clearWorkDriver(unit: *Unit) void {
 
 fn resumePark(self: *Machine) MachineError!void {
     const delivery = self.unit.takeParkResume().?;
-    switch (delivery.result) {
-        .task_wait => |wait| return resumeTaskWait(self, wait, delivery.task_join),
+    switch (delivery) {
+        .task_wait => |wait| return resumeTaskWait(self, wait),
         .sleep => |sleep| {
-            std.debug.assert(!delivery.task_join);
             // Successful timer waits resume the driver that requested them,
             // just as successful external readiness waits do.
             if (sleep == .elapsed) return;
@@ -7204,12 +6900,9 @@ fn resumePark(self: *Machine) MachineError!void {
     }
 }
 
-fn resumeTaskWait(self: *Machine, wait: TaskWaitResume, task_join: bool) MachineError!void {
+fn resumeTaskWait(self: *Machine, wait: TaskWaitResume) MachineError!void {
     switch (wait) {
-        .outcome => |outcome| if (task_join)
-            try resumeTaskJoin(self, outcome)
-        else
-            try self.pushOwned(outcome),
+        .outcome => |outcome| try self.pushOwned(outcome),
         .indexed => |indexed| {
             var window = self.reserveStack(2) catch {
                 self.unit.releases.releaseValue(indexed.outcome);
@@ -7237,189 +6930,24 @@ fn resumeTaskWait(self: *Machine, wait: TaskWaitResume, task_join: bool) Machine
             ));
         },
         .cancelled => {
-            abandonTaskJoin(self);
             clearWorkDriver(self.unit);
             return self.fail(.cancelled, "unit cancelled while awaiting a task");
         },
         .io => {
-            abandonTaskJoin(self);
             clearWorkDriver(self.unit);
             return self.fail(.io, "could not start a scheduler wait service");
         },
         .overflow => {
-            abandonTaskJoin(self);
             clearWorkDriver(self.unit);
             return self.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
         },
-        .out_of_memory => if (task_join)
-            try resumeTaskJoinOutOfMemory(self)
-        else {
+        .out_of_memory => {
             clearWorkDriver(self.unit);
             return error.OutOfMemory;
         },
     }
 }
 
-fn resumeTaskJoin(self: *Machine, outcome: Value) MachineError!void {
-    defer self.releaseDomain().releaseValue(outcome);
-    const join = self.unit.taskJoin().?;
-    const key = dict.keyAt(outcome.dict, 0);
-    const payload = dict.valueAt(outcome.dict, 0);
-    if (key.symbol == join.err_id) return advanceTaskJoin(self, .raised, payload);
-    std.debug.assert(key.symbol == join.ok_id);
-    if (payload != .list or payload.list.length() != 1)
-        return advanceTaskJoin(self, .contract, null);
-    return advanceTaskJoin(self, .success, list.atUnchecked(payload, 0));
-}
-
-fn resumeTaskJoinOutOfMemory(self: *Machine) MachineError!void {
-    return advanceTaskJoin(self, .out_of_memory, null);
-}
-
-fn advanceTaskJoin(
-    self: *Machine,
-    event: task_join_core.Event,
-    payload: ?Value,
-) MachineError!void {
-    const join = self.unit.taskJoin().?;
-    const decision = task_join_core.decide(join.policy, event) catch
-        @panic("invalid task join transition");
-    join.policy = decision.next;
-    if (decision.command.store_result) |result_index| {
-        const result = payload.?;
-        std.debug.assert(result_index == join.results.len());
-        join.results.appendBorrowed(result);
-    }
-    if (decision.command.record_failure) |failure| switch (failure) {
-        .raised => {
-            const raised = payload.?;
-            heap.retainValue(raised);
-            join.raised = raised;
-        },
-        .contract, .out_of_memory => {},
-    };
-    switch (decision.command.next) {
-        .request => |index| requestTaskJoin(self, index, decision.command.cancel_from),
-        .finish => try finishTaskJoin(self),
-    }
-}
-
-fn requestTaskJoin(self: *Machine, index: u32, cancel_from: ?u32) void {
-    const join = self.unit.taskJoin().?;
-    heap.retainValue(join.tasks);
-    self.unit.installParkRequest(.{ .join = .{
-        .tasks = join.tasks,
-        .index = index,
-        .cancel_from = cancel_from,
-    } });
-}
-
-fn finishTaskJoin(self: *Machine) MachineError!void {
-    var join = self.unit.takeTaskJoin().?;
-    const summary = join.policy.complete;
-    if (summary.failure) |failure| switch (failure) {
-        .raised => {
-            const raised = join.raised.?;
-            join.raised = null;
-            beginTaskJoinTeardown(self.unit, join, null, .continue_evaluation);
-            return self.raiseOwned(raised);
-        },
-        .contract => |index| {
-            beginTaskJoinTeardown(self.unit, join, null, .continue_evaluation);
-            return self.failAtIndex(
-                .contract,
-                "@each child must leave exactly one result",
-                index,
-            );
-        },
-        .out_of_memory => {
-            beginTaskJoinTeardown(self.unit, join, null, .out_of_memory);
-            return;
-        },
-    };
-    std.debug.assert(summary.successes == join.results.len());
-    const state = self.unit.allocator.create(JoinMaterializeDriver) catch {
-        beginTaskJoinTeardown(self.unit, join, null, .out_of_memory);
-        return;
-    };
-    state.* = .{
-        .join = join,
-        .materializer = list.ValueMaterializer.init(
-            self.unit.allocator,
-            join.results.values(),
-        ),
-    };
-    self.adoptDriver(state);
-}
-
-const JoinMaterializeDriver = struct {
-    pub const address_stable_driver = {};
-    pub const ownership: heap.DriverOwnership = .self_owned;
-    join: ?TaskJoinState,
-    materializer: list.ValueMaterializer,
-
-    fn beginTeardown(
-        self: *JoinMaterializeDriver,
-        evaluator: *Machine,
-        extra: ?Value,
-        disposition: TaskJoinCleanupDisposition,
-    ) void {
-        const partial = self.materializer.takePartial();
-        std.debug.assert(extra == null or partial == null);
-        beginTaskJoinTeardown(
-            evaluator.unit,
-            self.join.?,
-            extra orelse partial,
-            disposition,
-        );
-        self.join = null;
-    }
-
-    pub fn advance(
-        evaluator: *Machine,
-        self: *JoinMaterializeDriver,
-    ) MachineError!WorkProgress {
-        evaluator.pollKernel() catch |err| {
-            self.beginTeardown(evaluator, null, .continue_evaluation);
-            return err;
-        };
-        const materialized = self.materializer.advance(evaluator.workBudget()) catch {
-            self.beginTeardown(evaluator, null, .out_of_memory);
-            return .completed;
-        };
-        return switch (materialized) {
-            // Cancellation must enter through the teardown transfer above,
-            // rather than the dispatcher's cancellable progress charge.
-            .pending => .{ .yielded = .settle },
-            .complete => |result| completed: {
-                self.beginTeardown(evaluator, null, .continue_evaluation);
-                break :completed .{ .output = result };
-            },
-        };
-    }
-
-    pub fn deinit(
-        self: *JoinMaterializeDriver,
-        releases: *heap.ReleaseDomain,
-        _: std.mem.Allocator,
-    ) void {
-        self.materializer.retire(releases);
-        std.debug.assert(self.join == null);
-    }
-};
-
-fn abandonTaskJoin(self: *Machine) void {
-    const join = self.unit.takeTaskJoin() orelse return;
-    beginTaskJoinTeardown(self.unit, join, null, .continue_evaluation);
-}
-fn beginTaskJoinTeardown(
-    unit: *Unit,
-    join: TaskJoinState,
-    extra: ?Value,
-    disposition: TaskJoinCleanupDisposition,
-) void {
-    unit.installTaskJoinCleanup(.init(.init(join, extra), disposition));
-}
 fn poll(self: *Machine) MachineError!void {
     self.unit.fuel -= 1;
 }
@@ -9071,6 +8599,7 @@ fn scheduleWord(
             .registration_provenance = registration_provenance,
         },
         .traced_word = word,
+        .body_owner = word,
         .effect_tail = effect_tail,
         .application_tail = application_tail,
     };
@@ -9359,13 +8888,7 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         .state = .init(.{ .capture = .{
             .image = .init(image.move()),
             .remaining = observed,
-            .completion = if (owned.registration) |symbol|
-                .{ .named = .{
-                    .cursor = .init(symbol),
-                    .provenance = owned.provenance,
-                } }
-            else
-                .value,
+            .provenance = owned.provenance,
         } }),
     };
     self.adoptDriver(driver);
@@ -9543,9 +9066,7 @@ fn finishStateApplication(self: *Machine, boundary: Boundary) MachineError!void 
     });
 }
 
-/// The registry-mutation half of module publication, reached either by
-/// `register` on a value or by a `@defm` boundary that has just finished
-/// constructing one. Both spellings therefore share one publication protocol.
+/// The registry-mutation half of `register`, the one publication protocol.
 fn advanceRegistration(
     evaluator: *Machine,
     cursor: *modules.Registry.RegistrationCursor,
@@ -9635,10 +9156,9 @@ const SeedMaterializer = struct {
 const ConstructionTarget = union(enum) {
     /// `@attempt`: a failure boundary in the invoker's scope.
     attempt,
-    /// `@module`/`@defm`: the candidate image and the name it registers under.
+    /// `@module`: the candidate image and its constructing site's provenance.
     image: struct {
         candidate: modules.OwnedImage,
-        registration: ?u32,
         provenance: modules.RegistrationProvenance,
     },
 
@@ -9739,10 +9259,8 @@ const ConstructionDriver = struct {
                         try evaluator.openAttempt(body);
                     },
                     .image => |*owned| {
-                        const registration = owned.registration;
                         try evaluator.openImageBoundary(
                             &owned.candidate,
-                            registration,
                             owned.provenance,
                             self.word,
                             body,
@@ -9805,8 +9323,7 @@ const ModuleRegisterDriver = struct {
 };
 
 /// Finishes one construction boundary: capture the residual stack as the
-/// image's template, freeze the image, then either register it under the name
-/// the boundary carried or hand it to the program as a value.
+/// image's template, freeze the image, and hand it to the program as a value.
 const ModuleCompletionDriver = struct {
     pub const address_stable_driver = {};
     state: heap.Owned(State),
@@ -9817,24 +9334,12 @@ const ModuleCompletionDriver = struct {
             /// Construction-stack values still to move into the image
             /// template, counted from the top of the residual window down.
             remaining: usize,
-            completion: union(enum) {
-                value,
-                named: struct {
-                    cursor: intern.ModuleNameCursor,
-                    provenance: modules.RegistrationProvenance,
-                },
-            },
-        },
-        value: heap.Owned(modules.SealedImage),
-        validate: struct {
-            sealed: heap.Owned(modules.SealedImage),
-            cursor: intern.ModuleNameCursor,
+            /// The constructing site's. Embedded source registers its images
+            /// with `register`, so the seal records their recognition while
+            /// they are still values.
             provenance: modules.RegistrationProvenance,
         },
-        publish: struct {
-            sealed: heap.Owned(modules.SealedImage),
-            cursor: heap.Owned(modules.Registry.RegistrationCursor),
-        },
+        value: heap.Owned(modules.SealedImage),
 
         pub fn deinit(
             self: *State,
@@ -9844,11 +9349,6 @@ const ModuleCompletionDriver = struct {
             switch (self.*) {
                 .capture => |*capture| capture.image.deinit(releases, storage_allocator),
                 .value => |*sealed| sealed.deinit(releases, storage_allocator),
-                .validate => |*validate| validate.sealed.deinit(releases, storage_allocator),
-                .publish => |*publish| {
-                    publish.cursor.deinit(releases, storage_allocator);
-                    publish.sealed.deinit(releases, storage_allocator);
-                },
             }
             self.* = undefined;
         }
@@ -9867,48 +9367,17 @@ const ModuleCompletionDriver = struct {
                     );
                     continue;
                 }
-                const completion = capture.completion;
-                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(evaluator.moduleRecognition(switch (completion) {
-                    .named => |named| named.provenance,
-                    .value => .ordinary,
-                })));
+                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(
+                    evaluator.moduleRecognition(capture.provenance),
+                ));
                 capture.image.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                switch (completion) {
-                    .value => self.state.borrowMut().* = .{ .value = .init(sealed.take()) },
-                    .named => |validation| self.state.borrowMut().* = .{ .validate = .{
-                        .sealed = .init(sealed.take()),
-                        .cursor = validation.cursor,
-                        .provenance = validation.provenance,
-                    } },
-                }
+                self.state.borrowMut().* = .{ .value = .init(sealed.take()) };
             },
             .value => |*sealed| {
                 const item = try sealed.borrowMut().intoValue(evaluator.unit.allocator);
                 sealed.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 return .{ .output = item };
             },
-            .validate => |*validate| switch (validate.cursor.advance()) {
-                .pending => {},
-                .complete => |maybe_name| {
-                    const name = maybe_name orelse return evaluator.fail(
-                        .domain,
-                        "@defm requires a valid module name",
-                    );
-                    const provenance = validate.provenance;
-                    try evaluator.refuseReservedModule(name, provenance);
-                    const registration = evaluator.publicationRegistry(name, provenance).registrationCursor(
-                        validate.sealed.borrow().ref(),
-                        name,
-                        provenance,
-                        &evaluator.unit.turn_authority,
-                    );
-                    self.state.borrowMut().* = .{ .publish = .{
-                        .sealed = .init(validate.sealed.take()),
-                        .cursor = .init(registration),
-                    } };
-                },
-            },
-            .publish => |*publish| return advanceRegistration(evaluator, publish.cursor.borrowMut()),
         };
         return .stepped;
     }

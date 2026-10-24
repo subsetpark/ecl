@@ -300,6 +300,12 @@
 (: "Bind a private module value as a constant word; an optional annotation may precede the value.")
 (swap literal swap defp) 'setp def
 
+### def unset
+(name -- :
+ "Remove a binding from the current scope; do nothing when that scope does not bind the name. An
+  exact alias of `undef`.")
+(undef) 'unset def
+
 ### def assert
 (bool error -- :
  "Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds.")
@@ -393,3 +399,49 @@
 ### def converge
 (value quotation -- value : "Return the last value before unary iteration converges or cycles.")
 (converges last) 'converge def
+
+### def @defm
+(values body module-name -- :
+ "Evaluate a module body with an explicit initial stack and register the resulting module value
+  under a name; exactly `@module` followed by `register`.")
+(|values body module-name| values body @module module-name register) '@defm def
+
+### def @each
+(sequence values quotation -- results :
+ "Apply a quotation concurrently in one fresh unit per element, with the element deepest beneath the
+  shared values, and return one result per element in input order. Results are joined in order; the
+  first failure cancels every later task, waits for them to finish, and is raised.")
+(|sequence values quotation|
+ quotation type 'list match? not
+ ({'kind 'type 'msg "@each expected a quotation/list" 'word '@each} raise)
+ when
+ values type 'list match? not ({'kind 'type 'msg "@each expected a list" 'word '@each} raise) when
+ sequence type 'list match? not ({'kind 'type 'msg "@each expected a list" 'word '@each} raise) when
+ sequence values quotation pair
+ (|element seeds| element seeds first cons seeds 1 at @spawn)
+ partial each
+ dup
+ (|failure entry tasks|
+  failure entry tasks failure len 0 >
+  (|failure entry tasks| entry 1 at task.await pop failure)
+  (|failure entry tasks|
+   tasks entry first 1 +
+   entry first entry 1 at task.await
+   dup 'ok dict.has?
+   (|index outcome|
+    index outcome 'ok at len 1 =
+    (pop [])
+    (|index|
+     'kind 'contract 'msg "@each child must leave exactly one result" 'word '@each
+     'data 'index index pair dict.from-flat 8 pack dict.from-flat wrap)
+    if)
+   (|index outcome| outcome 'err at wrap)
+   if
+   dup len 0 >
+   (|tasks start failure| tasks start drop (task.cancel) for failure)
+   (|tasks start failure| failure)
+   if)
+  if)
+ partial
+ over dup len range swap (pair) zip-with [] rolldown fold
+ dup len 0 > (nip first raise) (pop (task.await 'ok at first) each) if) '@each def

@@ -16,7 +16,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@spawn", .primitive = spawn, .effect = "values quotation -- task", .doc = "Run a quotation with an explicit initial stack concurrently in a fresh child unit." },
         .{ .name = "@give", .primitive = give, .effect = "ports values quotation -- task", .doc = "Run a quotation concurrently in a fresh child unit that owns the given ports: the child unit closes them when it ends, and the calling unit no longer does." },
-        .{ .name = "@each", .primitive = parEach, .effect = "sequence values quotation -- results", .doc = "Apply a quotation with an explicit shared initial stack concurrently in one fresh unit per element and return one result per element in input order." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -366,59 +365,6 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
         .milliseconds = milliseconds,
     } });
 }
-
-fn parEach(evaluator: *Machine) MachineError!void {
-    try evaluator.require(3);
-    var input = try evaluator.popUnitInput();
-    defer input.deinit(evaluator.releaseDomain());
-    var sequence = try evaluator.popList();
-    defer sequence.deinit();
-
-    const count: usize = @intCast(sequence.borrow().list.length());
-    var task_buffer = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
-    defer task_buffer.deinit();
-    try evaluator.startDriver(ParEachDriver{
-        .sequence = .init(sequence.take()),
-        .input = .init(input.move()),
-        .tasks = .init(task_buffer.take()),
-    });
-}
-
-const ParEachDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    sequence: heap.Owned(Value),
-    /// One moved decoded owner supplies the body and shared seeds to
-    /// every immediate child launch; children retain their own references
-    /// before this fan-out state advances.
-    input: heap.Owned(machine.OwnedUnitInput),
-    tasks: heap.Owned(heap.OwnedValueBuffer),
-    index: usize = 0,
-
-    pub fn advance(
-        evaluator: *Machine,
-        self: *ParEachDriver,
-    ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const count: usize = @intCast(self.sequence.borrow().list.length());
-        const end = self.index + evaluator.workBudget().take(count - self.index);
-        while (self.index != end) : (self.index += 1) {
-            const element = list.atUnchecked(self.sequence.borrow(), self.index);
-            const borrowed = self.input.borrow().borrow();
-            const task = try spawnTask(
-                evaluator,
-                borrowed.quotation(),
-                borrowed.initialStack(element),
-                .each,
-            );
-            self.tasks.borrowMut().appendOwned(task);
-        }
-        if (self.index != count) return .stepped;
-        const task_values = self.tasks.borrowMut().takeList();
-        evaluator.retireDriver(self);
-        try evaluator.beginTaskJoinOwned(task_values);
-        return .detached;
-    }
-};
 
 const AwaitAnyDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;

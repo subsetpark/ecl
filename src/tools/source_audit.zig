@@ -47,7 +47,7 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     embeddedGroup(true, &.{
-        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
+        "machine.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -72,8 +72,8 @@ const source_groups = [_]SourceGroup{
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     embeddedGroup(true, &.{
-        "stdlib/dict.zig",  "stdlib/rand.zig", "stdlib/json.zig",   "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/time.zig", "stdlib/source.zig", "stdlib/host.zig",
+        "stdlib/dict.zig",  "stdlib/rand.zig",   "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
+        "stdlib/clock.zig", "stdlib/source.zig", "stdlib/host.zig",
     }),
     embeddedGroup(true, &.{
         "combinators.zig",
@@ -1244,12 +1244,12 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@each", "@module", "@defm", "@test" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@module", "@test" };
 
 /// First-party ECL words that apply their quotation in a fresh unit and are
 /// therefore marked too. Each must be defined by some first-party source;
 /// the compiler cannot see that either, so the audit checks both directions.
-const source_unit_constructors = [_][]const u8{"@serve"};
+const source_unit_constructors = [_][]const u8{ "@defm", "@each", "@serve" };
 
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from
@@ -1266,6 +1266,7 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/table.ecl"),
     @embedFile("../stdlib/rng.ecl"),
     @embedFile("../stdlib/path.ecl"),
+    @embedFile("../stdlib/time.ecl"),
     @embedFile("../stdlib/http/server.ecl"),
     @embedFile("../stdlib/http/request.ecl"),
     @embedFile("../stdlib/http/response.ecl"),
