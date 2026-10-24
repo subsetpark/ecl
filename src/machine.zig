@@ -1746,7 +1746,7 @@ comptime {
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
-pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan };
+pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp };
 /// A call of a trusted source word whose body was recognized when its
 /// environment froze. Only whether this call's operands admit the entry is left.
 pub const TrustedCall = struct {

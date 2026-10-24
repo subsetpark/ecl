@@ -32,6 +32,10 @@ test "every idiom entry hits across values empties spines floats and failures" {
                 else => false,
             })
                 compareTotalFailure(source)
+            else if (entry.operation == .direct and entry.operation.direct == .lex_cmp_with)
+                // Its hits are its comparator's, which the `lex_cmp` entry
+                // counts.
+                compareModesExactly(source)
             else
                 compareExecutions(source);
             comparison catch |err| {
@@ -180,7 +184,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                     @tagName(entry.context),
                 },
             ),
-            .direct => unreachable,
+            .direct, .lex_cmp => unreachable,
         },
         .length => std.fmt.allocPrint(allocator, "{s} ({s}) each", .{ switch (variant) {
             .atom => "[[] [1] [2 3]]",
@@ -194,6 +198,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             "{s} ({s}) each",
             .{ matchInput(variant), phrase },
         ),
+        .cmp => std.fmt.allocPrint(allocator, "{s} ({s}) lex-cmp-with", .{ lexInput(variant), phrase }),
         .direct => unreachable,
     };
 }
@@ -214,7 +219,7 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                 entry.source_word.?,
             },
         ),
-        .match, .length => unreachable,
+        .match, .length, .cmp => unreachable,
         .direct => |operation| direct: {
             var result: std.ArrayList(u8) = .empty;
             errdefer result.deinit(allocator);
@@ -428,6 +433,13 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .failure => "[1 'bad] (+)",
         },
         .sort => sortInput(variant),
+        .lex_cmp_with => switch (variant) {
+            .atom => "[1 2 3] [1 2 4] (cmp)",
+            .empty => "[] [1] (cmp)",
+            .spine => "[[1] [2]] [[1] [2]] (pop pop 0)",
+            .float => "[1 2] [1.0 0.5] (cmp)",
+            .failure => "[1 2] \"ab\" (cmp)",
+        },
         // The shape follows the list; `empty` is the single-row case, which
         // the fold returns unchanged.
         .reshape_sum, .reshape_product => switch (variant) {
@@ -484,6 +496,19 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .float => "[0.1] \"{}\"",
             .failure => "[] \"{\"",
         },
+    };
+}
+
+/// Two lists for `lex-cmp-with`: typed lists, whose search stops at a
+/// difference or a fault.
+fn lexInput(variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom => "[1 2 3] [1 2 4]",
+        .empty => "[] [1 2]",
+        .spine => "\"abc\" \"abd\"",
+        .float => "[1 2 3] [1.0 2.5 1.0]",
+        // Chars and numbers fault at their first pair, as `cmp` does.
+        .failure => "\"ab\" [1 2]",
     };
 }
 
@@ -687,6 +712,9 @@ test "idioms: a caller's quotation is recognized inside prelude definitions" {
     try expectHits("[1 2 3 4 5 6] (3 mod) filter", 2);
     // The shadowed `neg` declines; only the fold is recognized.
     try expectHits("(pop 1) 'neg def [5 6] (neg) all?", 1);
+    // `lex-cmp`'s own `(cmp)`, offered by `lex-cmp-with`.
+    try expectHits("[1 2 3] [1 2 4] lex-cmp", 1);
+    try expectHits("\"abc\" \"abd\" lex-cmp", 1);
 }
 
 test "idioms: scalar programs preserve generic behavior" {

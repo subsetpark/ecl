@@ -17,9 +17,27 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
-pub const Context = enum { direct, each, zip_with, fold, fold1, scan };
+pub const Context = enum {
+    direct,
+    each,
+    zip_with,
+    fold,
+    fold1,
+    scan,
+    lex_cmp,
+
+    /// A recognized application stands for a trusted definition's call, so
+    /// its fault traces through that definition.
+    fn tracesDefinition(self: Context) bool {
+        return switch (self) {
+            .direct, .fold1, .lex_cmp => true,
+            else => false,
+        };
+    }
+};
 pub const DirectOp = enum {
     sort,
+    lex_cmp_with,
     first,
     find,
     rest,
@@ -38,7 +56,18 @@ pub const DirectOp = enum {
         return switch (self) {
             .str_format => "str.format",
             .reshape_sum, .reshape_product => "reshape",
+            .lex_cmp_with => "lex-cmp-with",
             else => @tagName(self),
+        };
+    }
+
+    /// The combinator a trusted definition stands for, whose caller's
+    /// quotation it offers with its body as the fallback.
+    pub fn offers(self: DirectOp) ?machine.IdiomRequest {
+        return switch (self) {
+            .fold1 => .fold1,
+            .lex_cmp_with => .lex_cmp,
+            else => null,
         };
     }
 };
@@ -47,6 +76,8 @@ pub const Operation = union(enum) {
     binary: numeric.BinaryOp,
     match,
     length,
+    /// `cmp` as a lexicographic comparator.
+    cmp,
     direct: DirectOp,
 
     pub fn spelling(self: Operation) []const u8 {
@@ -55,6 +86,7 @@ pub const Operation = union(enum) {
             .binary => |operation| operation.spelling(),
             .match => "match?",
             .length => "len",
+            .cmp => "cmp",
             .direct => |operation| operation.spelling(),
         };
     }
@@ -92,6 +124,8 @@ pub const RegistryEntry = struct {
     /// Words that must follow the head in the code it runs from, checked
     /// where it runs. The phrase consumes them when it applies.
     following: []const ExpectedWord = &.{},
+    /// The combinator a trusted definition stands for, from its operation.
+    offers: ?machine.IdiomRequest = null,
 };
 
 const operation_pattern = [_]PatternAtom{.operation};
@@ -215,13 +249,24 @@ const fold1_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "rolldown", .binding = .source } },
     .{ .word = .{ .spelling = "fold" } },
 };
+/// `lex-cmp-with`: `0 0 (test) (step) while (finish) call`.
+const lex_cmp_with_pattern = [_]PatternAtom{
+    .{ .int = 0 },
+    .{ .int = 0 },
+    .literal,
+    .literal,
+    .{ .word = .{ .spelling = "while" } },
+    .literal,
+    .{ .word = .{ .spelling = "call" } },
+};
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 2]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 4]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
-    index += 1;
+    entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
+    index += 2;
     for (std.meta.tags(numeric.UnaryOp)) |operation| {
         entries[index] = .{
             .context = .each,
@@ -299,6 +344,7 @@ pub const registry = blk: {
     }
     for ([_]struct { operation: DirectOp, pattern: []const PatternAtom }{
         .{ .operation = .fold1, .pattern = &fold1_pattern },
+        .{ .operation = .lex_cmp_with, .pattern = &lex_cmp_with_pattern },
         .{ .operation = .sort, .pattern = &sort_pattern },
         .{ .operation = .first, .pattern = &first_pattern },
         .{ .operation = .find, .pattern = &find_pattern },
@@ -334,6 +380,9 @@ pub const registry = blk: {
         index += 1;
     }
     std.debug.assert(index == entries.len);
+    for (&entries) |*entry| {
+        if (entry.operation == .direct) entry.offers = entry.operation.direct.offers();
+    }
     break :blk entries;
 };
 
@@ -635,6 +684,7 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
     const context: Context, const depth: usize = switch (request) {
         .each => .{ .each, 2 },
         .fold1 => .{ .fold1, 2 },
+        .lex_cmp => .{ .lex_cmp, 3 },
         .zip_with => .{ .zip_with, 3 },
         .fold => .{ .fold, 3 },
         .scan => .{ .scan, 3 },
@@ -652,7 +702,7 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
 pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError!machine.TrustedOutcome {
     if (evaluator.unit.inherited.idiom_mode == .generic_only) return .declined;
     const entry = registry[call.idiom.entry];
-    if (entry.operation == .direct and entry.operation.direct == .fold1) return .{ .offered = .fold1 };
+    if (entry.offers) |request| return .{ .offered = request };
     if (!canApplyEntry(evaluator, entry)) return .declined;
     try applySelected(evaluator, .{ .list = call.body }, entry, .{
         .constant = call.idiom.constant,
@@ -804,7 +854,7 @@ fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usi
 }
 
 fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, capture: Capture) MachineError!void {
-    const direct_parent = if (selected.context == .direct or selected.context == .fold1)
+    const direct_parent = if (selected.context.tracesDefinition())
         evaluator.commitDirectIdiomTrace()
     else
         null;
@@ -1037,13 +1087,15 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .fold, .scan => stack[stack.len - 3] == .list,
             .fold1 => stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0,
             .direct => evaluator.available() >= 2,
+            .lex_cmp => false,
         },
         .length, .match => entry.context == .each and stack[stack.len - 2] == .list,
+        .cmp => order.lexCompareCandidate(stack[stack.len - 3], stack[stack.len - 2]),
         // `dip` is the one direct entry that needs a second input, and a
         // non-list top must reach the generic composition so the type error
         // still names the word that observed it.
         .direct => |operation| switch (operation) {
-            .fold1 => unreachable, // Offers its quotation instead; see `applyTrusted`.
+            .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
             .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
@@ -1074,16 +1126,18 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
             .zip_with => applyZipWith(evaluator, operation),
             .fold, .fold1, .scan => applyReduction(evaluator, operation, entry.context),
             .direct => binaryPrimitive(operation)(evaluator),
+            .lex_cmp => unreachable,
         },
         .match => applyMatchEach(evaluator, capture.constant.?),
         .length => applyLengthEach(evaluator),
+        .cmp => applyLexCompare(evaluator),
         .direct => |operation| applyDirect(evaluator, operation),
     };
 }
 
 fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
     try switch (operation) {
-        .fold1 => unreachable, // Offers its quotation instead; see `applyTrusted`.
+        .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
         .sort => order.sortForIdiom(evaluator),
         .first => sequence.firstForIdiom(evaluator),
         .find => applyMatchFind(evaluator),
@@ -1107,6 +1161,12 @@ fn applyTotal(evaluator: *Machine, operation: numeric.BinaryOp, empty: i64) Mach
         return evaluator.pushOwned(.{ .int = empty });
     }
     return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
+}
+
+/// `(cmp) lex-cmp-with`: the comparator is consumed with the lists.
+fn applyLexCompare(evaluator: *Machine) MachineError!void {
+    popRelease(evaluator, 1);
+    return order.lexCompare(evaluator);
 }
 
 fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!void {
@@ -1667,7 +1727,7 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
-        .match, .length => null,
+        .match, .length, .cmp => null,
         .direct => null,
     };
 }
@@ -1682,7 +1742,7 @@ fn operationBinding(operation: Operation) BindingKind {
             .mod, .ne, .le, .ge, .and_word, .or_word => .source,
             else => .builtin,
         },
-        .match, .length => .builtin,
+        .match, .length, .cmp => .builtin,
         .direct => .source,
     };
 }
