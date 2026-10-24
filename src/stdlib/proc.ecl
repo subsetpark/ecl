@@ -112,7 +112,7 @@
  (spec process stdout-limit stderr-limit -- result :
   "Concurrently feed, drain, and observe process exit.")
  (|spec process stdout-limit stderr-limit|
-  process proc.core.stdin port.endpoint spec 'stdin [] at-or pair
+  process proc.core.stdin port.endpoint spec 'stdin [] dict.get pair
   (dup len 0 > (over swap port.write) (pop) if port.finish {}) @spawn
   process proc.core.stdout port.endpoint stdout-limit pair
   (capture 'stdout swap pair dict.from-flat) @spawn
@@ -130,8 +130,8 @@
  (spec process limits -- result : "Resolve capture defaults from the registered policy operation.")
  (|spec process limits|
   spec process
-  spec 'stdout-limit limits 'stdout at at-or limits 'stdout at checked-limit
-  spec 'stderr-limit limits 'stderr at at-or limits 'stderr at checked-limit
+  spec 'stdout-limit limits 'stdout at dict.get limits 'stdout at checked-limit
+  spec 'stderr-limit limits 'stderr at dict.get limits 'stderr at checked-limit
   run-streams) 'run-limited defp
 
  ### defp run-body
@@ -164,10 +164,10 @@
    failures are 'io. Run-only fields are rejected by proc.spawn.")
  (dup type 'dict match? 'type error.new "expected a process specification dict" error.with-message
   assert
-  dup 'stdin [] at-or dup type 'list match? 'type error.new "expected a stdin byte list"
+  dup 'stdin [] dict.get dup type 'list match? 'type error.new "expected a stdin byte list"
   error.with-message assert
   (byte?) all? 'domain error.new "expected stdin bytes in 0...255" error.with-message assert
-  dup 'timeout-ms 0 at-or nonnegative pop
+  dup 'timeout-ms 0 dict.get nonnegative pop
   dup wrap (run-body) @spawn dup rolldown pair (run-wait) @attempt
   swap dup task.cancel task.await pop
   result.or-raise first

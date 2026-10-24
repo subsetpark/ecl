@@ -227,6 +227,21 @@ test "sequence: raze and cat specialize their outputs" {
     );
 }
 
+test "sequence: cons cat and raze widen within one class" {
+    // Bytes join ints and narrower characters join wider ones in one typed
+    // result; across classes the result is generic. `cons` onto an empty list
+    // makes the atom's own leaf, so a string stays a string.
+    try helper.expectStack(
+        "\\a \"bc\" cons \\λ \"bc\" cons \"ab\" \"😀\" cat \"λc\" \"ab\" cat " ++
+            "[1 2] [300 400] cat 300 [1 2] cons 5 () cons \\a \"\" cons",
+        "\"abc\" \"λbc\" \"ab😀\" \"λcab\" [1 2 300 400] [300 1 2] [5] \"a\"",
+    );
+    try helper.expectStack(
+        "(\"ab\" \"λc\") raze ([1 2] [300]) raze ([1 2] [1.5]) raze 1.5 [1 2] cons [1 2] 3 append",
+        "\"abλc\" [1 2 300] (1 2 1.5) (1.5 1 2) [1 2 3]",
+    );
+}
+
 test "sequence: flip and reshape obey rectangular row-major semantics" {
     try helper.expectStack(
         "([\"a\" \"long\"] [\"bc\" \"d\"]) flip " ++

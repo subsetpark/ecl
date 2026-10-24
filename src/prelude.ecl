@@ -240,11 +240,6 @@
 (ds l -- x : "Look up each key or index in a path from left to right.")
 (swap (at) fold) 'at-path def
 
-### def at-or
-(collection key default -- value :
- "Look up a key or index, returning a fallback value when lookup fails.")
-(|d k default| d k default d k dict.has? (pop at) (nip nip) if) 'at-or def
-
 ### def filter
 (sequence predicate -- matches :
  "Apply a predicate to every element, retaining each element as many times as its returned

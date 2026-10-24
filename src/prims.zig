@@ -13,6 +13,7 @@ const machine = @import("machine.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
+const sequence = @import("kernel_sequence.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const task_prims = @import("task_prims.zig");
 const test_prims = @import("test_prims.zig");
@@ -140,64 +141,8 @@ const StackSnapshotDriver = struct {
 };
 
 fn cons(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var collection = try evaluator.popList();
-    defer collection.deinit();
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    const count: usize = @intCast(collection.borrow().list.length());
-    const values = try evaluator.allocator().alloc(Value, count + 1);
-    try evaluator.startDriver(ConcatDriver.init(
-        evaluator.allocator(),
-        item.take(),
-        collection.take(),
-        values,
-    ));
+    return sequence.consForPrims(evaluator);
 }
-
-const ConcatDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    left: heap.Owned(Value),
-    right: heap.Owned(Value),
-    values: heap.Owned([]Value),
-    index: usize = 0,
-    materializing: bool = false,
-    materializer: heap.Owned(list.ValueMaterializer),
-
-    fn init(
-        allocator: std.mem.Allocator,
-        left: Value,
-        right: Value,
-        values: []Value,
-    ) ConcatDriver {
-        return .{
-            .left = .init(left),
-            .right = .init(right),
-            .values = .init(values),
-            .materializer = .init(.init(allocator, values)),
-        };
-    }
-
-    pub fn advance(evaluator: *Machine, self: *ConcatDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        const values = self.values.borrow();
-        while (!self.materializing and self.index != values.len and work.spend()) {
-            values[self.index] = if (self.index == 0)
-                self.left.borrow()
-            else
-                list.atUnchecked(self.right.borrow(), self.index - 1);
-            self.index += 1;
-        }
-        if (self.index != values.len) return .stepped;
-        self.materializing = true;
-        if (work.exhausted()) return .stepped;
-        return switch (try self.materializer.borrowMut().advance(work)) {
-            .pending => .stepped,
-            .complete => |result| .{ .output = result },
-        };
-    }
-};
 fn match(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();

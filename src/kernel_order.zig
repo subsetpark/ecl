@@ -56,7 +56,9 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     defer left.deinit();
     const left_item = left.borrow();
     const right_item = right.borrow();
-    if (try startTypedStringCompare(evaluator, &left, &right)) return;
+    // Two strings order as their chars do, which is `lex-cmp`'s order.
+    if (left_item.isString() and right_item.isString() and lexCompareCandidate(left_item, right_item))
+        return startLexCompare(evaluator, &left, &right);
     // Only two strings have anything to walk. Every other pair is one call to
     // `compareScalars` -- the cursor's own answer for them -- which a driver and
     // a scheduler turn were being allocated to reach.
@@ -86,12 +88,26 @@ const order_leaf_kinds = [_]value.HeapKind{
     .leaf_symbol,
 };
 
-const char_leaf_kinds = [_]value.HeapKind{ .leaf_char1, .leaf_char2, .leaf_char4 };
+/// The classes `cmp` orders within: numbers with numbers, chars with chars.
+const LexClass = enum { number, char };
 
-/// Codepoint-lexicographic comparison of two strings: a search over their
+fn lexClass(comptime kind: value.HeapKind) ?LexClass {
+    return switch (kind) {
+        .leaf_u8, .leaf_i64, .leaf_f64 => .number,
+        .leaf_char1, .leaf_char2, .leaf_char4 => .char,
+        else => null,
+    };
+}
+
+const lex_leaf_kinds = [_]value.HeapKind{ .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 };
+
+/// Lexicographic order of two typed lists under `cmp`: a search over their
 /// shared prefix that stops at the first difference, and otherwise orders by
-/// length.
-fn StringCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: value.HeapKind) type {
+/// length. A pair `cmp` cannot order faults there, as `cmp` would: lists of
+/// two classes fault at their first pair.
+fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: value.HeapKind) type {
+    const comparable = lexClass(left_kind).? == lexClass(right_kind).?;
+    const floating = left_kind == .leaf_f64 or right_kind == .leaf_f64;
     return struct {
         pub const arity = 2;
         pub const Params = void;
@@ -107,18 +123,34 @@ fn StringCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: 
             return .{ .ordering = std.math.order(operands[0].list.length(), operands[1].list.length()) };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            if (comptime !comparable) return incomparable(context);
             const left = heap.leafElements(left_kind, operands[0].list);
             const right = heap.leafElements(right_kind, operands[1].list);
             for (range.start..range.end) |index| {
-                const left_char: u32 = left[index];
-                const right_char: u32 = right[index];
-                if (left_char != right_char) {
-                    output.ordering = std.math.order(left_char, right_char);
+                const ordering = if (comptime floating)
+                    equal.compareScalars(scalar(left_kind, left[index]), scalar(right_kind, right[index])) catch
+                        return incomparable(context)
+                else
+                    std.math.order(widen(left[index]), widen(right[index]));
+                if (ordering != .eq) {
+                    output.ordering = ordering;
                     output.decided = true;
                     return;
                 }
             }
+        }
+
+        fn incomparable(context: support.Context) MachineError {
+            return context.evaluator.typeError("two comparable numbers, chars, or strings");
+        }
+
+        fn widen(element: anytype) if (lexClass(left_kind) == .char) u32 else i64 {
+            return element;
+        }
+
+        fn scalar(comptime kind: value.HeapKind, element: anytype) Value {
+            return if (kind == .leaf_f64) .{ .float = element } else .{ .int = element };
         }
 
         pub fn done(output: *const Output) bool {
@@ -135,17 +167,41 @@ fn StringCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: 
     };
 }
 
-fn startTypedStringCompare(evaluator: *Machine, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!bool {
-    if (!left.borrow().isString() or !right.borrow().isString()) return false;
-    const left_kind = left.borrow().list.kind();
-    const right_kind = right.borrow().list.kind();
-    const shared: usize = @intCast(@min(left.borrow().list.length(), right.borrow().list.length()));
-    inline for (char_leaf_kinds) |candidate_left| {
-        if (left_kind == candidate_left) inline for (char_leaf_kinds) |candidate_right| {
-            if (right_kind == candidate_right) {
-                try support.Kernel(StringCompareKernel(candidate_left, candidate_right)).run(evaluator, .{ left, right }, {}, shared);
-                return true;
-            }
+/// Whether `lexCompare` orders these two values without a comparator call:
+/// two lists whose shared prefix is empty, or two typed number or char lists.
+pub fn lexCompareCandidate(left: Value, right: Value) bool {
+    if (left != .list or right != .list) return false;
+    if (@min(left.list.length(), right.list.length()) == 0) return true;
+    return lexKind(left.list.kind()) and lexKind(right.list.kind());
+}
+
+fn lexKind(kind: value.HeapKind) bool {
+    return std.mem.findScalar(value.HeapKind, &lex_leaf_kinds, kind) != null;
+}
+
+/// `( left right -- ordering )`: `(cmp) lex-cmp-with` over two lists that
+/// `lexCompareCandidate` admits.
+pub fn lexCompare(evaluator: *Machine) MachineError!void {
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
+    return startLexCompare(evaluator, &left, &right);
+}
+
+fn startLexCompare(evaluator: *Machine, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
+    const left_list = left.borrow().list;
+    const right_list = right.borrow().list;
+    const shared: usize = @intCast(@min(left_list.length(), right_list.length()));
+    if (shared == 0) return evaluator.pushOwned(.{ .int = switch (std.math.order(left_list.length(), right_list.length())) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    } });
+    inline for (lex_leaf_kinds) |candidate_left| {
+        if (left_list.kind() == candidate_left) inline for (lex_leaf_kinds) |candidate_right| {
+            if (right_list.kind() == candidate_right)
+                return support.Kernel(LexCompareKernel(candidate_left, candidate_right)).run(evaluator, .{ left, right }, {}, shared);
         };
     }
     unreachable;

@@ -17,9 +17,27 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
-pub const Context = enum { direct, each, zip_with, fold, fold1, scan };
+pub const Context = enum {
+    direct,
+    each,
+    zip_with,
+    fold,
+    fold1,
+    scan,
+    lex_cmp,
+
+    /// A recognized application stands for a trusted definition's call, so
+    /// its fault traces through that definition.
+    fn tracesDefinition(self: Context) bool {
+        return switch (self) {
+            .direct, .fold1, .lex_cmp => true,
+            else => false,
+        };
+    }
+};
 pub const DirectOp = enum {
     sort,
+    lex_cmp_with,
     first,
     find,
     rest,
@@ -38,7 +56,18 @@ pub const DirectOp = enum {
         return switch (self) {
             .str_format => "str.format",
             .reshape_sum, .reshape_product => "reshape",
+            .lex_cmp_with => "lex-cmp-with",
             else => @tagName(self),
+        };
+    }
+
+    /// The combinator a trusted definition stands for, whose caller's
+    /// quotation it offers with its body as the fallback.
+    pub fn offers(self: DirectOp) ?machine.IdiomRequest {
+        return switch (self) {
+            .fold1 => .fold1,
+            .lex_cmp_with => .lex_cmp,
+            else => null,
         };
     }
 };
@@ -47,6 +76,8 @@ pub const Operation = union(enum) {
     binary: numeric.BinaryOp,
     match,
     length,
+    /// `cmp` as a lexicographic comparator.
+    cmp,
     direct: DirectOp,
 
     pub fn spelling(self: Operation) []const u8 {
@@ -55,6 +86,7 @@ pub const Operation = union(enum) {
             .binary => |operation| operation.spelling(),
             .match => "match?",
             .length => "len",
+            .cmp => "cmp",
             .direct => |operation| operation.spelling(),
         };
     }
@@ -92,6 +124,8 @@ pub const RegistryEntry = struct {
     /// Words that must follow the head in the code it runs from, checked
     /// where it runs. The phrase consumes them when it applies.
     following: []const ExpectedWord = &.{},
+    /// The combinator a trusted definition stands for, from its operation.
+    offers: ?machine.IdiomRequest = null,
 };
 
 const operation_pattern = [_]PatternAtom{.operation};
@@ -215,13 +249,24 @@ const fold1_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "rolldown", .binding = .source } },
     .{ .word = .{ .spelling = "fold" } },
 };
+/// `lex-cmp-with`: `0 0 (test) (step) while (finish) call`.
+const lex_cmp_with_pattern = [_]PatternAtom{
+    .{ .int = 0 },
+    .{ .int = 0 },
+    .literal,
+    .literal,
+    .{ .word = .{ .spelling = "while" } },
+    .literal,
+    .{ .word = .{ .spelling = "call" } },
+};
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 2]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 4]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
-    index += 1;
+    entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
+    index += 2;
     for (std.meta.tags(numeric.UnaryOp)) |operation| {
         entries[index] = .{
             .context = .each,
@@ -299,6 +344,7 @@ pub const registry = blk: {
     }
     for ([_]struct { operation: DirectOp, pattern: []const PatternAtom }{
         .{ .operation = .fold1, .pattern = &fold1_pattern },
+        .{ .operation = .lex_cmp_with, .pattern = &lex_cmp_with_pattern },
         .{ .operation = .sort, .pattern = &sort_pattern },
         .{ .operation = .first, .pattern = &first_pattern },
         .{ .operation = .find, .pattern = &find_pattern },
@@ -334,6 +380,9 @@ pub const registry = blk: {
         index += 1;
     }
     std.debug.assert(index == entries.len);
+    for (&entries) |*entry| {
+        if (entry.operation == .direct) entry.offers = entry.operation.direct.offers();
+    }
     break :blk entries;
 };
 
@@ -449,7 +498,7 @@ const LiveWord = struct {
 /// hold is resolved in full. Either way it must be the trusted binding
 /// expected, from a slot on core or the running root.
 fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind) error{OutOfMemory}!?LiveWord {
-    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    if (!plainWord(word.slot)) return null;
     const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
     if (cached.origin != .core and cached.origin != .standard_library) return null;
     const spec = cached.spec;
@@ -470,7 +519,7 @@ fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind)
 /// execution reports any error. A frozen binding outlives the call that
 /// matched it, so what it returns stays valid for the call.
 fn liveWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
-    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    if (!plainWord(word.slot)) return null;
     // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
     var resolved: machine.Resolution = undefined;
     if (!evaluator.peekSlotWord(word, &resolved)) return null;
@@ -572,7 +621,9 @@ pub fn tryApply(
     if (evaluator.unit.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
     const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
-    if (entries.len == 0) return decline.run(evaluator);
+    // An `each` or `zip-with` quotation of any length may be a scalar program.
+    if (entries.len == 0 and candidate.context != .each and candidate.context != .zip_with)
+        return decline.run(evaluator);
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
     const planned = try evaluator.planEntry();
@@ -633,6 +684,7 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
     const context: Context, const depth: usize = switch (request) {
         .each => .{ .each, 2 },
         .fold1 => .{ .fold1, 2 },
+        .lex_cmp => .{ .lex_cmp, 3 },
         .zip_with => .{ .zip_with, 3 },
         .fold => .{ .fold, 3 },
         .scan => .{ .scan, 3 },
@@ -650,7 +702,7 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
 pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError!machine.TrustedOutcome {
     if (evaluator.unit.inherited.idiom_mode == .generic_only) return .declined;
     const entry = registry[call.idiom.entry];
-    if (entry.operation == .direct and entry.operation.direct == .fold1) return .{ .offered = .fold1 };
+    if (entry.offers) |request| return .{ .offered = request };
     if (!canApplyEntry(evaluator, entry)) return .declined;
     try applySelected(evaluator, .{ .list = call.body }, entry, .{
         .constant = call.idiom.constant,
@@ -802,7 +854,7 @@ fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usi
 }
 
 fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, capture: Capture) MachineError!void {
-    const direct_parent = if (selected.context == .direct or selected.context == .fold1)
+    const direct_parent = if (selected.context.tracesDefinition())
         evaluator.commitDirectIdiomTrace()
     else
         null;
@@ -840,6 +892,10 @@ fn matchOffered(
             break index;
         }
     } else null;
+    if (matched == null) if (try tryProgram(evaluator, candidate)) {
+        decline.discard(evaluator);
+        return;
+    };
     if (planned) |entry| if (entry.offered == null) {
         heap.retainValue(candidate.phrase);
         entry.offered = .{
@@ -852,6 +908,154 @@ fn matchOffered(
         };
     };
     return applyMatched(evaluator, candidate.phrase, matched, capture, decline);
+}
+
+/// The numeric operations a scalar program may contain, by spelling, each with
+/// the binding its registry entries expect.
+const program_operations = blk: {
+    var found: [unary_count + binary_count]struct { spelling: []const u8, operation: Operation } = undefined;
+    var index: usize = 0;
+    for (std.meta.tags(numeric.UnaryOp)) |operation| {
+        found[index] = .{ .spelling = operation.spelling(), .operation = .{ .unary = operation } };
+        index += 1;
+    }
+    for (std.meta.tags(numeric.BinaryOp)) |operation| {
+        found[index] = .{ .spelling = operation.spelling(), .operation = .{ .binary = operation } };
+        index += 1;
+    }
+    break :blk found;
+};
+
+/// The stack words a scalar program may contain: they only move values, so
+/// they compile to register choices.
+const ProgramStackWord = enum { dup, swap, pop, over };
+
+/// Compiles a quotation applied to `inputs` values into a scalar program, or
+/// returns null when it is not one: every form must be a numeric constant, a
+/// stack word, or a numeric operation, each word bound as its registry entry
+/// expects, and the quotation must leave exactly one value from its inputs.
+/// Operations keep their order, including one whose result is later popped,
+/// so a fault happens where the quotation's own would.
+fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarProgram {
+    const Program = numeric.ScalarProgram;
+    var program: Program = .{ .inputs = inputs, .registers = inputs };
+    // SAFETY: only the first `depth` entries are read.
+    var stack: [Program.max_registers]Program.Register = undefined;
+    var depth: usize = inputs;
+    for (0..inputs) |input| stack[input] = @intCast(input);
+    const length: usize = @intCast(phrase.list.length());
+    for (0..length) |position| {
+        const form = list.atUnchecked(phrase, position);
+        if (form != .word) {
+            if (form != .int and form != .float) return null;
+            if (program.registers == Program.max_registers or depth == stack.len) return null;
+            program.constants[program.constant_count] = .{ .register = program.registers, .value = form };
+            program.constant_count += 1;
+            stack[depth] = program.registers;
+            depth += 1;
+            program.registers += 1;
+            continue;
+        }
+        const word = form.word;
+        const spelling = intern.get(word.name);
+        if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
+            const binding: BindingKind = if (stack_word == .over) .source else .builtin;
+            if (!guard.matches(word, binding, null, .trusted)) return null;
+            switch (stack_word) {
+                .dup => {
+                    if (depth < 1 or depth == stack.len) return null;
+                    stack[depth] = stack[depth - 1];
+                    depth += 1;
+                },
+                .swap => {
+                    if (depth < 2) return null;
+                    std.mem.swap(Program.Register, &stack[depth - 1], &stack[depth - 2]);
+                },
+                .pop => {
+                    if (depth < 1) return null;
+                    depth -= 1;
+                },
+                .over => {
+                    if (depth < 2 or depth == stack.len) return null;
+                    stack[depth] = stack[depth - 2];
+                    depth += 1;
+                },
+            }
+            continue;
+        }
+        const operation = for (program_operations) |candidate| {
+            if (std.mem.eql(u8, candidate.spelling, spelling)) break candidate.operation;
+        } else return null;
+        const binding = operationBinding(operation);
+        const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
+        if (!guard.matches(word, binding, primitive, .trusted)) return null;
+        if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
+        program.instructions[program.len] = switch (operation) {
+            .unary => |selected| unary: {
+                if (depth < 1) return null;
+                depth -= 1;
+                break :unary .{
+                    .operation = .{ .unary = selected },
+                    .left = stack[depth],
+                    .destination = program.registers,
+                    .word = word.name,
+                    .index = @intCast(position),
+                    .defined = binding == .source,
+                };
+            },
+            .binary => |selected| binary: {
+                if (depth < 2) return null;
+                depth -= 2;
+                break :binary .{
+                    .operation = .{ .binary = selected },
+                    .left = stack[depth],
+                    .right = stack[depth + 1],
+                    .destination = program.registers,
+                    .word = word.name,
+                    .index = @intCast(position),
+                    .defined = binding == .source,
+                };
+            },
+            else => unreachable,
+        };
+        program.len += 1;
+        stack[depth] = program.registers;
+        depth += 1;
+        program.registers += 1;
+    }
+    // A quotation that computes nothing is no faster compiled.
+    if (depth != 1 or program.len == 0) return null;
+    program.result = stack[0];
+    return program;
+}
+
+/// Offers an unmatched `each` or `zip-with` quotation as a scalar program.
+/// It is compiled afresh on every call rather than planned: the plan holds a
+/// registry entry, and a program is not one.
+fn tryProgram(evaluator: *Machine, candidate: Candidate) MachineError!bool {
+    const inputs: u8 = switch (candidate.context) {
+        .each => 1,
+        .zip_with => 2,
+        else => return false,
+    };
+    const program = compileProgram(.{ .live = evaluator }, candidate.phrase, inputs) orelse return false;
+    const stack = evaluator.unit.stack.items;
+    if (!numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1])) return false;
+    evaluator.unit.idiom_hits += 1;
+    var quotation = try evaluator.popValue();
+    defer quotation.deinit();
+    if (inputs == 1) {
+        var input = try evaluator.popValue();
+        defer input.deinit();
+        try numeric.startProgramEach(evaluator, &input, &quotation, program);
+        return true;
+    }
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
+    try numeric.startProgramZip(evaluator, &left, &right, &quotation, program);
+    return true;
 }
 
 /// Applies a matched entry when this application's operands admit it, and
@@ -883,13 +1087,15 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .fold, .scan => stack[stack.len - 3] == .list,
             .fold1 => stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0,
             .direct => evaluator.available() >= 2,
+            .lex_cmp => false,
         },
         .length, .match => entry.context == .each and stack[stack.len - 2] == .list,
+        .cmp => order.lexCompareCandidate(stack[stack.len - 3], stack[stack.len - 2]),
         // `dip` is the one direct entry that needs a second input, and a
         // non-list top must reach the generic composition so the type error
         // still names the word that observed it.
         .direct => |operation| switch (operation) {
-            .fold1 => unreachable, // Offers its quotation instead; see `applyTrusted`.
+            .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
             .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
@@ -920,16 +1126,18 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
             .zip_with => applyZipWith(evaluator, operation),
             .fold, .fold1, .scan => applyReduction(evaluator, operation, entry.context),
             .direct => binaryPrimitive(operation)(evaluator),
+            .lex_cmp => unreachable,
         },
         .match => applyMatchEach(evaluator, capture.constant.?),
         .length => applyLengthEach(evaluator),
+        .cmp => applyLexCompare(evaluator),
         .direct => |operation| applyDirect(evaluator, operation),
     };
 }
 
 fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
     try switch (operation) {
-        .fold1 => unreachable, // Offers its quotation instead; see `applyTrusted`.
+        .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
         .sort => order.sortForIdiom(evaluator),
         .first => sequence.firstForIdiom(evaluator),
         .find => applyMatchFind(evaluator),
@@ -953,6 +1161,12 @@ fn applyTotal(evaluator: *Machine, operation: numeric.BinaryOp, empty: i64) Mach
         return evaluator.pushOwned(.{ .int = empty });
     }
     return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
+}
+
+/// `(cmp) lex-cmp-with`: the comparator is consumed with the lists.
+fn applyLexCompare(evaluator: *Machine) MachineError!void {
+    popRelease(evaluator, 1);
+    return order.lexCompare(evaluator);
 }
 
 fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!void {
@@ -1513,7 +1727,7 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
-        .match, .length => null,
+        .match, .length, .cmp => null,
         .direct => null,
     };
 }
@@ -1528,7 +1742,7 @@ fn operationBinding(operation: Operation) BindingKind {
             .mod, .ne, .le, .ge, .and_word, .or_word => .source,
             else => .builtin,
         },
-        .match, .length => .builtin,
+        .match, .length, .cmp => .builtin,
         .direct => .source,
     };
 }
@@ -1545,22 +1759,11 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
     };
 }
 
-/// Whether a word linked to `slot_id` resolves where the phrase runs: its
-/// slot belongs to core or to the running activation's root. An unlinked word
-/// links where it runs, so it matches by definition. Recognition then reads
-/// the slot, so a root that has shadowed the name still declines.
-fn slotOnRunningRoot(evaluator: *machine.Machine, slot_id: u32) bool {
-    const root_id: u32 = switch (env.wordTarget(slot_id)) {
-        .unlinked => return true,
-        .local => return false,
-        .image => |scope| @backingInt(scope),
-        .slot => |id| root: {
-            const slot = evaluator.unit.environment.slot(id) orelse return false;
-            const root = slot.rootCell();
-            if (root.core) return true;
-            break :root @backingInt(root.id);
-        },
-    };
-    const running = evaluator.unit.current.?.resolutionScope() orelse return false;
-    return @backingInt(running.cellId()) == root_id;
+/// Whether a word can be a pattern word: anything but a local. A plain word
+/// resolves through its own slot wherever it runs, and recognition reads that
+/// same slot, so a word written in another root, as a caller's quotation run
+/// inside a prelude definition is, matches exactly when dispatch would run the
+/// expected binding; a root that shadows the name, or has retired, declines.
+fn plainWord(slot_id: u32) bool {
+    return env.wordTarget(slot_id) != .local;
 }
