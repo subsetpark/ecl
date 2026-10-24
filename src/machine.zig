@@ -5105,9 +5105,12 @@ pub const Machine = struct {
     pub fn setActiveWord(self: *Machine, word: intern.TraceWord) void {
         self.unit.active_word = word;
     }
+    /// Places the pending failure at `code[index]`, the position the failing
+    /// path ran in place of, unless an inner position already holds it.
     pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
-        if (self.unit.pendingFailureOptional()) |pending|
+        if (self.unit.pendingFailureOptional()) |pending| if (pending.site == null) {
             pending.site = .{ .token = .{ .code = code, .index = index } };
+        };
     }
     pub fn setWorkDriverSite(self: *Machine, code: *Header, index: u32) void {
         if (self.unit.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
@@ -6449,6 +6452,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.driver_resumes += 1;
                     const progress = driver.advance(self) catch |err| {
+                        // `setFailureSite`'s rule, spelled inline: calling it
+                        // here grew the run loop's frame (fannkuch +0.08%).
                         if (err == error.Ecl and self.unit.pendingFailure().site == null) {
                             if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
                         }
@@ -6565,12 +6570,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
         dispatch(self, form) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
-                if (self.unit.pendingFailure().site == null and self.unit.current != null) {
-                    self.unit.pendingFailure().site = .{ .token = .{
-                        .code = self.unit.current.?.code,
-                        .index = self.unit.active_index,
-                    } };
-                }
+                if (self.unit.current) |failed| self.setFailureSite(failed.code, self.unit.active_index);
                 try startFailure(self);
                 continue;
             },
