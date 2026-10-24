@@ -886,6 +886,12 @@ fn closeArbiter(owning: *ModuleSlot) void {
     owning.phase.store(.closing, .release);
 }
 
+/// A retired slot that no turn or lease can still reach.
+fn slotQuiescent(slot: *ModuleSlot) bool {
+    return slot.phase.load(.acquire) == .retired and
+        arbiterQuiescent(slot) and slot.lease_refs.load(.acquire) == 0;
+}
+
 fn registrationSlot(registration: *const Registration) ?*ModuleSlot {
     return switch (registration.slot_lifetime) {
         .provisional => null,
@@ -2666,17 +2672,23 @@ pub const Registry = enum(usize) {
         const ready = backing.slots_ready orelse return null;
         backing.slots_ready = ready.next_recycled;
         ready.next_recycled = null;
-        std.debug.assert(self.slotReusableLocked(ready));
+        std.debug.assert(slotQuiescent(ready));
         return ready;
     }
 
+    /// Admission to the ready list. A retired slot may still be reached
+    /// through a directory older than the current one, so admission also
+    /// waits until no previous directory is alive. Once admitted, nothing can
+    /// lease the slot again: every directory published since was built
+    /// without it. Readiness is therefore re-checked against the slot alone,
+    /// since a later publication with lingering readers says nothing about
+    /// this slot.
     fn slotReusableLocked(self: *Registry, slot: *ModuleSlot) bool {
         const backing = self.privateState();
         if (backing.directories.currentOwned()) |current| {
             if (current.previous != null) return false;
         }
-        return slot.phase.load(.acquire) == .retired and
-            arbiterQuiescent(slot) and slot.lease_refs.load(.acquire) == 0;
+        return slotQuiescent(slot);
     }
 
     fn enqueuePendingSlotLocked(self: *Registry, slot: *ModuleSlot) void {
@@ -3382,7 +3394,10 @@ pub const Registry = enum(usize) {
                     const prior = slot.publisher.currentOwned().?;
                     std.debug.assert(slot.phase.load(.acquire) == .live);
                     retired.* = .{ .generation = prior };
-                    registration.generation = prior.generation + 1;
+                    // Read before publishing: once the turn is released, a
+                    // waiting removal may retire this registration.
+                    const generation = prior.generation + 1;
+                    registration.generation = generation;
                     registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
                     slot.publisher.publish(self.takeRegistration());
                     const release_prior = slot.publisher.quiescent();
@@ -3395,7 +3410,7 @@ pub const Registry = enum(usize) {
                     }
                     if (self.barrier_turn) |*turn| turn.release();
                     self.state = .complete;
-                    break :result .{ .complete = registration.generation };
+                    break :result .{ .complete = generation };
                 },
                 .commit_new => |build| result: {
                     const slot = build.slot.get();
