@@ -621,8 +621,8 @@ pub fn tryApply(
     if (evaluator.unit.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
     const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
-    // An `each` or `zip-with` quotation of any length may be a scalar program.
-    if (entries.len == 0 and candidate.context != .each and candidate.context != .zip_with)
+    // A quotation of any length may be a scalar program.
+    if (entries.len == 0 and candidate.context == .lex_cmp)
         return decline.run(evaluator);
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
@@ -704,7 +704,7 @@ pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError
     const entry = registry[call.idiom.entry];
     if (entry.offers) |request| return .{ .offered = request };
     if (!canApplyEntry(evaluator, entry)) return .declined;
-    try applySelected(evaluator, .{ .list = call.body }, entry, .{
+    try applyRecognized(evaluator, .{ .list = call.body }, .{ .entry = entry }, .{
         .constant = call.idiom.constant,
         .active_word = call.idiom.active_word,
         .active_index = call.idiom.active_index,
@@ -802,23 +802,17 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         defer shape_owner.deinit();
         var input = try evaluator.popValue();
         defer input.deinit();
-        numeric.foldColumns(
+        const attribution: Attribution = .{
+            .site = if (idiom.active_index) |site| .{ .code = owner.body.?, .index = site } else null,
+            .parent = owner.trace_word,
+        };
+        try attribution.started(evaluator, numeric.foldColumns(
             evaluator,
             columnOperation(entry.operation.direct),
             &input,
             shape.rows,
             shape.columns,
-        ) catch |err| {
-            if (err == error.Ecl) {
-                if (idiom.active_index) |site| evaluator.setFailureSite(owner.body.?, site);
-                evaluator.setFailureTraceParent(owner.trace_word);
-            }
-            return err;
-        };
-        // A fold past the turn continues as a driver; its fault is reported
-        // the same way.
-        if (idiom.active_index) |site| evaluator.setWorkDriverSite(owner.body.?, site);
-        evaluator.setWorkDriverTraceParent(owner.trace_word);
+        ));
         return .applied;
     }
     return .declined;
@@ -853,24 +847,54 @@ fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usi
     return .{ .rows = rows, .columns = columns };
 }
 
-fn applySelected(evaluator: *Machine, phrase: Value, selected: RegistryEntry, capture: Capture) MachineError!void {
-    const direct_parent = if (selected.context.tracesDefinition())
-        evaluator.commitDirectIdiomTrace()
-    else
-        null;
-    evaluator.unit.idiom_hits += 1;
-    applyEntry(evaluator, selected, capture) catch |err| {
-        if (err == error.Ecl) {
-            if (capture.active_index) |index| evaluator.setFailureSite(phrase.list, index);
-            if (direct_parent) |word| evaluator.setFailureTraceParent(word);
-        }
-        return err;
-    };
-    if (capture.active_index) |index| {
-        evaluator.setWorkDriverSite(phrase.list, index);
+/// What a recognized application runs: a registry entry, or a quotation
+/// compiled to a scalar program.
+const Recognized = union(enum) {
+    entry: RegistryEntry,
+    program: *const OfferedProgram,
+
+    fn context(self: Recognized) Context {
+        return switch (self) {
+            inline else => |selected| selected.context,
+        };
     }
-    if (direct_parent) |word| evaluator.setWorkDriverTraceParent(word);
+};
+
+/// Every recognized application starts here: it counts the hit and reports
+/// a fault or a continuing driver at the phrase's active word, through the
+/// trusted definition it stands for.
+inline fn applyRecognized(evaluator: *Machine, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
+    evaluator.unit.idiom_hits += 1;
+    const attribution: Attribution = .{
+        .site = if (capture.active_index) |index| .{ .code = phrase.list, .index = index } else null,
+        .parent = if (recognized.context().tracesDefinition()) evaluator.commitDirectIdiomTrace() else null,
+    };
+    return attribution.started(evaluator, switch (recognized) {
+        .entry => |entry| applyEntry(evaluator, entry, capture),
+        .program => |program| startProgram(evaluator, program),
+    });
 }
+
+/// Where a recognized application's fault, or the driver it leaves, is
+/// reported: the source position it ran in place of, and the definition
+/// whose frame it elides. A fault that already names an inner definition
+/// keeps it.
+const Attribution = struct {
+    site: ?struct { code: *value.ListHandle, index: u32 } = null,
+    parent: ?intern.TraceWord = null,
+
+    fn started(self: Attribution, evaluator: *Machine, result: MachineError!void) MachineError!void {
+        result catch |err| {
+            if (err == error.Ecl) {
+                if (self.site) |site| evaluator.setFailureSite(site.code, site.index);
+                if (self.parent) |word| evaluator.setFailureTraceParent(word);
+            }
+            return err;
+        };
+        if (self.site) |site| evaluator.setWorkDriverSite(site.code, site.index);
+        if (self.parent) |word| evaluator.setWorkDriverTraceParent(word);
+    }
+};
 
 /// Matches an offered phrase against the registry entries of its context and
 /// length, records the match in the running finite iteration's plan when it
@@ -892,9 +916,9 @@ fn matchOffered(
             break index;
         }
     } else null;
-    if (matched == null) if (try tryProgram(evaluator, candidate)) {
+    if (matched == null) if (recognizeProgram(evaluator, candidate)) |program| {
         decline.discard(evaluator);
-        return;
+        return applyRecognized(evaluator, candidate.phrase, .{ .program = &program }, .{});
     };
     if (planned) |entry| if (entry.offered == null) {
         heap.retainValue(candidate.phrase);
@@ -1029,33 +1053,60 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
     return program;
 }
 
-/// Offers an unmatched `each` or `zip-with` quotation as a scalar program.
-/// It is compiled afresh on every call rather than planned: the plan holds a
+const OfferedProgram = struct {
+    context: Context,
+    compiled: numeric.ScalarProgram,
+};
+
+/// Offers an unmatched `each`, `zip-with`, `fold`, `fold1`, or `scan`
+/// quotation as a scalar program over the operands it will see. It is
+/// compiled afresh on every call rather than planned: the plan holds a
 /// registry entry, and a program is not one.
-fn tryProgram(evaluator: *Machine, candidate: Candidate) MachineError!bool {
+fn recognizeProgram(evaluator: *Machine, candidate: Candidate) ?OfferedProgram {
+    const stack = evaluator.unit.stack.items;
     const inputs: u8 = switch (candidate.context) {
         .each => 1,
-        .zip_with => 2,
-        else => return false,
+        .zip_with, .fold, .fold1, .scan => 2,
+        else => return null,
     };
-    const program = compileProgram(.{ .live = evaluator }, candidate.phrase, inputs) orelse return false;
-    const stack = evaluator.unit.stack.items;
-    if (!numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1])) return false;
-    evaluator.unit.idiom_hits += 1;
+    const compiled = compileProgram(.{ .live = evaluator }, candidate.phrase, inputs) orelse return null;
+    const admitted = switch (candidate.context) {
+        .each, .zip_with => numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1]),
+        // The accumulator is input 0 and the element input 1.
+        .fold, .scan => numeric.programReduceCandidate(stack[stack.len - 3], stack[stack.len - 2]),
+        .fold1 => numeric.programReduceCandidate(stack[stack.len - 2], null),
+        else => unreachable,
+    };
+    if (!admitted) return null;
+    return .{ .context = candidate.context, .compiled = compiled };
+}
+
+fn startProgram(evaluator: *Machine, program: *const OfferedProgram) MachineError!void {
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
-    if (inputs == 1) {
-        var input = try evaluator.popValue();
-        defer input.deinit();
-        try numeric.startProgramEach(evaluator, &input, &quotation, program);
-        return true;
+    switch (program.context) {
+        .each => {
+            var input = try evaluator.popValue();
+            defer input.deinit();
+            return numeric.startProgramEach(evaluator, &input, &quotation, program.compiled);
+        },
+        .zip_with => {
+            var right = try evaluator.popValue();
+            defer right.deinit();
+            var left = try evaluator.popValue();
+            defer left.deinit();
+            return numeric.startProgramZip(evaluator, &left, &right, &quotation, program.compiled);
+        },
+        .fold, .fold1, .scan => {
+            var initial: ?heap.OwnedValue = if (program.context == .fold1) null else try evaluator.popValue();
+            defer if (initial) |*owned| owned.deinit();
+            var input = try evaluator.popValue();
+            defer input.deinit();
+            const seed: ?Value = if (initial) |*owned| owned.borrow() else null;
+            return numeric.startProgramReduce(evaluator, &input, &quotation, program.compiled, seed, program.context == .scan);
+        },
+        else => unreachable,
     }
-    var right = try evaluator.popValue();
-    defer right.deinit();
-    var left = try evaluator.popValue();
-    defer left.deinit();
-    try numeric.startProgramZip(evaluator, &left, &right, &quotation, program);
-    return true;
 }
 
 /// Applies a matched entry when this application's operands admit it, and
@@ -1065,7 +1116,7 @@ fn applyMatched(evaluator: *Machine, phrase: Value, matched: ?u16, capture: Capt
     const selected = registry[index];
     if (!canApplyEntry(evaluator, selected)) return decline.run(evaluator);
     decline.discard(evaluator);
-    return applySelected(evaluator, phrase, selected, capture);
+    return applyRecognized(evaluator, phrase, .{ .entry = selected }, capture);
 }
 
 fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {

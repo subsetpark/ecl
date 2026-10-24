@@ -5174,8 +5174,12 @@ pub const Machine = struct {
         if (self.unit.current.?.nextIndex() >= self.unit.current.?.code.length()) self.unit.current.?.traced_word = no_word;
         return parent;
     }
+    /// Traces the pending failure through `word`, the definition whose frame
+    /// the failing path elided, unless an inner one already holds it.
     pub fn setFailureTraceParent(self: *Machine, word: intern.TraceWord) void {
-        if (self.unit.pendingFailureOptional()) |pending| pending.trace_parent = word;
+        if (self.unit.pendingFailureOptional()) |pending| if (pending.trace_parent == null) {
+            pending.trace_parent = word;
+        };
     }
     pub fn takePrimitiveFailure(self: *Machine) ?EclErr {
         if (!self.unit.hasPendingFailure()) return null;
@@ -6448,9 +6452,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
                         if (err == error.Ecl and self.unit.pendingFailure().site == null) {
                             if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
                         }
-                        if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
-                            self.unit.pendingFailure().trace_parent = driver.trace_parent;
-                        }
+                        if (err == error.Ecl) if (driver.trace_parent) |word| self.setFailureTraceParent(word);
                         clearWorkDriver(self.unit);
                         switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,

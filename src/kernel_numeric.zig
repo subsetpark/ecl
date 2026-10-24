@@ -3066,6 +3066,122 @@ fn ProgramKernel(comptime inputs: usize) type {
     };
 }
 
+/// Whether a two-input program can reduce `input` from `initial`, or from the
+/// list's own first element when `initial` is null: a numeric leaf and a
+/// numeric seed.
+pub fn programReduceCandidate(input: Value, initial: ?Value) bool {
+    if (!programOperand(input) or input != .list) return false;
+    const seed = initial orelse return true;
+    return seed == .int or seed == .float;
+}
+
+/// Runs a two-input program as `fold`, `fold1`, or `scan` runs its
+/// quotation: input 0 is the accumulator and input 1 the element, strictly in
+/// order, so the first fault is the one the generic route meets. A null
+/// `initial` starts from the list's first element.
+pub fn startProgramReduce(
+    evaluator: *Machine,
+    input: *heap.OwnedValue,
+    phrase: *heap.OwnedValue,
+    program: ScalarProgram,
+    initial: ?Value,
+    scan: bool,
+) MachineError!void {
+    const count: usize = @intCast(input.borrow().list.length());
+    const start: usize = if (initial == null) 1 else 0;
+    const params: ProgramReduceParams = .{
+        .program = try ownProgram(evaluator, program),
+        .initial = initial orelse programElement(input.borrow(), 0),
+        .start = start,
+    };
+    if (scan) return support.Kernel(ProgramReduceKernel(true)).run(evaluator, .{ input, phrase }, params, count - start);
+    return support.Kernel(ProgramReduceKernel(false)).run(evaluator, .{ input, phrase }, params, count - start);
+}
+
+const ProgramReduceParams = struct {
+    /// Owned by the output from `prepare` on.
+    program: *ScalarProgram,
+    initial: Value,
+    /// The list index position 0 reads.
+    start: usize,
+};
+
+fn ProgramReduceKernel(comptime scan: bool) type {
+    return struct {
+        pub const arity = 2;
+        pub const Params = ProgramReduceParams;
+        pub const Output = struct {
+            allocator: std.mem.Allocator,
+            program: *ScalarProgram,
+            accumulator: Value,
+            /// `scan`'s accumulators, then the list they become.
+            results: []Value,
+            profile: list.ListProfile = .{},
+            builder: ?heap.AnyListBuilder = null,
+
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                if (self.builder) |*builder| builder.retirePartial(releases);
+                self.release();
+            }
+
+            fn release(self: *Output) void {
+                self.allocator.free(self.results);
+                self.allocator.destroy(self.program);
+            }
+        };
+
+        pub fn prepare(evaluator: *Machine, _: [2]Value, params: Params, length: usize) error{OutOfMemory}!Output {
+            const allocator = evaluator.allocator();
+            errdefer allocator.destroy(params.program);
+            return .{
+                .allocator = allocator,
+                .program = params.program,
+                .accumulator = params.initial,
+                .results = try allocator.alloc(Value, if (scan) length else 0),
+            };
+        }
+
+        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+            if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
+            const program = output.program;
+            // SAFETY: `load` fills the constants; inputs and results are
+            // written before they are read.
+            var registers: [ScalarProgram.max_registers]Value = undefined;
+            program.load(&registers);
+            var accumulator = output.accumulator;
+            var profile = output.profile;
+            defer output.accumulator = accumulator;
+            for (range.start..range.end) |position| {
+                registers[0] = accumulator;
+                registers[1] = programElement(operands[0], params.start + position);
+                var failed: u8 = 0;
+                accumulator = program.run(&registers, &failed) catch |fault|
+                    return failProgram(context.evaluator, operands[1], program.instructions[failed], fault);
+                if (scan) {
+                    output.results[position] = accumulator;
+                    profile = profile.add(accumulator);
+                }
+            }
+            output.profile = profile;
+        }
+
+        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+            if (!scan or output.builder != null) return null;
+            const length = output.results.len;
+            output.builder = try heap.AnyListBuilder.init(output.allocator, output.profile.heapKind(), length, length);
+            // A generic list counts the values written into it.
+            if (output.builder.? == .generic) output.builder.?.generic.setLen(0);
+            return length;
+        }
+
+        pub fn finish(output: *Output) Value {
+            const result: Value = if (scan) .{ .list = output.builder.?.finish() } else output.accumulator;
+            output.release();
+            return result;
+        }
+    };
+}
+
 /// Reports a program's fault as the faulting word would: that word active, at
 /// its position in the quotation, with the shared scalar diagnostic.
 fn failProgram(evaluator: *Machine, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {

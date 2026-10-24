@@ -774,6 +774,50 @@ test "idioms: scalar programs preserve generic behavior" {
     try expectHits("(pop 9) 'dup def [1 2] (dup *) each", 0);
 }
 
+test "idioms: reductions run two-input programs in order" {
+    // `fold`, `fold1`, and `scan` feed the accumulator as the program's first
+    // input and the element as its second, one element at a time.
+    const sources = [_][]const u8{
+        "[1 2 3 4] 0 (-) fold",
+        "[1 2 3 4] 0 (-) scan",
+        "[1 2 3 4] (-) fold1",
+        "[1 2 3 4] 0 (swap 2 * +) scan",
+        "[1 2 3 4] 1 (over + *) scan",
+        "[1 2 3] 0.5 (+ 2 *) fold",
+        "[1.5 2.5] 1 (* 1 +) scan",
+        "[1 2 3] 0 (swap pop) scan",
+        "[255 1] 0 (+ 1 +) scan",
+        "[1 2.5 3] 0 (max) scan",
+        "[5] (-) fold1",
+        "[] 0 (2 * +) fold",
+        "[] 0 (2 * +) scan",
+        // A builtin's fault traces through the definition that offered the
+        // quotation.
+        "[1 2 0 4] 100 (swap div) scan",
+        "[1 2 0 4] (div) fold1",
+        "[1 2 0 4] (1 + div) fold1",
+        "[9223372036854775807 1] 0 (+ 1 +) fold",
+        // Shapes a program declines.
+        "[1 2 3] 'a (2 * +) fold",
+        "[1 'b 3] 0 (2 * +) fold",
+        "[1 2 3] [0] (2 * +) fold",
+        "\"abc\" 0 (2 * +) fold",
+        "(pop 1) 'neg def [1 2 3] 0 (neg +) scan",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("reduction-program differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    // A prelude operation names itself, as it does under `each`.
+    try compareModes("[1 2 0 4] (mod) fold1", false);
+    try expectHits("[1 2 3] 0 (dup * +) fold", 1);
+    try expectHits("[1 2 3] 0 (2 * -) scan", 1);
+    try expectHits("[1 2 3] (-) fold1", 1);
+    try expectHits("(pop 1) 'neg def [1 2 3] 0 (neg +) scan", 0);
+}
+
 test "idioms: scalar programs run a block at a time and fault as per element" {
     // Over numeric leaves a program runs each instruction across a block of
     // elements through the typed kernels. A block that faults is replayed
