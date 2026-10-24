@@ -746,6 +746,40 @@ test "idioms: scalar programs preserve generic behavior" {
     try expectHits("(pop 9) 'dup def [1 2] (dup *) each", 0);
 }
 
+test "idioms: scalar programs run a block at a time and fault as per element" {
+    // Over numeric leaves a program runs each instruction across a block of
+    // elements through the typed kernels. A block that faults is replayed
+    // element by element, so when an earlier element faults at a later step
+    // and a later element at an earlier one, the earlier element's fault wins.
+    const sources = [_][]const u8{
+        "1000 range (3 mod 0 =) each",
+        "1000 range 100 mod (2 * 1 +) each",
+        "1000 range 300 mod (1 +) each",
+        "1000 range 0.5 * (2.0 * floor) each",
+        "1000 range 0.5 * (floor 3 mod) each",
+        "1000 range (sqrt floor) each",
+        "1000 range dup (+ 2 *) zip-with",
+        "1000 range 0.5 * 1000 range (* 1 +) zip-with",
+        "7 1000 range (- neg) zip-with",
+        "1000 range (2 3 + *) each",
+        "1000 range 2 mod (not) each",
+        "1000 range 0.5 * 1000 range (max) zip-with",
+        "1000 range (3 mod 0 =) filter",
+        // Faults, in later blocks and in both orders within one block.
+        "1000 range 600 9223372036854775807 put (1 + 2 *) each",
+        "1000 range 600 4611686018427387904 put 601 9223372036854775807 put (2 * 1 +) each",
+        "1000 range 601 4611686018427387904 put 600 9223372036854775807 put (2 * 1 +) each",
+        "1000 range 300 0 put (10 swap div 1 +) each",
+        "1000 range 1.0 * 500 -1.0 put (sqrt 1 +) each",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("block-program differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+}
+
 test "idioms: length each preserves errors dictionaries shadowing and generated quotations" {
     const cases = [_][]const u8{
         "[[] [1] [1 2] \"λ😀\"] (len) each",

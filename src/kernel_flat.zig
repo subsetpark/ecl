@@ -178,6 +178,10 @@ pub const Placement = enum { fresh, over_operands };
 /// for one written over its operands.
 pub const CheckedOutcome = union(enum) { clean, faulted: usize };
 
+// The loop families below are `inline`: a numeric kernel and a scalar
+// program block both run the same instantiation, and each must keep the loop
+// compiled into its own range loop, as it is when it is the only caller.
+
 /// Monomorphic loops whose element types prove that the operation cannot fault.
 pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out: type) type {
     return struct {
@@ -186,7 +190,7 @@ pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out:
         /// leaf x leaf over one range. Both slices are indexed by the absolute
         /// logical position, which is what makes a resumed chunk read the same
         /// elements a fault replay would.
-        pub fn binary(
+        pub inline fn binary(
             comptime body: fn (Left, Right) Out,
             left: []const Left,
             right: []const Right,
@@ -204,7 +208,7 @@ pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out:
 
         /// leaf x scalar. The scalar operand remains one value; the loop reads
         /// it from a register at stride zero without materializing a broadcast.
-        pub fn binaryScalarRight(
+        pub inline fn binaryScalarRight(
             comptime body: fn (Left, Right) Out,
             left: []const Left,
             right: Right,
@@ -222,7 +226,7 @@ pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out:
 
         /// scalar x leaf, the mirror image; operand order is preserved because
         /// the operations are not all commutative.
-        pub fn binaryScalarLeft(
+        pub inline fn binaryScalarLeft(
             comptime body: fn (Left, Right) Out,
             left: Left,
             right: []const Right,
@@ -238,7 +242,7 @@ pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out:
             block.len = range.len();
         }
 
-        pub fn unary(
+        pub inline fn unary(
             comptime body: fn (Left) Out,
             operand: []const Left,
             range: Chunk,
@@ -262,7 +266,7 @@ pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: ty
         pub const Staging = Block(Out);
         const Fault = error{Fault};
 
-        pub fn binary(
+        pub inline fn binary(
             comptime body: fn (Left, Right) Fault!Out,
             left: []const Left,
             right: []const Right,
@@ -279,7 +283,7 @@ pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: ty
             return .clean;
         }
 
-        pub fn binaryScalarRight(
+        pub inline fn binaryScalarRight(
             comptime body: fn (Left, Right) Fault!Out,
             left: []const Left,
             right: Right,
@@ -296,7 +300,7 @@ pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: ty
             return .clean;
         }
 
-        pub fn binaryScalarLeft(
+        pub inline fn binaryScalarLeft(
             comptime body: fn (Left, Right) Fault!Out,
             left: Left,
             right: []const Right,
@@ -313,7 +317,7 @@ pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: ty
             return .clean;
         }
 
-        pub fn unary(
+        pub inline fn unary(
             comptime body: fn (Left) Fault!Out,
             operand: []const Left,
             range: Chunk,
@@ -384,7 +388,7 @@ pub fn VectorFamily(
             scalar: fn (Left, Right) Fault!Out,
         };
 
-        fn storeVector(dest: []Out, offset: usize, values: OutVector) void {
+        inline fn storeVector(dest: []Out, offset: usize, values: OutVector) void {
             dest[offset..][0..lanes].* = values;
         }
 
@@ -445,7 +449,7 @@ pub fn VectorFamily(
             }
         };
 
-        fn infallibleRange(
+        inline fn infallibleRange(
             comptime vector_body: fn (LeftVector, RightVector) OutVector,
             comptime scalar_body: fn (Left, Right) Out,
             source: anytype,
@@ -474,7 +478,7 @@ pub fn VectorFamily(
         /// range and reduces them once, instead of reducing and branching on
         /// every vector. Over its operands, a vector is stored only once known
         /// clean, so a fault leaves the input intact from that vector on.
-        fn checkedRange(
+        inline fn checkedRange(
             comptime placement: Placement,
             comptime body: Checked,
             source: anytype,
@@ -514,7 +518,7 @@ pub fn VectorFamily(
         /// testing every vector cost more than its arithmetic.
         const over_operands_group = 8;
 
-        fn checkedOverOperands(comptime body: Checked, source: anytype, range: Chunk, dest: []Out) CheckedOutcome {
+        inline fn checkedOverOperands(comptime body: Checked, source: anytype, range: Chunk, dest: []Out) CheckedOutcome {
             const group_width = over_operands_group * lanes;
             const groups = range.len() / group_width;
             const vectors = range.len() / lanes;
@@ -555,7 +559,7 @@ pub fn VectorFamily(
             return .clean;
         }
 
-        pub fn binary(
+        pub inline fn binary(
             comptime vector_body: fn (LeftVector, RightVector) OutVector,
             comptime scalar_body: fn (Left, Right) Out,
             left: []const Left,
@@ -567,7 +571,7 @@ pub fn VectorFamily(
             infallibleRange(vector_body, scalar_body, LeafLeaf{ .left = left, .right = right }, range, dest);
         }
 
-        pub fn binaryScalarRight(
+        pub inline fn binaryScalarRight(
             comptime vector_body: fn (LeftVector, RightVector) OutVector,
             comptime scalar_body: fn (Left, Right) Out,
             left: []const Left,
@@ -580,7 +584,7 @@ pub fn VectorFamily(
             infallibleRange(vector_body, scalar_body, source, range, dest);
         }
 
-        pub fn binaryScalarLeft(
+        pub inline fn binaryScalarLeft(
             comptime vector_body: fn (LeftVector, RightVector) OutVector,
             comptime scalar_body: fn (Left, Right) Out,
             left: Left,
@@ -593,7 +597,7 @@ pub fn VectorFamily(
             infallibleRange(vector_body, scalar_body, source, range, dest);
         }
 
-        pub fn checkedBinary(
+        pub inline fn checkedBinary(
             comptime body: Checked,
             placement: Placement,
             left: []const Left,
@@ -608,7 +612,7 @@ pub fn VectorFamily(
             };
         }
 
-        pub fn checkedBinaryScalarRight(
+        pub inline fn checkedBinaryScalarRight(
             comptime body: Checked,
             placement: Placement,
             left: []const Left,
@@ -623,7 +627,7 @@ pub fn VectorFamily(
             };
         }
 
-        pub fn checkedBinaryScalarLeft(
+        pub inline fn checkedBinaryScalarLeft(
             comptime body: Checked,
             placement: Placement,
             left: Left,
@@ -638,7 +642,7 @@ pub fn VectorFamily(
             };
         }
 
-        pub fn unary(
+        pub inline fn unary(
             comptime vector_body: fn (LeftVector) OutVector,
             comptime scalar_body: fn (Left) Out,
             operand: []const Left,
