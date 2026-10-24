@@ -37,7 +37,7 @@
 
  ### defp tag
  (milliseconds -- timestamp : "Tag an int millisecond count as a Unix timestamp.")
- ('unix swap 2 pack dict.from-flat) 'tag defp
+ ('unix swap pair dict.from-flat) 'tag defp
 
  ### defp checked
  (values quotation word -- result :
@@ -278,13 +278,13 @@
  (timestamp milliseconds -- timestamp : "Shift a timestamp by a signed millisecond duration.")
  (|timestamp duration|
   duration 'time.add "a timestamp followed by integer milliseconds" int-arg
-  timestamp 'time.add millis swap 2 pack (+) 'time.add checked tag) 'add def
+  timestamp 'time.add millis swap pair (+) 'time.add checked tag) 'add def
 
  ### def diff
  (later earlier -- milliseconds : "Return later minus earlier in milliseconds.")
  (|later earlier|
   earlier 'time.diff millis
-  later 'time.diff millis swap 2 pack (-) 'time.diff checked) 'diff def
+  later 'time.diff millis swap pair (-) 'time.diff checked) 'diff def
 
  ### def cmp
  (left right -- ordering : "Three-way compare two timestamps as -1, 0, or 1.")
@@ -292,19 +292,19 @@
 
  ### def seconds
  (n -- milliseconds : "Convert whole seconds to milliseconds.")
- ('time.seconds "an integer count" int-arg 1000 2 pack (*) 'time.seconds checked) 'seconds def
+ ('time.seconds "an integer count" int-arg 1000 pair (*) 'time.seconds checked) 'seconds def
 
  ### def minutes
  (n -- milliseconds : "Convert whole minutes to milliseconds.")
- ('time.minutes "an integer count" int-arg 60000 2 pack (*) 'time.minutes checked) 'minutes def
+ ('time.minutes "an integer count" int-arg 60000 pair (*) 'time.minutes checked) 'minutes def
 
  ### def hours
  (n -- milliseconds : "Convert whole hours to milliseconds.")
- ('time.hours "an integer count" int-arg 3600000 2 pack (*) 'time.hours checked) 'hours def
+ ('time.hours "an integer count" int-arg 3600000 pair (*) 'time.hours checked) 'hours def
 
  ### def days
  (n -- milliseconds : "Convert whole days of 86,400 seconds to milliseconds.")
- ('time.days "an integer count" int-arg 86400000 2 pack (*) 'time.days checked) 'days def
+ ('time.days "an integer count" int-arg 86400000 pair (*) 'time.days checked) 'days def
 
  ### def to-utc
  (timestamp -- fields : "Decompose a timestamp into UTC calendar fields.")

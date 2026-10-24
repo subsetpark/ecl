@@ -433,7 +433,7 @@
     (pop [])
     (|index|
      'kind 'contract 'msg "@each child must leave exactly one result" 'word '@each
-     'data 'index index 2 pack dict.from-flat 8 pack dict.from-flat wrap)
+     'data 'index index pair dict.from-flat 8 pack dict.from-flat wrap)
     if)
    (|index outcome| outcome 'err at wrap)
    if
