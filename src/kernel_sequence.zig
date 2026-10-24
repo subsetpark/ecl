@@ -15,8 +15,7 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-/// The sized-operation taxonomy lives in `kernel_support` so the registry in
-/// `kernels.zig` classifies exactly the operations this installer publishes.
+/// The operation family lives in `kernel_support`, beside the others.
 const Op = support.SequenceOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
@@ -372,8 +371,7 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
     if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
     const count: usize = @intCast(counts.borrow().list.length());
     // A typed count list is read as a slice and validated a block at a time;
-    // a boxed one keeps the per-element read, which is its registry
-    // classification.
+    // a boxed one keeps the per-element read.
     if (counts.borrow().list.kind() == .leaf_i64)
         return support.Kernel(WhereKernel(true)).run(evaluator, .{&counts}, {}, count);
     try support.Kernel(WhereKernel(false)).run(evaluator, .{&counts}, {}, count);
@@ -2619,8 +2617,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
 
 /// A typed copy starts when every operand shares one leaf representation,
 /// through the kernel executor (`support.Kernel`). Each start returns false
-/// without consuming anything when they do not, which is the registry's
-/// generic classification for a mixed-representation move. The caller knows
+/// without consuming anything when they do not, leaving a
+/// mixed-representation move to the generic path. The caller knows
 /// its copy's shape, so each shape has its own start and names exactly its
 /// operands.
 fn startTypedSlice(evaluator: *Machine, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {

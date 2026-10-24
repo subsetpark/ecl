@@ -16,7 +16,7 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-/// The sized-operation taxonomy also includes the hosted `str.format` idiom;
+/// The text family also includes the hosted `str.format` idiom;
 /// every other text operation is installed directly in core.
 const Op = support.TextOp;
 

@@ -214,9 +214,8 @@ pub const UnaryOp = enum {
     }
 };
 
-/// The sized-operation taxonomy the kernel registry classifies. Each family's
-/// enum is the same one its installer iterates, so an operation cannot exist
-/// without a classification or be classified without existing.
+/// The kernel operation families. Each family's enum is the same one its
+/// installer iterates.
 pub const SequenceOp = enum {
     at,
     where,

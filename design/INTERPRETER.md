@@ -1052,17 +1052,10 @@ cursor to validate cell contents. Recursive rectangularity remains the contract
 of `shape`; table conversion supplies the known output width when an empty
 axis cannot carry it in a list value.
 
-When descent reaches a specialized flat leaf, the kernel registry classifies
-the operation and operand representation as one of:
-
-- a reorderable typed loop;
-- bulk data movement;
-- a sequential typed operation whose order is semantically significant; or
-- generic fallback.
-
-The registry is a closed, compile-time-validated table over the operation and
-representation enums. Every added operation or leaf kind must classify each
-reachable combination for the program to compile.
+When descent reaches a specialized flat leaf, a typed kernel runs it through
+`support.Kernel`; any other shape takes the operation's generic path. The
+source audit holds the kernel files to that: a function that starts a driver
+itself fails the build unless it is listed as structural, with its reason.
 
 Unary and binary kernel selection produce opaque static plans binding operand
 classes, result storage, and the specialized loop. Shared preparation acquires the
@@ -1107,7 +1100,10 @@ together as one capability.
 `support.Kernel` is the one place that decides whether a typed kernel runs
 inline or as a driver. A kernel defines what one range computes; the executor
 charges it, holds its operands, abandons its output on a fault, and publishes
-it, so the decision and its bookkeeping are written once. Inside pervasion a
+it, so the decision and its bookkeeping are written once. A search declares
+`done` and stops at its answer; a kernel whose work depends on an earlier
+pass, such as `where`'s fill after its count or `grade`'s merge passes,
+declares `next` and runs in phases, each its own position space. Inside pervasion a
 kernel that cannot finish in its turn is boxed behind a small type-erased
 driver in the cursor's frame. Only the operation's own root operand may become
 the output there: an element held only by its spine would pass the

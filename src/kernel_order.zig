@@ -15,8 +15,7 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-/// The sized-operation taxonomy lives in `kernel_support` so the registry in
-/// `kernels.zig` classifies exactly the operations this installer publishes.
+/// The operation family lives in `kernel_support`, beside the others.
 const Op = support.OrderOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
