@@ -641,33 +641,6 @@ fn membershipKindsCompatible(comptime needle_kind: value.HeapKind, comptime hays
         (needle_kind == .leaf_symbol and haystack_kind == .leaf_symbol);
 }
 
-fn typedElementsMatch(
-    comptime needle_kind: value.HeapKind,
-    comptime haystack_kind: value.HeapKind,
-    needle: heap.LeafElement(needle_kind),
-    candidate: heap.LeafElement(haystack_kind),
-) bool {
-    if (needle_kind == .leaf_u8 and haystack_kind == .leaf_u8) return needle == candidate;
-    if (needle_kind == .leaf_u8 and haystack_kind == .leaf_i64) return @as(i64, needle) == candidate;
-    if (needle_kind == .leaf_i64 and haystack_kind == .leaf_u8) return needle == @as(i64, candidate);
-    if (needle_kind == .leaf_u8 and haystack_kind == .leaf_f64)
-        return equal.intFloatEqual(needle, candidate);
-    if (needle_kind == .leaf_f64 and haystack_kind == .leaf_u8)
-        return equal.intFloatEqual(candidate, needle);
-    if (needle_kind == .leaf_i64 and haystack_kind == .leaf_i64) return needle == candidate;
-    if (needle_kind == .leaf_i64 and haystack_kind == .leaf_f64)
-        return equal.intFloatEqual(needle, candidate);
-    if (needle_kind == .leaf_f64 and haystack_kind == .leaf_i64)
-        return equal.intFloatEqual(candidate, needle);
-    if (needle_kind == .leaf_f64 and haystack_kind == .leaf_f64) return needle == candidate;
-
-    const needle_char = needle_kind == .leaf_char1 or needle_kind == .leaf_char2 or needle_kind == .leaf_char4;
-    const haystack_char = haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4;
-    if (needle_char and haystack_char) return @as(u32, needle) == @as(u32, candidate);
-    if (needle_kind == .leaf_symbol and haystack_kind == .leaf_symbol) return needle == candidate;
-    return false;
-}
-
 fn scalarMatchesElement(
     comptime haystack_kind: value.HeapKind,
     needle: Value,

@@ -49,13 +49,6 @@ pub const Unit = union(enum) {
     pub fn phase(self: Unit) UnitPhase {
         return std.meta.activeTag(self);
     }
-
-    pub fn cancellationRequested(self: Unit) bool {
-        return switch (self) {
-            .ready, .running, .parked => |active| active.cancellation_requested,
-            .constructing, .closing, .done => false,
-        };
-    }
 };
 
 pub const UnitPhase = std.meta.Tag(Unit);
@@ -213,14 +206,6 @@ pub const Registration = enum {
     directory_after_delivery,
     delivery_after_cleanup,
     retired,
-
-    pub fn ownerCount(self: Registration) u2 {
-        return switch (self) {
-            .directory, .directory_after_delivery, .delivery_after_cleanup => 1,
-            .linked, .detached => 2,
-            .retired => 0,
-        };
-    }
 };
 
 pub const RegistrationEvent = enum {

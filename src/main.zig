@@ -366,14 +366,6 @@ fn testCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     };
 }
 
-/// The sentinel slice `realPathFileAlloc` hands back must be freed as one.
-fn startupDirectory(init: Startup) AppError![:0]u8 {
-    return std.Io.Dir.cwd().realPathFileAlloc(init.process.io, ".", init.process.gpa) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.Io,
-    };
-}
-
 fn cwdRoot(initial_cwd: []const u8) ecl.Filesystem.Root {
     return .{ .name = "cwd", .absolute_path = initial_cwd };
 }

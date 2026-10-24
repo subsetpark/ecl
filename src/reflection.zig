@@ -371,10 +371,6 @@ pub const ActionPlan = struct {
         return self.pending.count;
     }
 
-    pub fn isSealed(self: *const ActionPlan) bool {
-        return self.state != .building;
-    }
-
     pub fn seal(self: *ActionPlan) void {
         std.debug.assert(self.state == .building);
         self.state = .sealed;

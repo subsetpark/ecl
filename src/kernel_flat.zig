@@ -123,10 +123,6 @@ pub const FlatCursor = struct {
         return self.index == self.length;
     }
 
-    pub fn remainingElements(self: *const FlatCursor) usize {
-        return self.length - self.index;
-    }
-
     /// Reserves and charges the next range. The charge lands on the unit's one
     /// kernel budget, whose refill polls at the interval boundary,
     /// so cancellation surfaces here as an error rather than as a missed check.

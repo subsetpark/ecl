@@ -199,11 +199,6 @@ fn ownerFromAccess(access_value: *external.FilesystemAccess) *FilesystemOwner {
     return @ptrCast(@alignCast(access_value));
 }
 
-/// Consumes an independently opened directory on both success and failure.
-pub fn adoptDirectory(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, dir: std.Io.Dir) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
-    return @import("directory_resource.zig").adopt(access_value, scope, dir);
-}
-
 /// Consumes an acquired advisory lock on both success and failure.
 pub fn adoptLock(access_value: *external.FilesystemAccess, scope: *@import("scheduler.zig").TaskScope, file: std.Io.File) error{ OutOfMemory, ScopeClosing }!@import("value.zig").Value {
     return @import("directory_resource.zig").adoptLock(access_value, scope, file);
@@ -935,10 +930,6 @@ pub const StagedFile = struct {
             return .{ .staged = .{ .io = io, .parent = parent, .name = name, .file = file } };
         }
         return .{ .failed = .limit };
-    }
-
-    pub fn stagingName(self: *const StagedFile) []const u8 {
-        return &self.name;
     }
 
     /// Closes the handle before publication; contents are complete.

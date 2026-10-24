@@ -235,6 +235,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
     failed = auditKernelDriverStarts() or failed;
+    failed = auditUnreferencedDeclarations(init) or failed;
     if (failed) return error.SourceAuditFailed;
 }
 
@@ -1465,3 +1466,338 @@ fn installedPrimitiveName(source: []const u8, name: []const u8) bool {
     const needle = std.fmt.bufPrint(&buffer, ".name = \"{s}\"", .{name}) catch return false;
     return std.mem.indexOf(u8, source, needle) != null;
 }
+
+/// Every container-level declaration must be reachable from code that runs: a
+/// test, an exported symbol, an entry point, or another reachable declaration.
+/// Zig analyzes only what something references, so an unreachable declaration
+/// compiles without ever being checked or exercised. Data or types that only
+/// `comptime` blocks reach fail too: a check whose subject nothing else uses
+/// proves only itself. Functions and types reached that way are the checks
+/// and their vocabulary, and pass.
+///
+/// References resolve by name, so a name shared with a reachable declaration
+/// counts as reachable: the rule can miss dead code but never invents it.
+/// Comments are not references; an identifier-shaped string literal is, for
+/// `@hasDecl` and `@field`, and is owned and reached like an identifier. Compile-failure fixtures are skipped.
+fn auditUnreferencedDeclarations(init: std.process.Init) bool {
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var scan = DeclarationScan{ .arena = arena };
+    for ([_][]const u8{ "src", "test", "apps", "extensions" }) |root| {
+        var directory = std.Io.Dir.cwd().openDir(init.io, root, .{ .iterate = true }) catch |err| {
+            std.log.err("declarations: cannot open {s}: {s}", .{ root, @errorName(err) });
+            return true;
+        };
+        defer directory.close(init.io);
+        var walker = directory.walk(arena) catch |err| {
+            std.log.err("declarations: cannot walk {s}: {s}", .{ root, @errorName(err) });
+            return true;
+        };
+        defer walker.deinit();
+        while (walker.next(init.io) catch |err| {
+            std.log.err("declarations: cannot enumerate {s}: {s}", .{ root, @errorName(err) });
+            return true;
+        }) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+            const path = std.fmt.allocPrint(arena, "{s}/{s}", .{ root, entry.path }) catch |err| {
+                std.log.err("declarations: cannot record {s}/{s}: {s}", .{ root, entry.path, @errorName(err) });
+                return true;
+            };
+            std.mem.replaceScalar(u8, path, '\\', '/');
+            if (std.mem.indexOf(u8, path, "zig-cache") != null or
+                std.mem.indexOf(u8, path, "zig-pkg") != null or
+                std.mem.startsWith(u8, path, "test/native/negative/")) continue;
+            scan.add(init, path) catch |err| {
+                std.log.err("declarations: cannot scan {s}: {s}", .{ path, @errorName(err) });
+                return true;
+            };
+        }
+    }
+    var repository = std.Io.Dir.cwd().openDir(init.io, ".", .{ .iterate = true }) catch |err| {
+        std.log.err("declarations: cannot open repository root: {s}", .{@errorName(err)});
+        return true;
+    };
+    defer repository.close(init.io);
+    var iterator = repository.iterate();
+    while (iterator.next(init.io) catch |err| {
+        std.log.err("declarations: cannot enumerate repository root: {s}", .{@errorName(err)});
+        return true;
+    }) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
+        const path = arena.dupe(u8, entry.name) catch |err| {
+            std.log.err("declarations: cannot record {s}: {s}", .{ entry.name, @errorName(err) });
+            return true;
+        };
+        scan.add(init, path) catch |err| {
+            std.log.err("declarations: cannot scan {s}: {s}", .{ path, @errorName(err) });
+            return true;
+        };
+    }
+    return scan.report() catch true;
+}
+
+const DeclarationScan = struct {
+    arena: std.mem.Allocator,
+    files: std.ArrayList(File) = .empty,
+    declarations: std.ArrayList(Declaration) = .empty,
+
+    const File = struct {
+        path: []const u8,
+        tree: std.zig.Ast,
+        /// For each token, the innermost declaration or block containing it.
+        owners: []u32,
+    };
+    const top: u32 = std.math.maxInt(u32);
+    const in_test: u32 = top - 1;
+    const in_comptime: u32 = top - 2;
+
+    const Declaration = struct {
+        file: u32,
+        name: []const u8,
+        name_token: u32,
+        first: u32,
+        last: u32,
+        function: bool,
+        /// Declares a type, or may: a container, or an alias or computed type
+        /// whose initializer is not plainly a value.
+        type_like: bool,
+        root: bool,
+        comptime_used: bool = false,
+        users: std.ArrayList(u32) = .empty,
+    };
+
+    fn add(self: *DeclarationScan, init: std.process.Init, path: []const u8) !void {
+        const source = try std.Io.Dir.cwd().readFileAllocOptions(init.io, path, self.arena, .unlimited, .of(u8), 0);
+        const tree = try std.zig.Ast.parse(self.arena, source, .{});
+        if (tree.errors.len != 0) return error.ParseFailed;
+        const owners = try self.arena.alloc(u32, tree.tokens.len);
+        @memset(owners, top);
+        const file: u32 = @intCast(self.files.items.len);
+        try self.files.append(self.arena, .{ .path = path, .tree = tree, .owners = owners });
+        try self.collect(file, tree.rootDecls());
+    }
+
+    /// Records a container's members in source order, outer before inner, so
+    /// each token's owner ends as the innermost one.
+    fn collect(self: *DeclarationScan, file: u32, members: []const std.zig.Ast.Node.Index) error{OutOfMemory}!void {
+        const tree = &self.files.items[file].tree;
+        const owners = self.files.items[file].owners;
+        for (members) |member| {
+            const first = tree.firstToken(member);
+            const last = tree.lastToken(member);
+            switch (tree.nodeTag(member)) {
+                .test_decl => @memset(owners[first .. last + 1], in_test),
+                .@"comptime" => @memset(owners[first .. last + 1], in_comptime),
+                .fn_decl => {
+                    var buffer: [1]std.zig.Ast.Node.Index = undefined;
+                    const function = tree.fullFnProto(&buffer, member).?;
+                    const name_token = function.name_token orelse continue;
+                    const exported = if (function.extern_export_inline_token) |token|
+                        tree.tokenTag(token) == .keyword_export
+                    else
+                        false;
+                    try self.declare(file, name_token, first, last, true, false, exported);
+                    try self.collectNested(file, first, last);
+                },
+                .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
+                    const variable = tree.fullVarDecl(member).?;
+                    const exported = if (variable.extern_export_token) |token|
+                        tree.tokenTag(token) == .keyword_export
+                    else
+                        false;
+                    var buffer: [2]std.zig.Ast.Node.Index = undefined;
+                    const container = if (variable.ast.init_node.unwrap()) |initializer|
+                        tree.fullContainerDecl(&buffer, initializer)
+                    else
+                        null;
+                    const type_like = container != null or if (variable.ast.init_node.unwrap()) |initializer|
+                        typeExpression(tree.nodeTag(initializer))
+                    else
+                        false;
+                    try self.declare(file, variable.ast.mut_token + 1, first, last, false, type_like, exported);
+                    if (container) |declared| try self.collect(file, declared.ast.members);
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Initializers that can denote a type. Aliases, `@TypeOf`, and calls to
+    /// type-returning functions look alike to a syntax scan, so only plain
+    /// values are excluded.
+    fn typeExpression(tag: std.zig.Ast.Node.Tag) bool {
+        return switch (tag) {
+            .identifier,
+            .field_access,
+            .call,
+            .call_comma,
+            .call_one,
+            .call_one_comma,
+            .builtin_call,
+            .builtin_call_comma,
+            .builtin_call_two,
+            .builtin_call_two_comma,
+            .optional_type,
+            .error_union,
+            .merge_error_sets,
+            .error_set_decl,
+            .array_type,
+            .array_type_sentinel,
+            .ptr_type_aligned,
+            .ptr_type_sentinel,
+            .ptr_type,
+            .ptr_type_bit_range,
+            .fn_proto,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto_simple,
+            => true,
+            else => false,
+        };
+    }
+
+    /// A function's body can declare the container it returns, and its
+    /// members are declarations too. Takes the outermost containers inside
+    /// `first..last`; `collect` descends into the rest.
+    fn collectNested(self: *DeclarationScan, file: u32, first: u32, last: u32) error{OutOfMemory}!void {
+        const tree = &self.files.items[file].tree;
+        var found: std.ArrayList(std.zig.Ast.Node.Index) = .empty;
+        for (0..tree.nodes.len) |raw| {
+            const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw));
+            var buffer: [2]std.zig.Ast.Node.Index = undefined;
+            if (tree.fullContainerDecl(&buffer, node) == null) continue;
+            const start = tree.firstToken(node);
+            if (start < first or tree.lastToken(node) > last) continue;
+            try found.append(self.arena, node);
+        }
+        std.mem.sort(std.zig.Ast.Node.Index, found.items, tree, struct {
+            fn less(ast: *const std.zig.Ast, a: std.zig.Ast.Node.Index, b: std.zig.Ast.Node.Index) bool {
+                return ast.firstToken(a) < ast.firstToken(b);
+            }
+        }.less);
+        var covered: u32 = 0;
+        for (found.items) |node| {
+            if (tree.firstToken(node) < covered) continue;
+            covered = tree.lastToken(node) + 1;
+            var buffer: [2]std.zig.Ast.Node.Index = undefined;
+            try self.collect(file, tree.fullContainerDecl(&buffer, node).?.ast.members);
+        }
+    }
+
+    fn declare(self: *DeclarationScan, file: u32, name_token: u32, first: u32, last: u32, function: bool, type_like: bool, exported: bool) !void {
+        const tree = &self.files.items[file].tree;
+        const name = identifierName(tree.tokenSlice(name_token));
+        const entry_point = for ([_][]const u8{ "main", "build", "panic", "std_options" }) |root| {
+            if (std.mem.eql(u8, name, root)) break true;
+        } else false;
+        const index: u32 = @intCast(self.declarations.items.len);
+        try self.declarations.append(self.arena, .{
+            .file = file,
+            .name = name,
+            .name_token = name_token,
+            .first = first,
+            .last = last,
+            .function = function,
+            .type_like = type_like,
+            .root = exported or entry_point,
+        });
+        @memset(self.files.items[file].owners[first .. last + 1], index);
+    }
+
+    fn identifierName(spelling: []const u8) []const u8 {
+        if (std.mem.startsWith(u8, spelling, "@\"")) return spelling[2 .. spelling.len - 1];
+        return spelling;
+    }
+
+    fn identifierShaped(text: []const u8) bool {
+        if (text.len == 0 or std.ascii.isDigit(text[0])) return false;
+        for (text) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
+        return true;
+    }
+
+    fn report(self: *DeclarationScan) !bool {
+        var by_name: std.StringHashMapUnmanaged(std.ArrayList(u32)) = .empty;
+        for (self.declarations.items, 0..) |declaration, index| {
+            const slot = try by_name.getOrPut(self.arena, declaration.name);
+            if (!slot.found_existing) slot.value_ptr.* = .empty;
+            try slot.value_ptr.append(self.arena, @intCast(index));
+        }
+        for (self.files.items, 0..) |file, file_index| {
+            for (0..file.tree.tokens.len) |raw_token| {
+                const token: u32 = @intCast(raw_token);
+                const named = named: switch (file.tree.tokenTag(token)) {
+                    .identifier => identifierName(file.tree.tokenSlice(token)),
+                    .string_literal => {
+                        const spelling = file.tree.tokenSlice(token);
+                        const text = spelling[1 .. spelling.len - 1];
+                        // A name spelled as a string is used by reflection, from wherever it appears.
+                        if (!identifierShaped(text)) continue;
+                        break :named text;
+                    },
+                    else => continue,
+                };
+                const candidates = by_name.get(named) orelse continue;
+                const owner = file.owners[token];
+                for (candidates.items) |candidate| {
+                    const declaration = &self.declarations.items[candidate];
+                    // A declaration's own name and body do not keep it alive.
+                    if (declaration.file == file_index and declaration.first <= token and token <= declaration.last) continue;
+                    switch (owner) {
+                        top, in_test => declaration.root = true,
+                        in_comptime => declaration.comptime_used = true,
+                        else => try self.declarations.items[owner].users.append(self.arena, candidate),
+                    }
+                }
+            }
+        }
+        // `users` was filled user-to-used; walk it forward from every root.
+        const live = try self.reach(struct {
+            fn seed(declaration: Declaration) bool {
+                return declaration.root;
+            }
+        }.seed, null);
+        const checked = try self.reach(struct {
+            fn seed(declaration: Declaration) bool {
+                return declaration.comptime_used;
+            }
+        }.seed, live);
+        var failed = false;
+        for (self.declarations.items, 0..) |declaration, index| {
+            if (live[index]) continue;
+            const file = self.files.items[declaration.file];
+            const line = file.tree.tokenLocation(0, declaration.name_token).line + 1;
+            if (!checked[index]) {
+                std.log.err("{s}:{d}: `{s}` is never used: nothing outside its own body reaches it", .{ file.path, line, declaration.name });
+                failed = true;
+            } else if (!declaration.function and !declaration.type_like) {
+                std.log.err("{s}:{d}: `{s}` is reached only by comptime checks; data nothing else uses proves nothing", .{ file.path, line, declaration.name });
+                failed = true;
+            }
+        }
+        return failed;
+    }
+
+    /// Every declaration reachable from those `seed` selects, not passing
+    /// through any already in `excluded`.
+    fn reach(self: *DeclarationScan, seed: fn (Declaration) bool, excluded: ?[]const bool) ![]bool {
+        const reached = try self.arena.alloc(bool, self.declarations.items.len);
+        @memset(reached, false);
+        var pending: std.ArrayList(u32) = .empty;
+        for (self.declarations.items, 0..) |declaration, index| {
+            if (!seed(declaration)) continue;
+            if (excluded) |skip| if (skip[index]) continue;
+            reached[index] = true;
+            try pending.append(self.arena, @intCast(index));
+        }
+        while (pending.pop()) |index| {
+            for (self.declarations.items[index].users.items) |used| {
+                if (reached[used]) continue;
+                if (excluded) |skip| if (skip[used]) continue;
+                reached[used] = true;
+                try pending.append(self.arena, used);
+            }
+        }
+        return reached;
+    }
+};

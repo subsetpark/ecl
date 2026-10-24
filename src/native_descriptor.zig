@@ -236,10 +236,6 @@ pub const ValidatedDescriptor = opaque {
             .exchange => slot.exchange,
         };
     }
-
-    pub fn callbackCount(self: *const ValidatedDescriptor) u32 {
-        return self.state().callback_count;
-    }
 };
 
 pub const Progress = union(enum) {

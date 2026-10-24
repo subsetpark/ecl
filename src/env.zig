@@ -1444,9 +1444,9 @@ pub const ScopeId = enum(u32) { none = 0, _ };
 /// image reference comes with it. Until then the byte stays clear, asserted on
 /// every issued id, so adding the tag later cannot collide with a live value.
 pub const id_bits: u5 = 24;
-pub const reserved_bits: u5 = 8;
 
 comptime {
+    const reserved_bits: u5 = 8;
     const budget: u16 = @as(u16, id_bits) + @as(u16, reserved_bits);
     if (budget != @bitSizeOf(@typeInfo(ScopeId).@"enum".tag_type))
         @compileError("scope id bit budget does not cover its tag type");
@@ -1958,11 +1958,6 @@ pub const Env = enum(usize) {
     /// enter to read them without references.
     pub fn bindingDomain(self: *const Env) *heap.ReleaseDomain {
         return heap.hostDomain(self.privateState().host);
-    }
-
-    /// The core environment, which owns core's name slots.
-    pub fn coreEnvironment(self: *Env) *Environment {
-        return &self.privateState().core;
     }
 
     /// The directory freeze-time recognition resolves a word's slot through.

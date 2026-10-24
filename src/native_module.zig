@@ -423,10 +423,6 @@ pub const ModuleInstance = opaque {
         heap.hostDomain(state_value.host).retire(state_value, &state_value.retirement);
     }
 
-    pub fn definitionCount(self: *const ModuleInstance) usize {
-        return self.state().descriptor.definitions().len;
-    }
-
     pub fn definition(
         self: *const ModuleInstance,
         index: u32,

@@ -194,7 +194,6 @@ const ErrorData = struct {
     value: Value,
 };
 const empty_error_data = ErrorData{ .key = .{ .builtin = .needed }, .value = .{ .int = 0 } };
-pub const ErrorDetail = struct { symbol: u32, value: Value };
 /// Provenance attached to one filesystem failure. Values are borrowed; the
 /// pending failure retains what it records.
 pub const FilesystemErrorData = struct {
@@ -3043,13 +3042,6 @@ pub const Unit = struct {
         self.driver_slot_busy = false;
     }
 
-    /// True while the inline slot holds a live driver. Tests assert on this:
-    /// a slot that is never released is not a failure any behaviour can see,
-    /// only a silent return to allocating.
-    pub fn inlineDriverBusy(self: *const Unit) bool {
-        return self.driver_slot_busy;
-    }
-
     /// The binding version this unit observes, or null when it reads the
     /// current bindings.
     pub fn bindingPin(self: *const Unit) ?u64 {
@@ -5182,25 +5174,14 @@ pub const Machine = struct {
         self.unit.pendingFailure().addData(.name, .{ .symbol = name });
         return failure;
     }
-    /// The dispatcher's miss. Every resolution miss reports the reference the
-    /// program actually wrote, including a dotted one whose module never
-    /// loaded.
-    pub fn undefinedWord(self: *Machine, word: u32) MachineError {
-        return self.undefinedWordIn(word, self.currentLookupChain());
-    }
-    /// The same failure, for the two callers that know the search happened
-    /// somewhere other than the running activation's own chain.
+    /// A resolution miss, reported as the reference the program actually
+    /// wrote, including a dotted one whose module never loaded, with the
+    /// lookup chain that was searched.
     pub fn undefinedWordIn(self: *Machine, word: u32, chain: LookupChain) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
         self.unit.pendingFailure().addData(.name, .{ .symbol = word });
         self.addLookupChain(chain) catch return error.OutOfMemory;
         return failure;
-    }
-    pub fn undefinedActiveWord(self: *Machine) MachineError {
-        return self.undefinedWord(self.unit.active_word.atom());
-    }
-    pub fn undefinedName(self: *Machine, name: u32) MachineError {
-        return self.undefinedNameIn(name, self.currentLookupChain());
     }
     /// The same failure as `undefinedWordIn`, for a name that is not the word
     /// currently being traced: the active word becomes the requested name so
@@ -5212,23 +5193,6 @@ pub const Machine = struct {
     fn addLookupChain(self: *Machine, chain: LookupChain) error{OutOfMemory}!void {
         const named = try intern.intern(chain.spelling());
         self.unit.pendingFailure().addData(.scope, .{ .symbol = named });
-    }
-    /// What the running activation would have searched, for the callers that
-    /// have no word in hand — reflection, and a miss reported before a word's
-    /// scope is known.
-    /// The chain a lookup from the running activation searched.
-    ///
-    /// Derived from the resolution scope, exactly as `lookupChainFor` derives
-    /// it for a stamped occurrence, because they answer the same question and
-    /// must not answer it differently. This used to key on whether a home was
-    /// present, which is a related fact and not the same one: `ExecutionSite`
-    /// says so itself -- a homeless word called from module code inherits the
-    /// caller's home while resolving against its own chain -- so a module home
-    /// over a session chain reported `module` for a lookup that searched the
-    /// session.
-    fn currentLookupChain(self: *const Machine) LookupChain {
-        const current = self.unit.current orelse return .session;
-        return lookupChainFor(current.site.resolution_scope);
     }
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
@@ -5622,18 +5586,6 @@ pub const Machine = struct {
         self.unit.installPendingFailure(EclErr.init(kind, message));
         if (self.unit.active_word != no_word) self.unit.pendingFailure().word = self.unit.active_word;
         return error.Ecl;
-    }
-    /// Borrows bounded adapter diagnostics; the pending failure owns the
-    /// retained values independently of the request's subsequent retirement.
-    pub fn failWithDetails(self: *Machine, kind: ErrorKind, message: []const u8, details: [3]?ErrorDetail) MachineError {
-        const failure = self.fail(kind, message);
-        const pending = self.unit.pendingFailure();
-        for (details) |detail| if (detail) |entry| {
-            heap.retainValue(entry.value);
-            pending.data[pending.data_len] = .{ .key = .{ .symbol = entry.symbol }, .value = entry.value };
-            pending.data_len += 1;
-        };
-        return failure;
     }
     /// Diagnostic views are bounded and capability-free. Retain their values
     /// before the observing driver releases its resource or exchange.

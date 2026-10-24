@@ -1106,11 +1106,6 @@ fn sessionTypeExposesAuthority(
     };
 }
 
-fn environValue(entries: []const machine.Environ.Entry, name: []const u8) ?[]const u8 {
-    for (entries) |entry| if (std.mem.eql(u8, entry.name, name)) return entry.value;
-    return null;
-}
-
 comptime {
     @setEvalBranchQuota(4_000);
     for (@typeInfo(Session).@"enum".decl_names) |declaration_name| {
