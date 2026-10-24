@@ -2013,7 +2013,7 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
         }
         if (rank == 2 and source_count != 0 and try startTypedMatrix(
             evaluator,
-            collection.borrow(),
+            &collection,
             count,
             list.atUnchecked(shape_value.borrow(), 1),
         )) return;
@@ -2038,59 +2038,51 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
 /// is zero, leaving validation and its errors to the generic driver.
 fn startTypedMatrix(
     evaluator: *Machine,
-    source: Value,
+    source: *heap.OwnedValue,
     rows: usize,
     columns_value: Value,
 ) MachineError!bool {
     if (columns_value != .int or columns_value.int <= 0 or rows == 0) return false;
     const columns = std.math.cast(usize, columns_value.int) orelse return false;
-    _ = std.math.mul(usize, rows, columns) catch return false;
-    const source_kind = source.list.kind();
+    const volume = std.math.mul(usize, rows, columns) catch return false;
+    const source_kind = source.borrow().list.kind();
     inline for (leaf_kinds) |candidate| {
         if (candidate == source_kind) {
-            var spine = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), rows);
-            var held_locally = true;
-            errdefer if (held_locally) spine.deinit();
-            const driver = TypedMatrixDriver(candidate){
-                .source = .init(heap.LeafReader(candidate).acquire(source.list)),
-                .spine = .init(spine.take()),
-                .columns = columns,
-            };
-            held_locally = false;
-            try evaluator.runDriver(driver);
+            try support.Kernel(MatrixKernel(candidate)).run(evaluator, .{source}, .{ .rows = rows, .columns = columns }, volume);
             return true;
         }
     }
     return false;
 }
 
-fn TypedMatrixDriver(comptime kind: value.HeapKind) type {
-    const Element = heap.LeafElement(kind);
+/// The rows of a typed matrix reshape, one position per element: each range
+/// fills the current row and starts the next as one completes.
+fn MatrixKernel(comptime kind: value.HeapKind) type {
     return struct {
-        const Self = @This();
-        pub const ownership: heap.DriverOwnership = .fields;
+        pub const arity = 1;
+        pub const Params = struct { rows: usize, columns: usize };
+        pub const Output = struct {
+            spine: heap.OwnedValueBuffer,
+            row: ?heap.LeafWriter(kind) = null,
 
-        source: heap.Owned(heap.LeafReader(kind)),
-        spine: heap.Owned(heap.OwnedValueBuffer),
-        columns: usize,
-        row: ?heap.Owned(heap.LeafWriter(kind)) = null,
-        cursor: kernel_flat.FlatCursor = kernel_flat.FlatCursor.init(0),
-
-        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
-            const context = support.Context{ .evaluator = evaluator };
-            const spine = self.spine.borrowMut();
-            if (self.row == null) {
-                if (spine.len() == spine.capacity()) {
-                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    return .{ .output = spine.takeList() };
-                }
-                self.row = .init(try heap.LeafWriter(kind).init(evaluator.allocator(), self.columns));
-                self.cursor = kernel_flat.FlatCursor.init(self.columns);
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                if (self.row) |*row| row.retire(releases);
+                self.spine.deinit();
             }
-            if (try self.cursor.nextRange(context)) |range| {
-                const source = self.source.borrow().slice();
-                const out: []Element = self.row.?.borrowMut().unpublishedRange(range.start, range.len());
-                var from = (spine.len() * self.columns + range.start) % source.len;
+        };
+
+        pub fn prepare(evaluator: *Machine, _: [1]Value, shape: Params, _: usize) error{OutOfMemory}!Output {
+            return .{ .spine = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), shape.rows) };
+        }
+
+        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            const source = heap.leafElements(kind, operands[0].list);
+            var position = range.start;
+            while (position != range.end) {
+                const column = position % shape.columns;
+                if (output.row == null) output.row = try heap.LeafWriter(kind).init(context.allocator(), shape.columns);
+                const out = output.row.?.unpublishedRange(column, @min(shape.columns - column, range.end - position));
+                var from = position % source.len;
                 var written: usize = 0;
                 while (written != out.len) {
                     const run = @min(source.len - from, out.len - written);
@@ -2098,12 +2090,17 @@ fn TypedMatrixDriver(comptime kind: value.HeapKind) type {
                     written += run;
                     from = 0;
                 }
+                position += out.len;
+                if (column + out.len == shape.columns) {
+                    var row = output.row.?;
+                    output.row = null;
+                    output.spine.appendOwned(row.finish());
+                }
             }
-            if (!self.cursor.complete()) return .stepped;
-            var writer = self.row.?.take();
-            self.row = null;
-            spine.appendOwned(writer.finish());
-            return .stepped;
+        }
+
+        pub fn finish(output: *Output) Value {
+            return output.spine.takeList();
         }
     };
 }
