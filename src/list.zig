@@ -22,9 +22,76 @@ pub const ElemProfile = enum {
     mixed,
 };
 
-const Profile = struct {
-    kind: ElemProfile,
+/// The representation a list takes: the one lattice every list builder
+/// consults, whether it sees elements one at a time or whole typed pieces.
+/// Bytes widen to ints and narrower characters to wider ones; anything across
+/// classes, and any element that is not an atom, makes a generic spine.
+pub const ListProfile = struct {
+    kind: ElemProfile = .empty,
     max_codepoint: u32 = 0,
+
+    /// The profile with one more element.
+    pub fn add(self: ListProfile, item: Value) ListProfile {
+        return self.join(of(item));
+    }
+
+    /// One element's profile.
+    pub fn of(item: Value) ListProfile {
+        return switch (item) {
+            .int => |integer| .{ .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int },
+            .float => .{ .kind = .all_float },
+            .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
+            .symbol => .{ .kind = .all_symbol },
+            .word, .list, .dict, .task, .module, .port => .{ .kind = .mixed },
+        };
+    }
+
+    /// A whole typed leaf's profile, read from its representation rather than
+    /// its elements. A generic spine's elements are unknown without a scan.
+    pub fn ofKind(kind: HeapKind) ListProfile {
+        return switch (kind) {
+            .leaf_u8 => .{ .kind = .all_byte },
+            .leaf_i64 => .{ .kind = .all_int },
+            .leaf_f64 => .{ .kind = .all_float },
+            .leaf_char1 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u8) },
+            .leaf_char2 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u16) },
+            .leaf_char4 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u21) },
+            .leaf_symbol => .{ .kind = .all_symbol },
+            .generic_spine, .dict, .task, .port, .module, .reserved_mask => .{ .kind = .mixed },
+        };
+    }
+
+    pub fn join(self: ListProfile, other: ListProfile) ListProfile {
+        if (self.kind == .empty) return other;
+        if (other.kind == .empty) return self;
+        if (self.kind == .mixed or other.kind == .mixed) return .{ .kind = .mixed };
+        if (self.kind == other.kind) return .{ .kind = self.kind, .max_codepoint = @max(self.max_codepoint, other.max_codepoint) };
+        const byte_int = (self.kind == .all_byte or self.kind == .all_int) and (other.kind == .all_byte or other.kind == .all_int);
+        return .{ .kind = if (byte_int) .all_int else .mixed };
+    }
+
+    /// The representation this profile publishes as.
+    pub fn heapKind(self: ListProfile) HeapKind {
+        return switch (self.kind) {
+            .empty, .mixed => .generic_spine,
+            .all_byte => .leaf_u8,
+            .all_int => .leaf_i64,
+            .all_float => .leaf_f64,
+            .all_char => if (self.max_codepoint <= std.math.maxInt(u8))
+                .leaf_char1
+            else if (self.max_codepoint <= std.math.maxInt(u16))
+                .leaf_char2
+            else
+                .leaf_char4,
+            .all_symbol => .leaf_symbol,
+        };
+    }
+
+    /// The representation holding two typed leaves' elements; usable at
+    /// compile time.
+    pub fn joinKinds(left: HeapKind, right: HeapKind) HeapKind {
+        return ofKind(left).join(ofKind(right)).heapKind();
+    }
 };
 
 pub const MaterializeResult = poll.Progress(Value);
@@ -160,7 +227,7 @@ pub const ValueMaterializer = struct {
     source: union(enum) { borrowed: []const Value, owned: heap.OwnedValueBuffer },
     phase: enum { profile, fill, complete } = .profile,
     index: usize = 0,
-    item_profile: Profile = .{ .kind = .empty },
+    item_profile: ListProfile = .{},
     provenance_namespace: heap.CodeProvenanceNamespace = .none,
     builder: ?heap.AnyListBuilder = null,
 
@@ -227,7 +294,7 @@ pub const ValueMaterializer = struct {
                 var profile = self.item_profile;
                 var visited: usize = 0;
                 while (visited != run.len and profile.kind != .mixed) : (visited += 1)
-                    profile = profileNext(profile, run[visited], self.index + visited == 0);
+                    profile = profile.add(run[visited]);
                 _ = work.take(visited);
                 self.item_profile = profile;
                 self.index = if (profile.kind == .mixed) items.len else self.index + visited;
@@ -247,43 +314,6 @@ pub const ValueMaterializer = struct {
         if (self.phase == .fill and self.index == self.values().len) return self.finish();
         return .pending;
     }
-    fn profileNext(current: Profile, item: Value, first: bool) Profile {
-        if (first) return switch (item) {
-            .int => |integer| .{
-                .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int,
-            },
-            .float => .{ .kind = .all_float },
-            .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
-            .symbol => .{ .kind = .all_symbol },
-            .word, .list, .dict, .task, .module, .port => .{ .kind = .mixed },
-        };
-        var profile = current;
-        switch (profile.kind) {
-            .empty => unreachable,
-            .all_byte => {
-                if (item == .int) {
-                    if (item.int < 0 or item.int > std.math.maxInt(u8))
-                        profile.kind = .all_int;
-                } else profile.kind = .mixed;
-            },
-            .all_int => {
-                if (item != .int) profile.kind = .mixed;
-            },
-            .all_float => {
-                if (item != .float) profile.kind = .mixed;
-            },
-            .all_char => {
-                if (item == .char) {
-                    profile.max_codepoint = @max(profile.max_codepoint, item.char);
-                } else profile.kind = .mixed;
-            },
-            .all_symbol => {
-                if (item != .symbol) profile.kind = .mixed;
-            },
-            .mixed => {},
-        }
-        return profile;
-    }
     fn beginFill(self: *ValueMaterializer) error{OutOfMemory}!?Value {
         if (self.source == .owned and (self.item_profile.kind == .mixed or self.item_profile.kind == .empty)) {
             const result = self.source.owned.takeList();
@@ -291,19 +321,7 @@ pub const ValueMaterializer = struct {
             self.phase = .complete;
             return result;
         }
-        const kind: HeapKind = switch (self.item_profile.kind) {
-            .empty, .mixed => .generic_spine,
-            .all_byte => .leaf_u8,
-            .all_int => .leaf_i64,
-            .all_float => .leaf_f64,
-            .all_char => if (self.item_profile.max_codepoint <= std.math.maxInt(u8))
-                .leaf_char1
-            else if (self.item_profile.max_codepoint <= std.math.maxInt(u16))
-                .leaf_char2
-            else
-                .leaf_char4,
-            .all_symbol => .leaf_symbol,
-        };
+        const kind = self.item_profile.heapKind();
         var builder = try heap.AnyListBuilder.initCode(
             self.allocator,
             kind,

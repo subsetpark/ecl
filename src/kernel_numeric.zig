@@ -2960,42 +2960,6 @@ const BlockPlan = struct {
     }
 };
 
-/// The representation `each` gives a list of numeric atoms: bytes while every
-/// result is an int from 0 to 255, ints while every result is an int, floats
-/// while every result is a float, and a generic list once ints and floats mix.
-const ResultProfile = enum {
-    empty,
-    bytes,
-    ints,
-    floats,
-    mixed,
-
-    fn add(self: ResultProfile, item: Value) ResultProfile {
-        return switch (self) {
-            .empty => switch (item) {
-                .int => |integer| if (integer >= 0 and integer <= std.math.maxInt(u8)) .bytes else .ints,
-                else => .floats,
-            },
-            .bytes => switch (item) {
-                .int => |integer| if (integer >= 0 and integer <= std.math.maxInt(u8)) .bytes else .ints,
-                else => .mixed,
-            },
-            .ints => if (item == .int) .ints else .mixed,
-            .floats => if (item == .float) .floats else .mixed,
-            .mixed => .mixed,
-        };
-    }
-
-    fn kind(self: ResultProfile) value.HeapKind {
-        return switch (self) {
-            .bytes => .leaf_u8,
-            .ints => .leaf_i64,
-            .floats => .leaf_f64,
-            .empty, .mixed => .generic_spine,
-        };
-    }
-};
-
 /// Two phases: compute every element's result, then write the results in the
 /// representation `each` would give them. A planned program computes a block
 /// at a time through the typed kernels; a block that faults is replayed
@@ -3013,7 +2977,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             plan: ?*BlockPlan,
             /// The element-by-element results, when there is no plan.
             results: []Value,
-            profile: ResultProfile = .empty,
+            profile: list.ListProfile = .{},
             builder: ?heap.AnyListBuilder = null,
 
             pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
@@ -3087,7 +3051,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             const length = if (output.plan) |plan| switch (plan.result) {
                 inline else => |items| items.len,
             } else output.results.len;
-            const kind = if (output.plan) |plan| plan.kind() else output.profile.kind();
+            const kind = if (output.plan) |plan| plan.kind() else output.profile.heapKind();
             output.builder = try heap.AnyListBuilder.init(output.allocator, kind, length, length);
             // A generic list counts the values written into it.
             if (output.builder.? == .generic) output.builder.?.generic.setLen(0);
