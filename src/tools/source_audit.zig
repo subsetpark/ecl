@@ -890,10 +890,14 @@ const kernel_quantum_users = [_][]const u8{
 /// executor; only its structural path starts a driver itself. The rule holds
 /// both ways: a new driver start elsewhere fails, and so does an exception
 /// that no longer starts one.
-const kernel_driver_files = [_][]const u8{
-    "kernel_numeric.zig", "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig",
-    "kernel_random.zig",  "kernel_storage.zig",  "idioms.zig",
-};
+/// Kernel files are chosen from the production classification, so a newly
+/// classified kernel file is audited without a second list. `kernel_support.zig`
+/// is excluded because it owns `support.Kernel`, the one sanctioned start.
+fn isKernelDriverFile(file: []const u8) bool {
+    if (std.mem.eql(u8, file, "kernel_support.zig")) return false;
+    if (std.mem.eql(u8, file, "idioms.zig")) return true;
+    return std.mem.startsWith(u8, file, "kernel_") and std.mem.indexOfAny(u8, file, "/\\") == null;
+}
 
 const KernelDriverException = struct {
     file: []const u8,
@@ -936,42 +940,41 @@ const kernel_driver_exceptions = [_]KernelDriverException{
 };
 
 fn auditKernelDriverStarts() bool {
-    const sources = comptime blk: {
-        var result: [kernel_driver_files.len][:0]const u8 = undefined;
-        for (kernel_driver_files, 0..) |file, index| result[index] = @embedFile("../" ++ file);
-        break :blk result;
-    };
     var seen: [kernel_driver_exceptions.len]bool = @splat(false);
     var failed = false;
-    for (kernel_driver_files, sources) |file, source| {
-        var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
-        defer tree.deinit(std.heap.page_allocator);
-        if (tree.errors.len != 0) return true;
-        for (0..tree.nodes.len) |raw_node| {
-            const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
-            if (tree.nodeTag(node) != .fn_decl) continue;
-            var buffer: [1]std.zig.Ast.Node.Index = undefined;
-            const prototype = tree.fullFnProto(&buffer, node) orelse continue;
-            const name_token = prototype.name_token orelse continue;
-            const name = tree.tokenSlice(name_token);
-            const body = tree.nodeData(node).node_and_node[1];
-            const starts = for (tree.firstToken(body)..tree.lastToken(body)) |token| {
-                const spelling = tree.tokenSlice(@intCast(token));
-                const is_start = std.mem.eql(u8, spelling, "runDriver") or
-                    std.mem.eql(u8, spelling, "runDriverAt") or
-                    std.mem.eql(u8, spelling, "startDriver");
-                if (is_start and std.mem.eql(u8, tree.tokenSlice(@intCast(token + 1)), "(")) break true;
-            } else false;
-            if (!starts) continue;
-            const listed = for (kernel_driver_exceptions, 0..) |exception, index| {
-                if (std.mem.eql(u8, exception.file, file) and std.mem.eql(u8, exception.function, name)) {
-                    seen[index] = true;
-                    break true;
+    for (source_groups) |group| {
+        if (!group.production) continue;
+        for (group.files, group.sources) |file, source| {
+            if (!isKernelDriverFile(file)) continue;
+            var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .{}) catch return true;
+            defer tree.deinit(std.heap.page_allocator);
+            if (tree.errors.len != 0) return true;
+            for (0..tree.nodes.len) |raw_node| {
+                const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
+                if (tree.nodeTag(node) != .fn_decl) continue;
+                var buffer: [1]std.zig.Ast.Node.Index = undefined;
+                const prototype = tree.fullFnProto(&buffer, node) orelse continue;
+                const name_token = prototype.name_token orelse continue;
+                const name = tree.tokenSlice(name_token);
+                const body = tree.nodeData(node).node_and_node[1];
+                const starts = for (tree.firstToken(body)..tree.lastToken(body)) |token| {
+                    const spelling = tree.tokenSlice(@intCast(token));
+                    const is_start = std.mem.eql(u8, spelling, "runDriver") or
+                        std.mem.eql(u8, spelling, "runDriverAt") or
+                        std.mem.eql(u8, spelling, "startDriver");
+                    if (is_start and std.mem.eql(u8, tree.tokenSlice(@intCast(token + 1)), "(")) break true;
+                } else false;
+                if (!starts) continue;
+                const listed = for (kernel_driver_exceptions, 0..) |exception, index| {
+                    if (std.mem.eql(u8, exception.file, file) and std.mem.eql(u8, exception.function, name)) {
+                        seen[index] = true;
+                        break true;
+                    }
+                } else false;
+                if (!listed) {
+                    std.log.err("{s}: `{s}` starts a driver directly; run typed kernels through `support.Kernel`, or list the function in kernel_driver_exceptions if its path is structural", .{ file, name });
+                    failed = true;
                 }
-            } else false;
-            if (!listed) {
-                std.log.err("{s}: `{s}` starts a driver directly; run typed kernels through `support.Kernel`, or list the function in kernel_driver_exceptions if its path is structural", .{ file, name });
-                failed = true;
             }
         }
     }
