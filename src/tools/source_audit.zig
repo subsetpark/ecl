@@ -1244,12 +1244,12 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@each", "@module", "@defm", "@test" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@each", "@module", "@test" };
 
 /// First-party ECL words that apply their quotation in a fresh unit and are
 /// therefore marked too. Each must be defined by some first-party source;
 /// the compiler cannot see that either, so the audit checks both directions.
-const source_unit_constructors = [_][]const u8{"@serve"};
+const source_unit_constructors = [_][]const u8{ "@defm", "@serve" };
 
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from

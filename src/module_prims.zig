@@ -22,7 +22,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@module", .primitive = moduleWord, .effect = "values body -- module", .doc = "Evaluate a module body with an explicit initial stack in a fresh unit and return its definitions as an anonymous immutable module value." },
         .{ .name = "register", .primitive = registerWord, .effect = "module module-name --", .doc = "Register a module value under a canonical name, creating that registration or replacing its code while keeping its durable state." },
-        .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "Evaluate a module body with an explicit initial stack and register the resulting module value under a name; exactly `@module` followed by `register`." },
         .{ .name = "unmodule", .primitive = unmoduleWord, .effect = "module-name --", .doc = "Close, quiesce, and retire a registered module named by a symbol." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
@@ -43,7 +42,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 fn moduleWord(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());
-    return evaluator.moduleOwned(null, input.move());
+    return evaluator.moduleOwned(input.move());
 }
 /// Publication alone: name an already-constructed image. A missing name
 /// creates its registration; an existing one installs this image over the
@@ -58,19 +57,6 @@ fn registerWord(evaluator: *Machine) MachineError!void {
         .module = .init(item.take()),
         .validation = .init(name),
     });
-}
-/// The source-module spelling: construction followed immediately by
-/// registration, with the same all-or-nothing outcome as writing the two
-/// words. Name-last matches `def` and `set`.
-fn defmWord(evaluator: *Machine) MachineError!void {
-    try evaluator.require(3);
-    const name = try evaluator.popSymbol();
-    var input = try evaluator.popUnitInput();
-    defer input.deinit(evaluator.releaseDomain());
-    // The name is carried unvalidated into the construction boundary. The
-    // composition this word stands for evaluates the body first, so checking
-    // the name here would skip a body `@module` plus `register` would run.
-    return evaluator.moduleOwned(name, input.move());
 }
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// through the registry and drives the owner-issued close protocol.

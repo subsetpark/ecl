@@ -393,3 +393,9 @@
 ### def converge
 (value quotation -- value : "Return the last value before unary iteration converges or cycles.")
 (converges last) 'converge def
+
+### def @defm
+(values body module-name -- :
+ "Evaluate a module body with an explicit initial stack and register the resulting module value
+  under a name; exactly `@module` followed by `register`.")
+(|values body module-name| values body @module module-name register) '@defm def

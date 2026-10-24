@@ -189,7 +189,7 @@ Errors.
 by `register`: run the body on a fresh environment, then validate the
 canonical module path and register the resulting image under it. The body is
 evaluated before the name is validated, so the two spellings agree on every
-observable outcome.
+observable outcome. Defined in ecl.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore `values (body) 'name @defm`. See

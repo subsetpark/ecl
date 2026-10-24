@@ -116,10 +116,11 @@ test "unit inputs: every constructor diagnoses its own values operand" {
         "constructor's values operand",
         "`values (body) @module`",
     });
+    // `@defm` is prelude sugar over `@module`, which owns the floor.
     try expectErrorContains(&runtime, "9 [] (1 +) 'missing @defm", &.{
-        "'isolation @defm",
+        "'isolation @module",
         "constructor's values operand",
-        "`values (body) 'name @defm`",
+        "'trace ['+ '@defm]",
     });
     try expectErrorContains(&runtime, "[] (1 +) @spawn task.await 'err at raise", &.{
         "'isolation @spawn",

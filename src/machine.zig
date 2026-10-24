@@ -1273,19 +1273,13 @@ const OwnedApplication = enum(usize) {
     }
 };
 
-/// A module construction boundary. The body always produces an image; a
-/// `@defm` boundary additionally carries the symbol that image is registered
-/// under the instant construction succeeds, which is what makes the combined
-/// word a driver composition rather than a second publication protocol.
-///
-/// The symbol is unvalidated on purpose. `@defm` must behave as `@module`
-/// followed by `register`, and that composition evaluates the body before any
-/// name is checked, so validating early would skip a body the composition runs.
+/// A module construction boundary. The body always produces an anonymous
+/// image; publication is `register`'s alone, which the prelude's `@defm`
+/// composes after it.
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
-    registration: ?u32,
     provenance: modules.RegistrationProvenance,
-    /// Exact construction body admitted by `@module`/`@defm`. A declaration
+    /// Exact construction body admitted by `@module`. A declaration
     /// is module-level only while this is the current activation; quotations
     /// called by the body may inherit its home but not its declaration site.
     root_code: *Header,
@@ -5253,14 +5247,10 @@ pub const Machine = struct {
                     .advice = "the substack is isolated from the caller's stack — " ++
                         "pass initial values in the constructor's values operand: `values (q) @attempt`",
                 },
-                .module => |construction| if (construction.registration == null) .{
+                .module => .{
                     .constructor = "@module",
                     .advice = "the substack is isolated from the caller's stack — " ++
                         "pass initial values in the constructor's values operand: `values (body) @module`",
-                } else .{
-                    .constructor = "@defm",
-                    .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values (body) 'name @defm`",
                 },
                 .state => null,
             };
@@ -5993,11 +5983,9 @@ pub const Machine = struct {
         });
     }
     /// Opens a construction boundary. The body evaluates against a fresh
-    /// anonymous image; `registration`, when present, is the name that image
-    /// is published under the instant the body succeeds.
+    /// anonymous image, which the boundary returns as a value.
     pub fn moduleOwned(
         self: *Machine,
-        registration: ?u32,
         input: OwnedUnitInput,
     ) MachineError!void {
         var owned = input;
@@ -6027,7 +6015,6 @@ pub const Machine = struct {
                 if (owned.seedHeader() == null) {
                     return self.openImageBoundary(
                         &candidate,
-                        registration,
                         provenance,
                         word,
                         runnable.take(),
@@ -6037,7 +6024,6 @@ pub const Machine = struct {
                     .state = .init(.{ .open = .{
                         .target = .init(.{ .image = .{
                             .candidate = candidate.move(),
-                            .registration = registration,
                             .provenance = provenance,
                         } }),
                         .body = .init(runnable.take()),
@@ -6066,7 +6052,6 @@ pub const Machine = struct {
                     .state = .init(.{ .rescope = .{
                         .target = .init(.{ .image = .{
                             .candidate = candidate.move(),
-                            .registration = registration,
                             .provenance = provenance,
                         } }),
                         .cursor = .init(cursor.take()),
@@ -6086,7 +6071,6 @@ pub const Machine = struct {
     fn openImageBoundary(
         self: *Machine,
         candidate: *modules.OwnedImage,
-        registration: ?u32,
         provenance: modules.RegistrationProvenance,
         word: intern.TraceWord,
         body_header: *Header,
@@ -6105,7 +6089,6 @@ pub const Machine = struct {
         try self.openBoundary(
             .{ .module = .{
                 .image = candidate.move(),
-                .registration = registration,
                 .provenance = provenance,
                 .root_code = body_header,
             } },
@@ -9359,13 +9342,7 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         .state = .init(.{ .capture = .{
             .image = .init(image.move()),
             .remaining = observed,
-            .completion = if (owned.registration) |symbol|
-                .{ .named = .{
-                    .cursor = .init(symbol),
-                    .provenance = owned.provenance,
-                } }
-            else
-                .value,
+            .provenance = owned.provenance,
         } }),
     };
     self.adoptDriver(driver);
@@ -9543,9 +9520,7 @@ fn finishStateApplication(self: *Machine, boundary: Boundary) MachineError!void 
     });
 }
 
-/// The registry-mutation half of module publication, reached either by
-/// `register` on a value or by a `@defm` boundary that has just finished
-/// constructing one. Both spellings therefore share one publication protocol.
+/// The registry-mutation half of `register`, the one publication protocol.
 fn advanceRegistration(
     evaluator: *Machine,
     cursor: *modules.Registry.RegistrationCursor,
@@ -9635,10 +9610,9 @@ const SeedMaterializer = struct {
 const ConstructionTarget = union(enum) {
     /// `@attempt`: a failure boundary in the invoker's scope.
     attempt,
-    /// `@module`/`@defm`: the candidate image and the name it registers under.
+    /// `@module`: the candidate image and its constructing site's provenance.
     image: struct {
         candidate: modules.OwnedImage,
-        registration: ?u32,
         provenance: modules.RegistrationProvenance,
     },
 
@@ -9739,10 +9713,8 @@ const ConstructionDriver = struct {
                         try evaluator.openAttempt(body);
                     },
                     .image => |*owned| {
-                        const registration = owned.registration;
                         try evaluator.openImageBoundary(
                             &owned.candidate,
-                            registration,
                             owned.provenance,
                             self.word,
                             body,
@@ -9805,8 +9777,7 @@ const ModuleRegisterDriver = struct {
 };
 
 /// Finishes one construction boundary: capture the residual stack as the
-/// image's template, freeze the image, then either register it under the name
-/// the boundary carried or hand it to the program as a value.
+/// image's template, freeze the image, and hand it to the program as a value.
 const ModuleCompletionDriver = struct {
     pub const address_stable_driver = {};
     state: heap.Owned(State),
@@ -9817,24 +9788,12 @@ const ModuleCompletionDriver = struct {
             /// Construction-stack values still to move into the image
             /// template, counted from the top of the residual window down.
             remaining: usize,
-            completion: union(enum) {
-                value,
-                named: struct {
-                    cursor: intern.ModuleNameCursor,
-                    provenance: modules.RegistrationProvenance,
-                },
-            },
-        },
-        value: heap.Owned(modules.SealedImage),
-        validate: struct {
-            sealed: heap.Owned(modules.SealedImage),
-            cursor: intern.ModuleNameCursor,
+            /// The constructing site's. Embedded source registers its images
+            /// with `register`, so the seal records their recognition while
+            /// they are still values.
             provenance: modules.RegistrationProvenance,
         },
-        publish: struct {
-            sealed: heap.Owned(modules.SealedImage),
-            cursor: heap.Owned(modules.Registry.RegistrationCursor),
-        },
+        value: heap.Owned(modules.SealedImage),
 
         pub fn deinit(
             self: *State,
@@ -9844,11 +9803,6 @@ const ModuleCompletionDriver = struct {
             switch (self.*) {
                 .capture => |*capture| capture.image.deinit(releases, storage_allocator),
                 .value => |*sealed| sealed.deinit(releases, storage_allocator),
-                .validate => |*validate| validate.sealed.deinit(releases, storage_allocator),
-                .publish => |*publish| {
-                    publish.cursor.deinit(releases, storage_allocator);
-                    publish.sealed.deinit(releases, storage_allocator);
-                },
             }
             self.* = undefined;
         }
@@ -9867,48 +9821,17 @@ const ModuleCompletionDriver = struct {
                     );
                     continue;
                 }
-                const completion = capture.completion;
-                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(evaluator.moduleRecognition(switch (completion) {
-                    .named => |named| named.provenance,
-                    .value => .ordinary,
-                })));
+                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(
+                    evaluator.moduleRecognition(capture.provenance),
+                ));
                 capture.image.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                switch (completion) {
-                    .value => self.state.borrowMut().* = .{ .value = .init(sealed.take()) },
-                    .named => |validation| self.state.borrowMut().* = .{ .validate = .{
-                        .sealed = .init(sealed.take()),
-                        .cursor = validation.cursor,
-                        .provenance = validation.provenance,
-                    } },
-                }
+                self.state.borrowMut().* = .{ .value = .init(sealed.take()) };
             },
             .value => |*sealed| {
                 const item = try sealed.borrowMut().intoValue(evaluator.unit.allocator);
                 sealed.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 return .{ .output = item };
             },
-            .validate => |*validate| switch (validate.cursor.advance()) {
-                .pending => {},
-                .complete => |maybe_name| {
-                    const name = maybe_name orelse return evaluator.fail(
-                        .domain,
-                        "@defm requires a valid module name",
-                    );
-                    const provenance = validate.provenance;
-                    try evaluator.refuseReservedModule(name, provenance);
-                    const registration = evaluator.publicationRegistry(name, provenance).registrationCursor(
-                        validate.sealed.borrow().ref(),
-                        name,
-                        provenance,
-                        &evaluator.unit.turn_authority,
-                    );
-                    self.state.borrowMut().* = .{ .publish = .{
-                        .sealed = .init(validate.sealed.take()),
-                        .cursor = .init(registration),
-                    } };
-                },
-            },
-            .publish => |*publish| return advanceRegistration(evaluator, publish.cursor.borrowMut()),
         };
         return .stepped;
     }

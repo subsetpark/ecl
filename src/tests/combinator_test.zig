@@ -948,6 +948,20 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try std.testing.expectEqual(@as(u64, 0), executable_form.lastIdiomHits());
 }
 
+test "idioms: a standard-library definition recognizes through its registration" {
+    // Embedded source constructs an anonymous image and registers it in a
+    // separate step, so recognition must be recorded while the image is still
+    // a value. Losing it leaves `str.format` correct and ~75x slower.
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "[1 \"b\"] \"x{}y{}\" str.format", "\"x1yb\"");
+    try std.testing.expectEqual(@as(u64, 1), runtime.lastIdiomHits());
+}
+
 // Two separate reasons recognition must not fire, kept together because both
 // are about a rebound name and only one is about late binding.
 //

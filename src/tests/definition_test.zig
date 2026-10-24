@@ -322,11 +322,12 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "def" },
         .{ .name = "local separator", .source = "1 (|--| --)", .kind = "parse" },
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
-        .{ .name = "@defm", .source = "[] () '-- @defm", .kind = "domain", .word = "@defm" },
+        // @defm is prelude sugar too: `register` raises, under @defm.
+        .{ .name = "@defm", .source = "[] () '-- @defm", .kind = "domain", .word = "register" },
         .{ .name = "alias", .source = "[] () 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
         // The exact name `core` is the core qualifier, so neither publication
         // surface may claim it; `core.utils` remains an ordinary module name.
-        .{ .name = "@defm core", .source = "[] () 'core @defm", .kind = "domain", .word = "@defm" },
+        .{ .name = "@defm core", .source = "[] () 'core @defm", .kind = "domain", .word = "register" },
         .{ .name = "register core", .source = "[] () @module 'core register", .kind = "domain", .word = "register" },
         .{ .name = "alias core", .source = "[] () 'm @defm 'core 'm alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "[] ((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
