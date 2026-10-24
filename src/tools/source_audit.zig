@@ -1504,6 +1504,7 @@ fn auditUnreferencedDeclarations(init: std.process.Init) bool {
                 std.log.err("declarations: cannot record {s}/{s}: {s}", .{ root, entry.path, @errorName(err) });
                 return true;
             };
+            std.mem.replaceScalar(u8, path, '\\', '/');
             if (std.mem.indexOf(u8, path, "zig-cache") != null or
                 std.mem.indexOf(u8, path, "zig-pkg") != null or
                 std.mem.startsWith(u8, path, "test/native/negative/")) continue;
