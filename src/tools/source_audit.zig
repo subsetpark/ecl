@@ -915,6 +915,7 @@ const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "kernel_sequence.zig", .function = "rotatePrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "installOne" },
     .{ .file = "kernel_sequence.zig", .function = "installCat" },
+    .{ .file = "kernel_sequence.zig", .function = "installCons" },
     .{ .file = "kernel_sequence.zig", .function = "shapePrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "flipPrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "reshapePrimitive" },

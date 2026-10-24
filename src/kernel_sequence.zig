@@ -1099,19 +1099,6 @@ fn razePrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.runDriver(RazeDriver{ .collection = .init(collection.take()) });
 }
 
-/// The element class a raze's typed result is chosen from.
-const RazeClass = enum { none, ints, floats, chars, symbols, boxed };
-
-fn razeClass(kind: value.HeapKind) RazeClass {
-    return switch (kind) {
-        .leaf_u8, .leaf_i64 => .ints,
-        .leaf_f64 => .floats,
-        .leaf_char1, .leaf_char2, .leaf_char4 => .chars,
-        .leaf_symbol => .symbols,
-        .generic_spine, .dict, .task, .port, .address, .reserved_mask => .boxed,
-    };
-}
-
 /// The typed result buffer, held so a cancelled raze retires it.
 const RazeOutput = struct {
     builder: heap.AnyListBuilder,
@@ -1120,9 +1107,9 @@ const RazeOutput = struct {
     }
 };
 
-/// Flattens one level. When every non-empty child is a typed leaf of one
-/// element class, each child's slice is copied, widened where narrower,
-/// straight into a typed result as wide as the widest child. Otherwise the
+/// Flattens one level. When `list.ListProfile` joins the non-empty children's
+/// representations into one leaf (one element class, widened to the widest
+/// child), each child's slice is copied straight into it. Otherwise the
 /// children are read into boxed values and the result is profiled.
 const RazeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
@@ -1131,8 +1118,11 @@ const RazeDriver = struct {
     index: usize = 0,
     child_index: usize = 0,
     total: usize = 0,
-    class: RazeClass = .none,
-    widest: value.HeapKind = .leaf_u8,
+    /// The children's representations joined; any element that is not a
+    /// typed leaf makes it mixed.
+    profile: list.ListProfile = .{},
+    /// The last child representation joined, which the next usually repeats.
+    joined_kind: ?value.HeapKind = null,
     values: ?heap.Owned([]Value) = null,
     output: ?heap.Owned(RazeOutput) = null,
     destination: usize = 0,
@@ -1140,54 +1130,25 @@ const RazeDriver = struct {
 
     fn classify(self: *RazeDriver, item: Value) void {
         if (item != .list) {
-            self.class = .boxed;
+            self.profile = .{ .kind = .mixed };
             return;
         }
-        if (item.list.length() == 0 or self.class == .boxed) return;
+        if (item.list.length() == 0) return;
         const kind = item.list.kind();
-        const class = razeClass(kind);
-        if (self.class == .none) {
-            self.class = class;
-            self.widest = kind;
-        } else if (self.class != class) {
-            self.class = .boxed;
-        } else if (elementBits(kind) > elementBits(self.widest)) {
-            self.widest = kind;
-        }
+        if (self.joined_kind == kind) return;
+        self.joined_kind = kind;
+        self.profile = self.profile.join(list.ListProfile.ofKind(kind));
     }
 
-    fn elementBits(kind: value.HeapKind) usize {
-        return switch (kind) {
-            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |leaf| @bitSizeOf(heap.LeafElement(leaf)),
-            .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
-        };
-    }
-
-    /// Whether every `Source` element coerces to `Out` unchanged. The class
-    /// check already keeps floats, symbols, and codepoints apart at run time;
-    /// this only decides which pairs need code.
-    fn widens(comptime Source: type, comptime Out: type) bool {
-        if (Source == Out) return true;
-        const from = @typeInfo(Source);
-        const to = @typeInfo(Out);
-        if (from != .int or to != .int) return false;
-        return to.int.bits > from.int.bits and
-            (to.int.signedness == .signed or from.int.signedness == .unsigned);
-    }
-
-    /// Copies `out.len` elements of `child`, starting at `from`, into `out`.
-    fn copyChild(comptime Out: type, out: []Out, child: *heap.ListHandle, from: usize, releases: *heap.ReleaseDomain) void {
+    /// Copies `out.len` elements of `child`, starting at `from`, into `out`,
+    /// whose representation the profile joined `child`'s into.
+    fn copyChild(comptime out_kind: value.HeapKind, out: []heap.LeafElement(out_kind), child: *heap.ListHandle, from: usize, releases: *heap.ReleaseDomain) void {
         switch (child.kind()) {
             inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
-                const Source = heap.LeafElement(kind);
-                if (comptime !widens(Source, Out)) unreachable;
-                var reader = heap.LeafReader(kind).acquire(child);
-                defer reader.release(releases);
-                const source = reader.slice()[from..][0..out.len];
-                if (Source == Out) {
-                    @memcpy(out, source);
-                } else for (out, source) |*slot, item| {
-                    slot.* = item;
+                if (comptime list.ListProfile.joinKinds(kind, out_kind) != out_kind) unreachable else {
+                    var reader = heap.LeafReader(kind).acquire(child);
+                    defer reader.release(releases);
+                    copyWidened(heap.LeafElement(out_kind), out, reader.slice()[from..][0..out.len]);
                 }
             },
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
@@ -1202,10 +1163,11 @@ const RazeDriver = struct {
             .count => {
                 if (self.index == count) {
                     self.index = 0;
-                    if (self.class != .none and self.class != .boxed) {
+                    const kind = self.profile.heapKind();
+                    if (kind != .generic_spine) {
                         self.output = .init(.{ .builder = try heap.AnyListBuilder.init(
                             evaluator.allocator(),
-                            self.widest,
+                            kind,
                             self.total,
                             self.total,
                         ) });
@@ -1241,8 +1203,8 @@ const RazeDriver = struct {
                 const run = work.take(length - self.child_index);
                 switch (self.output.?.borrowMut().builder) {
                     .generic => unreachable,
-                    inline else => |*builder| copyChild(
-                        @TypeOf(builder.items()[0]),
+                    inline else => |*builder, tag| copyChild(
+                        comptime builderKind(tag),
                         builder.items()[self.destination..][0..run],
                         child,
                         self.child_index,
@@ -1461,6 +1423,8 @@ const ListCopyDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     left: heap.Owned(Value),
     right: ?heap.Owned(Value) = null,
+    /// An atom placed before `left`'s elements, for `cons`.
+    head: ?heap.Owned(Value) = null,
     start: usize,
     end: usize,
     left_count: usize = 0,
@@ -1488,6 +1452,19 @@ const ListCopyDriver = struct {
             .start = start,
             .end = end,
             .reverse = reverse,
+            .values = .init(values),
+            .materializer = .init(.init(evaluator.allocator(), values)),
+        });
+    }
+
+    fn installCons(evaluator: *Machine, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+        const count: usize = @intCast(collection.borrow().list.length());
+        const values = try evaluator.allocator().alloc(Value, count + 1);
+        try evaluator.runDriver(ListCopyDriver{
+            .left = .init(collection.take()),
+            .head = .init(item.take()),
+            .start = 0,
+            .end = count + 1,
             .values = .init(values),
             .materializer = .init(.init(evaluator.allocator(), values)),
         });
@@ -1524,7 +1501,12 @@ const ListCopyDriver = struct {
         const work = evaluator.workBudget();
         const values = self.values.borrow();
         while (self.index != values.len and work.spend()) {
-            if (self.right) |*right| {
+            if (self.head) |*head| {
+                values[self.index] = if (self.index == 0)
+                    head.borrow()
+                else
+                    list.atUnchecked(self.left.borrow(), self.index - 1);
+            } else if (self.right) |*right| {
                 values[self.index] = if (self.index < self.left_count)
                     list.atUnchecked(self.left.borrow(), self.index)
                 else
@@ -1885,8 +1867,8 @@ const FlipDriver = struct {
             const run = work.take(rows - self.row);
             switch (self.typed.?.borrowMut().builder) {
                 .generic => unreachable,
-                inline else => |*builder| RazeDriver.copyChild(
-                    @TypeOf(builder.items()[0]),
+                inline else => |*builder, tag| RazeDriver.copyChild(
+                    comptime builderKind(tag),
                     builder.items()[self.row..][0..run],
                     self.flat.?.borrow().list,
                     spine.len() * rows + self.row,
@@ -2469,7 +2451,31 @@ const CopyShape = union(enum) {
     /// `result[i] = source[indices[i]]`, with the same bounds and sign checks
     /// the scalar index path applies, reported identically.
     gather,
+    /// `result[0] = head`, then `result[i] = source[i - 1]`
+    cons: struct { head: Value },
 };
+
+/// Copies `items` into `out`, widening each element when the result's
+/// representation, which `list.ListProfile` chose, is wider; a plain copy when
+/// they match. Every typed list move widens through this.
+fn copyWidened(comptime Out: type, out: []Out, items: anytype) void {
+    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return @memcpy(out, items);
+    for (out, items) |*slot, item| slot.* = item;
+}
+
+/// The representation an `AnyListBuilder` variant writes.
+fn builderKind(comptime tag: std.meta.Tag(heap.AnyListBuilder)) value.HeapKind {
+    return switch (tag) {
+        .generic => .generic_spine,
+        .u8 => .leaf_u8,
+        .i64 => .leaf_i64,
+        .f64 => .leaf_f64,
+        .char1 => .leaf_char1,
+        .char2 => .leaf_char2,
+        .char4 => .leaf_char4,
+        .symbol => .leaf_symbol,
+    };
+}
 
 const leaf_kinds = [_]value.HeapKind{
     .leaf_u8,
@@ -2481,26 +2487,34 @@ const leaf_kinds = [_]value.HeapKind{
     .leaf_symbol,
 };
 
-/// The typed copy kernels: one representation for every source and the
-/// result. Each names exactly its operands: one source for a contiguous,
-/// reversed, or cyclic copy; two for a concatenation; a source and its index
-/// vector for a gather.
-fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+/// The typed copy kernels. The result's representation is the one
+/// `list.ListProfile` joins the sources' into: their own when they share one,
+/// the wider when they differ only in width (bytes into ints, narrower
+/// characters into wider), each element widened as it is copied. Each names
+/// exactly its operands: one source for a contiguous, reversed, or cyclic
+/// copy, or for an atom placed before it; two for a concatenation, whose
+/// second is `other_kind`; a source and its index vector for a gather. For a
+/// `cons`, `other_kind` is the atom's.
+fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
+    const out_kind = comptime list.ListProfile.joinKinds(kind, other_kind);
+    comptime std.debug.assert(out_kind != .generic_spine);
     const Element = heap.LeafElement(kind);
+    const Other = heap.LeafElement(other_kind);
+    const Out = heap.LeafElement(out_kind);
     const Index = heap.LeafElement(index_kind);
     return struct {
-        fn prepareWriter(evaluator: *Machine, length: usize) error{OutOfMemory}!heap.LeafWriter(kind) {
+        fn prepareWriter(evaluator: *Machine, length: usize) error{OutOfMemory}!heap.LeafWriter(out_kind) {
             return .init(evaluator.allocator(), length);
         }
 
-        fn finishWriter(output: *heap.LeafWriter(kind)) Value {
+        fn finishWriter(output: *heap.LeafWriter(out_kind)) Value {
             return output.finish();
         }
 
         const Single = struct {
             pub const arity = 1;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(kind);
+            pub const Output = heap.LeafWriter(out_kind);
 
             pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
                 return prepareWriter(evaluator, length);
@@ -2514,13 +2528,13 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
         const Concat = struct {
             pub const arity = 2;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(kind);
+            pub const Output = heap.LeafWriter(out_kind);
 
             pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
                 return prepareWriter(evaluator, length);
             }
             pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(kind, operands[1].list), null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.unpublishedRange(range.start, range.len()), range);
             }
             pub const finish = finishWriter;
         };
@@ -2528,7 +2542,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
         const Gather = struct {
             pub const arity = 2;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(kind);
+            pub const Output = heap.LeafWriter(out_kind);
 
             pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
                 return prepareWriter(evaluator, length);
@@ -2539,6 +2553,33 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
             pub const finish = finishWriter;
         };
 
+        /// An atom before a source's elements; an empty source is never read,
+        /// whatever its representation.
+        const Cons = struct {
+            pub const arity = 1;
+            pub const Params = CopyShape;
+            pub const Output = heap.LeafWriter(out_kind);
+
+            pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
+                return prepareWriter(evaluator, length);
+            }
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+                const source: []const Element = if (range.end > 1) heap.leafElements(kind, operands[0].list) else &.{};
+                return copyRange(context, shape, source, null, null, output.unpublishedRange(range.start, range.len()), range);
+            }
+            pub const finish = finishWriter;
+        };
+
+        /// An atom as the result's element; `ListProfile` admitted its class.
+        fn element(item: Value) Out {
+            return switch (comptime out_kind) {
+                .leaf_f64 => item.float,
+                .leaf_symbol => item.symbol,
+                .leaf_char1, .leaf_char2, .leaf_char4 => @intCast(item.char),
+                else => @intCast(item.int),
+            };
+        }
+
         /// Copies `range` of the result into `out`. Nothing reads the result
         /// before it is published, so each shape writes its range in place,
         /// with no staging block.
@@ -2546,13 +2587,13 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
             context: support.Context,
             shape: CopyShape,
             source: []const Element,
-            other: ?[]const Element,
+            other: ?[]const Other,
             gather_indices: ?[]const Index,
-            out: []Element,
+            out: []Out,
             range: kernel_flat.Chunk,
         ) MachineError!void {
             switch (shape) {
-                .contiguous => |contiguous| @memcpy(out, source[contiguous.start + range.start ..][0..out.len]),
+                .contiguous => |contiguous| copyWidened(Out, out, source[contiguous.start + range.start ..][0..out.len]),
                 .reversed => |reversed| for (out, range.start..) |*slot, index| {
                     slot.* = source[reversed.end - index - 1];
                 },
@@ -2561,7 +2602,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
                     var written: usize = 0;
                     while (written != out.len) {
                         const run = @min(source.len - from, out.len - written);
-                        @memcpy(out[written..][0..run], source[from..][0..run]);
+                        copyWidened(Out, out[written..][0..run], source[from..][0..run]);
                         written += run;
                         from = 0;
                     }
@@ -2569,9 +2610,9 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
                 .concat => |concat| {
                     const right = other.?;
                     const split = @min(out.len, concat.left_count -| range.start);
-                    if (split != 0) @memcpy(out[0..split], source[range.start..][0..split]);
+                    if (split != 0) copyWidened(Out, out[0..split], source[range.start..][0..split]);
                     const right_start = (range.start + split) -| concat.left_count;
-                    @memcpy(out[split..], right[right_start..][0 .. out.len - split]);
+                    copyWidened(Out, out[split..], right[right_start..][0 .. out.len - split]);
                 },
                 .gather => {
                     const indices = gather_indices.?[range.start..range.end];
@@ -2580,6 +2621,16 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime index_kind: value.HeapKin
                         .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
                     };
                     for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
+                },
+                .cons => |cons| {
+                    var from = range.start;
+                    var written: usize = 0;
+                    if (from == 0) {
+                        out[0] = element(cons.head);
+                        from = 1;
+                        written = 1;
+                    }
+                    copyWidened(Out, out[written..], source[from - 1 .. range.end - 1]);
                 },
             }
         }
@@ -2599,7 +2650,7 @@ fn startTypedSlice(evaluator: *Machine, source_owner: *heap.OwnedValue, shape: C
     const source_kind = source.list.kind();
     inline for (leaf_kinds) |candidate| {
         if (candidate == source_kind) {
-            try support.Kernel(CopyKernels(candidate, .leaf_i64).Single).run(evaluator, .{source_owner}, shape, length);
+            try support.Kernel(CopyKernels(candidate, candidate, .leaf_i64).Single).run(evaluator, .{source_owner}, shape, length);
             return true;
         }
     }
@@ -2616,11 +2667,12 @@ fn startTypedConcat(
     if (length == 0) return false;
     const left = left_owner.borrow();
     const right = right_owner.borrow();
-    if (left != .list or right != .list or right.list.kind() != left.list.kind()) return false;
-    const source_kind = left.list.kind();
-    inline for (leaf_kinds) |candidate| {
-        if (candidate == source_kind) {
-            try support.Kernel(CopyKernels(candidate, .leaf_i64).Concat).run(
+    if (left != .list or right != .list) return false;
+    const left_kind = left.list.kind();
+    const right_kind = right.list.kind();
+    inline for (leaf_kinds) |candidate_left| if (candidate_left == left_kind) inline for (leaf_kinds) |candidate_right| if (candidate_right == right_kind) {
+        if (comptime list.ListProfile.joinKinds(candidate_left, candidate_right) == .generic_spine) return false else {
+            try support.Kernel(CopyKernels(candidate_left, candidate_right, .leaf_i64).Concat).run(
                 evaluator,
                 .{ left_owner, right_owner },
                 .{ .concat = .{ .left_count = left_count } },
@@ -2628,8 +2680,42 @@ fn startTypedConcat(
             );
             return true;
         }
-    }
+    };
     return false;
+}
+
+/// `cons` of an atom onto a list, as a typed copy when the atom and the
+/// list's elements join into one leaf representation (see `CopyKernels`); onto
+/// an empty list, the leaf the atom alone makes. False otherwise, for the
+/// generic path.
+fn startTypedCons(evaluator: *Machine, item: Value, collection: *heap.OwnedValue) MachineError!bool {
+    const atom_kind = list.ListProfile.of(item).heapKind();
+    const count: usize = @intCast(collection.borrow().list.length());
+    const list_kind = if (count == 0) atom_kind else collection.borrow().list.kind();
+    inline for (leaf_kinds) |candidate_list| if (candidate_list == list_kind) inline for (leaf_kinds) |candidate_atom| if (candidate_atom == atom_kind) {
+        if (comptime list.ListProfile.joinKinds(candidate_list, candidate_atom) == .generic_spine) return false else {
+            try support.Kernel(CopyKernels(candidate_list, candidate_atom, .leaf_i64).Cons).run(
+                evaluator,
+                .{collection},
+                .{ .cons = .{ .head = item } },
+                count + 1,
+            );
+            return true;
+        }
+    };
+    return false;
+}
+
+/// `cons`: a typed copy when the atom and the list join into one leaf, and
+/// otherwise the boxed copy every mixed move takes, profiled into its result.
+pub fn consForPrims(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var collection = try evaluator.popList();
+    defer collection.deinit();
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    if (try startTypedCons(evaluator, item.borrow(), &collection)) return;
+    try ListCopyDriver.installCons(evaluator, &item, &collection);
 }
 
 fn startTypedGather(
@@ -2648,7 +2734,7 @@ fn startTypedGather(
     inline for (leaf_kinds) |candidate| {
         inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
             if (candidate == source_kind and candidate_index == index_kind) {
-                try support.Kernel(CopyKernels(candidate, candidate_index).Gather).run(
+                try support.Kernel(CopyKernels(candidate, candidate, candidate_index).Gather).run(
                     evaluator,
                     .{ source_owner, indices_owner },
                     .gather,
