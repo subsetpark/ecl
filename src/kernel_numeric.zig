@@ -2486,6 +2486,245 @@ pub const IdiomStart = struct {
     pub const Binary = *const fn (*Machine, *heap.OwnedValue, *heap.OwnedValue) MachineError!void;
 };
 
+/// A quotation compiled to a straight-line scalar function of one or two
+/// inputs: what calling it on atoms computes, without the interpreter. Stack
+/// words were resolved when it was compiled, so only operations remain, in
+/// the quotation's own order, each reading registers the compiler assigned.
+/// Inputs occupy the first registers, then constants and results as the
+/// quotation made them.
+pub const ScalarProgram = struct {
+    pub const max_instructions = 16;
+    pub const max_registers = 32;
+    pub const Register = u8;
+
+    pub const Instruction = struct {
+        operation: union(enum) { unary: UnaryOp, binary: BinaryOp },
+        left: Register,
+        right: Register = 0,
+        destination: Register,
+        /// The word and its position in the quotation, which a fault names.
+        word: u32,
+        index: u32,
+        /// The word is a prelude definition, so a fault traces through it as
+        /// well as through the operation its body runs.
+        defined: bool,
+    };
+
+    inputs: u8,
+    registers: u8,
+    // SAFETY: only the first `constant_count` constants are read.
+    constants: [max_registers]struct { register: Register, value: Value } = undefined,
+    constant_count: u8 = 0,
+    // SAFETY: only the first `len` instructions are read.
+    instructions: [max_instructions]Instruction = undefined,
+    len: u8 = 0,
+    result: Register = 0,
+
+    /// Loads the constants into their registers; inputs and results are
+    /// written before they are read.
+    fn load(self: *const ScalarProgram, registers: *[max_registers]Value) void {
+        for (self.constants[0..self.constant_count]) |constant| registers[constant.register] = constant.value;
+    }
+
+    /// Runs every instruction over `registers`, reporting the instruction a
+    /// fault happened in.
+    fn run(self: *const ScalarProgram, registers: *[max_registers]Value, failed: *u8) ScalarError!Value {
+        for (self.instructions[0..self.len], 0..) |instruction, position| {
+            registers[instruction.destination] = (switch (instruction.operation) {
+                .unary => |operation| switch (operation) {
+                    inline else => |selected| scalarUnary(selected, registers[instruction.left]),
+                },
+                .binary => |operation| switch (operation) {
+                    inline else => |selected| scalarBinary(selected, registers[instruction.left], registers[instruction.right]),
+                },
+            }) catch |fault| {
+                failed.* = @intCast(position);
+                return fault;
+            };
+        }
+        return registers[self.result];
+    }
+};
+
+/// Whether `operand` can feed a scalar program: a numeric atom, or a nonempty
+/// numeric leaf.
+fn programOperand(operand: Value) bool {
+    return switch (operand) {
+        .int, .float => true,
+        .list => |header| header.length() != 0 and switch (header.kind()) {
+            .leaf_u8, .leaf_i64, .leaf_f64 => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+/// Whether a program over these operands runs as one kernel: every operand a
+/// numeric atom or nonempty numeric leaf, at least one a leaf, and the leaves
+/// of one length. Anything else takes the generic path.
+pub fn programCandidate(operands: []const Value) bool {
+    var length: ?usize = null;
+    for (operands) |operand| {
+        if (!programOperand(operand)) return false;
+        if (operand != .list) continue;
+        const count: usize = @intCast(operand.list.length());
+        if (length) |expected| if (expected != count) return false;
+        length = count;
+    }
+    return length != null;
+}
+
+/// Runs a program once per element of its list operands, as calling the
+/// quotation per element would: each element passes through every
+/// instruction before the next starts, so the first fault is the one that
+/// order meets, reported by its own word. An atom operand is the same at every
+/// element. The quotation is held as an operand for that report.
+pub fn startProgramEach(evaluator: *Machine, input: *heap.OwnedValue, phrase: *heap.OwnedValue, program: ScalarProgram) MachineError!void {
+    const count: usize = @intCast(input.borrow().list.length());
+    return support.Kernel(ProgramKernel(1)).run(evaluator, .{ input, phrase }, try ownProgram(evaluator, program), count);
+}
+
+/// A program is too large to travel by value in a driver; the kernel's output
+/// owns this copy from `prepare` on.
+fn ownProgram(evaluator: *Machine, program: ScalarProgram) error{OutOfMemory}!*ScalarProgram {
+    const owned = try evaluator.allocator().create(ScalarProgram);
+    owned.* = program;
+    return owned;
+}
+
+pub fn startProgramZip(
+    evaluator: *Machine,
+    left: *heap.OwnedValue,
+    right: *heap.OwnedValue,
+    phrase: *heap.OwnedValue,
+    program: ScalarProgram,
+) MachineError!void {
+    const count: usize = @intCast(if (left.borrow() == .list) left.borrow().list.length() else right.borrow().list.length());
+    return support.Kernel(ProgramKernel(2)).run(evaluator, .{ left, right, phrase }, try ownProgram(evaluator, program), count);
+}
+
+fn programElement(operand: Value, index: usize) Value {
+    if (operand != .list) return operand;
+    return switch (operand.list.kind()) {
+        .leaf_f64 => .{ .float = heap.leafElements(.leaf_f64, operand.list)[index] },
+        .leaf_i64 => .{ .int = heap.leafElements(.leaf_i64, operand.list)[index] },
+        .leaf_u8 => .{ .int = heap.leafElements(.leaf_u8, operand.list)[index] },
+        else => unreachable, // `programCandidate` admits numeric leaves only.
+    };
+}
+
+/// The representation `each` gives a list of numeric atoms: bytes while every
+/// result is an int from 0 to 255, ints while every result is an int, floats
+/// while every result is a float, and a generic list once ints and floats mix.
+const ResultProfile = enum {
+    empty,
+    bytes,
+    ints,
+    floats,
+    mixed,
+
+    fn add(self: ResultProfile, item: Value) ResultProfile {
+        return switch (self) {
+            .empty => switch (item) {
+                .int => |integer| if (integer >= 0 and integer <= std.math.maxInt(u8)) .bytes else .ints,
+                else => .floats,
+            },
+            .bytes => switch (item) {
+                .int => |integer| if (integer >= 0 and integer <= std.math.maxInt(u8)) .bytes else .ints,
+                else => .mixed,
+            },
+            .ints => if (item == .int) .ints else .mixed,
+            .floats => if (item == .float) .floats else .mixed,
+            .mixed => .mixed,
+        };
+    }
+
+    fn kind(self: ResultProfile) value.HeapKind {
+        return switch (self) {
+            .bytes => .leaf_u8,
+            .ints => .leaf_i64,
+            .floats => .leaf_f64,
+            .empty, .mixed => .generic_spine,
+        };
+    }
+};
+
+/// Two phases: compute every element's result as an atom, noting the
+/// representation `each` would give them, then write them in it. The last
+/// operand is the quotation.
+fn ProgramKernel(comptime inputs: usize) type {
+    return struct {
+        pub const arity = inputs + 1;
+        /// Owned by the output from `prepare` on.
+        pub const Params = *ScalarProgram;
+        pub const Output = struct {
+            allocator: std.mem.Allocator,
+            program: *ScalarProgram,
+            results: []Value,
+            profile: ResultProfile = .empty,
+            builder: ?heap.AnyListBuilder = null,
+
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                if (self.builder) |*builder| builder.retirePartial(releases);
+                self.allocator.free(self.results);
+                self.allocator.destroy(self.program);
+            }
+        };
+
+        pub fn prepare(evaluator: *Machine, _: [arity]Value, program: *ScalarProgram, length: usize) error{OutOfMemory}!Output {
+            errdefer evaluator.allocator().destroy(program);
+            return .{
+                .allocator = evaluator.allocator(),
+                .program = program,
+                .results = try evaluator.allocator().alloc(Value, length),
+            };
+        }
+
+        pub fn chunk(program: *ScalarProgram, operands: [arity]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+            if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
+            // SAFETY: `load` fills the constants; inputs and results are
+            // written before they are read.
+            var registers: [ScalarProgram.max_registers]Value = undefined;
+            program.load(&registers);
+            var profile = output.profile;
+            for (output.results[range.start..range.end], range.start..) |*slot, index| {
+                inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
+                var failed: u8 = 0;
+                slot.* = program.run(&registers, &failed) catch |fault|
+                    return failProgram(context.evaluator, operands[inputs], program.instructions[failed], fault);
+                profile = profile.add(slot.*);
+            }
+            output.profile = profile;
+        }
+
+        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+            if (output.builder != null) return null;
+            const length = output.results.len;
+            output.builder = try heap.AnyListBuilder.init(output.allocator, output.profile.kind(), length, length);
+            // A generic list counts the values written into it.
+            if (output.builder.? == .generic) output.builder.?.generic.setLen(0);
+            return length;
+        }
+
+        pub fn finish(output: *Output) Value {
+            const header = output.builder.?.finish();
+            output.allocator.free(output.results);
+            output.allocator.destroy(output.program);
+            return .{ .list = header };
+        }
+    };
+}
+
+/// Reports a program's fault as the faulting word would: that word active, at
+/// its position in the quotation, with the shared scalar diagnostic.
+fn failProgram(evaluator: *Machine, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
+    evaluator.setActiveWord(.plain(instruction.word));
+    const failure = scalarFailure(evaluator, fault, null);
+    evaluator.setFailureSite(phrase.list, instruction.index);
+    if (instruction.defined) evaluator.setFailureTraceParent(.plain(instruction.word));
+    return failure;
+}
+
 /// The caller guards with the matching candidate predicate, so the start
 /// asserts: a guard and a dispatch that could disagree would be a second,
 /// silent classification.

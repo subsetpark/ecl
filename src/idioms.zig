@@ -572,7 +572,9 @@ pub fn tryApply(
     if (evaluator.unit.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
     const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
-    if (entries.len == 0) return decline.run(evaluator);
+    // An `each` or `zip-with` quotation of any length may be a scalar program.
+    if (entries.len == 0 and candidate.context != .each and candidate.context != .zip_with)
+        return decline.run(evaluator);
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
     const planned = try evaluator.planEntry();
@@ -840,6 +842,10 @@ fn matchOffered(
             break index;
         }
     } else null;
+    if (matched == null) if (try tryProgram(evaluator, candidate)) {
+        decline.discard(evaluator);
+        return;
+    };
     if (planned) |entry| if (entry.offered == null) {
         heap.retainValue(candidate.phrase);
         entry.offered = .{
@@ -852,6 +858,154 @@ fn matchOffered(
         };
     };
     return applyMatched(evaluator, candidate.phrase, matched, capture, decline);
+}
+
+/// The numeric operations a scalar program may contain, by spelling, each with
+/// the binding its registry entries expect.
+const program_operations = blk: {
+    var found: [unary_count + binary_count]struct { spelling: []const u8, operation: Operation } = undefined;
+    var index: usize = 0;
+    for (std.meta.tags(numeric.UnaryOp)) |operation| {
+        found[index] = .{ .spelling = operation.spelling(), .operation = .{ .unary = operation } };
+        index += 1;
+    }
+    for (std.meta.tags(numeric.BinaryOp)) |operation| {
+        found[index] = .{ .spelling = operation.spelling(), .operation = .{ .binary = operation } };
+        index += 1;
+    }
+    break :blk found;
+};
+
+/// The stack words a scalar program may contain: they only move values, so
+/// they compile to register choices.
+const ProgramStackWord = enum { dup, swap, pop, over };
+
+/// Compiles a quotation applied to `inputs` values into a scalar program, or
+/// returns null when it is not one: every form must be a numeric constant, a
+/// stack word, or a numeric operation, each word bound as its registry entry
+/// expects, and the quotation must leave exactly one value from its inputs.
+/// Operations keep their order, including one whose result is later popped,
+/// so a fault happens where the quotation's own would.
+fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarProgram {
+    const Program = numeric.ScalarProgram;
+    var program: Program = .{ .inputs = inputs, .registers = inputs };
+    // SAFETY: only the first `depth` entries are read.
+    var stack: [Program.max_registers]Program.Register = undefined;
+    var depth: usize = inputs;
+    for (0..inputs) |input| stack[input] = @intCast(input);
+    const length: usize = @intCast(phrase.list.length());
+    for (0..length) |position| {
+        const form = list.atUnchecked(phrase, position);
+        if (form != .word) {
+            if (form != .int and form != .float) return null;
+            if (program.registers == Program.max_registers or depth == stack.len) return null;
+            program.constants[program.constant_count] = .{ .register = program.registers, .value = form };
+            program.constant_count += 1;
+            stack[depth] = program.registers;
+            depth += 1;
+            program.registers += 1;
+            continue;
+        }
+        const word = form.word;
+        const spelling = intern.get(word.name);
+        if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
+            const binding: BindingKind = if (stack_word == .over) .source else .builtin;
+            if (!guard.matches(word, binding, null, .trusted)) return null;
+            switch (stack_word) {
+                .dup => {
+                    if (depth < 1 or depth == stack.len) return null;
+                    stack[depth] = stack[depth - 1];
+                    depth += 1;
+                },
+                .swap => {
+                    if (depth < 2) return null;
+                    std.mem.swap(Program.Register, &stack[depth - 1], &stack[depth - 2]);
+                },
+                .pop => {
+                    if (depth < 1) return null;
+                    depth -= 1;
+                },
+                .over => {
+                    if (depth < 2 or depth == stack.len) return null;
+                    stack[depth] = stack[depth - 2];
+                    depth += 1;
+                },
+            }
+            continue;
+        }
+        const operation = for (program_operations) |candidate| {
+            if (std.mem.eql(u8, candidate.spelling, spelling)) break candidate.operation;
+        } else return null;
+        const binding = operationBinding(operation);
+        const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
+        if (!guard.matches(word, binding, primitive, .trusted)) return null;
+        if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
+        program.instructions[program.len] = switch (operation) {
+            .unary => |selected| unary: {
+                if (depth < 1) return null;
+                depth -= 1;
+                break :unary .{
+                    .operation = .{ .unary = selected },
+                    .left = stack[depth],
+                    .destination = program.registers,
+                    .word = word.name,
+                    .index = @intCast(position),
+                    .defined = binding == .source,
+                };
+            },
+            .binary => |selected| binary: {
+                if (depth < 2) return null;
+                depth -= 2;
+                break :binary .{
+                    .operation = .{ .binary = selected },
+                    .left = stack[depth],
+                    .right = stack[depth + 1],
+                    .destination = program.registers,
+                    .word = word.name,
+                    .index = @intCast(position),
+                    .defined = binding == .source,
+                };
+            },
+            else => unreachable,
+        };
+        program.len += 1;
+        stack[depth] = program.registers;
+        depth += 1;
+        program.registers += 1;
+    }
+    // A quotation that computes nothing is no faster compiled.
+    if (depth != 1 or program.len == 0) return null;
+    program.result = stack[0];
+    return program;
+}
+
+/// Offers an unmatched `each` or `zip-with` quotation as a scalar program.
+/// It is compiled afresh on every call rather than planned: the plan holds a
+/// registry entry, and a program is not one.
+fn tryProgram(evaluator: *Machine, candidate: Candidate) MachineError!bool {
+    const inputs: u8 = switch (candidate.context) {
+        .each => 1,
+        .zip_with => 2,
+        else => return false,
+    };
+    const program = compileProgram(.{ .live = evaluator }, candidate.phrase, inputs) orelse return false;
+    const stack = evaluator.unit.stack.items;
+    if (!numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1])) return false;
+    evaluator.unit.idiom_hits += 1;
+    var quotation = try evaluator.popValue();
+    defer quotation.deinit();
+    if (inputs == 1) {
+        var input = try evaluator.popValue();
+        defer input.deinit();
+        try numeric.startProgramEach(evaluator, &input, &quotation, program);
+        return true;
+    }
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
+    try numeric.startProgramZip(evaluator, &left, &right, &quotation, program);
+    return true;
 }
 
 /// Applies a matched entry when this application's operands admit it, and

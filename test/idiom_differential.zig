@@ -689,6 +689,63 @@ test "idioms: a caller's quotation is recognized inside prelude definitions" {
     try expectHits("(pop 1) 'neg def [5 6] (neg) all?", 1);
 }
 
+test "idioms: scalar programs preserve generic behavior" {
+    // An `each` or `zip-with` quotation of numeric operations, constants, and
+    // stack words runs as one compiled program per element. Results, their
+    // representations, and failures must match calling the quotation per
+    // element, including which step faults first.
+    const sources = [_][]const u8{
+        "[1 2 3 4 5 6] (3 mod 0 =) each",
+        "[1.5 -2.5 0.0] (2.0 * floor) each",
+        "[0.0 -0.0 1.0] (neg 0.0 +) each",
+        "[1 2 3] (10 swap - neg) each",
+        "[1 2 3] (dup *) each",
+        "[1 2 3] (dup 2 * swap 3 * +) each",
+        "[1 2 3] (10 over -) each",
+        "[1 2] (5 pop 2 *) each",
+        "[200 100 50] (2 * 300 min) each",
+        "[1 2 3] [4 5 6] (+ 2 *) zip-with",
+        "[1 2 3] [4 5 6] (over * +) zip-with",
+        "[1 2 3] 10 (- neg) zip-with",
+        "10 [1 2 3] (- neg) zip-with",
+        "[12 13 11] 10 (- 2 *) each-prior",
+        "[1 2 3 4 5 6] (3 mod 0 =) filter",
+        // Faults: the first in element order, by the word that meets it.
+        "[1 9223372036854775807] (2 * 1 +) each",
+        "[1 9223372036854775807] (1 + 2 *) each",
+        "[4 -1 9] (sqrt neg) each",
+        "[2 0 4] (10 swap div 1 +) each",
+        "[1 9223372036854775807] (dup * pop 1) each",
+        "[1 9223372036854775807] [1 1] (+ 2 *) zip-with",
+        // Shapes a program declines still agree with the generic path.
+        "[1 2] ('a + 1 +) each",
+        "[1 2] ([1 2] + 1 +) each",
+        "(1 2 3) (1 + 2 *) each",
+        "\"abc\" (1 + 2 *) each",
+        "[[1 2] [3]] (1 + 2 *) each",
+        "[1 2 3] [4 5] (+ 2 *) zip-with",
+        "[1 2] (dup) each",
+        "(pop 9) 'dup def [1 2] (dup *) each",
+        "(pop 9) 'over def [1 2] (10 over -) each",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("scalar-program differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    // A prelude-defined operation faults inside its own body on the generic
+    // path, naming the builtin it reached there (`div` for `mod`); a lifted
+    // step names the operation, as every recognized prelude operation does.
+    // Kind and message agree.
+    try compareModes("[1 2] (0 mod 1 +) each", false);
+    try expectHits("[1 2 3] (3 mod 0 =) each", 1);
+    try expectHits("[1 2 3] (dup *) each", 1);
+    try expectHits("[1 2 3] [4 5 6] (+ 2 *) zip-with", 1);
+    // A shadowed stack word declines.
+    try expectHits("(pop 9) 'dup def [1 2] (dup *) each", 0);
+}
+
 test "idioms: length each preserves errors dictionaries shadowing and generated quotations" {
     const cases = [_][]const u8{
         "[[] [1] [1 2] \"λ😀\"] (len) each",
