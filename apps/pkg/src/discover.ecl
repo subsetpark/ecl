@@ -9,7 +9,8 @@
  ### defp known?
  (state requirement -- bool : "Recognize an exact manifest already inspected for this resolution.")
  (|state requirement|
-  state 'catalog at requirement 'package at {} at-or requirement 'version at dict.has?) 'known? defp
+  state 'catalog at requirement 'package at {} dict.get requirement 'version at dict.has?) 'known?
+ defp
 
  ### defp fetched
  (state requirement manifest -- state :
@@ -21,7 +22,7 @@
   state 'count state 'count at 1 + put
   'pending state 'pending at manifest 'requires at dict.vals cat put
   'catalog state 'catalog at requirement 'package at
-  state 'catalog at requirement 'package at {} at-or requirement 'version at manifest put put put)
+  state 'catalog at requirement 'package at {} dict.get requirement 'version at manifest put put put)
  'fetched defp
 
  ### defp visit-new

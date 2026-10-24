@@ -1331,7 +1331,7 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
     try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") 'new def) 'error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
-    try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+    try expectOk(&runtime, "{'a 1} 'a 7 dict.get 1 = {'kind 'user 'msg \"dict.get lost dict\"} assert");
     try expectOk(&runtime, "[] (\"abc\" \"z\" str.index-of) @attempt 'err at 'kind at 'domain match? " ++
         "{'kind 'user 'msg \"str lost error\"} assert");
     // A dotted name under a stdlib prefix is an ordinary module.
@@ -1353,5 +1353,5 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
         "{'kind 'user 'msg \"alias escaped\"} assert");
     try expectErrorContains(&runtime, "[] result.ok ('dict undefm) () result.either", &.{reserved});
     try expectErrorContains(&runtime, "[] result.ok ([] () 'dict @defm) () result.either", &.{reserved});
-    try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+    try expectOk(&runtime, "{'a 1} 'a 7 dict.get 1 = {'kind 'user 'msg \"dict.get lost dict\"} assert");
 }

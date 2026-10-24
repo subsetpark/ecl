@@ -44,7 +44,7 @@
  ### defp precheck-requirement-value
  (requirement pair package -- : "Validate the version held by a requirement value.")
  (|requirement pair package|
-  package requirement 'package pair first at-or requirement 'version at
+  package requirement 'package pair first dict.get requirement 'version at
   resolve-version-checked pop) 'precheck-requirement-value defp
 
  ### defp precheck-requirement
@@ -90,7 +90,7 @@
   candidate type 'dict match?
   'type error.new "a manifest is a dict" error.with-message assert
   candidate
-  candidate 'name fallback at-or
+  candidate 'name fallback dict.get
   precheck-and-validate-manifest) 'resolve-manifest-checked defp
 
  ### defp precheck-and-validate-manifest
@@ -205,7 +205,7 @@
  (requirement package -- record : "Attach declaring-package provenance to a requirement.")
  (|requirement package|
   requirement 'requirer package put
-  'git-commit requirement 'source at 'commit "" at-or put) 'source-record defp
+  'git-commit requirement 'source at 'commit "" dict.get put) 'source-record defp
 
  ### defp merge-source
  (prior name requirement package -- record :
@@ -220,7 +220,7 @@
   infra
   (hash-conflict) with
   when
-  prior 'git-commit prior 'git-commit at requirement 'source at 'commit "" at-or merge-commit put
+  prior 'git-commit prior 'git-commit at requirement 'source at 'commit "" dict.get merge-commit put
   'source prior requirement canonical-source put
   'requirer prior 'requirer at package lex-min put) 'merge-source defp
 
@@ -306,9 +306,9 @@
   "Return an exact catalog manifest, or raise an error naming the requiring package.")
  (|state package version requirer|
   state 'catalog at package dict.has?
-  state 'catalog at package {} at-or type 'dict match?
+  state 'catalog at package {} dict.get type 'dict match?
   and
-  state 'catalog at package {} at-or version dict.has?
+  state 'catalog at package {} dict.get version dict.has?
   and
   state package version 3 pack (catalog-value) with
   requirer package version 3 pack (missing-manifest) with
