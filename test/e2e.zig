@@ -1852,7 +1852,9 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'type", "@defm expected a symbol name" },
+        // `@defm` is `@module` followed by `register`, so the misplaced symbol
+        // reaches `@module` as its values operand first.
+        .stderr_contains = &.{ "'kind 'type", "@module expected a list", "'trace ['@module '@defm]" },
     });
 
     // Anonymous construction names nothing, so its isolation advice names the
