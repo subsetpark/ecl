@@ -884,12 +884,12 @@ const kernel_quantum_users = [_][]const u8{
 /// Kernel files start drivers only through `support.Kernel`, which decides
 /// once whether a typed kernel runs inline or as a driver and owns the
 /// charging, operand holding, and fault cleanup around it. The functions
-/// below are the exceptions, each for a reason:
-/// - `structural`: it drives work the executor does not model, such as boxed
-///   spines, dicts, quotations, or a cursor over nested structure.
-/// - `typed_pending`: a typed kernel not yet moved onto the executor.
-/// The rule holds both ways: a new driver start elsewhere fails, and so does
-/// an exception that no longer starts one.
+/// below are the exceptions, each structural: it drives work the executor
+/// does not model, such as boxed spines, dicts, quotations, or a cursor over
+/// nested structure. A typed path in such a function still goes through the
+/// executor; only its structural path starts a driver itself. The rule holds
+/// both ways: a new driver start elsewhere fails, and so does an exception
+/// that no longer starts one.
 const kernel_driver_files = [_][]const u8{
     "kernel_numeric.zig", "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig",
     "kernel_random.zig",  "kernel_storage.zig",  "idioms.zig",
@@ -898,46 +898,41 @@ const kernel_driver_files = [_][]const u8{
 const KernelDriverException = struct {
     file: []const u8,
     function: []const u8,
-    reason: enum { structural, typed_pending },
 };
 
 const kernel_driver_exceptions = [_]KernelDriverException{
-    .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive", .reason = .structural },
-    .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive", .reason = .structural },
-    .{ .file = "kernel_numeric.zig", .function = "reduceGroups", .reason = .typed_pending },
-    .{ .file = "kernel_sequence.zig", .function = "atPrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "inPrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "razePrimitive", .reason = .typed_pending },
-    .{ .file = "kernel_sequence.zig", .function = "takePrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "rotatePrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "installOne", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "installCat", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "shapePrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "flipPrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "reshapePrimitive", .reason = .structural },
-    .{ .file = "kernel_sequence.zig", .function = "cutPrimitive", .reason = .structural },
-    .{ .file = "kernel_order.zig", .function = "cmpPrimitive", .reason = .structural },
-    .{ .file = "kernel_order.zig", .function = "startGrade", .reason = .structural },
-    .{ .file = "kernel_order.zig", .function = "distinctPrimitive", .reason = .structural },
-    .{ .file = "kernel_order.zig", .function = "groupPrimitive", .reason = .structural },
-    .{ .file = "kernel_order.zig", .function = "groupColumnsPrimitive", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "strPrimitive", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "hasPrimitive", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "putImpl", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "startTypedListPut", .reason = .typed_pending },
-    .{ .file = "kernel_dict_text.zig", .function = "startTypedVectorPutDriver", .reason = .typed_pending },
-    .{ .file = "kernel_dict_text.zig", .function = "fromListsForModule", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "delPrimitive", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "startTypedDel", .reason = .typed_pending },
-    .{ .file = "kernel_dict_text.zig", .function = "mergePrimitive", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "splitPrimitive", .reason = .typed_pending },
-    .{ .file = "kernel_dict_text.zig", .function = "joinPrimitive", .reason = .structural },
-    .{ .file = "kernel_dict_text.zig", .function = "formatPrimitive", .reason = .structural },
-    .{ .file = "idioms.zig", .function = "install", .reason = .structural },
-    .{ .file = "idioms.zig", .function = "applyLengthEach", .reason = .structural },
-    .{ .file = "idioms.zig", .function = "applyMatchEach", .reason = .structural },
-    .{ .file = "idioms.zig", .function = "applyMatchFind", .reason = .structural },
-    .{ .file = "idioms.zig", .function = "startReduction", .reason = .structural },
+    .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive" },
+    .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive" },
+    .{ .file = "kernel_numeric.zig", .function = "reduceGroups" },
+    .{ .file = "kernel_sequence.zig", .function = "atPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "inPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "razePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "takePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "rotatePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "installOne" },
+    .{ .file = "kernel_sequence.zig", .function = "installCat" },
+    .{ .file = "kernel_sequence.zig", .function = "shapePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "flipPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "reshapePrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "cutPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "cmpPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "startGrade" },
+    .{ .file = "kernel_order.zig", .function = "distinctPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "groupPrimitive" },
+    .{ .file = "kernel_order.zig", .function = "groupColumnsPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "strPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "hasPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "putImpl" },
+    .{ .file = "kernel_dict_text.zig", .function = "fromListsForModule" },
+    .{ .file = "kernel_dict_text.zig", .function = "delPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "mergePrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "joinPrimitive" },
+    .{ .file = "kernel_dict_text.zig", .function = "formatPrimitive" },
+    .{ .file = "idioms.zig", .function = "install" },
+    .{ .file = "idioms.zig", .function = "applyLengthEach" },
+    .{ .file = "idioms.zig", .function = "applyMatchEach" },
+    .{ .file = "idioms.zig", .function = "applyMatchFind" },
+    .{ .file = "idioms.zig", .function = "startReduction" },
 };
 
 fn auditKernelDriverStarts() bool {
@@ -975,7 +970,7 @@ fn auditKernelDriverStarts() bool {
                 }
             } else false;
             if (!listed) {
-                std.log.err("{s}: `{s}` starts a driver directly; run typed kernels through `support.Kernel`, or list the function in kernel_driver_exceptions with its reason", .{ file, name });
+                std.log.err("{s}: `{s}` starts a driver directly; run typed kernels through `support.Kernel`, or list the function in kernel_driver_exceptions if its path is structural", .{ file, name });
                 failed = true;
             }
         }

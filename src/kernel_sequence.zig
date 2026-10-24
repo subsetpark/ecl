@@ -383,9 +383,10 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
 ///
 /// The counting phase has a position per count. Typed counts are validated a
 /// block at a time; only a block that fails is rescanned element by element,
-/// to report the first failing position. The fill phase has a position per
-/// unit of its work: one per count read, or one per element written when a
-/// count is above one, which is `total + zeros`.
+/// to report the first failing position. The fill spends one unit per count
+/// read, or one per element written when a count is above one; its phase is
+/// sized by the bound on that, `count + total`, and is done once the result is
+/// full, so counts after the last nonzero one are not read.
 fn WhereKernel(comptime typed: bool) type {
     return struct {
         pub const arity = 1;
@@ -395,7 +396,6 @@ fn WhereKernel(comptime typed: bool) type {
             /// The count the next position reads.
             index: usize = 0,
             total: usize = 0,
-            zeros: usize = 0,
             writer: ?heap.LeafWriter(.leaf_i64) = null,
             destination: usize = 0,
             /// What remains of the run at `index` when a range ended inside it.
@@ -428,12 +428,16 @@ fn WhereKernel(comptime typed: bool) type {
             // Every index the fill stores is below the count of counts.
             if (output.index != 0 and std.math.cast(i64, output.index - 1) == null)
                 return context.fail(.overflow, "where index exceeds integer range");
-            const units = std.math.add(usize, output.total, output.zeros) catch
-                return context.fail(.overflow, "where result is too large");
             output.writer = try .init(context.allocator(), output.total);
+            // A bound on the fill's work; done ends it once the result is full.
+            const units = output.index +| output.total;
             output.index = 0;
             output.phase = .fill;
             return units;
+        }
+
+        pub fn done(output: *const Output) bool {
+            return output.phase == .fill and output.destination == output.total and output.repetition == 0;
         }
 
         pub fn finish(output: *Output) Value {
@@ -454,22 +458,20 @@ fn WhereKernel(comptime typed: bool) type {
             }
         };
 
-        /// The sum of one block of typed counts and how many are zero, or null
-        /// when the block holds a count that is negative or too large to sum
-        /// without a checked add. Every count below 2^55 keeps a block's sum
-        /// below 2^63, so one `or` decides both.
-        fn blockSum(counts: []const i64) ?struct { sum: usize, zeros: usize } {
+        /// The sum of one block of typed counts, or null when the block holds
+        /// a count that is negative or too large to sum without a checked add.
+        /// Every count below 2^55 keeps a block's sum below 2^63, so one `or`
+        /// decides both.
+        fn blockSum(counts: []const i64) ?usize {
             std.debug.assert(counts.len <= kernel_flat.block_size);
             var bits: i64 = 0;
             var sum: i64 = 0;
-            var zeros: usize = 0;
             for (counts) |item| {
                 bits |= item;
                 sum +%= item;
-                zeros += @intFromBool(item == 0);
             }
             if (bits >> 55 != 0) return null;
-            return .{ .sum = std.math.cast(usize, sum) orelse return null, .zeros = zeros };
+            return std.math.cast(usize, sum);
         }
 
         /// Validates and adds the count at `index`: the exact per-element
@@ -481,7 +483,6 @@ fn WhereKernel(comptime typed: bool) type {
                 return context.failAt(.overflow, "where count exceeds addressable size", output.index);
             output.total = std.math.add(usize, output.total, repetitions) catch
                 return context.fail(.overflow, "where result is too large");
-            output.zeros += @intFromBool(repetitions == 0);
             output.index += 1;
         }
 
@@ -491,10 +492,9 @@ fn WhereKernel(comptime typed: bool) type {
             while (offset != counts.len) {
                 const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
                 offset += block.len;
-                if (blockSum(block)) |summed| {
-                    if (std.math.add(usize, output.total, summed.sum)) |total| {
+                if (blockSum(block)) |sum| {
+                    if (std.math.add(usize, output.total, sum)) |total| {
                         output.total = total;
-                        output.zeros += summed.zeros;
                         output.index += block.len;
                         continue;
                     } else |_| {}
@@ -503,13 +503,12 @@ fn WhereKernel(comptime typed: bool) type {
             }
         }
 
-        /// Spends `limit` units of the fill: one per count read, or one per
-        /// element written when a count is above one. A count of zero or one
-        /// stores its index unconditionally and advances by the count, so a
-        /// mask fills without a branch on its contents; the store a zero
+        /// Spends up to `limit` units of the fill: one per count read, or one
+        /// per element written when a count is above one. A count of zero or
+        /// one stores its index unconditionally and advances by the count, so
+        /// a mask fills without a branch on its contents; the store a zero
         /// leaves behind lies inside the result and is overwritten by the next
-        /// index. Once the result is full, what is left is trailing zeros,
-        /// each read for its one unit.
+        /// index.
         fn fill(output: *Output, limit: usize, counts: anytype) void {
             const out = output.writer.?.unpublishedRange(
                 output.destination,
@@ -543,7 +542,6 @@ fn WhereKernel(comptime typed: bool) type {
                     break;
                 }
             }
-            if (written == out.len and output.repetition == 0) index += limit - spent;
             output.index = index;
             output.destination += written;
         }

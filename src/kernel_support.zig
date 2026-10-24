@@ -374,14 +374,7 @@ pub fn Kernel(comptime Spec: type) type {
             const context = Context{ .evaluator = evaluator };
             try context.advance(length);
             try Spec.chunk(params, operands, &output, .{ .start = 0, .end = length }, context);
-            const consumed = adoptedOperand(&output);
-            const result = Spec.finish(&output);
-            // The result republished an operand's buffer, so that operand's
-            // reference is the result's now, not the caller's to release.
-            if (comptime @hasDecl(Spec, "adopted")) if (consumed) |position| {
-                _ = owners[position].take();
-            };
-            return evaluator.pushOwned(result);
+            return publish(evaluator, owners, &output);
         }
 
         fn adoptedOperand(output: *const Spec.Output) ?usize {
@@ -433,7 +426,19 @@ pub fn Kernel(comptime Spec: type) type {
                     return err;
                 };
             }
-            return evaluator.pushOwned(Spec.finish(&output));
+            return publish(evaluator, owners, &output);
+        }
+
+        /// Publishes a finished kernel's result. When the result republished
+        /// an operand's buffer, that operand's reference is the result's now,
+        /// not the caller's to release.
+        fn publish(evaluator: *Machine, owners: Owners, output: *Spec.Output) MachineError!void {
+            const consumed = adoptedOperand(output);
+            const result = Spec.finish(output);
+            if (comptime @hasDecl(Spec, "adopted")) if (consumed) |position| {
+                _ = owners[position].take();
+            };
+            return evaluator.pushOwned(result);
         }
 
         /// Kept out of line, so the common inline path carries none of the
