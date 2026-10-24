@@ -55,9 +55,9 @@
  (dup type 'dict match?
   (dup dict.keys ['method 'target 'path 'query 'headers 'body 'peer 'params] in? (1 match?) all?
    (dup ['method 'target 'path 'query 'peer] swap (string-field?) partial all?
-    over 'headers {} at-or headers? and
-    over 'body [] at-or bytes? and
-    over 'params {} at-or params? and
+    over 'headers {} dict.get headers? and
+    over 'body [] dict.get bytes? and
+    over 'params {} dict.get params? and
     nip)
    (pop 0)
    if)
@@ -98,7 +98,7 @@
   "Return the list of values of a header, matching the name regardless of letter case, or () when it
    is absent. A non-request or non-string name is 'type.")
  ("http.request.header expects a string header name" checked-string str.lower
-  swap checked 'headers {} at-or swap () at-or) 'header def
+  swap checked 'headers {} dict.get swap () dict.get) 'header def
 
  ### def header?
  (request name -- bool : "Return 1 when the request carries the header under any letter case.")
@@ -135,7 +135,7 @@
    the result must be UTF-8, + is left as is, and a later duplicate key replaces an earlier one. An
    empty query is {}. A % not followed by two hex digits, or an escape sequence that is not UTF-8,
    is 'domain; a non-request is 'type.")
- (checked 'query "" at-or "&" split ("" match? not) filter {} (query-pair) fold) 'query def
+ (checked 'query "" dict.get "&" split ("" match? not) filter {} (query-pair) fold) 'query def
 
  ### def param
  (request name -- value :
@@ -143,7 +143,7 @@
    parameter is 'domain; a non-request or non-string name is 'type.")
  ("http.request.param expects a string parameter name" checked-string
   (|request name|
-   request checked 'params {} at-or
+   request checked 'params {} dict.get
    dup name dict.has? "http.request.param found no such route parameter" domain-error assert
    name at)
   call) 'param def
@@ -151,7 +151,7 @@
  ### def text
  (request -- string :
   "Return the body decoded as UTF-8 text. A body that is not valid UTF-8 is 'domain, as for chars.")
- (checked 'body [] at-or chars) 'text def
+ (checked 'body [] dict.get chars) 'text def
 
  ### def json
  (request -- value :
@@ -168,8 +168,8 @@
   assert
   swap "http.request.with-header expects a string header name" checked-string str.lower
   (|request value name|
-   request checked 'headers {} at-or name () at-or value cat
-   request 'headers {} at-or name rolldown put
+   request checked 'headers {} dict.get name () dict.get value cat
+   request 'headers {} dict.get name rolldown put
    request 'headers rolldown put)
   call) 'with-header def
 
@@ -187,6 +187,7 @@
    non-string name or value is 'type.")
  ("http.request.with-param expects a string value" checked-string
   swap "http.request.with-param expects a string parameter name" checked-string swap
-  (|request name value| request checked 'params {} at-or name value put request 'params rolldown put)
+  (|request name value| request checked 'params {} dict.get name value put request 'params rolldown
+   put)
   call) 'with-param def
 ) 'http.request @defm

@@ -47,6 +47,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = pairs,
     },
     .{
+        .name = "get",
+        .doc = "( dict key default -- value ) Return the value of a whole-value key, or default when the dictionary has no such key.",
+        .primitive = get,
+    },
+    .{
         .name = "has?",
         .doc = "( dict key -- bool ) Return whether a dictionary contains a whole-value key.",
         .primitive = dict_kernels.hasForModule,
@@ -141,6 +146,45 @@ pub const words = [_]env.BuiltinWord{
         .doc = "( left right quotation -- dict ) Merge dictionaries and resolve collisions with ( key left right -- value ).",
         .primitive = mergeWith,
     },
+};
+
+fn get(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var fallback = try evaluator.popValue();
+    defer fallback.deinit();
+    var key = try evaluator.popValue();
+    defer key.deinit();
+    var dictionary = try evaluator.popDict();
+    defer dictionary.deinit();
+    const cursor = dict_storage.FindCursor.initHeader(evaluator.allocator(), dictionary.borrow().dict, key.borrow());
+    try evaluator.startDriver(GetDriver{
+        .dictionary = .init(dictionary.take()),
+        .key = .init(key.take()),
+        .fallback = .init(fallback.take()),
+        .cursor = .init(cursor),
+    });
+}
+
+/// One key's value, or the default. Searching a dict is bounded work over its
+/// entries, so the driver is earned; its creation is not.
+const GetDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    pub const inline_driver = true;
+    dictionary: heap.Owned(Value),
+    key: heap.Owned(Value),
+    fallback: heap.Owned(Value),
+    cursor: heap.Owned(dict_storage.FindCursor),
+
+    pub fn advance(evaluator: *Machine, self: *GetDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
+            .complete => |found| if (found) |item| present: {
+                heap.retainValue(item);
+                break :present .{ .output = item };
+            } else .{ .output = self.fallback.take() },
+        };
+    }
 };
 
 fn valuesAtOr(evaluator: *Machine) MachineError!void {

@@ -188,7 +188,7 @@
   'type error.new "table column names must be strings" error.with-message assert
   mapping dict.vals (len) each 0 > 1 (and) fold
   'domain error.new "table column names must not be empty" error.with-message assert
-  table dict.keys mapping (swap dup at-or) partial each
+  table dict.keys mapping (swap dup dict.get) partial each
   dup distinct len over len =
   'domain error.new "table.rename would collide two columns onto one name" error.with-message assert
   table dict.vals dict.from-lists) 'rename def

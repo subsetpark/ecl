@@ -23,7 +23,8 @@
  (result -- count :
   "Count only this collector's removal and tolerate another collector winning first.")
  (dup result.ok? (pop 1)
-  ('err at dup 'data {} at-or 'reason 'none at-or 'not-found match? (pop 0) (raise) if) if) 'removed
+  ('err at dup 'data {} dict.get 'reason 'none dict.get 'not-found match? (pop 0) (raise) if) if)
+ 'removed
  defp
 
  ### defp remove
@@ -72,7 +73,8 @@
 
  ### defp missing-cache
  (result -- count : "Accept only the documented absent-directory case.")
- ('err at dup 'kind at 'io match? over 'data {} at-or 'reason 'none at-or 'not-found match? and
+ ('err at dup 'kind at 'io match? over 'data {} dict.get 'reason 'none dict.get 'not-found match?
+  and
   (pop 0) (raise) if) 'missing-cache defp
 
  ### def run
