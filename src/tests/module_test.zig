@@ -927,9 +927,15 @@ test "session: a module body's redefinitions are not kept for the image's life" 
         const few = counting.total_requested_bytes - before;
         try expectOk(&runtime, "[] " ++ body ++ "4096 r) 'redefined-many @defm");
         const many = counting.total_requested_bytes - before - few;
+        try expectOk(&runtime, "[] " ++ body ++ "4096 r) 'redefined-many-again @defm");
+        const many_again = counting.total_requested_bytes - before - few - many;
         // Replaced snapshots retire as they go: the image holds its final
-        // bindings, whatever it redefined on the way.
-        try std.testing.expect(many <= few + 4096);
+        // bindings, whatever it redefined on the way. Every construction also
+        // takes reader-lineage identities from a session-wide index that grows
+        // by whole leaves, and where a leaf boundary falls depends on how much
+        // lineage the prelude used. One leaf can land in at most one of the two
+        // runs; retention per redefinition would show in both.
+        try std.testing.expect(@min(many, many_again) <= few + 4096);
         try expectOk(&runtime, "background task.cancel");
     }
     try std.testing.expectEqual(.ok, counting.deinit());
