@@ -100,8 +100,7 @@ test "unit inputs: isolation underflow names only the explicit values operand" {
         &runtime,
         "9 [1] (+) @attempt nip 'err at dup 'data at 'isolation at swap 'msg at",
         "@attempt \"+ needs 2 stack values, but found 1; the substack is isolated from " ++
-            "the caller's stack — pass initial values in the constructor's values operand: " ++
-            "`values (q) @attempt`\"",
+            "the caller's stack — pass initial values in the constructor's values operand\"",
     );
 }
 
@@ -113,8 +112,7 @@ test "unit inputs: every constructor diagnoses its own values operand" {
 
     try expectErrorContains(&runtime, "9 [] (1 +) @module", &.{
         "'isolation @module",
-        "constructor's values operand",
-        "`values (body) @module`",
+        "constructor's values operand\"",
     });
     // `@defm` is prelude sugar over `@module`, which owns the floor.
     try expectErrorContains(&runtime, "9 [] (1 +) 'missing @defm", &.{
@@ -124,13 +122,13 @@ test "unit inputs: every constructor diagnoses its own values operand" {
     });
     try expectErrorContains(&runtime, "[] (1 +) @spawn task.await 'err at raise", &.{
         "'isolation @spawn",
-        "constructor's values operand",
-        "`values (q) @spawn`",
+        "constructor's values operand\"",
     });
+    // `@each` is prelude code over `@spawn`, which owns each child's floor.
     try expectErrorContains(&runtime, "[1] [] (+) @each", &.{
-        "'isolation @each",
+        "'isolation @spawn",
         "constructor's values operand",
-        "`list values (q) @each`",
+        "'trace ['+]",
     });
 }
 

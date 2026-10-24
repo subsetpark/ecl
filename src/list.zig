@@ -202,12 +202,6 @@ pub const ValueMaterializer = struct {
         if (self.builder) |*builder| builder.retirePartial(releases);
         self.retireSource();
     }
-    pub fn takePartial(self: *ValueMaterializer) ?Value {
-        if (self.builder == null) return null;
-        const header = self.builder.?.finish();
-        self.builder = null;
-        return .{ .list = header };
-    }
     pub fn advance(
         self: *ValueMaterializer,
         work: *poll.WorkBudget,

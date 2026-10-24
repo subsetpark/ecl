@@ -200,8 +200,8 @@ Modules.
 per element, contract `( a -- b )` enforced per element. Concurrent
 `each`: ordered results, leftmost failure re-raised after cancelling and
 quiescing the remainder. Each child's stack starts with its element deepest;
-`list values (q) @each` adds the shared values above it. See
-Concurrency.
+`list values (q) @each` adds the shared values above it. Defined in ecl over
+`@spawn`, `task.await`, and `task.cancel`. See Concurrency.
 
 ### @module
 `( values body -- module )` — *Unit constructor.* Run the body on a fresh

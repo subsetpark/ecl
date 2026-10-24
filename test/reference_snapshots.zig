@@ -1172,7 +1172,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\  {
         \\    'err {
         \\      'kind 'underflow
-        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — pass initial values in the constructor's values operand: `values (q) @attempt`"
+        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — pass initial values in the constructor's values operand"
         \\      'word '+
         \\      'trace ['+]
         \\      'data {
@@ -1193,7 +1193,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — pass shared initial values in the constructor's values operand: `list values (q) @each`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @each 'source "<command>" 'line 1 'col 13}}
+        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — pass initial values in the constructor's values operand" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @spawn 'source "<command>" 'line 1 'col 13}}
         \\=== seeded attempt ===
         \\source: [3] (1 +) @attempt
         \\exit: 0

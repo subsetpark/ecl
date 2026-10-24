@@ -464,7 +464,7 @@ test "concurrency: complete console calls do not interleave bytes" {
         std.mem.eql(u8, written, "bbbbaaaa"));
 }
 
-test "concurrency: primitive @each is reflective and task-join is absent" {
+test "concurrency: @each is a reflective prelude definition and task-join is absent" {
     var output_bytes: [4096]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_bytes);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -483,9 +483,7 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     }
     try runOk(
         &runtime,
-        "'@each doc " ++
-            "\"Apply a quotation with an explicit shared initial stack concurrently in one fresh unit per element and return one result per element in input order.\" match? " ++
-            "'@each which '@each see words",
+        "'@each doc len 0 > '@each which '@each see words",
     );
     var reflected = try display(&runtime);
     defer reflected.deinit();
@@ -493,13 +491,9 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.buffered(),
-        "@each -> @each primitive public (sequence values quotation -- results)\n",
+        "@each -> @each def public (sequence values quotation -- results)\n",
     ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        output.buffered(),
-        "<primitive>\n",
-    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@spawn") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@each") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "task-join") == null);
 }

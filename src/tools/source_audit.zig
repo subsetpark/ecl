@@ -47,7 +47,7 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     embeddedGroup(true, &.{
-        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
+        "machine.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -1244,12 +1244,12 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@each", "@module", "@test" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@module", "@test" };
 
 /// First-party ECL words that apply their quotation in a fresh unit and are
 /// therefore marked too. Each must be defined by some first-party source;
 /// the compiler cannot see that either, so the audit checks both directions.
-const source_unit_constructors = [_][]const u8{ "@defm", "@serve" };
+const source_unit_constructors = [_][]const u8{ "@defm", "@each", "@serve" };
 
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from
