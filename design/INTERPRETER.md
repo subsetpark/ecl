@@ -360,6 +360,11 @@ without reading a slot; a linked one, written as ordinary text, dispatches
 through its slot like any word. The reader preserves source spans for the
 produced forms, keeping diagnostics anchored to the user's source.
 
+A binder's failure belongs to whoever wrote it, which the lowered operation
+cannot name. An activation therefore records the word whose body it runs,
+set only when dispatch enters that body. The trace word cannot serve: a tail
+position clears it, and an application may borrow a word for attribution.
+
 ### Source metadata lives on a separate code plane
 
 Executable values do not carry file names, line numbers, or slices of source.

@@ -798,11 +798,50 @@ test "locals: the reserved backend words behave and blame as before" {
         },
     });
     try support.expectErrors(&.{
-        .{ .name = "binding blames the load word", .source = "(|x| x) call", .kind = "underflow", .word = "_ll" },
-        .{ .name = "binding inside a definition traces both", .source = "(|x| x) 'f def f", .kind = "underflow", .word = "_ll" },
+        // A binder opening a word's body is that word's arity check, so the
+        // word fails as a primitive would; any other binder fails as itself.
+        .{
+            .name = "a definition's binder blames the definition",
+            .source = "(|x| x) 'f def f",
+            .kind = "underflow",
+            .word = "f",
+            .message = "f needs 1 stack value, but found 0",
+        },
+        .{
+            .name = "a prelude binder blames the prelude word",
+            .source = "1 at-or",
+            .kind = "underflow",
+            .word = "at-or",
+            .message = "at-or needs 3 stack values, but found 1",
+        },
+        .{
+            .name = "an anonymous binder blames the binding",
+            .source = "(|x| x) call",
+            .kind = "underflow",
+            .message = "local binding needs 1 stack value, but found 0",
+        },
+        .{
+            .name = "a binder applied through a word is still anonymous",
+            .source = "1 (|a b| a b) dip",
+            .kind = "underflow",
+            .message = "local binding needs 2 stack values, but found 0",
+        },
         .{ .name = "the backend names stay reserved", .source = "(|x| x) '_gl def", .kind = "domain", .word = "def" },
         .{ .name = "nor can they be unset", .source = "'_ll unset", .kind = "domain", .word = "undef" },
         .{ .name = "the names are not words a program can write", .source = "0 _gl", .kind = "undefined-word", .word = "_gl" },
+    });
+    // The failing word appears once, and an anonymous binding names none.
+    try support.expectStacks(&.{
+        .{
+            .name = "the owner is traced once",
+            .source = "(|x| x) 'f def ([] (f 1) @attempt 'err at 'trace at) 'g def g",
+            .expected = "['f 'g]",
+        },
+        .{
+            .name = "an anonymous binding has no word",
+            .source = "[] ((|x| x) call) @attempt 'err at 'word dict.has?",
+            .expected = "0",
+        },
     });
 }
 

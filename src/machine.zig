@@ -1155,6 +1155,11 @@ const Eval = struct {
     /// the third describing different code.
     site: ExecutionSite,
     traced_word: intern.TraceWord,
+    /// The word whose body this is, set only when dispatch entered that body.
+    /// `traced_word` cannot answer this: a tail position clears it, and an
+    /// application may borrow a word for attribution. A locals binder opening
+    /// the body is that word's arity check, so its failure is the word's.
+    body_owner: intern.TraceWord = no_word,
     /// Nominal authority to replace one source effect check's completion
     /// provenance. A non-tail call and every application quotation receive
     /// no authority, so their internal tail calls cannot overwrite the
@@ -4948,6 +4953,25 @@ pub const Machine = struct {
     }
     noinline fn failUnderflow(self: *Machine, count: usize) MachineError {
         @branchHint(.cold);
+        return self.failUnderflowOf(self.activeWordName(), count);
+    }
+    /// A locals binder that cannot take its values. The reader lowered it into
+    /// the reserved `_ll`, which names nothing a program wrote. Opening a
+    /// word's body, the binder is that word's arity check, so the word fails
+    /// as a primitive would: it is the failing word, and its body activation,
+    /// which never got past entry, is not repeated in the trace. Opening any
+    /// other quotation, there is no word to blame, and the binding itself is
+    /// what fails.
+    noinline fn failBinding(self: *Machine, count: usize) MachineError {
+        @branchHint(.cold);
+        const current = &self.unit.current.?;
+        const owner = current.body_owner;
+        self.unit.active_word = owner;
+        if (owner == no_word) return self.failUnderflowOf("local binding", count);
+        current.traced_word = no_word;
+        return self.failUnderflowOf(self.activeWordName(), count);
+    }
+    fn failUnderflowOf(self: *Machine, subject: []const u8, count: usize) MachineError {
         // Underflow against the floor of a unit constructor's substack is the
         // one underflow whose cause is invisible: the values the caller meant
         // to pass are right there and unreachable. Name the isolation and the
@@ -4957,7 +4981,7 @@ pub const Machine = struct {
             .underflow,
             "{s} needs {d} stack value{s}, but found {d}; {s}",
             .{
-                self.activeWordName(),
+                subject,
                 count,
                 if (count == 1) "" else "s",
                 self.available(),
@@ -4967,7 +4991,7 @@ pub const Machine = struct {
             .underflow,
             "{s} needs {d} stack value{s}, but found {d}",
             .{
-                self.activeWordName(),
+                subject,
                 count,
                 if (count == 1) "" else "s",
                 self.available(),
@@ -6028,7 +6052,7 @@ pub const Machine = struct {
             return self.readLocal(operand);
         }
         if (name == locals.load) {
-            try self.require(operand);
+            if (self.available() < operand) return self.failBinding(operand);
             return self.bindLocals(operand);
         }
         if (name == locals.drop) {
@@ -8575,6 +8599,7 @@ fn scheduleWord(
             .registration_provenance = registration_provenance,
         },
         .traced_word = word,
+        .body_owner = word,
         .effect_tail = effect_tail,
         .application_tail = application_tail,
     };
