@@ -84,26 +84,6 @@ pub const Materializer = struct {
         return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
     }
 
-    pub fn initSlices(
-        allocator: std.mem.Allocator,
-        source_keys: []const Value,
-        source_vals: []const Value,
-        check_duplicates: bool,
-    ) error{OutOfMemory}!Materializer {
-        if (source_keys.len != source_vals.len or source_keys.len >= std.math.maxInt(u32))
-            return error.OutOfMemory;
-        const keys = try allocator.alloc(Value, source_keys.len);
-        errdefer allocator.free(keys);
-        const vals = try allocator.alloc(Value, source_vals.len);
-        errdefer allocator.free(vals);
-        const hashes = try allocator.alloc(i64, source_keys.len);
-        errdefer allocator.free(hashes);
-        const table = try allocateIndex(allocator, source_keys.len);
-        @memcpy(keys, source_keys);
-        @memcpy(vals, source_vals);
-        return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
-    }
-
     /// Borrow source slices until completion or retirement. Copying is part of
     /// advance, so native and scheduler builders retain bounded work per turn.
     pub fn initBorrowedSlices(

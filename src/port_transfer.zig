@@ -35,15 +35,6 @@ pub fn publishScope(comptime Cell: type, cell: *Cell, scope: *scheduler.TaskScop
     if (!try scope.scheduler.publishExternalBatch(scope, members, &publication)) return error.ScopeClosing;
 }
 
-/// Bind backend activity to its owning resource's group using the same atomic
-/// publication as task-owned resources. Failure retains caller ownership.
-pub fn publishGroup(comptime Cell: type, cell: *Cell, group: *scheduler.ExternalGroup, comptime ownership: fn (*Cell) *external.Ownership) error{ OutOfMemory, ScopeClosing }!void {
-    var publication: InitialPublication(Cell, ownership) = .{ .cell = cell };
-    var members: [16]?external.ScopeMember = @splat(null);
-    members[0] = external.scopeMember(Cell, cell);
-    if (!try group.publish(members, &publication)) return error.ScopeClosing;
-}
-
 /// The backend supplies only its locked lifetime predicate and ownership
 /// location. This boundary owns lock ordering, origin authorization, destination
 /// attachment, revalidation, and consuming rollback for every port kind.

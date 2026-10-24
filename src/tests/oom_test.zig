@@ -1679,20 +1679,6 @@ test "oom: standard-library and host: native port lifecycle transfer and rollbac
     ).run);
 }
 
-fn checkStdlibSurfaceOrdinalShard(
-    comptime surface: StdlibSurface,
-    comptime ordinal_shard_index: usize,
-    comptime ordinal_shard_count: usize,
-) !void {
-    try checkPostInitAllocationFailureOrdinalShard(
-        std.heap.smp_allocator,
-        SurfaceProbe(surface).run,
-        ordinal_shard_index,
-        ordinal_shard_count,
-        .deterministic,
-    );
-}
-
 test "oom: standard-library and host: module map: artifact loading propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.mapped_module);

@@ -136,40 +136,6 @@ pub const SpanTable = struct {
         return .{ .header = header, .entry = self.buckets[bucket(header)] };
     }
 
-    pub const SourceLookupProgress = poll.Progress(?SourceRange);
-    pub const SourceLookupCursor = struct {
-        header: *Header,
-        entry: ?*Entry,
-        pub fn advance(self: *SourceLookupCursor) SourceLookupProgress {
-            const current = self.entry orelse return .{ .complete = null };
-            self.entry = current.next_bucket;
-            if (current.header == self.header and current.source_range != null)
-                return .{ .complete = current.source_range };
-            return .pending;
-        }
-    };
-    pub fn sourceLookupCursor(self: *const SpanTable, header: *Header) ?SourceLookupCursor {
-        if (self.buckets.len == 0) return null;
-        return .{ .header = header, .entry = self.buckets[bucket(header)] };
-    }
-
-    pub const ContainerLookupProgress = poll.Progress(?Span);
-    pub const ContainerLookupCursor = struct {
-        header: *Header,
-        entry: ?*Entry,
-        pub fn advance(self: *ContainerLookupCursor) ContainerLookupProgress {
-            const current = self.entry orelse return .{ .complete = null };
-            self.entry = current.next_bucket;
-            if (current.header == self.header and current.container_span != null)
-                return .{ .complete = current.container_span };
-            return .pending;
-        }
-    };
-    pub fn containerLookupCursor(self: *const SpanTable, header: *Header) ?ContainerLookupCursor {
-        if (self.buckets.len == 0) return null;
-        return .{ .header = header, .entry = self.buckets[bucket(header)] };
-    }
-
     pub const PutProgress = poll.Progress(void);
     pub const PutCursor = struct {
         table: *SpanTable,

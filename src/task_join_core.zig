@@ -26,13 +26,6 @@ pub const Active = struct {
 pub const Join = union(enum) {
     active: Active,
     complete: Summary,
-
-    pub fn successCount(self: Join) u32 {
-        return switch (self) {
-            .active => |active| active.successes,
-            .complete => |summary| summary.successes,
-        };
-    }
 };
 
 pub const Event = enum {

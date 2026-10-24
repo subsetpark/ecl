@@ -108,58 +108,6 @@ pub const Cursor = struct {
         }
         return codepoint;
     }
-
-    pub fn skipIgnored(self: *Cursor) void {
-        var ignored = IgnoredCursor{ .source = self };
-        poll.driveVoid(&ignored, .{});
-    }
-
-    /// Takes one maximal atom token. Quote and backslash dispatch only when
-    /// token-initial; inside a token, symbol validation diagnoses them.
-    pub fn takeToken(self: *Cursor) []const u8 {
-        var token = TokenCursor.init(self);
-        return poll.drive([]const u8, &token, .{});
-    }
-};
-
-pub const ScanProgress = poll.Progress(void);
-pub const IgnoredCursor = struct {
-    source: *Cursor,
-    comment: bool = false,
-    pub fn advance(self: *IgnoredCursor) ScanProgress {
-        const next = self.source.peek() orelse return .complete;
-        if (self.comment) {
-            if (next == '\n') self.comment = false else _ = self.source.bump();
-            return .pending;
-        }
-        if (isWhitespace(next) or next == ',') {
-            _ = self.source.bump();
-            return .pending;
-        }
-        if (next == '#') {
-            _ = self.source.bump();
-            self.comment = true;
-            return .pending;
-        }
-        return .complete;
-    }
-};
-
-pub const TokenProgress = poll.Progress([]const u8);
-pub const TokenCursor = struct {
-    source: *Cursor,
-    start: usize,
-    pub fn init(source: *Cursor) TokenCursor {
-        return .{ .source = source, .start = source.index };
-    }
-    pub fn advance(self: *TokenCursor) TokenProgress {
-        const next = self.source.peek() orelse
-            return .{ .complete = self.source.source[self.start..self.source.index] };
-        if (isTokenBoundary(next) or next == ';' or next == '|')
-            return .{ .complete = self.source.source[self.start..self.source.index] };
-        _ = self.source.bump();
-        return .pending;
-    }
 };
 
 pub fn classify(token: []const u8) Classification {

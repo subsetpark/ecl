@@ -152,13 +152,6 @@ fn reason(name: []const u8) support.DataField {
     return .{ .name = "reason", .expected = .{ .symbol = name } };
 }
 
-fn addressData(address: []const u8, port: i64) [2]support.DataField {
-    return .{
-        .{ .name = "address", .expected = .{ .string = address } },
-        .{ .name = "port", .expected = .{ .int = port } },
-    };
-}
-
 fn processFixturePath() ![:0]u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(io, fixture.process_exe, allocator);
 }

@@ -208,9 +208,6 @@ pub const Builder = opaque {
     pub fn create(host: *const heap.HostCleanup, running: *@import("port_controller.zig").Running) error{OutOfMemory}!*Builder {
         return createConfigured(host, running, .{});
     }
-    pub fn createInitializing(host: *const heap.HostCleanup, closed: *const std.atomic.Value(bool)) error{OutOfMemory}!*Builder {
-        return createInitializingConfigured(host, closed, .{});
-    }
     pub fn createConfigured(host: *const heap.HostCleanup, running: *@import("port_controller.zig").Running, grant: Limits) error{OutOfMemory}!*Builder {
         return createWithCancellation(host, .{ .controller = running }, grant);
     }

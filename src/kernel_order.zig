@@ -170,20 +170,6 @@ fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
     });
 }
 
-fn typedOrder(comptime kind: value.HeapKind, left: heap.LeafElement(kind), right: heap.LeafElement(kind)) std.math.Order {
-    return switch (kind) {
-        .leaf_u8, .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (left < right)
-            .lt
-        else if (left > right)
-            .gt
-        else
-            .eq,
-        .leaf_f64 => if (left < right) .lt else if (left > right) .gt else .eq,
-        .leaf_symbol => unreachable,
-        .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
-    };
-}
-
 /// A stable sort of (key, position) pairs. Keys are compared in place rather
 /// than through a position into the collection, and floats by an integer
 /// image; runs of `run_width` are insertion-sorted first and bottom-up merge

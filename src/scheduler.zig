@@ -2075,34 +2075,6 @@ pub const WorkerScheduler = enum(usize) {
         return .{ .task = header };
     }
 
-    /// Consumes `member` on success and failure. Publication of the returned
-    /// detach token occurs only after the member is linked and counted in the
-    /// scope; a closing scope refuses the attachment instead of accepting a
-    /// resource that could escape its cancellation walk.
-    pub fn attachExternal(
-        self: *const WorkerScheduler,
-        scope: *TaskScope,
-        incoming: external.ScopeMember,
-    ) ExternalAttachError!external.ScopeMembership {
-        const Publication = struct {
-            token: ?external.ScopeMembership = null,
-            fn lock(_: *@This()) void {}
-            fn unlock(_: *@This()) void {}
-            fn validate(_: *@This()) bool {
-                return true;
-            }
-            fn publish(self_: *@This(), tokens: [16]?external.ScopeMembership) void {
-                self_.token = tokens[0];
-            }
-        };
-        var publication: Publication = .{};
-        var members: [16]?external.ScopeMember = @splat(null);
-        members[0] = incoming;
-        const accepted = try self.publishExternalBatch(scope, members, &publication);
-        if (!accepted) unreachable; // This publisher has no rejecting state.
-        return publication.token.?;
-    }
-
     /// Consume all incoming member pins on either outcome. Allocate the fixed
     /// batch before acquiring publication locks. Scope cancellation observes
     /// either the complete publication or none of it. The guard locks its
@@ -2198,15 +2170,6 @@ pub const WorkerScheduler = enum(usize) {
             .task => |task| self.enqueueTask(task),
             .external_group => |group| group.quiescent(),
         };
-    }
-
-    pub fn runRoot(
-        self: *const WorkerScheduler,
-        unit: *machine.Unit,
-        code: *ListHandle,
-    ) machine.MachineError!void {
-        try machine.initialize(unit, code, .empty);
-        return self.runInitializedRoot(unit);
     }
 
     /// Drive a root whose caller installed its initial machine work. Session
@@ -2957,14 +2920,6 @@ pub const Scheduler = enum(usize) {
         facade.releaseDomain().detachWake();
         owner_allocator.destroy(backing);
         self.* = .consumed;
-    }
-
-    pub fn runRoot(
-        self: *Scheduler,
-        unit: *machine.Unit,
-        code: *ListHandle,
-    ) machine.MachineError!void {
-        return self.worker().runRoot(unit, code);
     }
 
     pub fn runInitializedRoot(

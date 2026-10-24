@@ -656,13 +656,6 @@ const UnpackDriver = struct {
         };
     }
 
-    fn sourceDestination(self: *const UnpackDriver) Value {
-        return switch (self.source.borrow()) {
-            .unpack => |*source| source.destination.borrow(),
-            .view => unreachable,
-        };
-    }
-
     fn encodeBytes(
         self: *UnpackDriver,
         evaluator: *Machine,

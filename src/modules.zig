@@ -1414,18 +1414,6 @@ pub const ModuleHome = opaque {
     pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
         return self.pinInternal();
     }
-    fn tryPinInternal(self: *const ModuleHome) ?GenerationPin {
-        if (!self.state().tryRetain()) return null;
-        return .initRetained(self.state());
-    }
-    /// The pin a borrow takes. Null means this home's owner has reached its
-    /// last release, which resolution reports as a retired scope rather than
-    /// falling back to another chain. Split from `tryPinInternal` for the same
-    /// reason `pin` is: the source audit rejects one function that both holds a
-    /// capability token and performs a pointer cast.
-    pub fn tryPin(self: *const ModuleHome, _: *const ExecutionAccess) ?GenerationPin {
-        return self.tryPinInternal();
-    }
 };
 
 /// An owned reference to whichever owner backs one home. The raw image or
@@ -4070,64 +4058,6 @@ pub const Registry = enum(usize) {
         target: intern.ModuleName,
     ) AliasCursor {
         return .init(self, short, target);
-    }
-
-    pub const CanonicalProgress = poll.Progress(?intern.ModuleName);
-    pub const CanonicalCursor = struct {
-        directory: DirectoryLease,
-        name: intern.ModuleName,
-        phase: enum { module, alias, complete } = .module,
-        module_lookup: ?Directory.ModuleMap.RawLookupCursor = null,
-        alias_lookup: ?Directory.AliasMap.RawLookupCursor = null,
-
-        pub fn deinit(self: *CanonicalCursor) void {
-            self.directory.deinit();
-            self.* = undefined;
-        }
-        pub fn advance(self: *CanonicalCursor) CanonicalProgress {
-            while (true) switch (self.phase) {
-                .module => {
-                    const lookup = &(self.module_lookup orelse {
-                        self.phase = .complete;
-                        return .{ .complete = null };
-                    });
-                    switch (lookup.advance()) {
-                        .pending => return .pending,
-                        .complete => |slot| if (slot != null) {
-                            self.phase = .complete;
-                            return .{ .complete = self.name };
-                        } else {
-                            if (intern.moduleBindingName(self.name)) |alias_name| {
-                                self.alias_lookup = self.directory.directory.?.aliases.rawLookup(alias_name);
-                                self.phase = .alias;
-                            } else {
-                                self.phase = .complete;
-                                return .{ .complete = null };
-                            }
-                        },
-                    }
-                },
-                .alias => switch (self.alias_lookup.?.advance()) {
-                    .pending => return .pending,
-                    .complete => |canonical_name| {
-                        self.phase = .complete;
-                        return .{ .complete = canonical_name };
-                    },
-                },
-                .complete => unreachable,
-            };
-        }
-    };
-    pub fn canonicalCursor(self: *const Registry, name: intern.ModuleName) CanonicalCursor {
-        const directory = self.acquireDirectory();
-        return .{
-            .directory = directory,
-            .name = name,
-            .module_lookup = if (directory.directory) |current|
-                current.modules.rawLookup(name)
-            else
-                null,
-        };
     }
 
     pub const AcquireProgress = poll.Progress(?GenerationLease);
