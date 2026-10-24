@@ -662,6 +662,33 @@ fn expectHits(source: []const u8, expected: u64) !void {
     try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
 }
 
+test "idioms: a caller's quotation is recognized inside prelude definitions" {
+    // `all?` and `filter` hand their caller's quotation to `each` from inside
+    // the prelude. The quotation's words resolve through their own slots
+    // there as anywhere, so recognition reads the same bindings dispatch runs.
+    const sources = [_][]const u8{
+        "[1 2 3] (0 >=) all?",
+        "[1 -2 3] (0 >=) all?",
+        "[1 2 3 4 5 6] (3 mod) filter",
+        "[1 2 9223372036854775807] (1 +) all?",
+        "[1 'a] (1 +) filter",
+        // A caller that shadows the word keeps its own definition.
+        "(pop 1) 'neg def [5 6] (neg) all?",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("prelude-hosted differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    // `each` and `all?`'s own `(and)` fold.
+    try expectHits("[1 2 3] (0 >=) all?", 2);
+    // `each`, and the `dip` inside `filter`'s own `over`.
+    try expectHits("[1 2 3 4 5 6] (3 mod) filter", 2);
+    // The shadowed `neg` declines; only the fold is recognized.
+    try expectHits("(pop 1) 'neg def [5 6] (neg) all?", 1);
+}
+
 test "idioms: length each preserves errors dictionaries shadowing and generated quotations" {
     const cases = [_][]const u8{
         "[[] [1] [1 2] \"λ😀\"] (len) each",
