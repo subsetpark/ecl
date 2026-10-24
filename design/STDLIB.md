@@ -1390,7 +1390,7 @@ slot's turn. See [Modules](SPEC.md#modules).
 ### unset
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `undef`; removing a
-local shadow may reveal a parent or core binding.
+local shadow may reveal a parent or core binding. Defined in ecl.
 
 ### update
 `( collection selector quotation -- collection )` — Apply an isolated

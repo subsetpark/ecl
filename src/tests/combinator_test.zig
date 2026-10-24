@@ -801,7 +801,7 @@ test "locals: the reserved backend words behave and blame as before" {
         .{ .name = "binding blames the load word", .source = "(|x| x) call", .kind = "underflow", .word = "_ll" },
         .{ .name = "binding inside a definition traces both", .source = "(|x| x) 'f def f", .kind = "underflow", .word = "_ll" },
         .{ .name = "the backend names stay reserved", .source = "(|x| x) '_gl def", .kind = "domain", .word = "def" },
-        .{ .name = "nor can they be unset", .source = "'_ll unset", .kind = "domain", .word = "unset" },
+        .{ .name = "nor can they be unset", .source = "'_ll unset", .kind = "domain", .word = "undef" },
         .{ .name = "the names are not words a program can write", .source = "0 _gl", .kind = "undefined-word", .word = "_gl" },
     });
 }

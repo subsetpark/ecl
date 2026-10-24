@@ -332,7 +332,7 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "alias core", .source = "[] () 'm @defm 'core 'm alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "[] ((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
         .{ .name = "private value", .source = "[] (1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
-        .{ .name = "unset separator", .source = "'-- unset", .kind = "domain", .word = "unset" },
+        .{ .name = "unset separator", .source = "'-- unset", .kind = "domain", .word = "undef" },
         .{ .name = "undef qualified", .source = "'m.x undef", .kind = "domain", .word = "undef" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });

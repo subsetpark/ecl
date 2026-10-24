@@ -300,6 +300,12 @@
 (: "Bind a private module value as a constant word; an optional annotation may precede the value.")
 (swap literal swap defp) 'setp def
 
+### def unset
+(name -- :
+ "Remove a binding from the current scope; do nothing when that scope does not bind the name. An
+  exact alias of `undef`.")
+(undef) 'unset def
+
 ### def assert
 (bool error -- :
  "Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds.")
