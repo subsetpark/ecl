@@ -425,7 +425,7 @@
   failure entry tasks failure len 0 >
   (|failure entry tasks| entry 1 at task.await pop failure)
   (|failure entry tasks|
-   tasks entry first 1 + drop
+   tasks entry first 1 +
    entry first entry 1 at task.await
    dup 'ok dict.has?
    (|index outcome|
@@ -437,7 +437,10 @@
     if)
    (|index outcome| outcome 'err at wrap)
    if
-   dup len 0 > (swap (task.cancel) for) (nip) if)
+   dup len 0 >
+   (|tasks start failure| tasks start drop (task.cancel) for failure)
+   (|tasks start failure| failure)
+   if)
   if)
  partial
  over dup len range swap (pair) zip-with [] rolldown fold
