@@ -449,7 +449,7 @@ const LiveWord = struct {
 /// hold is resolved in full. Either way it must be the trusted binding
 /// expected, from a slot on core or the running root.
 fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind) error{OutOfMemory}!?LiveWord {
-    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    if (!plainWord(word.slot)) return null;
     const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
     if (cached.origin != .core and cached.origin != .standard_library) return null;
     const spec = cached.spec;
@@ -470,7 +470,7 @@ fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind)
 /// execution reports any error. A frozen binding outlives the call that
 /// matched it, so what it returns stays valid for the call.
 fn liveWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
-    if (!slotOnRunningRoot(evaluator, word.slot)) return null;
+    if (!plainWord(word.slot)) return null;
     // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
     var resolved: machine.Resolution = undefined;
     if (!evaluator.peekSlotWord(word, &resolved)) return null;
@@ -1545,22 +1545,11 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
     };
 }
 
-/// Whether a word linked to `slot_id` resolves where the phrase runs: its
-/// slot belongs to core or to the running activation's root. An unlinked word
-/// links where it runs, so it matches by definition. Recognition then reads
-/// the slot, so a root that has shadowed the name still declines.
-fn slotOnRunningRoot(evaluator: *machine.Machine, slot_id: u32) bool {
-    const root_id: u32 = switch (env.wordTarget(slot_id)) {
-        .unlinked => return true,
-        .local => return false,
-        .image => |scope| @backingInt(scope),
-        .slot => |id| root: {
-            const slot = evaluator.unit.environment.slot(id) orelse return false;
-            const root = slot.rootCell();
-            if (root.core) return true;
-            break :root @backingInt(root.id);
-        },
-    };
-    const running = evaluator.unit.current.?.resolutionScope() orelse return false;
-    return @backingInt(running.cellId()) == root_id;
+/// Whether a word can be a pattern word: anything but a local. A plain word
+/// resolves through its own slot wherever it runs, and recognition reads that
+/// same slot, so a word written in another root, as a caller's quotation run
+/// inside a prelude definition is, matches exactly when dispatch would run the
+/// expected binding; a root that shadows the name, or has retired, declines.
+fn plainWord(slot_id: u32) bool {
+    return env.wordTarget(slot_id) != .local;
 }
