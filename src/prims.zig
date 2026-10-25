@@ -245,6 +245,7 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .dict => "dict",
         .task => "task",
         .port => "port",
+        .address => "address",
     };
     try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
 }

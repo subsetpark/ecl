@@ -9,6 +9,7 @@ const modules = @import("modules.zig");
 const core = @import("scheduler_core.zig");
 const external = @import("external.zig");
 const poll = @import("poll.zig");
+const mailbox = @import("mailbox.zig");
 
 // A callback borrows only the current executor's allowance. No pointer to a
 // stack-owned budget crosses a suspension or enters an extension descriptor.
@@ -1354,10 +1355,15 @@ const TaskCell = struct {
     waiter_last: ?*WaitRegistration = null,
     waitset: ?*WaitSet = null,
     cancellation: CancellationWork = .none,
+    /// Created with the cell and closed when the unit becomes terminal. The
+    /// cell's reference is one of several: every address value holds its
+    /// own, which is why an address can outlive the task it names.
+    mailbox: *mailbox.Mailbox,
 
     pub fn destroy(allocator: std.mem.Allocator, self: *TaskCell) ?Value {
         std.debug.assert(self.parent_membership == .detached);
         std.debug.assert(self.cancellation == .none);
+        self.mailbox.release();
         const child = switch (self.publication) {
             .constructing, .active => unreachable,
             .published => |terminal| switch (terminal) {
@@ -1942,6 +1948,9 @@ pub const WorkerScheduler = enum(usize) {
         const state_ = self.privateState();
         const cell = try self.allocator().create(TaskCell);
         errdefer self.allocator().destroy(cell);
+        const identity = state_.next_identity.fetchAdd(1, .monotonic);
+        const cell_mailbox = try mailbox.Mailbox.create(self.allocator(), identity);
+        errdefer cell_mailbox.release();
         cell.* = .{
             .allocator = self.allocator(),
             .scheduler = self,
@@ -1950,6 +1959,7 @@ pub const WorkerScheduler = enum(usize) {
             .queue = .{ .item = .{ .task = cell } },
             .cancellation_queue = .{ .item = .{ .cancellation = cell } },
             .admission = .{ .owner = .{ .task = cell } },
+            .mailbox = cell_mailbox,
         };
         cell.scope.owner = cell;
 
@@ -1997,7 +2007,6 @@ pub const WorkerScheduler = enum(usize) {
         // dropping the new memberships and the originals never moved.
         if (request.transfer) |transfer| try transfer.prepare_fn(transfer.context, &cell.scope);
         errdefer if (request.transfer) |transfer| transfer.abort_fn(transfer.context);
-        const identity = state_.next_identity.fetchAdd(1, .monotonic);
         const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);
         cell.header_state = .{ .published = header };
         cell.publication = .{ .active = execution };
@@ -2245,6 +2254,19 @@ pub const WorkerScheduler = enum(usize) {
         self.releaseDomain().releaseValue(task);
         if (enqueue_cancellation) self.enqueueCancellation(cell);
         notifyCancellation(self);
+    }
+
+    /// The mailbox of the task that owns `scope`; null for the root scope,
+    /// which no task owns and which therefore has no mailbox.
+    pub fn currentMailbox(_: *const WorkerScheduler, scope: *TaskScope) ?*mailbox.Mailbox {
+        const cell = scope.owner orelse return null;
+        return cell.mailbox;
+    }
+
+    /// Mints an address for `task`'s mailbox.
+    pub fn taskAddress(self: *const WorkerScheduler, task: Value) error{OutOfMemory}!Value {
+        const cell = taskCell(task).?;
+        return cell.mailbox.createAddress(self.allocator());
     }
 
     /// Requests cancellation of the task that owns `scope`, as cancelling its
@@ -2650,6 +2672,9 @@ pub const WorkerScheduler = enum(usize) {
             .ready => |ready| ready,
             else => unreachable,
         };
+        // The mailbox closes with the unit: a sender then sees `'closed`
+        // and a parked receiver wakes, before the result is published.
+        cell.mailbox.close(self.releaseDomain());
         execution.unit.deinit();
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
         const completed = unitDecision(cell.policy, .scope_quiescent);

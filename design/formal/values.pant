@@ -23,8 +23,9 @@ list-type => ValueType.
 dict-type => ValueType.
 task-type => ValueType.
 port-type => ValueType.
+address-type => ValueType.
 ---
-> The value-kind universe is closed: every value has one of these nine kinds.
+> The value-kind universe is closed: every value has one of these ten kinds.
 all value: Value |
   value-type value = int-type or
   value-type value = float-type or
@@ -34,7 +35,8 @@ all value: Value |
   value-type value = list-type or
   value-type value = dict-type or
   value-type value = task-type or
-  value-type value = port-type.
+  value-type value = port-type or
+  value-type value = address-type.
 
 > The ten kind names are distinct, so the total `value-type` rule assigns
 > exactly one kind to every value.
@@ -46,6 +48,7 @@ int-type ~= list-type and
 int-type ~= dict-type and
 int-type ~= task-type and
 int-type ~= port-type and
+int-type ~= address-type and
 float-type ~= char-type and
 float-type ~= symbol-type and
 float-type ~= word-type and
@@ -53,27 +56,35 @@ float-type ~= list-type and
 float-type ~= dict-type and
 float-type ~= task-type and
 float-type ~= port-type and
+float-type ~= address-type and
 char-type ~= symbol-type and
 char-type ~= word-type and
 char-type ~= list-type and
 char-type ~= dict-type and
 char-type ~= task-type and
 char-type ~= port-type and
+char-type ~= address-type and
 symbol-type ~= word-type and
 symbol-type ~= list-type and
 symbol-type ~= dict-type and
 symbol-type ~= task-type and
 symbol-type ~= port-type and
+symbol-type ~= address-type and
 word-type ~= list-type and
 word-type ~= dict-type and
 word-type ~= task-type and
 word-type ~= port-type and
+word-type ~= address-type and
 list-type ~= dict-type and
 list-type ~= task-type and
 list-type ~= port-type and
+list-type ~= address-type and
 dict-type ~= task-type and
 dict-type ~= port-type and
-task-type ~= port-type.
+dict-type ~= address-type and
+task-type ~= port-type and
+task-type ~= address-type and
+port-type ~= address-type.
 
 where
 
@@ -228,7 +239,8 @@ all left: Value, right: Value, matches? left right |
   (value-type left = list-type and value-type right = list-type) or
   (value-type left = dict-type and value-type right = dict-type) or
   (value-type left = task-type and value-type right = task-type) or
-  (value-type left = port-type and value-type right = port-type).
+  (value-type left = port-type and value-type right = port-type) or
+  (value-type left = address-type and value-type right = address-type).
 
 > Numeric matching is exact mathematical-value equality across int and float.
 all left: Value, right: Value,
@@ -329,6 +341,12 @@ all left: Value, right: Value,
     value-type right = port-type |
   matches? left right <-> left = right.
 
+> Address values match only by the mailbox they name.
+all left: Value, right: Value,
+    value-type left = address-type,
+    value-type right = address-type |
+  matches? left right <-> left = right.
+
 > Scalar source kinds have readable representations.
 all value: Value,
     value-type value = int-type or
@@ -338,11 +356,12 @@ all value: Value,
     value-type value = word-type |
   readable? value.
 
-> Task and port values have diagnostic displays but no readable
+> Task, port, and address values have diagnostic displays but no readable
 > representations.
 all value: Value,
     value-type value = task-type or
-    value-type value = port-type |
+    value-type value = port-type or
+    value-type value = address-type |
   ~readable? value.
 
 > A list is readable exactly when all its elements are readable.

@@ -81,6 +81,7 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
             std.meta.eql(env.localOperand(reference.slot), env.localOperand(b.word.slot)),
         .task => |header| header == b.task,
         .port => |header| header == b.port,
+        .address => |header| heap.addressTarget(header) == heap.addressTarget(b.address),
         // Image identity, never structural traversal: two references to one
         // image match and two constructions never do, and no comparison
         // enters the frozen environment or initial-state template.
@@ -191,7 +192,7 @@ pub const MatchCursor = struct {
                     return null;
                 }
                 switch (pair.a) {
-                    .int, .float, .char, .symbol, .word, .task, .port => unreachable,
+                    .int, .float, .char, .symbol, .word, .task, .port, .address => unreachable,
                     .list => |a_header| {
                         const b_header = pair.b.list;
                         if (a_header == b_header) {
@@ -324,7 +325,7 @@ pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
             .int => |b_int| orderInt(a_int, b_int),
             .float => |b_float| intFloatOrder(a_int, b_float) orelse
                 error.NotComparable,
-            .char, .symbol, .word, .list, .dict, .task, .port => error.NotComparable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.NotComparable,
         },
         .float => |a_float| switch (b) {
             .int => |b_int| reverseOrder(intFloatOrder(b_int, a_float) orelse
@@ -335,13 +336,13 @@ pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
                 }
                 return orderFloat(a_float, b_float);
             },
-            .char, .symbol, .word, .list, .dict, .task, .port => error.NotComparable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.NotComparable,
         },
         .char => |a_char| switch (b) {
             .char => |b_char| orderInt(a_char, b_char),
-            .int, .float, .symbol, .word, .list, .dict, .task, .port => error.NotComparable,
+            .int, .float, .symbol, .word, .list, .dict, .task, .port, .address => error.NotComparable,
         },
-        .symbol, .word, .list, .dict, .task, .port => error.NotComparable,
+        .symbol, .word, .list, .dict, .task, .port, .address => error.NotComparable,
     };
 }
 
@@ -490,7 +491,7 @@ pub const HashCursor = struct {
                             try self.actions.push(.{ .visit = dictItem(header, true, 0) });
                         }
                     },
-                    .int, .float, .char, .symbol, .word, .task, .port => unreachable,
+                    .int, .float, .char, .symbol, .word, .task, .port, .address => unreachable,
                 }
             },
             .string_hash => |continuation| {
@@ -595,11 +596,11 @@ fn characterHash(codepoint: u32) u64 {
 fn numericPair(a: Value, b: Value) bool {
     const a_numeric = switch (a) {
         .int, .float => true,
-        .char, .symbol, .word, .list, .dict, .task, .port => false,
+        .char, .symbol, .word, .list, .dict, .task, .port, .address => false,
     };
     const b_numeric = switch (b) {
         .int, .float => true,
-        .char, .symbol, .word, .list, .dict, .task, .port => false,
+        .char, .symbol, .word, .list, .dict, .task, .port, .address => false,
     };
     return a_numeric and b_numeric;
 }
@@ -612,14 +613,14 @@ fn numberEqual(a: Value, b: Value) bool {
         .int => |a_int| switch (b) {
             .int => |b_int| a_int == b_int,
             .float => |b_float| intFloatEqual(a_int, b_float),
-            .char, .symbol, .word, .list, .dict, .task, .port => unreachable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => unreachable,
         },
         .float => |a_float| switch (b) {
             .int => |b_int| intFloatEqual(b_int, a_float),
             .float => |b_float| a_float == b_float,
-            .char, .symbol, .word, .list, .dict, .task, .port => unreachable,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => unreachable,
         },
-        .char, .symbol, .word, .list, .dict, .task, .port => unreachable,
+        .char, .symbol, .word, .list, .dict, .task, .port, .address => unreachable,
     };
 }
 
@@ -642,7 +643,7 @@ pub const LeafMatchKey = struct {
             else
                 .{ .class = .real, .bits = @bitCast(item) },
             .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => .{ .class = .other, .bits = item },
-            .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }
 
@@ -689,6 +690,7 @@ pub fn scalarHash(item: Value) ?u64 {
         .word => |id| mix(0x574f_5244, id.name) ^ (if (env.localOperand(id.slot)) |operand| mix(0x4c4f_4341, operand) else 0),
         .task => |header| mix(0x5441_534b, @intFromPtr(header)),
         .port => |header| mix(0x504f_5254, @intFromPtr(header)),
+        .address => |header| mix(0x4144_4452, @intFromPtr(heap.addressTarget(header))),
         .list, .dict => null,
     };
 }

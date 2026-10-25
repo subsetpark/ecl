@@ -249,7 +249,7 @@ pub const ValueMaterializer = struct {
             .float => .{ .kind = .all_float },
             .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
             .symbol => .{ .kind = .all_symbol },
-            .word, .list, .dict, .task, .port => .{ .kind = .mixed },
+            .word, .list, .dict, .task, .port, .address => .{ .kind = .mixed },
         };
         var profile = current;
         switch (profile.kind) {
@@ -496,7 +496,7 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
         .leaf_char2 => .{ .char = heap.chars16(header)[index] },
         .leaf_char4 => .{ .char = heap.chars32(header)[index] },
         .leaf_symbol => .{ .symbol = heap.symbols(header)[index] },
-        .dict, .task, .port, .reserved_mask => unreachable,
+        .dict, .task, .port, .address, .reserved_mask => unreachable,
     };
 }
 
@@ -512,9 +512,9 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
             .leaf_char4,
             .leaf_symbol,
             => header,
-            .dict, .task, .port, .reserved_mask => error.NotAList,
+            .dict, .task, .port, .address, .reserved_mask => error.NotAList,
         },
-        .int, .float, .char, .symbol, .word, .dict, .task, .port => error.NotAList,
+        .int, .float, .char, .symbol, .word, .dict, .task, .port, .address => error.NotAList,
     };
 }
 

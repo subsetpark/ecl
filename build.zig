@@ -1005,6 +1005,7 @@ pub fn build(b: *std.Build) void {
             "tests.value_test.",
             "tests.cursor_budget_test.",
             "tests.interleaving_test.",
+            "tests.mailbox_test.",
             "turn_core.test.",
             "scheduler_core.test.",
             "tests.reader_test.",

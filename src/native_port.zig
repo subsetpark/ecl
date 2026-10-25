@@ -1028,7 +1028,7 @@ fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueV
         .list => |header| .{ .kind = .list, .aggregate_len = header.length(), .text = if (item.isString()) .string else .none },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .port => .{ .kind = .port },
-        .word, .task => return false,
+        .word, .task, .address => return false,
     };
     return true;
 }

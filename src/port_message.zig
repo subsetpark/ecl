@@ -58,7 +58,7 @@ const State = struct {
                 try charge(&self.footprint.capabilities, 1, self.limits.capabilities);
                 self.attachments[self.footprint.capabilities - 1] = port;
             },
-            .word, .task => return error.InvalidValue,
+            .word, .task, .address => return error.InvalidValue,
             .list, .dict => {
                 const count: usize = if (item == .list) @intCast(item.list.length()) else std.math.mul(usize, @intCast(item.dict.length()), 2) catch return error.Overflow;
                 // Reject a wide aggregate before constructing traversal work.

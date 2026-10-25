@@ -539,7 +539,7 @@ pub fn valueAt(header: *DictHandle, index: usize) Value {
 fn dictHeader(dictionary: Value) error{NotADict}!*DictHandle {
     return switch (dictionary) {
         .dict => |header| header,
-        .int, .float, .char, .symbol, .word, .list, .task, .port => error.NotADict,
+        .int, .float, .char, .symbol, .word, .list, .task, .port, .address => error.NotADict,
     };
 }
 

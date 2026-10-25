@@ -103,11 +103,11 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",       "scheduler_core.zig",    "turn_core.zig",         "external.zig",        "console.zig",       "task_prims.zig",      "archive_document.zig",
-        "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",  "port_builder.zig",    "port_bytes.zig",
-        "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig", "port_result.zig",     "port_error_data.zig",
-        "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",  "filesystem_port.zig", "directory_resource.zig",
-        "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
+        "scheduler.zig",          "scheduler_core.zig",  "turn_core.zig",         "external.zig",          "console.zig",         "task_prims.zig",    "archive_document.zig",
+        "mailbox.zig",            "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",  "port_builder.zig",
+        "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig", "port_result.zig",
+        "port_error_data.zig",    "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",  "filesystem_port.zig",
+        "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -162,6 +162,7 @@ const test_files = [_][]const u8{
     "tests/conversion_test.zig",
     "tests/cursor_budget_test.zig",
     "tests/interleaving_test.zig",
+    "tests/mailbox_test.zig",
     "tests/http_server_test.zig",
 };
 const repository_verification_files = [_][]const u8{
@@ -834,10 +835,9 @@ fn auditUnsafeCasts() bool {
         "capability payload erasure",
         @embedFile("../heap.zig"),
         &.{
-            "TaskDestroyAdapter",     "PortReleaseAdapter",
-            "PortTransferAdapter",    "ModuleReleaseAdapter",
-            "RetirementAdapters",     "RetirementWakeAdapters",
-            "CodeRetirementAdapters",
+            "TaskDestroyAdapter",     "PortReleaseAdapter",     "AddressReleaseAdapter",
+            "PortTransferAdapter",    "ModuleReleaseAdapter",   "RetirementAdapters",
+            "RetirementWakeAdapters", "CodeRetirementAdapters",
         },
     ) or failed;
     failed = auditErasedCasts(

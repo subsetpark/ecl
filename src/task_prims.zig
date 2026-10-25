@@ -27,6 +27,8 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
     .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
     .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
+    .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "( task -- address ) Return the address of a task's mailbox. Two addresses of one task match; an address never reaches the task's result." },
+    .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "( -- address ) Return the address of the executing task's own mailbox. 'domain outside a task." },
 };
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
@@ -340,6 +342,19 @@ fn cancel(evaluator: *Machine) MachineError!void {
 fn cancelSelf(evaluator: *Machine) MachineError!void {
     if (!scheduler(evaluator).cancelScopeOwner(scope(evaluator)))
         return evaluator.fail(.domain, "task.cancel-self is legal only inside a task");
+}
+
+fn address(evaluator: *Machine) MachineError!void {
+    var task = try evaluator.popValue();
+    defer task.deinit();
+    if (task.borrow() != .task) return evaluator.typeError("a task");
+    try evaluator.pushOwned(try scheduler(evaluator).taskAddress(task.borrow()));
+}
+
+fn selfAddress(evaluator: *Machine) MachineError!void {
+    const own = scheduler(evaluator).currentMailbox(scope(evaluator)) orelse
+        return evaluator.fail(.domain, "task.self is legal only inside a task");
+    try evaluator.pushOwned(try own.createAddress(evaluator.unit.allocator));
 }
 
 fn tasks(evaluator: *Machine) MachineError!void {

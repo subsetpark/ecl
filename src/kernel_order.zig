@@ -859,7 +859,7 @@ const GroupDriver = struct {
             .leaf_f64 => .{ .float = item },
             .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
             .leaf_symbol => .{ .symbol = item },
-            .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }
 
@@ -950,7 +950,7 @@ const GroupDriver = struct {
                 const rows = work.take(self.row_count - self.item_index);
                 switch (self.collection.borrow().list.kind()) {
                     inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| self.assignTyped(kind, rows, evaluator.releaseDomain()),
-                    .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
+                    .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
                 }
             },
             .hash => {

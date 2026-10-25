@@ -510,6 +510,7 @@ const InitializingList = opaque {};
 const InitializingDict = opaque {};
 const InitializingTask = opaque {};
 const InitializingPort = opaque {};
+const InitializingAddress = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
 
@@ -632,6 +633,14 @@ const PortStorage = struct {
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
     role: PortRole,
+};
+
+/// An address value owns one reference to an opaque mailbox. The mailbox
+/// supplies `releaseAddress`; the heap never observes its queue or phase.
+const AddressStorage = struct {
+    identity: u64,
+    payload: *anyopaque,
+    release: *const fn (*anyopaque) void,
 };
 
 const PreparePortTransfer = *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer;
@@ -819,6 +828,10 @@ pub fn headerFromPort(handle: *PortHandle) *Header {
     return @ptrCast(@alignCast(handle));
 }
 
+pub fn headerFromAddress(handle: *value.AddressHandle) *Header {
+    return @ptrCast(@alignCast(handle));
+}
+
 fn mutableHeader(handle: anytype) *Header {
     return @ptrCast(@alignCast(@constCast(handle)));
 }
@@ -827,7 +840,7 @@ pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .port, .reserved_mask => false,
+        .dict, .task, .port, .address, .reserved_mask => false,
     });
     return result;
 }
@@ -861,6 +874,10 @@ fn publishTask(header: *InitializingTask) *TaskHandle {
 }
 
 fn publishPort(header: *InitializingPort) *PortHandle {
+    return @ptrCast(@alignCast(header));
+}
+
+fn publishAddress(header: *InitializingAddress) *value.AddressHandle {
     return @ptrCast(@alignCast(header));
 }
 
@@ -911,7 +928,7 @@ fn allocObject(
         .leaf_symbol,
         => |list_kind| try allocListObject(LeafElement(list_kind), allocator, capacity_value),
         .dict, .reserved_mask => try allocator.create(Object),
-        .task, .port => unreachable,
+        .task, .port, .address => unreachable,
     };
     obj.* = .{
         .header = HeaderImpl.init(kind_value, len_value),
@@ -937,7 +954,7 @@ fn allocListHeader(
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .port, .reserved_mask => false,
+        .dict, .task, .port, .address, .reserved_mask => false,
     });
     const header = try allocObject(allocator, kind_value, len_value, capacity_value);
     object(header).provenance_namespace = provenance_namespace;
@@ -957,7 +974,7 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4, .leaf_symbol => u32,
-        .dict, .task, .port, .reserved_mask => @compileError("a list representation is required"),
+        .dict, .task, .port, .address, .reserved_mask => @compileError("a list representation is required"),
     };
 }
 
@@ -975,7 +992,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
         .leaf_char4, .leaf_symbol => @sizeOf(u32),
-        .dict, .task, .port, .reserved_mask => 0,
+        .dict, .task, .port, .address, .reserved_mask => 0,
     };
 }
 
@@ -1088,7 +1105,7 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_symbol => .{ .symbol = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
-            .dict, .task, .port, .reserved_mask => unreachable,
+            .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }
 
@@ -1381,6 +1398,69 @@ pub fn portIdentity(header: *const PortHandle) u64 {
     return portStorage(header).identity;
 }
 
+fn addressStorage(header: *const value.AddressHandle) *const AddressStorage {
+    return @ptrCast(@alignCast(objectConst(headerFromAddress(@constCast(header))).payload.?));
+}
+
+pub fn addressIdentity(header: *const value.AddressHandle) u64 {
+    return addressStorage(header).identity;
+}
+
+/// The mailbox an address names, as an identity: two addresses of one
+/// mailbox compare equal through it, and nothing else about the mailbox
+/// is visible here.
+pub fn addressTarget(header: *const value.AddressHandle) *anyopaque {
+    return addressStorage(header).payload;
+}
+
+fn allocAddressHeader(
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *anyopaque,
+    release: *const fn (*anyopaque) void,
+) error{OutOfMemory}!*InitializingAddress {
+    const obj = try allocator.create(Object);
+    errdefer allocator.destroy(obj);
+    const storage = try allocator.create(AddressStorage);
+    storage.* = .{ .identity = identity, .payload = payload, .release = release };
+    obj.* = .{
+        .header = HeaderImpl.init(.address, identity),
+        .capacity = 0,
+        .payload = @ptrCast(storage),
+        .provenance_namespace = .none,
+        .next_destroy = null,
+        .destroy_index = 0,
+    };
+    return @ptrCast(@alignCast(&obj.header));
+}
+
+fn AddressReleaseAdapter(comptime Payload: type) type {
+    return struct {
+        fn release(raw: *anyopaque) void {
+            const payload: *Payload = @ptrCast(@alignCast(raw));
+            Payload.releaseAddress(payload);
+        }
+    };
+}
+
+/// Wraps one already-owned mailbox reference in an opaque address value. On
+/// failure the caller retains the reference; on success the value's final
+/// release calls `releaseAddress` exactly once.
+pub fn createAddress(
+    comptime Payload: type,
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *Payload,
+) error{OutOfMemory}!Value {
+    const initializing = try allocAddressHeader(
+        allocator,
+        identity,
+        @ptrCast(payload),
+        AddressReleaseAdapter(Payload).release,
+    );
+    return .{ .address = publishAddress(initializing) };
+}
+
 pub fn portVariant(header: *const PortHandle) value.PortVariant {
     return std.meta.activeTag(portStorage(header).role);
 }
@@ -1497,6 +1577,7 @@ pub fn retainValue(item: Value) void {
         .dict => |header| incRef(header),
         .task => |header| incRef(header),
         .port => |header| incRef(header),
+        .address => |header| incRef(header),
     }
 }
 
@@ -2303,6 +2384,13 @@ pub const ReleaseDomain = struct {
                 storage.release(storage.payload);
                 return true;
             },
+            .address => {
+                if (obj.destroy_index != 0) return false;
+                obj.destroy_index = 1;
+                const storage: *AddressStorage = @constCast(addressStorage(@ptrCast(@alignCast(header))));
+                storage.release(storage.payload);
+                return true;
+            },
             .leaf_u8,
             .leaf_i64,
             .leaf_f64,
@@ -2999,7 +3087,7 @@ pub const OwnedValueChain = union(enum) {
 fn ownsNoReferences(header: *const Header) bool {
     return switch (kind(header)) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => objectConst(header).provenance_namespace == .none,
-        .generic_spine, .dict, .task, .port, .reserved_mask => false,
+        .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
     };
 }
 
@@ -3016,7 +3104,7 @@ fn destroyObject(allocator: std.mem.Allocator, header: *Header) void {
         .leaf_char4,
         .leaf_symbol,
         => |list_kind| freeListObject(LeafElement(list_kind), allocator, object(header)),
-        .dict, .task, .port, .reserved_mask => {
+        .dict, .task, .port, .address, .reserved_mask => {
             freeStorage(allocator, header);
             allocator.destroy(object(header));
         },
@@ -3041,6 +3129,10 @@ fn freeStorage(allocator: std.mem.Allocator, header: *Header) void {
         },
         .port => {
             const storage: *PortStorage = @constCast(portStorage(@ptrCast(@alignCast(header))));
+            allocator.destroy(storage);
+        },
+        .address => {
+            const storage: *AddressStorage = @constCast(addressStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
         },
         .reserved_mask => {},

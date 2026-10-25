@@ -271,15 +271,17 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 **port-type** ⇒ `ValueType`.
 
+**address-type** ⇒ `ValueType`.
+
 ---
 
-> The value-kind universe is closed: every value has one of these nine kinds.
+> The value-kind universe is closed: every value has one of these ten kinds.
 
-∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type**.
+∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **address-type**.
 
 > The ten kind names are distinct, so the total `value-type` rule assigns exactly one kind to every value.
 
-**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **port-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **port-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **port-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **port-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **port-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **port-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **port-type** ∧ **task-type** ≠ **port-type**.
+**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **port-type** ∧ **int-type** ≠ **address-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **port-type** ∧ **float-type** ≠ **address-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **port-type** ∧ **char-type** ≠ **address-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **port-type** ∧ **symbol-type** ≠ **address-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **port-type** ∧ **word-type** ≠ **address-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **port-type** ∧ **list-type** ≠ **address-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **port-type** ∧ **dict-type** ≠ **address-type** ∧ **task-type** ≠ **port-type** ∧ **task-type** ≠ **address-type** ∧ **port-type** ≠ **address-type**.
 
 #### Chapter 2
 
@@ -387,7 +389,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Values match only as numbers across the two numeric kinds, or within the same non-numeric kind.
 
-∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type**.
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** ∨ **value-type** *left* = **address-type** ∧ **value-type** *right* = **address-type**.
 
 > Numeric matching is exact mathematical-value equality across int and float.
 
@@ -433,13 +435,17 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **port-type**, **value-type** *right* = **port-type** · **matches?** *left* *right* ↔ *left* = *right*.
 
+> Address values match only by the mailbox they name.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **address-type**, **value-type** *right* = **address-type** · **matches?** *left* *right* ↔ *left* = *right*.
+
 > Scalar source kinds have readable representations.
 
 ∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type**) · **readable?** *value*.
 
-> Task and port values have diagnostic displays but no readable representations.
+> Task, port, and address values have diagnostic displays but no readable representations.
 
-∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type**) · ¬**readable?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **address-type**) · ¬**readable?** *value*.
 
 > A list is readable exactly when all its elements are readable.
 
@@ -558,7 +564,7 @@ quoted string syntax.
 
 > Scalar and capability values contain no nested display elision.
 
-∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **task-type**) · ¬**display-contains-elision?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **address-type**) · ¬**display-contains-elision?** *value*.
 
 > A displayed list contains elision exactly when it exceeds 256 elements, or when an unelided child recursively contains elision.
 

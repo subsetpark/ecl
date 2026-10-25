@@ -12,6 +12,7 @@ pub const Tag = enum(u8) {
     dict,
     task,
     port,
+    address,
 };
 
 /// The representation tag is a construction-time fact. Extending this enum is
@@ -28,6 +29,7 @@ pub const HeapKind = enum(u8) {
     dict,
     task,
     port,
+    address,
     reserved_mask,
 };
 
@@ -81,6 +83,10 @@ pub const PortVariant = enum {
 /// or PID.
 pub const PortHandle = opaque {};
 
+/// A task mailbox's name. It reaches the mailbox and nothing else, which is
+/// what lets an address be sent where a task handle cannot.
+pub const AddressHandle = opaque {};
+
 /// Kept beside Header so equality can inspect dicts without importing the
 /// operations layer and creating a module cycle.
 pub const DictPayload = struct {
@@ -130,6 +136,7 @@ pub const Value = union(Tag) {
     dict: *DictHandle,
     task: *TaskHandle,
     port: *PortHandle,
+    address: *AddressHandle,
 
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);
@@ -142,6 +149,7 @@ pub const Value = union(Tag) {
             .dict => |header| @import("heap.zig").headerFromDict(header),
             .task => |header| @import("heap.zig").headerFromTask(header),
             .port => |header| @import("heap.zig").headerFromPort(header),
+            .address => |header| @import("heap.zig").headerFromAddress(header),
         };
     }
 
@@ -154,7 +162,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .reserved_mask => false,
+            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .address, .reserved_mask => false,
         };
     }
 };
@@ -168,6 +176,6 @@ pub fn unicodeScalar(codepoint: u64) ?u21 {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@typeInfo(HeapKind).@"enum".field_names.len != 12)
+    if (@typeInfo(HeapKind).@"enum".field_names.len != 13)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }
