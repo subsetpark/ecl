@@ -5955,6 +5955,9 @@ pub const Machine = struct {
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
         const view = self.bindingView();
         if (cacheable) if (self.unit.binding_cache.find(word.slot, view)) |cached| {
+            // A cached binding has no home, pin, or generation, so a builtin
+            // runs exactly as `executeResolved` would run it.
+            if (cached.spec.binding == .builtin) return invokeBuiltin(self, cached.trace_word, cached.spec.binding.builtin);
             var resolved: Resolution = .{
                 .lease = .{ .releases = self.unit.releases, .held = .{ .borrowed = cached.spec } },
                 .execution_generation = null,
