@@ -218,12 +218,17 @@ public operations are `@defm`, `unmodule`, `alias`, `import`, and `qualify`.
 
 ### Milestone 3: task-mailboxes
 
+**Status**: planned (2026-10-25). Gameplan: `gameplans/task-mailboxes.yaml`
+(local; gitignored). Cut to the minimal layer the runtime alone can provide:
+five words, one kind, one object. Request/reply is composed in ECL; the runtime
+one-shot reply mailbox is recorded in issue #150.
+
 **Definition of Done**:
 - Every task owns a mailbox: a separately counted object reachable from the
   cell, never pointing back at it, closed by the task's terminal transition.
   Closing discards queued messages, which breaks any queue cycle.
 - A new `'address` value kind: opaque, prints as `<address:n>`, `match?` by
-  task identity, unreadable, rejected by JSON, native views, and port
+  mailbox identity, unreadable, rejected by JSON, native views, and port
   messages exactly as tasks are. `task.address ( task -- address )` and
   `task.self ( -- address )`; `task.self` is `'domain` outside a task.
 - `task.send ( address value -- )` parks under pressure at capacity 16, is
@@ -232,35 +237,31 @@ public operations are `@defm`, `unmodule`, `alias`, `import`, and `qualify`.
   is `'type`; the check runs under the work budget and skips flat
   specialized lists without traversal.
 - `task.receive ( -- envelope )` parks in the receiving task and returns
-  `{'value v}` for a send or `{'value v 'from reply}` for a call; `'domain`
-  outside a task. `task.receive-for ( ms -- envelope-or-timeout )` mirrors
-  `await-for`.
-- `task.call ( address value -- result )` mints a one-shot reply capability,
-  parks, and returns the replied value; `task.call-for` adds a deadline.
-  `task.reply ( reply value -- )` consumes the capability; a second reply
-  is `'contract`. Releasing an unreplied capability fails the parked caller
-  with `'io {'reason 'dropped}`. Server termination fails every parked
-  caller with `'io {'reason 'closed}`. A reply to a caller that was
-  cancelled or timed out is silently dropped. Calling your own address is
-  `'domain`.
-- Caller cancellation, deadline, reply, and server termination contend
-  through the existing `WaitSet` arbitration; cancellation allocates nothing.
+  `{'value v}`; `'domain` outside a task. `task.receive-for ( ms -- result )`
+  returns `{'ok envelope}` or `{'err {'kind 'timeout}}`, with `'overflow` for
+  an unreachable deadline, as `await-for` does.
+- Mailbox waits park through the external-readiness arbitration ports use,
+  with a resume variant that returns a deadline as a value; receiver and
+  sender cancellation go through the existing `WaitSet` arbitration.
+- No request/reply primitive. `call` is an ECL composition: a helper task
+  whose address travels as `'from` and whose result is the reply, bounded only
+  by `task.await-for`. The runtime one-shot reply mailbox, with `'dropped`
+  detection, self-call refusal, and abandonment, is issue #150.
 - `SPEC.src.md` Concurrency gains a mailbox section and `concurrency.pant`
-  gains the mailbox, send, receive, call, reply, and closure actions with the
-  invariant that no reachable value from a mailbox or address reaches a task
-  cell. `STDLIB.md` documents the eight words. `INTERPRETER.md` documents
-  the mailbox object, the handle check on send, and the reply capability.
-- Proofs: behavioral tests under one and eight workers,
-  `src/tests/interleaving_test.zig` cases for the four-way contention,
-  `test-oom` coverage of send, call, and reply, delayed-owner retention of a
-  queued message carrying the receiver's own address, and the Docker
-  Linux/x86_64 TSan run.
+  gains the `Mailboxes` context with `Send`, `Receive`, and closure on the
+  terminal actions, under the invariant that a queued message's target is
+  active. `STDLIB.md` documents the five words. `INTERPRETER.md` documents
+  the mailbox object, the readiness reuse, and the handle check on send.
+- Proofs: behavioral tests under one and eight workers, three
+  `src/tests/interleaving_test.zig` programs, a `test-oom` snippet over send
+  and receive, and the Docker TSan run.
 
 **Why this is a safe pause point**: Additive. No existing word changes
 meaning. Issue #13 (unit-scoped channels) is closed by this milestone with a
 note that the design chose mailboxes.
 
-**Unlocks**: Any stateful service in ECL. The `agent` module is one.
+**Unlocks**: Any stateful service in ECL. The `agent` module is one; its
+`agent.call` is the composed helper-task form until #150 lands.
 
 **Operator Actions Before Next Milestone**:
 - Run the TSan Docker procedure from `agent-guides/testing.md` over the new
@@ -280,7 +281,10 @@ note that the design chose mailboxes.
   `agent.call ( quotation address -- result )`, which applies the quotation
   to the server's stack and returns its top, re-raising the quotation's
   error in the caller; and `agent.send ( quotation address -- )`, which
-  applies without a reply.
+  applies without a reply. `agent.call` is composed from the Milestone 3
+  words: a helper task receives the reply and `task.await` returns it, so an
+  unbounded call to a dead server hangs until #150 lands; `agent.call-for`
+  bounds it with `task.await-for`.
 - Each application runs as a unit, so a failing quotation restores the
   server's stack: state is unchanged on error without any copying by the
   agent itself. The server survives application errors and dies only by
@@ -355,14 +359,25 @@ replacement for `rng` ships before `rng` is deleted.
 
 ## Open Questions
 
-- Whether `task.receive` and `task.reply` should also be spelled bare
-  (`receive`, `reply`) as core words for server loops. Default is the
-  qualified spelling only.
 - Whether the `agent` server should accept a `{'kind 'stop}` protocol message
   or rely on cancellation through the handle. Default is cancellation only.
 
 ## Decisions Made
 
+- **The mailbox layer is minimal.** The runtime provides only what it alone
+  can: the `'address` kind, one mailbox per task closed at the terminal
+  transition, `task.address`, `task.self`, `task.send`, `task.receive`, and
+  `task.receive-for`. Request/reply is composed in ECL (a helper task as the
+  reply mailbox); the runtime one-shot reply mailbox is issue #150, to land as
+  a measured optimization. Decided while planning Milestone 3.
+- **Mailbox waits ride the external-readiness arbitration.** A mailbox is a
+  readiness cell like the archive, directory, and port cells; a
+  `ParkRequest.mailbox` variant shares that registration and resumes the
+  driver on a deadline so `receive-for` returns the timeout as a value.
+- **The root has no mailbox.** `task.receive`, `task.receive-for`, and
+  `task.self` are `'domain` at the root; `task.send` works anywhere. A root
+  mailbox is a separate, additive feature if ever wanted.
+- **Mailbox words are `task.`-qualified only.** No bare `receive`.
 - **`@defm` is the single module constructor and a primitive.** Name
   validation precedes the body; only a registry change during construction
   (an alias now occupying the name) can refuse publication after the body's
@@ -482,12 +497,14 @@ echoed final stack or the error dictionary on stderr.
   - **Traces to**: Milestone 2 — `ModuleCompletionDriver` in
     `src/machine.zig`.
 
-- **DoD-7 — call and reply round trip**
-  - **Assert**: a caller receives the server's reply value.
-  - **Verify by** `cmd`: `[] (task.receive dup 'from at swap 'value at 1 + task.reply) @spawn task.address 41 task.call`.
+- **DoD-7 — composed request and reply round trip**
+  - **Assert**: `agent.call`'s composition (a helper task as the reply
+    mailbox) returns the server's answer.
+  - **Verify by** `cmd`: `(|a v| [] (task.receive 'value at) @spawn dup task.address {'value v} swap 'from put a task.send task.await 'ok at first) 'call def [] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 call`.
   - **Expected**: `42`.
-  - **Traces to**: Milestone 3 — `task.call`/`task.reply` in
-    `src/task_prims.zig`.
+  - **Traces to**: Milestone 3 — `task.send`/`task.receive` in
+    `src/task_prims.zig`; Milestone 4 ships the same composition as
+    `agent.call`.
 
 - **DoD-8 — handles do not cross mailboxes**
   - **Assert**: sending a value containing a task handle is `'type` and
@@ -506,40 +523,23 @@ echoed final stack or the error dictionary on stderr.
   - **Expected**: wall-clock difference below 5 ms across five runs.
   - **Traces to**: Milestone 3 — flat-list fast path in the handle check.
 
-- **DoD-10 — calling a terminated task fails closed**
-  - **Assert**: `task.call` to a terminal task is `'io` with reason
-    `'closed`.
-  - **Verify by** `cmd`: `[] (1) @spawn dup task.await pop task.address 1 task.call`.
+- **DoD-10 — sending to a terminated task fails closed**
+  - **Assert**: `task.send` to a terminal task is `'io` with reason `'closed`.
+  - **Verify by** `cmd`: `[] (1) @spawn dup task.await pop task.address 1 task.send`.
   - **Expected**: `'kind 'io` with `'data {'reason 'closed}`.
   - **Traces to**: Milestone 3 — mailbox closure on terminal transition.
 
-- **DoD-11 — server death fails parked callers**
-  - **Assert**: a caller parked in `task.call` fails when the server task
-    exits without replying.
-  - **Verify by** `cmd`: `[] (task.receive pop) @spawn task.address 1 task.call`.
-  - **Expected**: `'kind 'io` with `'data {'reason 'closed}`; the program
-    does not hang.
-  - **Traces to**: Milestone 3 — closure fails the caller's wait set.
-
-- **DoD-12 — dropped reply fails the caller**
-  - **Assert**: a server that discards the reply capability but stays alive
-    fails the caller with reason `'dropped`.
-  - **Verify by** `cmd`: `[] (task.receive pop (1) loop) @spawn task.address 1 task.call`.
-  - **Expected**: `'kind 'io` with `'data {'reason 'dropped}` within the
-    deferred-destruction bound, and the program exits after root cancellation.
-  - **Traces to**: Milestone 3 — reply-capability release path.
-
-- **DoD-13 — self-call is refused**
-  - **Assert**: `task.call` on `task.self` is `'domain`.
-  - **Verify by** `cmd`: `[] (task.self 1 task.call) @spawn task.await`.
-  - **Expected**: `{'err {'kind 'domain …}}`.
-  - **Traces to**: Milestone 3 — `task.call`.
+- **DoD-11, DoD-12, DoD-13 — moved to issue #150.** A caller failing when its
+  server dies (`'dropped`), a dropped reply address failing the caller, and
+  self-call refusal are properties of the runtime one-shot reply mailbox,
+  which this workstream does not build. Until then an unbounded composed call
+  to a dead server hangs; `task.await-for` bounds it.
 
 - **DoD-14 — receive deadline**
   - **Assert**: `task.receive-for` on an empty mailbox returns the timeout
-    envelope after the deadline.
-  - **Verify by** `cmd`: `[] (50 task.receive-for) @spawn task.await`.
-  - **Expected**: `{'ok [{'err {'kind 'timeout}}]}`.
+    envelope after the deadline, and a delivered message as `{'ok envelope}`.
+  - **Verify by** `cmd`: `[] (50 task.receive-for) @spawn task.await`; `[] (1000 task.receive-for) @spawn dup task.address 7 task.send task.await`.
+  - **Expected**: `{'ok [{'err {'kind 'timeout}}]}`; `{'ok [{'ok {'value 7}}]}`.
   - **Traces to**: Milestone 3 — `task.receive-for`.
 
 - **DoD-15 — per-sender order**
