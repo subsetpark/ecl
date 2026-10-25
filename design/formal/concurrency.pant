@@ -5,9 +5,9 @@ import ECL_UNITS.
 context Concurrency.
 
 > This model is normative for structured task identity, attachment to the
-> general unit lifecycle, cached terminal results, observation by `task.await`,
-> deadline expiry, cancellation, and the requirement that a unit quiesce its
-> task scope before becoming terminal.
+> general unit lifecycle, task ownership, cached terminal results, observation
+> by `task.await`, deadline expiry, cancellation, and the requirement that a
+> task quiesce the tasks it owns before its attached unit becomes terminal.
 >
 > It abstracts over evaluator steps, scheduling policy, elapsed time, I/O
 > interleaving, handle storage and lexical scope, and the selection algorithms
@@ -18,65 +18,36 @@ context Concurrency.
 > Task capabilities are immutable ECL values and may be shared. The mutable
 > evaluation state of each task remains confined to its attached unit.
 >
-> `Spawn task` is the formal `@spawn` boundary. The explicit values list and
-> quotation body become the attached unit's complete entry stack and body.
-> Ambient operands are absent from the action, so they cannot cross the
-> boundary. The action chooses both a fresh task identity and a fresh unit
-> identity, attaches them permanently, and records the active unit that owns
-> the new task's structured lifetime.
-Units, Concurrency ~> Spawn task @ owner: Unit, entry: Value, body: Value, unit-created? owner, unit-active? owner, ~unit-succeeded? owner, ~unit-failed? owner, value-type entry = list-type, value-type body = list-type.
----
-> Spawning creates one task and one attached active unit. Both identities are
-> fresh, and all previously created task and unit state is preserved.
-some task: Task, child: Unit,
-    ~task-created? task,
-    ~unit-created? child |
-  task-created?' task and
-  task-unit' task = child and
-  task-owner-unit' task = owner and
-  value-type (task-capability task) = task-type and
-  (all existing: Task, task-created? existing |
-    task-capability task != task-capability existing) and
-  unit-created?' child and
-  unit-active?' child and
-  ~unit-succeeded?' child and
-  ~unit-failed?' child and
-  unit-entry' child = entry and
-  unit-body' child = body and
-  unit-stack' child = entry and
-  unit-error' child = unit-error child and
-  (all other-task: Task, other-task != task |
-    task-created?' other-task = task-created? other-task and
-    task-unit' other-task = task-unit other-task and
-    task-owner-unit' other-task = task-owner-unit other-task) and
-  (all other-unit: Unit, other-unit != child |
-    unit-created?' other-unit = unit-created? other-unit and
-    unit-active?' other-unit = unit-active? other-unit and
-    unit-succeeded?' other-unit = unit-succeeded? other-unit and
-    unit-failed?' other-unit = unit-failed? other-unit and
-    unit-entry' other-unit = unit-entry other-unit and
-    unit-body' other-unit = unit-body other-unit and
-    unit-stack' other-unit = unit-stack other-unit and
-    unit-error' other-unit = unit-error other-unit).
-
-where
-
-> A created task permanently names one attached unit and its owning unit. Its
-> capability is an ECL value of the task kind. No two task identities attach to
-> the same unit or expose the same capability value.
+> Task scopes exist at exactly two places: the session root and each spawned
+> task. A spawn is owned by the task whose attached unit is executing it, or
+> by the session root when no task is executing. Other units, such as
+> `@attempt`, combinator applications, `load`, and module construction, are
+> stack transactions and never owners: a task spawned inside one belongs to
+> the enclosing scope and is unaffected by that unit's success or failure.
+> The session root closes only at `exit` or session end, which this model
+> leaves outside its actions.
+>
+> A created task permanently names one attached unit and is owned either by
+> the session root or by one other task. Its capability is an ECL value of the
+> task kind. No two task identities attach to the same unit or expose the same
+> capability value. `task-owner` is meaningful only for a task that is not
+> root-owned; every proposition that reads it is guarded accordingly.
 Task.
 {Concurrency} task-created? task: Task => Bool.
 {Concurrency} task-unit task: Task => Unit.
-{Concurrency} task-owner-unit task: Task => Unit.
+{Concurrency} root-owned? task: Task => Bool.
+{Concurrency} task-owner task: Task => Task.
 task-capability task: Task => Value.
 ---
-> Every created task has a task-valued capability, attaches to a created unit,
-> and was spawned by a distinct created unit.
+> Every created task has a task-valued capability and attaches to a created
+> unit. A task not owned by the root is owned by a distinct created task.
 all task: Task, task-created? task |
   value-type (task-capability task) = task-type and
-  unit-created? (task-unit task) and
-  unit-created? (task-owner-unit task) and
-  task-unit task != task-owner-unit task.
+  unit-created? (task-unit task).
+
+all task: Task, task-created? task, ~root-owned? task |
+  task-created? (task-owner task) and
+  task-owner task != task.
 
 > Attached units are unique to their task identities.
 all left: Task, right: Task,
@@ -95,6 +66,93 @@ all left: Task, right: Task,
 > Initially no task identity has been created.
 initially all task: Task |
   ~task-created? task.
+
+where
+
+> `Spawn task under task` and `Spawn task under root` are the formal `@spawn`
+> boundary. The explicit values list and quotation body become the attached
+> unit's complete entry stack and body. Ambient operands are absent from the
+> action, so they cannot cross the boundary. The action chooses both a fresh
+> task identity and a fresh unit identity, attaches them permanently, and
+> records the owning task or the session root.
+Units, Concurrency ~> Spawn task under task @ owner: Task, entry: Value, body: Value, task-created? owner, unit-active? (task-unit owner), ~unit-succeeded? (task-unit owner), ~unit-failed? (task-unit owner), value-type entry = list-type, value-type body = list-type.
+---
+> Spawning creates one task and one attached active unit. Both identities are
+> fresh, the owner is recorded, and all previously created task and unit state
+> is preserved.
+some task: Task, child: Unit,
+    ~task-created? task,
+    ~unit-created? child |
+  task-created?' task and
+  task-unit' task = child and
+  ~root-owned?' task and
+  task-owner' task = owner and
+  value-type (task-capability task) = task-type and
+  (all existing: Task, task-created? existing |
+    task-capability task != task-capability existing) and
+  unit-created?' child and
+  unit-active?' child and
+  ~unit-succeeded?' child and
+  ~unit-failed?' child and
+  unit-entry' child = entry and
+  unit-body' child = body and
+  unit-stack' child = entry and
+  unit-error' child = unit-error child and
+  (all other-task: Task, other-task != task |
+    task-created?' other-task = task-created? other-task and
+    task-unit' other-task = task-unit other-task and
+    root-owned?' other-task = root-owned? other-task) and
+  (all other-task: Task, other-task != task |
+    task-owner' other-task = task-owner other-task) and
+  (all other-unit: Unit, other-unit != child |
+    unit-created?' other-unit = unit-created? other-unit and
+    unit-active?' other-unit = unit-active? other-unit and
+    unit-succeeded?' other-unit = unit-succeeded? other-unit and
+    unit-failed?' other-unit = unit-failed? other-unit and
+    unit-entry' other-unit = unit-entry other-unit and
+    unit-body' other-unit = unit-body other-unit and
+    unit-stack' other-unit = unit-stack other-unit and
+    unit-error' other-unit = unit-error other-unit).
+
+where
+
+> `Spawn task under root` is the same boundary when no task is executing:
+> a root unit, or a stack transaction inside one, spawns into the session
+> root scope.
+Units, Concurrency ~> Spawn task under root @ entry: Value, body: Value, value-type entry = list-type, value-type body = list-type.
+---
+some task: Task, child: Unit,
+    ~task-created? task,
+    ~unit-created? child |
+  task-created?' task and
+  task-unit' task = child and
+  root-owned?' task and
+  value-type (task-capability task) = task-type and
+  (all existing: Task, task-created? existing |
+    task-capability task != task-capability existing) and
+  unit-created?' child and
+  unit-active?' child and
+  ~unit-succeeded?' child and
+  ~unit-failed?' child and
+  unit-entry' child = entry and
+  unit-body' child = body and
+  unit-stack' child = entry and
+  unit-error' child = unit-error child and
+  (all other-task: Task, other-task != task |
+    task-created?' other-task = task-created? other-task and
+    task-unit' other-task = task-unit other-task and
+    root-owned?' other-task = root-owned? other-task) and
+  (all other-task: Task, other-task != task |
+    task-owner' other-task = task-owner other-task) and
+  (all other-unit: Unit, other-unit != child |
+    unit-created?' other-unit = unit-created? other-unit and
+    unit-active?' other-unit = unit-active? other-unit and
+    unit-succeeded?' other-unit = unit-succeeded? other-unit and
+    unit-failed?' other-unit = unit-failed? other-unit and
+    unit-entry' other-unit = unit-entry other-unit and
+    unit-body' other-unit = unit-body other-unit and
+    unit-stack' other-unit = unit-stack other-unit and
+    unit-error' other-unit = unit-error other-unit).
 
 where
 
@@ -132,16 +190,17 @@ all task: Task,
   failed-result-error (task-result task) =
     unit-error (task-unit task).
 
-> A unit may become terminal only after every directly owned task is terminal.
-> Applying the same rule recursively gives structured quiescence for the
-> complete descendant task tree. This is the task-scope part of the rule that
-> a failed unit leaves nothing running.
-all owner: Unit,
-    unit-created? owner,
-    unit-succeeded? owner or unit-failed? owner |
+> A task's attached unit may become terminal only after every task it owns is
+> terminal. Applying the same rule recursively gives structured quiescence for
+> the complete descendant task tree. This is the task-scope part of the rule
+> that a failed task leaves nothing running.
+all owner: Task,
+    task-created? owner,
+    unit-succeeded? (task-unit owner) or unit-failed? (task-unit owner) |
   all task: Task,
       task-created? task,
-      task-owner-unit task = owner |
+      ~root-owned? task,
+      task-owner task = owner |
     unit-succeeded? (task-unit task) or unit-failed? (task-unit task).
 
 where
@@ -150,7 +209,7 @@ where
 > general unit success transition. The evaluator supplies the final stack.
 > The attached unit can become terminal only after its own task scope has
 > quiesced.
-Units, Concurrency ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -176,7 +235,10 @@ all other: Unit, other != task-unit task |
 all candidate: Task |
   task-created?' candidate = task-created? candidate and
   task-unit' candidate = task-unit candidate and
-  task-owner-unit' candidate = task-owner-unit candidate.
+  root-owned?' candidate = root-owned? candidate.
+
+all candidate: Task |
+  task-owner' candidate = task-owner candidate.
 
 where
 
@@ -184,7 +246,7 @@ where
 > general unit failure transition. The evaluator supplies the error. The
 > attached unit restores its entry stack and becomes terminal after its own
 > task scope has quiesced.
-Units, Concurrency ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -210,7 +272,10 @@ all other: Unit, other != task-unit task |
 all candidate: Task |
   task-created?' candidate = task-created? candidate and
   task-unit' candidate = task-unit candidate and
-  task-owner-unit' candidate = task-owner-unit candidate.
+  root-owned?' candidate = root-owned? candidate.
+
+all candidate: Task |
+  task-owner' candidate = task-owner candidate.
 
 where
 
@@ -223,7 +288,10 @@ Concurrency ~> Await task @ observer: Unit, task: Task, unit-created? observer, 
 all candidate: Task |
   task-created?' candidate = task-created? candidate and
   task-unit' candidate = task-unit candidate and
-  task-owner-unit' candidate = task-owner-unit candidate.
+  root-owned?' candidate = root-owned? candidate.
+
+all candidate: Task |
+  task-owner' candidate = task-owner candidate.
 
 where
 
@@ -237,14 +305,17 @@ Concurrency ~> Await task until deadline expires @ observer: Unit, task: Task, u
 all candidate: Task |
   task-created?' candidate = task-created? candidate and
   task-unit' candidate = task-unit candidate and
-  task-owner-unit' candidate = task-owner-unit candidate.
+  root-owned?' candidate = root-owned? candidate.
+
+all candidate: Task |
+  task-owner' candidate = task-owner candidate.
 
 where
 
 > `Cancel active task` is ordinary unit failure with a cancellation error. It
 > restores the unit's entry stack and becomes terminal only after the task's
 > own descendants are quiescent.
-Units, Concurrency ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, task-owner-unit child = task-unit task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -270,7 +341,10 @@ all other: Unit, other != task-unit task |
 all candidate: Task |
   task-created?' candidate = task-created? candidate and
   task-unit' candidate = task-unit candidate and
-  task-owner-unit' candidate = task-owner-unit candidate.
+  root-owned?' candidate = root-owned? candidate.
+
+all candidate: Task |
+  task-owner' candidate = task-owner candidate.
 
 where
 
@@ -290,4 +364,7 @@ all candidate: Unit |
 all candidate: Task |
   task-created?' candidate = task-created? candidate and
   task-unit' candidate = task-unit candidate and
-  task-owner-unit' candidate = task-owner-unit candidate.
+  root-owned?' candidate = root-owned? candidate.
+
+all candidate: Task |
+  task-owner' candidate = task-owner candidate.

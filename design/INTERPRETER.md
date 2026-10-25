@@ -1295,6 +1295,16 @@ closing a scope stops new children before teardown advances. This is the
 structured-concurrency rule that lets a parent own the resources its children
 borrow.
 
+Scopes and units are different granularities. A `TaskScope` exists in exactly
+two places: the session root, shared by every root unit and closed only at
+exit, and each `TaskCell`. `@attempt`, combinator applications, `load`, and
+module construction are boundary frames inside the unit that runs them: stack
+transactions that checkpoint and restore operands, owning nothing. A spawn
+registers under the nearest enclosing scope, so a task started inside an
+`@attempt` outlives it. The constructor primitives refuse while a
+module-construction boundary is open anywhere in the frame stack, so an image
+never owns a task and modules stay pure code.
+
 Task handles refer to write-once task cells. Construction, active execution,
 and published terminal results are distinct tagged states. The task becomes
 reachable after its execution and parent membership are stable. A cancelled

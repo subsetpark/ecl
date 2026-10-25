@@ -367,9 +367,8 @@ a channel between running units. Because no definition can occur inside a
 combinator application, the session bindings a combinator call observes do not
 change while it runs. Core is frozen, so it needs no such rule. A module image
 is immutable once registered; before that only its construction body defines
-in it, and a task that body spawned reads the image as it stands at each
-execution, so it may observe a definition the body makes after the spawn,
-including during one combinator call. Qualified words and words dispatched by `execute` look up the current
+in it, and the body starts no tasks that could observe it mid-construction.
+Qualified words and words dispatched by `execute` look up the current
 registration at each execution, so a module registered during a call is seen by
 its later applications. A
 module image is immutable
@@ -473,7 +472,9 @@ Units are delimited by the reader or by semantic unit constructors:
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
 
-A dying unit also cancels its unawaited tasks (see Concurrency).
+`@attempt` is a stack transaction, not a task scope: a task spawned inside it
+belongs to the enclosing scope and is unaffected by the `@attempt` succeeding or
+failing (see Concurrency).
 
 ### Application contexts
 
@@ -958,8 +959,10 @@ anonymously, be passed as data, and be registered more than once.
 - **Construction uses ordinary unit rollback.** Its scope, bindings, and draft
   initial-state stack are provisional. On failure they are discarded and no
   module value is produced. I/O, completed registry publications, and other
-  external effects performed by the body are not rolled back; child tasks are
-  cancelled by the ordinary failing-unit rule. Registration commits atomically
+  external effects performed by the body are not rolled back. A construction
+  body starts no tasks: `@spawn`, `@give`, and `@each` are `'domain` while
+  construction is in progress, at any depth, including inside a helper word the
+  body calls and inside an `@attempt` nested in the body. Registration commits atomically
   only after an image exists. A failed registration leaves the previous
   directory entry, current generation, and durable state exactly as they were.
 - The registry is flat. A module body may register another module, but that
@@ -975,7 +978,7 @@ anonymously, be passed as data, and be registered more than once.
   subtractive: private definitions are omitted entirely from the module's
   public face. A
   definition attempted inside a combinator application, an `@attempt`, or a
-  task started by the construction body is `'domain`, as it is everywhere.
+  task is `'domain`, as it is everywhere.
 - **Tests are a distinct module-owned namespace.**
   `annotation? (body) 'name test` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
@@ -1239,11 +1242,15 @@ anonymously, be passed as data, and be registered more than once.
 
 ### Task scopes and observation
 
-The unit that spawns a task owns its structured lifetime. A unit cannot finish
-while an owned task remains active. Leaving a scope with an active unawaited
-task requests cancellation and waits for that task's complete descendant scope
-to quiesce. The session is the root task scope. `task.pending` reports pending
-descendants in deterministic spawn preorder.
+Task scopes exist at exactly two places: the session root and each spawned
+task. A spawn is owned by the task executing it, or by the session root when no
+task is executing. `@attempt`, combinator applications, `load`, and module
+construction open no scope; they are stack transactions inside the enclosing
+one. A task's attached unit cannot become terminal while a task it owns is
+active: its completion cancels the remaining owned tasks and waits for their
+complete descendant scopes to quiesce. The session root scope closes only at
+`exit` or session end. `task.pending` reports pending descendants in
+deterministic spawn preorder.
 
 `task.await-any` accepts a nonempty task list and returns the selected index and
 cached task result. Among tasks terminal when the operation begins, the lowest

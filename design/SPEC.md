@@ -656,9 +656,8 @@ a channel between running units. Because no definition can occur inside a
 combinator application, the session bindings a combinator call observes do not
 change while it runs. Core is frozen, so it needs no such rule. A module image
 is immutable once registered; before that only its construction body defines
-in it, and a task that body spawned reads the image as it stands at each
-execution, so it may observe a definition the body makes after the spawn,
-including during one combinator call. Qualified words and words dispatched by `execute` look up the current
+in it, and the body starts no tasks that could observe it mid-construction.
+Qualified words and words dispatched by `execute` look up the current
 registration at each execution, so a module registered during a call is seen by
 its later applications. A
 module image is immutable
@@ -952,7 +951,7 @@ surviving execution state at the point of failure.
 
 ##### Action
 
-> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `task.await` later reifies the attached unit's terminal outcome through the same mapping. Thus `@attempt` is observationally equivalent to `@spawn task.await`, while task lifetime and waiting behavior remain outside this model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
+> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `task.await` later reifies the attached unit's terminal outcome through the same mapping. The two therefore agree on entry stack, result envelope, and failure mapping. They differ in ownership: `@spawn` creates a task, which owns the tasks spawned inside it, while `@attempt` is a stack transaction that owns nothing, so tasks spawned inside it belong to the enclosing task or the session root. Task lifetime, ownership, and waiting behavior are governed by the concurrency model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
 
 **`Units`** ↝ Begin unit *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
@@ -1095,7 +1094,9 @@ Units are delimited by the reader or by semantic unit constructors:
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
 
-A dying unit also cancels its unawaited tasks (see Concurrency).
+`@attempt` is a stack transaction, not a task scope: a task spawned inside it
+belongs to the enclosing scope and is unaffected by the `@attempt` succeeding or
+failing (see Concurrency).
 
 ### Application contexts
 
@@ -1925,8 +1926,10 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 - **Construction uses ordinary unit rollback.** Its scope, bindings, and draft
   initial-state stack are provisional. On failure they are discarded and no
   module value is produced. I/O, completed registry publications, and other
-  external effects performed by the body are not rolled back; child tasks are
-  cancelled by the ordinary failing-unit rule. Registration commits atomically
+  external effects performed by the body are not rolled back. A construction
+  body starts no tasks: `@spawn`, `@give`, and `@each` are `'domain` while
+  construction is in progress, at any depth, including inside a helper word the
+  body calls and inside an `@attempt` nested in the body. Registration commits atomically
   only after an image exists. A failed registration leaves the previous
   directory entry, current generation, and durable state exactly as they were.
 - The registry is flat. A module body may register another module, but that
@@ -1942,7 +1945,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   subtractive: private definitions are omitted entirely from the module's
   public face. A
   definition attempted inside a combinator application, an `@attempt`, or a
-  task started by the construction body is `'domain`, as it is everywhere.
+  task is `'domain`, as it is everywhere.
 - **Tests are a distinct module-owned namespace.**
   `annotation? (body) 'name test` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
@@ -2210,23 +2213,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 #### Chapter 1
 
-##### Action
-
-> This model is normative for structured task identity, attachment to the general unit lifecycle, cached terminal results, observation by `task.await`, deadline expiry, cancellation, and the requirement that a unit quiesce its task scope before becoming terminal.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  `Spawn task` is the formal `@spawn` boundary. The explicit values list and quotation body become the attached unit's complete entry stack and body. Ambient operands are absent from the action, so they cannot cross the boundary. The action chooses both a fresh task identity and a fresh unit identity, attaches them permanently, and records the active unit that owns the new task's structured lifetime.
-
-**`Units`**, **`Concurrency`** ↝ Spawn task *owner*: `Unit`, *entry*: `Value`, *body*: `Value`, **unit-created?** *owner*, **unit-active?** *owner*, ¬**unit-succeeded?** *owner*, ¬**unit-failed?** *owner*, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
-
----
-
-> Spawning creates one task and one attached active unit. Both identities are fresh, and all previously created task and unit state is preserved.
-
-∃ *task*: `Task`, *child*: `Unit`, ¬**task-created?** *task*, ¬**unit-created?** *child* · **task-created?**′ *task* ∧ **task-unit**′ *task* = *child* ∧ **task-owner-unit**′ *task* = *owner* ∧ **value-type** (**task-capability** *task*) = **task-type** ∧ (∀ *existing*: `Task`, **task-created?** *existing* · **task-capability** *task* ≠ **task-capability** *existing*) ∧ **unit-created?**′ *child* ∧ **unit-active?**′ *child* ∧ ¬**unit-succeeded?**′ *child* ∧ ¬**unit-failed?**′ *child* ∧ **unit-entry**′ *child* = *entry* ∧ **unit-body**′ *child* = *body* ∧ **unit-stack**′ *child* = *entry* ∧ **unit-error**′ *child* = **unit-error** *child* ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-created?**′ *other-task* = **task-created?** *other-task* ∧ **task-unit**′ *other-task* = **task-unit** *other-task* ∧ **task-owner-unit**′ *other-task* = **task-owner-unit** *other-task*) ∧ (∀ *other-unit*: `Unit`, *other-unit* ≠ *child* · **unit-created?**′ *other-unit* = **unit-created?** *other-unit* ∧ **unit-active?**′ *other-unit* = **unit-active?** *other-unit* ∧ **unit-succeeded?**′ *other-unit* = **unit-succeeded?** *other-unit* ∧ **unit-failed?**′ *other-unit* = **unit-failed?** *other-unit* ∧ **unit-entry**′ *other-unit* = **unit-entry** *other-unit* ∧ **unit-body**′ *other-unit* = **unit-body** *other-unit* ∧ **unit-stack**′ *other-unit* = **unit-stack** *other-unit* ∧ **unit-error**′ *other-unit* = **unit-error** *other-unit*).
-
-#### Chapter 2
-
 ##### Domains
 
-> A created task permanently names one attached unit and its owning unit. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value.
+> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, and the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at exactly two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Other units, such as `@attempt`, combinator applications, `load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently names one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
 
 `Task`.
 
@@ -2236,15 +2225,19 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 {**`Concurrency`**} **task-unit** *task*: `Task` ⇒ `Unit`.
 
-{**`Concurrency`**} **task-owner-unit** *task*: `Task` ⇒ `Unit`.
+{**`Concurrency`**} **root-owned?** *task*: `Task` ⇒ `Bool`.
+
+{**`Concurrency`**} **task-owner** *task*: `Task` ⇒ `Task`.
 
 **task-capability** *task*: `Task` ⇒ `Value`.
 
 ---
 
-> Every created task has a task-valued capability, attaches to a created unit, and was spawned by a distinct created unit.
+> Every created task has a task-valued capability and attaches to a created unit. A task not owned by the root is owned by a distinct created task.
 
-∀ *task*: `Task`, **task-created?** *task* · **value-type** (**task-capability** *task*) = **task-type** ∧ **unit-created?** (**task-unit** *task*) ∧ **unit-created?** (**task-owner-unit** *task*) ∧ **task-unit** *task* ≠ **task-owner-unit** *task*.
+∀ *task*: `Task`, **task-created?** *task* · **value-type** (**task-capability** *task*) = **task-type** ∧ **unit-created?** (**task-unit** *task*).
+
+∀ *task*: `Task`, **task-created?** *task*, ¬**root-owned?** *task* · **task-created?** (**task-owner** *task*) ∧ **task-owner** *task* ≠ *task*.
 
 > Attached units are unique to their task identities.
 
@@ -2258,7 +2251,33 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
+#### Chapter 2
+
+##### Action
+
+> `Spawn task under task` and `Spawn task under root` are the formal `@spawn` boundary. The explicit values list and quotation body become the attached unit's complete entry stack and body. Ambient operands are absent from the action, so they cannot cross the boundary. The action chooses both a fresh task identity and a fresh unit identity, attaches them permanently, and records the owning task or the session root.
+
+**`Units`**, **`Concurrency`** ↝ Spawn task under task *owner*: `Task`, *entry*: `Value`, *body*: `Value`, **task-created?** *owner*, **unit-active?** (**task-unit** *owner*), ¬**unit-succeeded?** (**task-unit** *owner*), ¬**unit-failed?** (**task-unit** *owner*), **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
+
+---
+
+> Spawning creates one task and one attached active unit. Both identities are fresh, the owner is recorded, and all previously created task and unit state is preserved.
+
+∃ *task*: `Task`, *child*: `Unit`, ¬**task-created?** *task*, ¬**unit-created?** *child* · **task-created?**′ *task* ∧ **task-unit**′ *task* = *child* ∧ ¬**root-owned?**′ *task* ∧ **task-owner**′ *task* = *owner* ∧ **value-type** (**task-capability** *task*) = **task-type** ∧ (∀ *existing*: `Task`, **task-created?** *existing* · **task-capability** *task* ≠ **task-capability** *existing*) ∧ **unit-created?**′ *child* ∧ **unit-active?**′ *child* ∧ ¬**unit-succeeded?**′ *child* ∧ ¬**unit-failed?**′ *child* ∧ **unit-entry**′ *child* = *entry* ∧ **unit-body**′ *child* = *body* ∧ **unit-stack**′ *child* = *entry* ∧ **unit-error**′ *child* = **unit-error** *child* ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-created?**′ *other-task* = **task-created?** *other-task* ∧ **task-unit**′ *other-task* = **task-unit** *other-task* ∧ **root-owned?**′ *other-task* = **root-owned?** *other-task*) ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-owner**′ *other-task* = **task-owner** *other-task*) ∧ (∀ *other-unit*: `Unit`, *other-unit* ≠ *child* · **unit-created?**′ *other-unit* = **unit-created?** *other-unit* ∧ **unit-active?**′ *other-unit* = **unit-active?** *other-unit* ∧ **unit-succeeded?**′ *other-unit* = **unit-succeeded?** *other-unit* ∧ **unit-failed?**′ *other-unit* = **unit-failed?** *other-unit* ∧ **unit-entry**′ *other-unit* = **unit-entry** *other-unit* ∧ **unit-body**′ *other-unit* = **unit-body** *other-unit* ∧ **unit-stack**′ *other-unit* = **unit-stack** *other-unit* ∧ **unit-error**′ *other-unit* = **unit-error** *other-unit*).
+
 #### Chapter 3
+
+##### Action
+
+> `Spawn task under root` is the same boundary when no task is executing: a root unit, or a stack transaction inside one, spawns into the session root scope.
+
+**`Units`**, **`Concurrency`** ↝ Spawn task under root *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
+
+---
+
+∃ *task*: `Task`, *child*: `Unit`, ¬**task-created?** *task*, ¬**unit-created?** *child* · **task-created?**′ *task* ∧ **task-unit**′ *task* = *child* ∧ **root-owned?**′ *task* ∧ **value-type** (**task-capability** *task*) = **task-type** ∧ (∀ *existing*: `Task`, **task-created?** *existing* · **task-capability** *task* ≠ **task-capability** *existing*) ∧ **unit-created?**′ *child* ∧ **unit-active?**′ *child* ∧ ¬**unit-succeeded?**′ *child* ∧ ¬**unit-failed?**′ *child* ∧ **unit-entry**′ *child* = *entry* ∧ **unit-body**′ *child* = *body* ∧ **unit-stack**′ *child* = *entry* ∧ **unit-error**′ *child* = **unit-error** *child* ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-created?**′ *other-task* = **task-created?** *other-task* ∧ **task-unit**′ *other-task* = **task-unit** *other-task* ∧ **root-owned?**′ *other-task* = **root-owned?** *other-task*) ∧ (∀ *other-task*: `Task`, *other-task* ≠ *task* · **task-owner**′ *other-task* = **task-owner** *other-task*) ∧ (∀ *other-unit*: `Unit`, *other-unit* ≠ *child* · **unit-created?**′ *other-unit* = **unit-created?** *other-unit* ∧ **unit-active?**′ *other-unit* = **unit-active?** *other-unit* ∧ **unit-succeeded?**′ *other-unit* = **unit-succeeded?** *other-unit* ∧ **unit-failed?**′ *other-unit* = **unit-failed?** *other-unit* ∧ **unit-entry**′ *other-unit* = **unit-entry** *other-unit* ∧ **unit-body**′ *other-unit* = **unit-body** *other-unit* ∧ **unit-stack**′ *other-unit* = **unit-stack** *other-unit* ∧ **unit-error**′ *other-unit* = **unit-error** *other-unit*).
+
+#### Chapter 4
 
 ##### Rules
 
@@ -2282,17 +2301,17 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *task*: `Task`, **task-created?** *task*, **unit-failed?** (**task-unit** *task*) · **failed-result-error** (**task-result** *task*) = **unit-error** (**task-unit** *task*).
 
-> A unit may become terminal only after every directly owned task is terminal. Applying the same rule recursively gives structured quiescence for the complete descendant task tree. This is the task-scope part of the rule that a failed unit leaves nothing running.
+> A task's attached unit may become terminal only after every task it owns is terminal. Applying the same rule recursively gives structured quiescence for the complete descendant task tree. This is the task-scope part of the rule that a failed task leaves nothing running.
 
-∀ *owner*: `Unit`, **unit-created?** *owner*, (**unit-succeeded?** *owner* ∨ **unit-failed?** *owner*) · ∀ *task*: `Task`, **task-created?** *task*, **task-owner-unit** *task* = *owner* · **unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*).
+∀ *owner*: `Task`, **task-created?** *owner*, (**unit-succeeded?** (**task-unit** *owner*) ∨ **unit-failed?** (**task-unit** *owner*)) · ∀ *task*: `Task`, **task-created?** *task*, ¬**root-owned?** *task*, **task-owner** *task* = *owner* · **unit-succeeded?** (**task-unit** *task*) ∨ **unit-failed?** (**task-unit** *task*).
 
-#### Chapter 4
+#### Chapter 5
 
 ##### Action
 
 > `Complete spawned task successfully` is the concurrency-layer use of the general unit success transition. The evaluator supplies the final stack. The attached unit can become terminal only after its own task scope has quiesced.
 
-**`Units`**, **`Concurrency`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2318,15 +2337,17 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
 
-∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **root-owned?**′ *candidate* = **root-owned?** *candidate*.
 
-#### Chapter 5
+∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
+
+#### Chapter 6
 
 ##### Action
 
 > `Complete spawned task with failure` is the concurrency-layer use of the general unit failure transition. The evaluator supplies the error. The attached unit restores its entry stack and becomes terminal after its own task scope has quiesced.
 
-**`Units`**, **`Concurrency`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2352,9 +2373,11 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
 
-∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **root-owned?**′ *candidate* = **root-owned?** *candidate*.
 
-#### Chapter 6
+∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
+
+#### Chapter 7
 
 ##### Action
 
@@ -2364,9 +2387,11 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ---
 
-∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **root-owned?**′ *candidate* = **root-owned?** *candidate*.
 
-#### Chapter 7
+∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
+
+#### Chapter 8
 
 ##### Action
 
@@ -2376,15 +2401,17 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ---
 
-∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **root-owned?**′ *candidate* = **root-owned?** *candidate*.
 
-#### Chapter 8
+∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
+
+#### Chapter 9
 
 ##### Action
 
 > `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent.
 
-**`Units`**, **`Concurrency`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, **task-owner-unit** *child* = **task-unit** *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2410,9 +2437,11 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *other*: `Unit`, *other* ≠ **task-unit** *task* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
 
-∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **root-owned?**′ *candidate* = **root-owned?** *candidate*.
 
-#### Chapter 9
+∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
+
+#### Chapter 10
 
 ##### Action
 
@@ -2424,17 +2453,23 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *candidate*: `Unit` · **unit-created?**′ *candidate* = **unit-created?** *candidate* ∧ **unit-active?**′ *candidate* = **unit-active?** *candidate* ∧ **unit-succeeded?**′ *candidate* = **unit-succeeded?** *candidate* ∧ **unit-failed?**′ *candidate* = **unit-failed?** *candidate* ∧ **unit-entry**′ *candidate* = **unit-entry** *candidate* ∧ **unit-body**′ *candidate* = **unit-body** *candidate* ∧ **unit-stack**′ *candidate* = **unit-stack** *candidate* ∧ **unit-error**′ *candidate* = **unit-error** *candidate*.
 
-∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **task-owner-unit**′ *candidate* = **task-owner-unit** *candidate*.
+∀ *candidate*: `Task` · **task-created?**′ *candidate* = **task-created?** *candidate* ∧ **task-unit**′ *candidate* = **task-unit** *candidate* ∧ **root-owned?**′ *candidate* = **root-owned?** *candidate*.
+
+∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
 
 
 
 ### Task scopes and observation
 
-The unit that spawns a task owns its structured lifetime. A unit cannot finish
-while an owned task remains active. Leaving a scope with an active unawaited
-task requests cancellation and waits for that task's complete descendant scope
-to quiesce. The session is the root task scope. `task.pending` reports pending
-descendants in deterministic spawn preorder.
+Task scopes exist at exactly two places: the session root and each spawned
+task. A spawn is owned by the task executing it, or by the session root when no
+task is executing. `@attempt`, combinator applications, `load`, and module
+construction open no scope; they are stack transactions inside the enclosing
+one. A task's attached unit cannot become terminal while a task it owns is
+active: its completion cancels the remaining owned tasks and waits for their
+complete descendant scopes to quiesce. The session root scope closes only at
+`exit` or session end. `task.pending` reports pending descendants in
+deterministic spawn preorder.
 
 `task.await-any` accepts a nonempty task list and returns the selected index and
 cached task result. Among tasks terminal when the operation begins, the lowest
