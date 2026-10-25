@@ -171,18 +171,29 @@ true. The mailbox model's closure rule is stated against scopes, not units.
 
 ### Milestone 2: remove-anonymous-modules
 
+**Status**: planned (2026-10-25). Gameplan: `gameplans/remove-anonymous-modules.yaml`
+(local; gitignored). Three patches in order: `@defm` as the single primitive
+constructor with the test rewrite; deletion of the `'module` value kind with
+`values.pant`; the spec, formal-model, and docs rewrite.
+
 **Definition of Done**:
 - `@module`, `register`, and `invoke` are gone from `src/module_prims.zig`
   and from `STDLIB.md`. `@defm` constructs and registers directly, validates
   its name (including the reserved `core` and standard-library names) before
   running the body, and fails only when the body fails or publication is
   refused.
+- `@defm` is a primitive again (reversing #147's prelude definition over
+  `@module` and `register`): a non-symbol name is `'type`; an invalid path,
+  `core`, or a standard-library name is `'domain`; none of these runs the body.
 - The `'module` value kind is gone from `src/value.zig`, the heap, `print`,
-  `match?`, `type`, and the JSON, native-view, and port-message rejection
-  paths. `src/tests/module_value_test.zig` and the acceptance scripts
-  `test/acceptance/modules/register-style.ecl`, `image-only.ecl`, and the
-  module-value cases of `escaped-quotation-authority.ecl` are deleted or
-  rewritten against `@defm`.
+  `match?`, `type` (which now lists nine kinds), the reader's `<module>`
+  marker, and the JSON, native-view, and port-message rejection paths.
+  `design/formal/values.pant` drops `module-type` in the same patch, since the
+  source audit compares the Zig tag universe with it.
+  `src/tests/module_value_test.zig` becomes `module_registration_test.zig`
+  with its anonymous-value tests deleted and the rest rewritten against
+  `@defm`; `test/acceptance/modules/register-style.ecl` and `image-only.ecl`
+  are deleted.
 - `SPEC.src.md` Modules prose drops "construction and publication are
   separate operations", the two-phase failure story, "nameable at a
   distance", and "parameterized with anonymous module handles";
@@ -347,6 +358,14 @@ replacement for `rng` ships before `rng` is deleted.
 
 ## Decisions Made
 
+- **`@defm` is the single module constructor and a primitive.** Name
+  validation precedes the body; only a registry change during construction
+  (an alias now occupying the name) can refuse publication after the body's
+  effects. The formal `Register` action constructs and publishes in one step,
+  because no program can observe an image between the two. The
+  `within`-active registry-mutation refusal stays at publication until
+  Milestone 5 deletes `within`. Decided while planning Milestone 2.
+
 - **Mailboxes, not CSP.** Tasks are the objects; a channel would be a second
   object kind with its own ownership. Cost accepted: no unified `select`,
   and competing consumers need a dispatcher task.
@@ -432,16 +451,31 @@ echoed final stack or the error dictionary on stderr.
 
 - **DoD-5 — `@defm` validates its name before running the body**
   - **Assert**: a reserved name fails before the body's own error can occur.
-  - **Verify by** `cmd`: `[] ("body ran" 'user error.new fail) 'core @defm`.
-  - **Expected**: `'kind 'domain` naming the reserved name, never `'user`.
-  - **Traces to**: Milestone 2 — `@defm` in `src/module_prims.zig`.
+  - **Verify by** `cmd`: `[] ("body ran" 'user error.new fail) 'core @defm`;
+    `[] (1 'x set) 'bad..name @defm`; `[] (1 'x set) 'dict @defm`;
+    `'wrong [] (1 'x set) @defm`.
+  - **Expected**: the first three are `'kind 'domain` (the first never
+    `'user`, the third naming the standard library); the last is `'kind
+    'type` with `'word '@defm`.
+  - **Traces to**: Milestone 2 — `defmWord` in `src/module_prims.zig`.
 
 - **DoD-6 — `type` has no module kind**
   - **Assert**: no expression produces a value whose `type` is `'module`.
-  - **Verify by** `cmd`: `[] (1 'x def) 'm @defm m.x type`.
-  - **Expected**: `'int`; and `grep -c "'module" design/STDLIB.md` reports
-    only the `*module*` entry.
-  - **Traces to**: Milestone 2 — `src/value.zig`.
+  - **Verify by** `cmd`: `[] (1 'x set) 'm @defm m.x type`; `timeout 600
+    zig build source-audit < /dev/null`.
+  - **Expected**: `'int`; the audit exits 0 with `module-type` absent from
+    `design/formal/values.pant`.
+  - **Traces to**: Milestone 2 — `src/value.zig`, `design/formal/values.pant`.
+
+- **DoD-6b — nested definitions and reloads publish through the registry**
+  - **Assert**: a module body may define another module, and re-defining a
+    name publishes new code.
+  - **Verify by** `cmd`: `[] ([] ((2) 'x def) 'inner @defm (inner.x) 'get def)
+    'outer @defm outer.get`; `[] ((1) 'x def) 'm @defm [] ((2) 'x def) 'm @defm
+    m.x`.
+  - **Expected**: `2` for both.
+  - **Traces to**: Milestone 2 — `ModuleCompletionDriver` in
+    `src/machine.zig`.
 
 - **DoD-7 — call and reply round trip**
   - **Assert**: a caller receives the server's reply value.
