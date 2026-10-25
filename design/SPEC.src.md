@@ -127,9 +127,9 @@ word together with any resolution and provenance metadata assigned to that
 occurrence. A **quotation** is a list applied as a program. A **binding**
 associates a name with an executable body and metadata; it is not a value. A
 **scope** is a binding map with a fixed parent. An **activation** is one
-invocation of a binding. A **module image** is an immutable module value; a
-**registration** is the durable named slot through which an image may be
-published and invoked.
+invocation of a binding. A **module image** is the immutable code and
+definitions `@defm` constructs; a **registration** is the durable named slot
+through which an image is published and invoked.
 
 ## Source language
 
@@ -493,7 +493,7 @@ Three quotation-application behaviors exist:
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
   `fold`, `scan`, `update`, `stencil`, `unfold`, `infra`, `@attempt`, `@spawn`,
-  `@each`, `@module`, and `@defm`.
+  `@each`, and `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
 quotation argument (given per word in the reference). The contract is
@@ -534,13 +534,12 @@ constant-continuation choices for iterative and tail-recursive shapes.
 #### The `@` spelling convention
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
-— one unit per application for `@each`. There are five: `@attempt`, `@spawn`,
-`@each`, `@module`, and `@defm`. Each takes an explicit seed-values list and a
-body quotation as separate operands. An empty seed list is written `[]`; no
+— one unit per application for `@each`. There are four: `@attempt`, `@spawn`,
+`@each`, and `@defm`. Each takes an explicit seed-values list and a body
+quotation as separate operands. An empty seed list is written `[]`; no
 constructor reads the ambient stack across its unit boundary. `@each` also
 places the iterated element deepest in each child stack, beneath the shared
-seed values. `register` is not marked: it publishes an already-constructed
-module value and takes no quotation.
+seed values.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -548,8 +547,8 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` and `within` — they apply on an explicitly named *other* stack.
-- `import`, `load`, `unmodule`, `register` — they construct, publish, or retire
-  without taking a quotation.
+- `import`, `load`, `unmodule` — they publish or retire without taking a
+  quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
@@ -579,7 +578,6 @@ Every unit constructor receives its seed values and exact body separately:
 values (q) @attempt
 values (q) @spawn
 list values (q) @each          ( element deepest in each child )
-values (body) @module
 values (body) 'name @defm
 ```
 
@@ -592,7 +590,7 @@ is part of the construction body's text. `@each` puts the iterated element
 deepest in each child stack, beneath the shared seeds.
 
 Keeping the two operands separate is what makes seeding compatible with module
-text: `@module` and `@defm` know exactly which list is the construction body.
+text: `@defm` knows exactly which list is the construction body.
 Generic quotation-building operations such as `with` may still produce a body,
 but a runtime-built body has no reader lineage and therefore takes no module
 attribution; see Modules.
@@ -644,7 +642,7 @@ accept `core`.
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
-first use. `register`, `@defm`, and `unmodule` with a standard-library module
+first use. `@defm` and `unmodule` with a standard-library module
 name are `'domain`, as is `alias` with one as either the alias or its target. A
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
@@ -900,44 +898,34 @@ resolves where it is invoked. Non-symbol operands are `'type`.
 
 ## Modules
 
-A module is a value; a *registration* is the assignment of a module to a public
-name. A per-session registry maps symbols to registrations; files are
-transport.
+A module is code published under a name: a *registration* assigns an immutable
+module image to a public name, and a per-session registry maps symbols to
+registrations; files are transport. Modules are not values. The only way to
+make one is to define it under a name, and the only way to reach one is through
+that name.
 
-Construction and publication are separate operations, so a module can exist
-anonymously, be passed as data, and be registered more than once.
+### Operations
 
-### Operations and values
-
-- `@module` is `( values body -- module )`. It runs the body on a fresh, isolated
-  environment and returns an **anonymous immutable module image**: its frozen
+- `@defm` is `( values body 'module-name -- )`. It validates the name before
+  evaluating anything: a non-symbol is `'type`; a name that is not a valid
+  module path, the reserved name `core`, or a standard-library module name is
+  `'domain`, and in each case the body never runs. With a valid name it runs the
+  body on a fresh, isolated environment, freezes the resulting image (its
   environment, its definitions, and the body's final operand stack as an
-  *initial-state template*. It claims no registry name. The body runs
-  stack-isolated: it never sees or disturbs the caller's stack.
-- `register` is `( module 'module-name -- )`. It validates the canonical name
-  and publishes the image under it. Registration is an upsert: a missing name
-  creates its registration, and an existing name installs the new image while
-  keeping the durable state that registration already owns.
-- `@defm` is `( values body 'module-name -- )` and is exactly `@module` followed by
-  `register`, including failure and effect order. The body is evaluated before
-  the name is validated or publication is attempted. If construction fails,
-  registration is not attempted. If construction succeeds and registration
-  fails, completed external construction effects survive under ordinary unit
-  semantics. `@defm` introduces no transaction spanning both operations. It
-  is the source spelling for a module definition.
-- `values (body) @module` and `values (body) 'name @defm` initialize the same
-  isolated construction. The values form the body unit's initial stack, in list
-  order; the body may consume, reorder, or extend them. The separate operands
-  let attribution below name the body exactly.
-- **A module value is an opaque capability.** Its `type` is `'module`; it
-  prints as the unreadable marker `<module>`; `match?` compares **image
-  identity**, so one construction duplicated matches itself and two
-  constructions of the same body never match. It cannot be read from source,
-  emitted as JSON, or passed through a native word's value or view inputs.
-  It exposes no name, address, environment, registration, or state.
-- Modules are first-class: enumerable, diffable, constructible by building
-  the body quotation programmatically, and nameable at a distance — build
-  once, choose the name later, or register the same image twice.
+  *initial-state template*), and publishes that image as the registration's new
+  generation. Publication is an upsert: a missing name creates its
+  registration, and an existing name installs the new image while keeping the
+  durable state that registration already owns. A body failure publishes
+  nothing. A registry change during construction, such as an alias now
+  occupying the name, can still refuse publication after the body has run;
+  the body's external effects then survive under ordinary unit semantics.
+- `values (body) 'name @defm` initializes the construction. The values form the
+  body unit's initial stack, in list order; the body may consume, reorder, or
+  extend them. The separate operands let attribution below name the body
+  exactly. The body runs stack-isolated: it never sees or disturbs the
+  caller's stack.
+- Modules are constructible by building the body quotation programmatically
+  and enumerable and diffable through their names.
 - **Module names are validated paths.** A canonical module name is one or
   more nonempty binding-name segments joined by dots: `stats`, `core.utils`,
   and `company.data.csv` are valid; leading, trailing, and doubled dots are
@@ -958,15 +946,15 @@ anonymously, be passed as data, and be registered more than once.
 
 - **Construction uses ordinary unit rollback.** Its scope, bindings, and draft
   initial-state stack are provisional. On failure they are discarded and no
-  module value is produced. I/O, completed registry publications, and other
+  module is registered. I/O, completed registry publications, and other
   external effects performed by the body are not rolled back. A construction
   body starts no tasks: `@spawn`, `@give`, and `@each` are `'domain` while
   construction is in progress, at any depth, including inside a helper word the
   body calls and inside an `@attempt` nested in the body. Registration commits atomically
   only after an image exists. A failed registration leaves the previous
   directory entry, current generation, and durable state exactly as they were.
-- The registry is flat. A module body may register another module, but that
-  registration creates an independent module with its own canonical name
+- The registry is flat. A module body may define another module with `@defm`,
+  but that registration creates an independent module with its own canonical name
   and lifetime; it does not establish lexical nesting or parent ownership.
   Registrations commit independently, so a completed inner registration
   remains published if the outer construction body later fails.
@@ -982,7 +970,7 @@ anonymously, be passed as data, and be registered more than once.
 - **Tests are a distinct module-owned namespace.**
   `annotation? (body) 'name test` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
-  body of `@module` or `@defm` is executing. A nested quotation, child unit,
+  body of `@defm` is executing. A nested quotation, child unit,
   or top-level use is `'domain`. Test names may equal public or private word
   names because catalog entries never enter local lookup, qualified lookup,
   imports, `words`, reflection, or module invocation. Application Sessions
@@ -1025,8 +1013,8 @@ anonymously, be passed as data, and be registered more than once.
 - `*module*`, `within`, and every other slot-dependent operation use only the
   registration context established by actual dispatch; they never infer one
   from image identity. Missing authority becomes a `'domain` error only when
-  such an operation is reached, so anonymous stateless code and private calls
-  remain valid. An application through escaped module-authored code still
+  such an operation is reached, so construction roots, escaped quotations, and
+  private calls remain valid. An application through escaped module-authored code still
   crosses a module boundary for effect checking, despite having no slot. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
@@ -1079,21 +1067,9 @@ anonymously, be passed as data, and be registered more than once.
   available is `'domain`. Seed values passed to unit constructors are not part
   of the construction body. Runtime-built captures retain their existing
   word scopes.
-- `module 'name invoke` calls one public export of an image reached as a value
-  rather than through a registered name. A module value is otherwise an
-  ordinary opaque value: `register` consumes one and `type` reports `'module`.
-  It is the same dispatch a qualified call performs — the home is the image, so
-  a public reaches its own privates, and lookup is public-only, so a private is
-  as absent as a missing name. On the other hand, it can't access module
-  registration state: module stacks are associated with module names, *not*
-  with anonymous module values. `within` inside a handle-called word is
-  therefore `'domain` exactly as it is in a construction root.
-- Module constructors are parameterized by the seed operand — `values (body)
-  @module`, `values (body) 'name @defm` — and nothing else crosses the
-  boundary. There is no ambient environment between a module's own definitions
-  and core.
-  Modules can be parameterized with anonymous module handles, enabling a
-  simple kind of dependency injection.
+- `@defm` is parameterized by the seed operand — `values (body) 'name @defm` —
+  and nothing else crosses the boundary. There is no ambient environment
+  between a module's own definitions and core.
   A quotation parameter carries the scope it was written in, so it preserves
   its references on injection into a module. Given:
 
@@ -1136,8 +1112,8 @@ anonymously, be passed as data, and be registered more than once.
 - **`within` is the explicit stack boundary.** `within` runs a quotation
   against the current registration's durable stack rather than the ambient
   operand stack. It requires a
-  `registered(generation, slot, image)` invocation context. A construction root, anonymous
-  `invoke`, escaped module quotation, or session activation has no slot and
+  `registered(generation, slot, image)` invocation context. A construction root,
+  escaped module quotation, or session activation has no slot and
   raises `'domain` if it reaches `within`. The operation never infers a slot
   from an image or targets some caller's slot. Homeless helpers and same-image
   calls preserve an existing registered context; dispatch into another image
@@ -1171,14 +1147,11 @@ anonymously, be passed as data, and be registered more than once.
   different module's slot alike. Ordinary calls into the same or another
   module remain legal; a call fails on this ground only if it reaches another
   `within`.
-- **A `within` transaction cannot mutate the module registry.** `register`,
-  `unmodule`, `alias`, and any other primitive registry mutation raise
-  `'domain` while a transaction is active. The error occurs before that
-  operation consumes its operands, resolves a target registration, or
-  publishes any registry change. A derived sequence may perform earlier
-  operations before it reaches the prohibited mutation: in particular,
-  `@defm` may complete its `@module` phase before `register` raises. A
-  transaction therefore holds authority over exactly its already-selected
+- **A `within` transaction cannot mutate the module registry.** `unmodule`,
+  `alias`, and any other primitive registry mutation raise `'domain` while a
+  transaction is active, before that operation consumes its operands, resolves
+  a target registration, or publishes any registry change. `@defm` is refused
+  the same way at publication, after its body has run. A transaction therefore holds authority over exactly its already-selected
   slot and cannot acquire registration authority over another slot as a side
   effect.
 - **Slot lifetime is an owned capability.** Every published generation owns a

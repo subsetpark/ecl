@@ -403,7 +403,7 @@ provenance stays focused on diagnostics.
 
 The evaluator moves one closed `Value` union. The layout is fixed at 16 bytes:
 integers, floats, Unicode scalars, symbols, and word references are inline;
-lists, dictionaries, tasks, module values, and ports carry kind-specific
+lists, dictionaries, tasks, and ports carry kind-specific
 opaque handles. External code inspects handles through their public semantic surfaces.
 Allocation and mutation require capabilities issued by `heap.zig`.
 The precommit source audit compares this closed Zig tag universe exactly with
@@ -698,8 +698,8 @@ child scope, is what keeps those bodies from defining: they run in their
 invoker's root. `ExecutionSite` carries these together and exposes named
 constructors for root, image, inherited, and resumed execution. They cannot safely be reconstructed
 from one another. A source definition may resolve against its defining chain
-while inheriting a caller's module home, and an anonymous module image may have
-private code but no registered state slot.
+while inheriting a caller's module home, and a construction body runs against
+an image that has private code but no registered state slot yet.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.
@@ -707,14 +707,12 @@ authority facts cross a boundary as one nominal value.
 ### Images, registrations, and state have different lifetimes
 
 A module image is immutable code and metadata with its own environment and
-root scope. A registry registration publishes an image under a canonical name
-as one generation. The registry slot owns the durable stack and the FIFO
+root scope, created by `@defm` and published in the same step. A registry
+registration publishes an image under a canonical name as one generation. The registry slot owns the durable stack and the FIFO
 arbiter used by `within`; an image supplies the initial stack template.
 
-Separating the three concepts supports all of these cases cleanly:
+Separating the three concepts supports these cases cleanly:
 
-- an anonymous image exists as a first-class value with no registered state;
-- one immutable image may be registered under more than one name;
 - replacing a registration publishes a new generation without rewriting the
   old image; and
 - old code may finish under a generation pin while new qualified calls reach

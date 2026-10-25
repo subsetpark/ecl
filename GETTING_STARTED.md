@@ -280,9 +280,9 @@ All unit constructors are marked with a `@`.
 
 ## Modules
 
-ECL's module system consists of two parts: _module images_ and _module
-registrations_. The most common way to use a module is to create an image and
-then immediately register it, so we'll introduce them as a single action.
+ECL's module system consists of two parts: _module images_, the code a module
+body defines, and _module registrations_, the names they are published under.
+`@defm` creates both in one step.
 
 Modules are ECL's core primitive for encapsulation, distribution, and
 application structure. There's no special syntax for module construction;

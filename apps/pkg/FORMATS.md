@@ -94,8 +94,8 @@ export maps to exactly one source file. File and directory names do not
 determine module names.
 
 Other registrations in a selected file are private to that file. They may
-use unrelated names and may be constructed dynamically with `@module` and
-`register`. Modules and their tests can use their defining file's private
+use unrelated names, including names computed at run time. Modules and their
+tests can use their defining file's private
 registrations. Other files cannot access those registrations, including files
 in the same package. Two files may independently register the same private
 name.

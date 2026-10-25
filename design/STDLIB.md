@@ -98,9 +98,8 @@ no source provenance; there is no fallback to the caller's file.
 `( -- 'module-name )` — Return the canonical registration name selected by
 the current module activation. The same image registered under different names
 reports the name through which it was called; an alias reports its target's
-canonical name. `'domain` at top level, during module construction, through an
-anonymous module value, or through an escaped quotation whose image has no
-invoking registration.
+canonical name. `'domain` at top level, during module construction, or through
+an escaped quotation whose image has no invoking registration.
 
 ### +
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
@@ -185,11 +184,13 @@ Errors.
 ```
 
 ### @defm
-`( values body 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
-by `register`: run the body on a fresh environment, then validate the
-canonical module path and register the resulting image under it. The body is
-evaluated before the name is validated, so the two spellings agree on every
-observable outcome. Defined in ecl.
+`( values body 'module-name -- )` — *Unit constructor.* The one module
+constructor. Validate the name first: a non-symbol is `'type`; an invalid
+module path, the reserved name `core`, or a standard-library module name is
+`'domain`, and the body never runs. Then run the body on a fresh environment
+and publish the resulting image under the name, keeping any durable state the
+registration already owns. A body failure publishes nothing; a registry change
+during construction may still refuse publication after the body has run.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore `values (body) 'name @defm`. See
@@ -204,13 +205,6 @@ quiescing the remainder. Each child's stack starts with its element deepest;
 `@spawn`, `task.await`, and `task.cancel`. Inside a module construction body,
 at any depth, this constructor is `'domain`: a module body defines words and
 starts no tasks (see Modules). See Concurrency.
-
-### @module
-`( values body -- module )` — *Unit constructor.* Run the body on a fresh
-environment and return the resulting anonymous immutable module image. No
-registry name is claimed and no name is validated. The body's final operand
-stack becomes the image's initial-state template. Use `values (body) @module`.
-See [Modules](SPEC.md#modules).
 
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack
@@ -1078,14 +1072,6 @@ nonnegative int.
 ### raze
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
 
-### register
-`( module 'module-name -- )` — Validate a canonical module path and publish a
-module value under it. A missing name creates its registration and copies the
-image's initial-state template into the new durable stack; an existing name
-installs the new image and retains that registration's durable stack. One
-image may be registered under any number of names, each with independent
-state and lifetime. See [Modules](SPEC.md#modules).
-
 ### reshape
 `( list shape -- list )` — Cycle the data into the exact nested-list
 shape; a zero axis must be final.
@@ -1342,7 +1328,7 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'module`, or `'task`.
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`, or `'port`.
 
 #### Examples
 
@@ -1476,7 +1462,7 @@ with the list's elements as separate stack values. Defined in ecl as
 
 This is ordinary quotation composition and constructs nothing. It is not a
 unit's seed operand: the flattened quotation it returns is a runtime-built
-body, so `@module` and `@defm` give it no reader attribution. Pass initial
+body, so `@defm` gives it no reader attribution. Pass initial
 values as the constructor's separate list operand.
 
 #### Examples

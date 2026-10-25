@@ -3,15 +3,15 @@ module ECL_MODULES.
 import ECL_VALUES.
 
 context Calls.
-context Images.
+context Construction.
 context Registry.
 context Transactions.
 context WithinCommit.
 
 RegistryName.
 BindingName.
-> This model is normative for module-image availability; registry names,
-> slots, aliases, generations, and publication; abstract definitions and
+> This model is normative for registry names, slots, aliases, generations,
+> and publication, including the construction of the images they publish; abstract definitions and
 > visibility; call contexts and generation pins; the ordered durable, draft,
 > pending-output, and ambient stacks; and atomic completion or abortion of
 > `within` transactions.
@@ -82,7 +82,7 @@ where
 > Definitions and initial templates are immutable background relations. Each
 > definition belongs to one image and binding name, binding names are unique
 > within an image, and visibility controls which call actions may select it.
-> The model begins with no constructed or value-held images, created or live
+> The model begins with no constructed images, created or live
 > slots, occupied names, published generations, calls, or transactions. Domain
 > atoms are possibilities rather than initially existing language values.
 >
@@ -116,8 +116,7 @@ occurrence-image occurrence: WordOccurrence => Image.
 call-invocation? invoker: InvocationContext => Bool.
 invocation-call invoker: InvocationContext => Call.
 
-{Images} constructed? image: Image => Bool.
-{Images} value-held? image: Image => Bool.
+{Construction} constructed? image: Image => Bool.
 
 {Registry} canonical? name: RegistryName => Bool.
 {Registry} alias? name: RegistryName => Bool.
@@ -191,8 +190,11 @@ all slot: Slot, slot-live? slot |
 all generation: Generation, generation-published? generation |
   constructed? (generation-image generation).
 
-all image: Image, value-held? image |
-  constructed? image.
+> An image exists only as the image of a published generation: no program
+> can hold one any other way.
+all image: Image, constructed? image |
+  some generation: Generation |
+    generation-published? generation and generation-image generation = image.
 
 all generation: Generation, generation-retired? generation |
   generation-published? generation.
@@ -239,7 +241,7 @@ all left: Transaction, right: Transaction,
   left = right.
 
 initially all image: Image |
-  ~constructed? image and ~value-held? image.
+  ~constructed? image.
 
 initially all registry-name: RegistryName |
   ~canonical? registry-name and ~alias? registry-name.
@@ -262,57 +264,21 @@ initially some invoker: InvocationContext | ~call-invocation? invoker.
 
 where
 
-> `Construct image` allocates a fresh image identity and establishes its first
-> module-value owner. Its immutable definition map and initial stack template
-> already exist as background relations. Construction creates no name, slot,
-> alias, or generation. Failure before this transition changes no modeled
-> state; evaluation of the body and any external effects are outside this
-> abstraction.
-Images ~> Construct image.
----
-some image: Image, ~constructed? image |
-  constructed?' image and
-  value-held?' image and
-  (all other: Image, other != image |
-    constructed?' other = constructed? other and
-    value-held?' other = value-held? other).
-
-where
-
-> Image availability follows semantic ownership rather than reclamation
-> mechanics. `value-held?` records the Boolean fact that at least one reachable
-> module value owns the image; the model contains no reference count. `Release last value owner` clears that
-> fact only when the final such owner disappears. The action models
-> reachability and is not an ECL operation. Current generations and active
-> calls are the other image owners; scoped words and quotations are not.
-Images ~> Release last value owner @ image: Image,
-                                        constructed? image,
-                                        value-held? image.
----
-~value-held?' image and
-(all other: Image, other != image |
-  value-held?' other = value-held? other).
-
-all image: Image |
-  constructed?' image = constructed? image.
-
-where
-
-> `Register` is an ordered upsert. Publishing under a missing canonical name
+> `Register` is `@defm`'s publication: it constructs a fresh image and
+> publishes it in one step, because no program can observe an image between
+> the two. It is an ordered upsert. Publishing under a missing canonical name
 > creates a fresh slot initialized from the image's initial template.
 > Publishing under an existing canonical name preserves that slot and its
 > complete durable stack. Every successful registration publishes a fresh
-> generation and retires the previous current generation, even when both
-> generations contain the same image. It cannot interleave with an active
+> generation and retires the previous current generation. It cannot interleave with an active
 > transaction on the selected slot or be performed by a call that owns an
 > active transaction. The supplied invocation context is the top-level
 > evaluator or the exact call performing the mutation.
-Registry ~> Register @ invoker: InvocationContext,
-                       image: Image,
-                       module-name: RegistryName,
-                       constructed? image,
-                       value-held? image,
-                       ~alias? module-name.
+Registry, Construction ~> Register @ invoker: InvocationContext,
+                                     image: Image,
+                                     module-name: RegistryName,
+                                     ~constructed? image,
+                                     ~alias? module-name.
 ---
 (~call-invocation? invoker or
   (call-active? (invocation-call invoker) and
@@ -349,6 +315,9 @@ Registry ~> Register @ invoker: InvocationContext,
   ~generation-retired?' generation and
   generation-slot' generation = slot and
   generation-image' generation = image and
+  constructed?' image and
+  (all other-image: Image, other-image != image |
+    constructed?' other-image = constructed? other-image) and
   (all other-generation: Generation, other-generation != generation |
     generation-published?' other-generation =
       generation-published? other-generation and
@@ -477,49 +446,10 @@ Registry ~> Remove @ invoker: InvocationContext,
 
 where
 
-> `Begin image call` invokes a public binding through a module value. The
-> invocation pins the image directly and has no registration, slot, or
-> generation context. The image must still have a module-value owner when the
-> call begins.
-Calls ~> Begin image call @ image: Image,
-                            binding-name: BindingName,
-                            constructed? image,
-                            value-held? image.
----
-some callee: Call,
-     ~call-created? callee,
-     binding-present? image binding-name,
-     definition: Definition,
-     definition = definition-at image binding-name,
-     public? definition |
-  call-created?' callee and
-  call-active?' callee and
-  ~registered-call?' callee and
-  call-generation' callee = call-generation callee and
-  call-slot' callee = call-slot callee and
-  call-image' callee = image and
-  call-definition' callee = definition and
-  (all other: Call, other != callee |
-    call-created?' other = call-created? other and
-    call-active?' other = call-active? other and
-    registered-call?' other = registered-call? other and
-    call-generation' other = call-generation other and
-    call-slot' other = call-slot other and
-    call-image' other = call-image other and
-    call-definition' other = call-definition other) and
-
-  (all call: Call |
-    ambient-depth' call = ambient-depth call and
-    (all position: Nat |
-      ambient-value' call position = ambient-value call position)).
-
-where
-
 > `Begin scoped call` resolves the name stored in a word occurrence against the
 > image stored in that occurrence. A quotation or word occurrence owns this
 > scope but does not cache a definition or generation. The image must still be
-> available through a module value, a current generation, or another active
-> call. Same-image dispatch from a registered caller preserves its pinned slot
+> available through a current generation or another active call. Same-image dispatch from a registered caller preserves its pinned slot
 > and generation; other scoped dispatch has no registration context. Private
 > definitions are therefore available to same-image scoped resolution without
 > becoming publicly invocable.
@@ -532,11 +462,10 @@ Calls ~> Begin scoped call @ caller: Call,
 some image: Image,
      image = occurrence-image occurrence,
      constructed? image,
-     value-held? image or
-       #(each slot: Slot,
-              slot-live? slot and
-              generation-image (current-generation slot) = image |
-           slot) > 0 or
+     #(each slot: Slot,
+            slot-live? slot and
+            generation-image (current-generation slot) = image |
+         slot) > 0 or
        #(each owner: Call,
               call-active? owner and call-image owner = image |
            owner) > 0,
