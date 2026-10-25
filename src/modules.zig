@@ -586,12 +586,6 @@ const ModuleImage = struct {
         self.environment.releases.retire(self, &self.retirement);
     }
 
-    /// The heap's module value calls this on final release; whatever the drop
-    /// makes unreachable retires through the same domain in later steps.
-    pub fn releaseImage(self: *ModuleImage) void {
-        self.release();
-    }
-
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,

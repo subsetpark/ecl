@@ -437,7 +437,7 @@ const AtomBuilder = struct {
     /// place source recognizes them so every capability rejects identically.
     /// `<module>` is one exact spelling; `<task:N>` needs its digits scanned,
     /// which is why recognition is a cursor step rather than a comparison.
-    marker: enum { none, module, task_digits, port_digits },
+    marker: enum { none, task_digits, port_digits },
 
     fn init(token: Token, quoted: bool, word_linker: value.WordLinker) AtomBuilder {
         return .{
@@ -446,8 +446,6 @@ const AtomBuilder = struct {
             .quoted = quoted,
             .marker = if (quoted)
                 .none
-            else if (std.mem.eql(u8, token.bytes, "<module>"))
-                .module
             else if (std.mem.startsWith(u8, token.bytes, "<task:") and
                 token.bytes.len >= "<task:0>".len and token.bytes[token.bytes.len - 1] == '>')
                 .task_digits
@@ -461,10 +459,6 @@ const AtomBuilder = struct {
     fn advance(self: *AtomBuilder, diag: *reader.Diag) (error{ OutOfMemory, Parse })!ScalarProgress {
         switch (self.marker) {
             .none => {},
-            .module => {
-                diag.set(self.token.span, "module display markers are runtime-only and cannot be parsed");
-                return error.Parse;
-            },
             .task_digits => return self.advanceMarkerDigits(
                 diag,
                 "task display markers are runtime-only and cannot be parsed",

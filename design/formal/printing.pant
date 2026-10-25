@@ -12,7 +12,7 @@ import ECL_VALUES.
 > Canonical output is always a compact single line and never contains a
 > display-elision marker. For every recursively readable value, that string is
 > readable as one value and the result matches the original value. Task and
-> module values, and aggregates containing them, retain diagnostic canonical
+> port values, and aggregates containing them, retain diagnostic canonical
 > displays without a read-back guarantee.
 canonical-render value: Value => String.
 source-readable-as-one? source: String => Bool.
@@ -76,8 +76,7 @@ all value: Value,
     value-type value = char-type or
     value-type value = symbol-type or
     value-type value = word-type or
-    value-type value = task-type or
-    value-type value = module-type |
+    value-type value = task-type |
   ~display-contains-elision? value.
 
 > A displayed list contains elision exactly when it exceeds 256 elements, or

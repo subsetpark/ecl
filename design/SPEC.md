@@ -271,23 +271,21 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 **port-type** ⇒ `ValueType`.
 
-**module-type** ⇒ `ValueType`.
-
 ---
 
-> The value-kind universe is closed: every value has one of these ten kinds.
+> The value-kind universe is closed: every value has one of these nine kinds.
 
-∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **module-type**.
+∀ *value*: `Value` · **value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **list-type** ∨ **value-type** *value* = **dict-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type**.
 
 > The ten kind names are distinct, so the total `value-type` rule assigns exactly one kind to every value.
 
-**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **port-type** ∧ **int-type** ≠ **module-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **port-type** ∧ **float-type** ≠ **module-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **port-type** ∧ **char-type** ≠ **module-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **port-type** ∧ **symbol-type** ≠ **module-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **port-type** ∧ **word-type** ≠ **module-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **port-type** ∧ **list-type** ≠ **module-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **port-type** ∧ **dict-type** ≠ **module-type** ∧ **task-type** ≠ **port-type** ∧ **task-type** ≠ **module-type** ∧ **port-type** ≠ **module-type**.
+**int-type** ≠ **float-type** ∧ **int-type** ≠ **char-type** ∧ **int-type** ≠ **symbol-type** ∧ **int-type** ≠ **word-type** ∧ **int-type** ≠ **list-type** ∧ **int-type** ≠ **dict-type** ∧ **int-type** ≠ **task-type** ∧ **int-type** ≠ **port-type** ∧ **float-type** ≠ **char-type** ∧ **float-type** ≠ **symbol-type** ∧ **float-type** ≠ **word-type** ∧ **float-type** ≠ **list-type** ∧ **float-type** ≠ **dict-type** ∧ **float-type** ≠ **task-type** ∧ **float-type** ≠ **port-type** ∧ **char-type** ≠ **symbol-type** ∧ **char-type** ≠ **word-type** ∧ **char-type** ≠ **list-type** ∧ **char-type** ≠ **dict-type** ∧ **char-type** ≠ **task-type** ∧ **char-type** ≠ **port-type** ∧ **symbol-type** ≠ **word-type** ∧ **symbol-type** ≠ **list-type** ∧ **symbol-type** ≠ **dict-type** ∧ **symbol-type** ≠ **task-type** ∧ **symbol-type** ≠ **port-type** ∧ **word-type** ≠ **list-type** ∧ **word-type** ≠ **dict-type** ∧ **word-type** ≠ **task-type** ∧ **word-type** ≠ **port-type** ∧ **list-type** ≠ **dict-type** ∧ **list-type** ≠ **task-type** ∧ **list-type** ≠ **port-type** ∧ **dict-type** ≠ **task-type** ∧ **dict-type** ≠ **port-type** ∧ **task-type** ≠ **port-type**.
 
 #### Chapter 2
 
 ##### Domains
 
-> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task, port, and module values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
+> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and port values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
 
 `NumericMagnitude`.
 
@@ -389,7 +387,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 > Values match only as numbers across the two numeric kinds, or within the same non-numeric kind.
 
-∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type** ∨ **value-type** *left* = **module-type** ∧ **value-type** *right* = **module-type**.
+∀ *left*: `Value`, *right*: `Value`, **matches?** *left* *right* · **numeric-value?** *left* ∧ **numeric-value?** *right* ∨ **value-type** *left* = **char-type** ∧ **value-type** *right* = **char-type** ∨ **value-type** *left* = **symbol-type** ∧ **value-type** *right* = **symbol-type** ∨ **value-type** *left* = **word-type** ∧ **value-type** *right* = **word-type** ∨ **value-type** *left* = **list-type** ∧ **value-type** *right* = **list-type** ∨ **value-type** *left* = **dict-type** ∧ **value-type** *right* = **dict-type** ∨ **value-type** *left* = **task-type** ∧ **value-type** *right* = **task-type** ∨ **value-type** *left* = **port-type** ∧ **value-type** *right* = **port-type**.
 
 > Numeric matching is exact mathematical-value equality across int and float.
 
@@ -435,17 +433,13 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **port-type**, **value-type** *right* = **port-type** · **matches?** *left* *right* ↔ *left* = *right*.
 
-> Module values match only by image identity.
-
-∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **module-type**, **value-type** *right* = **module-type** · **matches?** *left* *right* ↔ *left* = *right*.
-
 > Scalar source kinds have readable representations.
 
 ∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type**) · **readable?** *value*.
 
-> Task, port, and module values have diagnostic displays but no readable representations.
+> Task and port values have diagnostic displays but no readable representations.
 
-∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type** ∨ **value-type** *value* = **module-type**) · ¬**readable?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **task-type** ∨ **value-type** *value* = **port-type**) · ¬**readable?** *value*.
 
 > A list is readable exactly when all its elements are readable.
 
@@ -518,7 +512,7 @@ quoted string syntax.
 
 ##### Rules
 
-> This model is normative for canonical rendering, its read-back guarantee, and display elision. It abstracts over concrete atom spellings, escapes, delimiters, whitespace, indentation, stack layout, terminal width, and the reader's treatment of source containing more or less than one value. The surrounding language specification governs those subjects.  `canonical-render` is the string produced by `str` for one value. Canonical output is always a compact single line and never contains a display-elision marker. For every recursively readable value, that string is readable as one value and the result matches the original value. Task and module values, and aggregates containing them, retain diagnostic canonical displays without a read-back guarantee.
+> This model is normative for canonical rendering, its read-back guarantee, and display elision. It abstracts over concrete atom spellings, escapes, delimiters, whitespace, indentation, stack layout, terminal width, and the reader's treatment of source containing more or less than one value. The surrounding language specification governs those subjects.  `canonical-render` is the string produced by `str` for one value. Canonical output is always a compact single line and never contains a display-elision marker. For every recursively readable value, that string is readable as one value and the result matches the original value. Task and port values, and aggregates containing them, retain diagnostic canonical displays without a read-back guarantee.
 
 **canonical-render** *value*: `Value` ⇒ `String`.
 
@@ -564,7 +558,7 @@ quoted string syntax.
 
 > Scalar and capability values contain no nested display elision.
 
-∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **task-type** ∨ **value-type** *value* = **module-type**) · ¬**display-contains-elision?** *value*.
+∀ *value*: `Value`, (**value-type** *value* = **int-type** ∨ **value-type** *value* = **float-type** ∨ **value-type** *value* = **char-type** ∨ **value-type** *value* = **symbol-type** ∨ **value-type** *value* = **word-type** ∨ **value-type** *value* = **task-type**) · ¬**display-contains-elision?** *value*.
 
 > A displayed list contains elision exactly when it exceeds 256 elements, or when an unelided child recursively contains elision.
 

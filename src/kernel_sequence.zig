@@ -670,7 +670,7 @@ fn scalarMatchesElement(
             .symbol => |symbol| symbol == candidate,
             else => false,
         },
-        .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
     };
 }
 
@@ -679,7 +679,7 @@ fn scalarCanMatchKind(needle: Value, haystack_kind: value.HeapKind) bool {
         .int, .float => haystack_kind == .leaf_u8 or haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
         .char => haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4,
         .symbol => haystack_kind == .leaf_symbol,
-        .word, .list, .dict, .task, .module, .port => false,
+        .word, .list, .dict, .task, .port => false,
     };
 }
 
@@ -1108,7 +1108,7 @@ fn razeClass(kind: value.HeapKind) RazeClass {
         .leaf_f64 => .floats,
         .leaf_char1, .leaf_char2, .leaf_char4 => .chars,
         .leaf_symbol => .symbols,
-        .generic_spine, .dict, .task, .module, .port, .reserved_mask => .boxed,
+        .generic_spine, .dict, .task, .port, .reserved_mask => .boxed,
     };
 }
 
@@ -1159,7 +1159,7 @@ const RazeDriver = struct {
     fn elementBits(kind: value.HeapKind) usize {
         return switch (kind) {
             inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |leaf| @bitSizeOf(heap.LeafElement(leaf)),
-            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
         };
     }
 
@@ -1190,7 +1190,7 @@ const RazeDriver = struct {
                     slot.* = item;
                 }
             },
-            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
         }
     }
 
@@ -1818,7 +1818,7 @@ const FlipDriver = struct {
     fn leafKind(kind: value.HeapKind) ?value.HeapKind {
         return switch (kind) {
             .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => kind,
-            .generic_spine, .dict, .task, .module, .port, .reserved_mask => null,
+            .generic_spine, .dict, .task, .port, .reserved_mask => null,
         };
     }
 
@@ -1934,7 +1934,7 @@ const FlipDriver = struct {
                     for (line, sources[0..children.len]) |*slot, source| slot.* = source[column];
                 }
             },
-            .generic_spine, .dict, .task, .module, .port, .reserved_mask => unreachable,
+            .generic_spine, .dict, .task, .port, .reserved_mask => unreachable,
         }
     }
 

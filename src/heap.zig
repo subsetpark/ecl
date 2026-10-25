@@ -10,7 +10,6 @@ pub const ListHandle = value.ListHandle;
 pub const DictHandle = value.DictHandle;
 pub const TaskHandle = value.TaskHandle;
 pub const PortHandle = value.PortHandle;
-pub const ModuleHandle = value.ModuleHandle;
 pub const HeapKind = value.HeapKind;
 /// A read capability over one list's unboxed payload.
 ///
@@ -359,43 +358,6 @@ test "leaf capabilities exhaust allocation failures" {
     );
 }
 
-/// A stand-in for the semantic module image. The heap only ever calls
-/// `releaseImage`, so the probe can prove the ownership contract without
-/// importing the module layer and creating a cycle.
-const ProbeImage = struct {
-    releases: usize = 0,
-
-    fn releaseImage(self: *ProbeImage) void {
-        self.releases += 1;
-    }
-};
-
-/// Ownership on both exits: a failed `createModule` publishes nothing and the
-/// caller still owns its image reference, while a published value releases the
-/// image exactly once when its last reference drops.
-fn moduleCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
-    var cleanup = testing.Cleanup.init(allocator);
-    defer cleanup.deinit();
-    var image: ProbeImage = .{};
-    const item = try createModule(ProbeImage, allocator, &image);
-    try std.testing.expectEqual(HeapKind.module, kind(item.heapHeader().?));
-    retainValue(item);
-    cleanup.releaseValue(item);
-    cleanup.capability().drain();
-    try std.testing.expectEqual(@as(usize, 0), image.releases);
-    cleanup.releaseValue(item);
-    cleanup.capability().drain();
-    try std.testing.expectEqual(@as(usize, 1), image.releases);
-}
-
-test "module capability exhausts allocation failures" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        moduleCapabilityFailureProbe,
-        .{},
-    );
-}
-
 /// A stand-in for one scheduler-owned external cell. The heap observes only
 /// the final reference release; it cannot reach process state or OS handles.
 const ProbePort = struct {
@@ -548,7 +510,6 @@ const InitializingList = opaque {};
 const InitializingDict = opaque {};
 const InitializingTask = opaque {};
 const InitializingPort = opaque {};
-const InitializingModule = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
 
@@ -688,15 +649,6 @@ const PortRole = union(value.PortVariant) {
 
 pub const OwningPortVariant = enum { resource, exchange };
 pub const BorrowedPortVariant = enum { factory, operation_selector, endpoint_selector, endpoint };
-
-/// A module value owns exactly one release of an opaque semantic payload.
-/// The heap never learns what a module image is: it stores the payload and
-/// the callback its factory derived, and the callback is what enters bounded
-/// retirement in the layer that owns the image's graph.
-pub const ModuleStorage = struct {
-    payload: *anyopaque,
-    release: *const fn (*anyopaque) void,
-};
 
 const Object = struct {
     header: HeaderImpl,
@@ -867,10 +819,6 @@ pub fn headerFromPort(handle: *PortHandle) *Header {
     return @ptrCast(@alignCast(handle));
 }
 
-pub fn headerFromModule(handle: *ModuleHandle) *Header {
-    return @ptrCast(@alignCast(handle));
-}
-
 fn mutableHeader(handle: anytype) *Header {
     return @ptrCast(@alignCast(@constCast(handle)));
 }
@@ -879,7 +827,7 @@ pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .port, .module, .reserved_mask => false,
+        .dict, .task, .port, .reserved_mask => false,
     });
     return result;
 }
@@ -913,10 +861,6 @@ fn publishTask(header: *InitializingTask) *TaskHandle {
 }
 
 fn publishPort(header: *InitializingPort) *PortHandle {
-    return @ptrCast(@alignCast(header));
-}
-
-fn publishModule(header: *InitializingModule) *ModuleHandle {
     return @ptrCast(@alignCast(header));
 }
 
@@ -967,7 +911,7 @@ fn allocObject(
         .leaf_symbol,
         => |list_kind| try allocListObject(LeafElement(list_kind), allocator, capacity_value),
         .dict, .reserved_mask => try allocator.create(Object),
-        .task, .port, .module => unreachable,
+        .task, .port => unreachable,
     };
     obj.* = .{
         .header = HeaderImpl.init(kind_value, len_value),
@@ -993,7 +937,7 @@ fn allocListHeader(
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .port, .module, .reserved_mask => false,
+        .dict, .task, .port, .reserved_mask => false,
     });
     const header = try allocObject(allocator, kind_value, len_value, capacity_value);
     object(header).provenance_namespace = provenance_namespace;
@@ -1013,7 +957,7 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4, .leaf_symbol => u32,
-        .dict, .task, .port, .module, .reserved_mask => @compileError("a list representation is required"),
+        .dict, .task, .port, .reserved_mask => @compileError("a list representation is required"),
     };
 }
 
@@ -1031,7 +975,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
         .leaf_char4, .leaf_symbol => @sizeOf(u32),
-        .dict, .task, .port, .module, .reserved_mask => 0,
+        .dict, .task, .port, .reserved_mask => 0,
     };
 }
 
@@ -1144,7 +1088,7 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_symbol => .{ .symbol = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
-            .dict, .task, .port, .module, .reserved_mask => unreachable,
+            .dict, .task, .port, .reserved_mask => unreachable,
         };
     }
 
@@ -1450,56 +1394,6 @@ pub fn portPayload(comptime Payload: type, comptime variant: value.PortVariant, 
     return @ptrCast(@alignCast(storage.payload));
 }
 
-fn allocModuleHeader(
-    allocator: std.mem.Allocator,
-    payload: *anyopaque,
-    release: *const fn (*anyopaque) void,
-) error{OutOfMemory}!*InitializingModule {
-    const obj = try allocator.create(Object);
-    errdefer allocator.destroy(obj);
-    const storage = try allocator.create(ModuleStorage);
-    storage.* = .{ .payload = payload, .release = release };
-    obj.* = .{
-        .header = HeaderImpl.init(.module, 0),
-        .capacity = 0,
-        .payload = @ptrCast(storage),
-        .provenance_namespace = .none,
-        .next_destroy = null,
-        .destroy_index = 0,
-    };
-    return @ptrCast(@alignCast(&obj.header));
-}
-
-fn ModuleReleaseAdapter(comptime Payload: type) type {
-    return struct {
-        fn release(raw: *anyopaque) void {
-            const payload: *Payload = @ptrCast(@alignCast(raw));
-            Payload.releaseImage(payload);
-        }
-    };
-}
-
-/// Wraps one already-owned module image in a value. On success the value owns
-/// the reference the caller handed over; on failure the caller still owns it,
-/// because nothing was published. Final release calls `releaseImage`, which is
-/// where the semantic layer enters its own bounded retirement.
-pub fn createModule(
-    comptime Payload: type,
-    allocator: std.mem.Allocator,
-    payload: *Payload,
-) error{OutOfMemory}!Value {
-    const initializing = try allocModuleHeader(
-        allocator,
-        @ptrCast(payload),
-        ModuleReleaseAdapter(Payload).release,
-    );
-    return .{ .module = publishModule(initializing) };
-}
-
-pub fn moduleStorage(header: *const ModuleHandle) *const ModuleStorage {
-    return @ptrCast(@alignCast(objectConst(headerFromModule(@constCast(header))).payload.?));
-}
-
 /// A list is one allocation: its payload follows its `Object` directly.
 /// Every list element fits the object's alignment, so the offset is the same
 /// for every kind, and capacity is fixed at allocation, so the block's length
@@ -1603,7 +1497,6 @@ pub fn retainValue(item: Value) void {
         .dict => |header| incRef(header),
         .task => |header| incRef(header),
         .port => |header| incRef(header),
-        .module => |header| incRef(header),
     }
 }
 
@@ -2410,16 +2303,6 @@ pub const ReleaseDomain = struct {
                 storage.release(storage.payload);
                 return true;
             },
-            // The image's own graph is user-sized, so the callback only drops
-            // one reference; whatever that makes unreachable retires through
-            // this same domain in later bounded steps.
-            .module => {
-                if (obj.destroy_index != 0) return false;
-                obj.destroy_index = 1;
-                const storage: *ModuleStorage = @constCast(moduleStorage(@ptrCast(@alignCast(header))));
-                storage.release(storage.payload);
-                return true;
-            },
             .leaf_u8,
             .leaf_i64,
             .leaf_f64,
@@ -3116,7 +2999,7 @@ pub const OwnedValueChain = union(enum) {
 fn ownsNoReferences(header: *const Header) bool {
     return switch (kind(header)) {
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => objectConst(header).provenance_namespace == .none,
-        .generic_spine, .dict, .task, .port, .module, .reserved_mask => false,
+        .generic_spine, .dict, .task, .port, .reserved_mask => false,
     };
 }
 
@@ -3133,7 +3016,7 @@ fn destroyObject(allocator: std.mem.Allocator, header: *Header) void {
         .leaf_char4,
         .leaf_symbol,
         => |list_kind| freeListObject(LeafElement(list_kind), allocator, object(header)),
-        .dict, .task, .port, .module, .reserved_mask => {
+        .dict, .task, .port, .reserved_mask => {
             freeStorage(allocator, header);
             allocator.destroy(object(header));
         },
@@ -3158,10 +3041,6 @@ fn freeStorage(allocator: std.mem.Allocator, header: *Header) void {
         },
         .port => {
             const storage: *PortStorage = @constCast(portStorage(@ptrCast(@alignCast(header))));
-            allocator.destroy(storage);
-        },
-        .module => {
-            const storage: *ModuleStorage = @constCast(moduleStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
         },
         .reserved_mask => {},

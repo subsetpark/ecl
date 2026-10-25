@@ -162,7 +162,6 @@ const cases = [_]Case{
     .{ .name = "isolated child", .source = "3 [1 2] [] (+ +) @each" },
     .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
     .{ .name = "seeded module", .source = "[7] ('base set) 'm @defm m.base" },
-    .{ .name = "module marker is unreadable", .source = "\"<module>\" parse" },
     .{ .name = "old spelling", .source = "(1) attempt" },
     .{ .name = "row annotation", .source = "(a -- ...) (dup) 'f def 'f see" },
     .{ .name = "row after mixing", .source = "(a -- ... b) (dup) 'f def" },
@@ -1200,13 +1199,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\7
         \\stderr:
         \\<empty>
-        \\=== module marker is unreadable ===
-        \\source: "<module>" parse
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{'kind 'parse 'msg "module display markers are runtime-only and cannot be parsed" 'word 'parse 'trace ['parse] 'data {'source "<parse>" 'line 1 'col 1}}
         \\=== old spelling ===
         \\source: (1) attempt
         \\exit: 1
