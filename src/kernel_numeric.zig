@@ -1393,7 +1393,8 @@ fn binaryLoopPolicy(
         .wrap_mul => if (support.targetHasNativePackedI64Multiply()) .vector_infallible else .scalar_infallible,
         .add, .sub => .vector_checked,
         .mul => if (support.targetHasNativePackedI64Multiply()) .vector_checked else .scalar_checked,
-        .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
+        .and_word, .or_word => .vector_checked,
+        .div, .int_div, .mod, .pow, .atan2, .bsl, .bsr => .scalar_checked,
     };
     if (left == .real and right == .real) return switch (operation) {
         // No operand is NaN, so comparison and selection cannot fail.
@@ -1413,6 +1414,7 @@ fn binaryLoopPolicy(
 
 fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPolicy {
     if (operand == .integer and operation == .bnot) return .vector_infallible;
+    if (operand != .real and operation == .not_word) return .vector_checked;
     // No operand is NaN, so a float's negation or magnitude cannot fault.
     if (operand == .real and (operation == .neg or operation == .abs)) return .vector_infallible;
     return .scalar_checked;
@@ -1808,6 +1810,15 @@ fn binaryKernel(
             a: @Vector(lanes, left_class.Element()),
             b: @Vector(lanes, right_class.Element()),
         ) Vectors.Masked {
+            if (left_class == .integer and right_class == .integer and
+                (operation == .and_word or operation == .or_word))
+            {
+                // Both operands must be 0 or 1, exactly `boolean`'s test.
+                const ones: @Vector(lanes, i64) = @splat(1);
+                const zeros: @Vector(lanes, i64) = @splat(0);
+                const values = if (operation == .and_word) a & b else a | b;
+                return .{ .values = values, .faults = Vectors.mask((a | b) & ~ones != zeros) };
+            }
             if (left_class == .integer and right_class == .integer) {
                 const result = switch (operation) {
                     .add => @addWithOverflow(a, b),
@@ -2002,31 +2013,51 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
             };
         }
     }.run;
+    const checked: Vectors.Checked = .{
+        .vector = struct {
+            fn run(a: @Vector(lanes, operand_class.Element())) Vectors.Masked {
+                switch (operation) {
+                    .not_word => {
+                        // The operand must be 0 or 1, exactly `boolean`'s test.
+                        const ones: @Vector(lanes, operand_class.Element()) = @splat(1);
+                        const zeros: @Vector(lanes, operand_class.Element()) = @splat(0);
+                        return .{ .values = @intCast(a ^ ones), .faults = Vectors.mask(a & ~ones != zeros) };
+                    },
+                    else => unreachable,
+                }
+            }
+        }.run,
+        .scalar = checked_body,
+    };
     return struct {
-        /// Computes `range` into `output`. A faulted piece stored nothing, so
-        /// the returned range's operands are intact for the replay.
-        fn runPieces(operand: []const operand_class.Element(), output: *TypedOutput, range: flat.Chunk) ?flat.Chunk {
-            return runRange(operand, OutputTarget(out){ .output = output }, range);
+        /// Computes `range` into `output`. Returns the range a scalar replay
+        /// must rescan; see `binaryKernel`'s.
+        fn runPieces(operand: []const operand_class.Element(), output: *TypedOutput, placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
+            return runRange(operand, OutputTarget(out){ .output = output }, placement, range);
         }
 
         /// One block of a scalar program; see `binaryKernel`'s.
         fn runBlock(operand: []const operand_class.Element(), dest: []out.Element()) bool {
-            return runRange(operand, SliceTarget(out){ .items = dest }, .{ .start = 0, .end = dest.len }) != null;
+            return runRange(operand, SliceTarget(out){ .items = dest }, .fresh, .{ .start = 0, .end = dest.len }) != null;
         }
 
         /// The one range loop; see `binaryKernel`'s.
-        inline fn runRange(operand: []const operand_class.Element(), target: anytype, range: flat.Chunk) ?flat.Chunk {
+        inline fn runRange(operand: []const operand_class.Element(), target: anytype, placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
             var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = nextPiece(comptime policy.isVector(), range, offset);
                 switch (comptime policy) {
                     .vector_infallible => Vectors.unary(vector_body, infallible_body, operand, piece, target.vector(piece)),
+                    .vector_checked => switch (Vectors.checkedUnary(checked, placement, operand, piece, target.vector(piece))) {
+                        .clean => {},
+                        .faulted => |from| return .{ .start = from, .end = piece.end },
+                    },
                     .scalar_checked => {
                         if (Checked.unary(checked_body, operand, piece, &block) == .faulted) return piece;
                         target.store(piece.start, block.written());
                     },
-                    .vector_checked, .scalar_infallible => unreachable,
+                    .scalar_infallible => unreachable,
                 }
                 offset += piece.len();
             }
@@ -2053,7 +2084,8 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
 
             pub fn chunk(params: NumericParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
                 const elements = heap.leafElements(operand_class.kind(), operands[0].list);
-                if (runPieces(elements, &output.typed, range)) |faulted|
+                const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
+                if (runPieces(elements, &output.typed, placement, range)) |faulted|
                     return replayDirect(context, params.report, elements, faulted);
             }
 

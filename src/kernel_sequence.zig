@@ -370,11 +370,12 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
     defer counts.deinit();
     if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
     const count: usize = @intCast(counts.borrow().list.length());
-    // A typed count list is read as a slice and validated a block at a time;
+    // An integer leaf is read as a slice and validated a block at a time;
     // a boxed one keeps the per-element read.
-    if (counts.borrow().list.kind() == .leaf_i64)
-        return support.Kernel(WhereKernel(true)).run(evaluator, .{&counts}, {}, count);
-    try support.Kernel(WhereKernel(false)).run(evaluator, .{&counts}, {}, count);
+    switch (counts.borrow().list.kind()) {
+        inline .leaf_u8, .leaf_i64 => |kind| return support.Kernel(WhereKernel(kind)).run(evaluator, .{&counts}, {}, count),
+        else => return support.Kernel(WhereKernel(null)).run(evaluator, .{&counts}, {}, count),
+    }
 }
 
 /// Counts, then fills: two phases. The result is an exact-size index vector
@@ -386,8 +387,11 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
 /// to report the first failing position. The fill spends one unit per count
 /// read, or one per element written when a count is above one; its phase is
 /// sized by the bound on that, `count + total`, and is done once the result is
-/// full, so counts after the last nonzero one are not read.
-fn WhereKernel(comptime typed: bool) type {
+/// full, so counts after the last nonzero one are not read. Counts that are
+/// all zero or one, a mask, fill without testing for repetition.
+fn WhereKernel(comptime kind: ?value.HeapKind) type {
+    const typed = kind != null;
+    const Count = if (kind) |leaf| heap.LeafElement(leaf) else void;
     return struct {
         pub const arity = 1;
         pub const Params = void;
@@ -400,6 +404,8 @@ fn WhereKernel(comptime typed: bool) type {
             destination: usize = 0,
             /// What remains of the run at `index` when a range ended inside it.
             repetition: usize = 0,
+            /// No count read so far is above one.
+            mask: bool = true,
 
             pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
                 if (self.writer) |*writer| writer.retire(releases);
@@ -413,13 +419,13 @@ fn WhereKernel(comptime typed: bool) type {
         pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
             switch (output.phase) {
                 .count => if (typed)
-                    try countTyped(output, context, heap.leafElements(.leaf_i64, operands[0].list)[range.start..range.end])
+                    try countTyped(output, context, heap.leafElements(kind.?, operands[0].list)[range.start..range.end])
                 else for (range.start..range.end) |index|
                     try countOne(output, context, list.atUnchecked(operands[0], index)),
-                .fill => if (typed)
-                    fill(output, range.len(), TypedCounts{ .items = heap.leafElements(.leaf_i64, operands[0].list) })
-                else
-                    fill(output, range.len(), BoxedCounts{ .items = operands[0] }),
+                .fill => if (typed) {
+                    const items = heap.leafElements(kind.?, operands[0].list);
+                    if (output.mask) fillMask(output, range.len(), items) else fill(output, range.len(), TypedCounts{ .items = items });
+                } else fill(output, range.len(), BoxedCounts{ .items = operands[0] }),
             }
         }
 
@@ -446,7 +452,7 @@ fn WhereKernel(comptime typed: bool) type {
 
         /// Counts already validated by the counting phase, read without boxing.
         const TypedCounts = struct {
-            items: []const i64,
+            items: []const Count,
             fn at(self: TypedCounts, index: usize) usize {
                 return @intCast(self.items[index]);
             }
@@ -458,20 +464,41 @@ fn WhereKernel(comptime typed: bool) type {
             }
         };
 
-        /// The sum of one block of typed counts, or null when the block holds
-        /// a count that is negative or too large to sum without a checked add.
-        /// Every count below 2^55 keeps a block's sum below 2^63, so one `or`
-        /// decides both.
-        fn blockSum(counts: []const i64) ?usize {
+        const lanes = std.simd.suggestVectorLength(i64) orelse 1;
+        const unroll = 4;
+        const Lanes = @Vector(lanes, i64);
+
+        /// The sum of one block of typed counts and the `or` of its counts, or
+        /// null when the block holds a count that is negative or too large to
+        /// sum without a checked add. Every count below 2^55 keeps a block's
+        /// sum below 2^63, so the `or` decides both.
+        fn blockSum(counts: []const Count) ?struct { sum: usize, bits: i64 } {
             std.debug.assert(counts.len <= kernel_flat.block_size);
-            var bits: i64 = 0;
-            var sum: i64 = 0;
-            for (counts) |item| {
-                bits |= item;
-                sum +%= item;
+            // Independent accumulators, `unroll` vectors per iteration, so
+            // loop control is paid once per group.
+            var bits: [unroll]Lanes = @splat(@splat(0));
+            var sum: [unroll]Lanes = @splat(@splat(0));
+            const group_end = counts.len / (unroll * lanes) * (unroll * lanes);
+            var index: usize = 0;
+            while (index != group_end) : (index += unroll * lanes) {
+                inline for (0..unroll) |member| {
+                    const items: Lanes = @intCast(@as(@Vector(lanes, Count), counts[index + member * lanes ..][0..lanes].*));
+                    bits[member] |= items;
+                    sum[member] +%= items;
+                }
             }
-            if (bits >> 55 != 0) return null;
-            return std.math.cast(usize, sum);
+            inline for (1..unroll) |member| {
+                bits[0] |= bits[member];
+                sum[0] +%= sum[member];
+            }
+            var tail_bits: i64 = @reduce(.Or, bits[0]);
+            var tail_sum: i64 = @reduce(.Add, sum[0]);
+            for (counts[group_end..]) |item| {
+                tail_bits |= item;
+                tail_sum +%= item;
+            }
+            if (tail_bits >> 55 != 0) return null;
+            return .{ .sum = @intCast(tail_sum), .bits = tail_bits };
         }
 
         /// Validates and adds the count at `index`: the exact per-element
@@ -481,26 +508,59 @@ fn WhereKernel(comptime typed: bool) type {
             if (item.int < 0) return context.failAt(.domain, "where counts must be non-negative", output.index);
             const repetitions = std.math.cast(usize, item.int) orelse
                 return context.failAt(.overflow, "where count exceeds addressable size", output.index);
+            if (repetitions > 1) output.mask = false;
             output.total = std.math.add(usize, output.total, repetitions) catch
                 return context.fail(.overflow, "where result is too large");
             output.index += 1;
         }
 
         /// Counts one range of a typed list, a block at a time.
-        fn countTyped(output: *Output, context: support.Context, counts: []const i64) MachineError!void {
+        fn countTyped(output: *Output, context: support.Context, counts: []const Count) MachineError!void {
             var offset: usize = 0;
             while (offset != counts.len) {
                 const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
                 offset += block.len;
-                if (blockSum(block)) |sum| {
-                    if (std.math.add(usize, output.total, sum)) |total| {
+                if (blockSum(block)) |summed| {
+                    if (std.math.add(usize, output.total, summed.sum)) |total| {
                         output.total = total;
                         output.index += block.len;
+                        if (summed.bits >> 1 != 0) output.mask = false;
                         continue;
                     } else |_| {}
                 }
                 for (block) |item| try countOne(output, context, .{ .int = item });
             }
+        }
+
+        /// Spends up to `limit` units of a mask's fill, one per count read.
+        /// Every count read stores its index and advances by its count; a
+        /// stretch is no longer than the room left, so no store passes the
+        /// result's end.
+        fn fillMask(output: *Output, limit: usize, counts: []const Count) void {
+            const out = output.writer.?.unpublishedRange(
+                output.destination,
+                output.total - output.destination,
+            );
+            const end = @min(counts.len, output.index + limit);
+            var written: usize = 0;
+            var index = output.index;
+            while (index != end and written != out.len) {
+                const stretch = @min(end - index, out.len - written);
+                const stretch_end = index + stretch;
+                const group_end = index + stretch / unroll * unroll;
+                while (index != group_end) : (index += unroll) {
+                    inline for (0..unroll) |member| {
+                        out[written] = @intCast(index + member);
+                        written += @intCast(counts[index + member]);
+                    }
+                }
+                while (index != stretch_end) : (index += 1) {
+                    out[written] = @intCast(index);
+                    written += @intCast(counts[index]);
+                }
+            }
+            output.index = index;
+            output.destination += written;
         }
 
         /// Spends up to `limit` units of the fill: one per count read, or one

@@ -382,8 +382,12 @@ pub fn VectorFamily(
 
         /// The two bodies of a checked operation. `vector` masks exactly the
         /// lanes `scalar` rejects, because a block declared faulted is replayed
-        /// through the scalar authority, which must then find its fault.
-        pub const Checked = struct {
+        /// through the scalar authority, which must then find its fault. A
+        /// unary family's bodies take the one operand.
+        pub const Checked = if (Right == void) struct {
+            vector: fn (LeftVector) Masked,
+            scalar: fn (Left) Fault!Out,
+        } else struct {
             vector: fn (LeftVector, RightVector) Masked,
             scalar: fn (Left, Right) Fault!Out,
         };
@@ -421,6 +425,18 @@ pub fn VectorFamily(
             }
         };
 
+        const LeafOnly = struct {
+            operand: []const Left,
+
+            fn vectors(self: LeafOnly, index: usize) struct { LeftVector } {
+                return .{self.operand[index..][0..lanes].*};
+            }
+
+            fn scalars(self: LeafOnly, index: usize) struct { Left } {
+                return .{self.operand[index]};
+            }
+        };
+
         const LeafScalar = struct {
             left: []const Left,
             right: Right,
@@ -450,8 +466,8 @@ pub fn VectorFamily(
         };
 
         inline fn infallibleRange(
-            comptime vector_body: fn (LeftVector, RightVector) OutVector,
-            comptime scalar_body: fn (Left, Right) Out,
+            comptime vector_body: anytype,
+            comptime scalar_body: anytype,
             source: anytype,
             range: Chunk,
             dest: []Out,
@@ -463,14 +479,12 @@ pub fn VectorFamily(
                 start: usize,
                 dest: []Out,
                 inline fn visit(self: @This(), offset: usize) void {
-                    const a, const b = self.source.vectors(self.start + offset);
-                    storeVector(self.dest, offset, vector_body(a, b));
+                    storeVector(self.dest, offset, @call(.auto, vector_body, self.source.vectors(self.start + offset)));
                 }
             };
             forEachVector(range.len() / lanes, Step{ .source = source, .start = range.start, .dest = dest });
             for (vector_end..range.end) |index| {
-                const a, const b = source.scalars(index);
-                dest[index - range.start] = scalar_body(a, b);
+                dest[index - range.start] = @call(.auto, scalar_body, source.scalars(index));
             }
         }
 
@@ -499,16 +513,14 @@ pub fn VectorFamily(
                 dest: []Out,
                 suspect: *LaneMask,
                 inline fn visit(self: @This(), offset: usize) void {
-                    const a, const b = self.source.vectors(self.start + offset);
-                    const result = body.vector(a, b);
+                    const result = @call(.auto, body.vector, self.source.vectors(self.start + offset));
                     self.suspect.* |= result.faults;
                     storeVector(self.dest, offset, result.values);
                 }
             };
             forEachVector(vectors, Step{ .source = source, .start = range.start, .dest = dest, .suspect = &suspect });
             for (vector_end..range.end) |index| {
-                const a, const b = source.scalars(index);
-                dest[index - range.start] = body.scalar(a, b) catch return .{ .faulted = range.start };
+                dest[index - range.start] = @call(.auto, body.scalar, source.scalars(index)) catch return .{ .faulted = range.start };
             }
             return if (@reduce(.Or, suspect) == 0) .clean else .{ .faulted = range.start };
         }
@@ -529,8 +541,7 @@ pub fn VectorFamily(
                 var faults: [over_operands_group]LaneMask = undefined;
                 var suspect: LaneMask = @splat(0);
                 inline for (0..over_operands_group) |member| {
-                    const a, const b = source.vectors(range.start + base + member * lanes);
-                    const result = body.vector(a, b);
+                    const result = @call(.auto, body.vector, source.vectors(range.start + base + member * lanes));
                     values[member] = result.values;
                     faults[member] = result.faults;
                     suspect |= result.faults;
@@ -547,14 +558,12 @@ pub fn VectorFamily(
             }
             for (groups * over_operands_group..vectors) |vector| {
                 const offset = vector * lanes;
-                const a, const b = source.vectors(range.start + offset);
-                const result = body.vector(a, b);
+                const result = @call(.auto, body.vector, source.vectors(range.start + offset));
                 if (@reduce(.Or, result.faults) != 0) return .{ .faulted = range.start + offset };
                 storeVector(dest, offset, result.values);
             }
             for (vector_end..range.end) |index| {
-                const a, const b = source.scalars(index);
-                dest[index - range.start] = body.scalar(a, b) catch return .{ .faulted = index };
+                dest[index - range.start] = @call(.auto, body.scalar, source.scalars(index)) catch return .{ .faulted = index };
             }
             return .clean;
         }
@@ -649,22 +658,22 @@ pub fn VectorFamily(
             range: Chunk,
             dest: []Out,
         ) void {
-            std.debug.assert(dest.len == range.len());
             std.debug.assert(range.end <= operand.len);
-            const vector_end = range.start + range.len() / lanes * lanes;
-            const Step = struct {
-                operand: []const Left,
-                start: usize,
-                dest: []Out,
-                inline fn visit(self: @This(), offset: usize) void {
-                    const a: LeftVector = self.operand[self.start + offset ..][0..lanes].*;
-                    storeVector(self.dest, offset, vector_body(a));
-                }
+            infallibleRange(vector_body, scalar_body, LeafOnly{ .operand = operand }, range, dest);
+        }
+
+        pub inline fn checkedUnary(
+            comptime body: Checked,
+            placement: Placement,
+            operand: []const Left,
+            range: Chunk,
+            dest: []Out,
+        ) CheckedOutcome {
+            std.debug.assert(range.end <= operand.len);
+            const source: LeafOnly = .{ .operand = operand };
+            return switch (placement) {
+                inline else => |selected| checkedRange(selected, body, source, range, dest),
             };
-            forEachVector(range.len() / lanes, Step{ .operand = operand, .start = range.start, .dest = dest });
-            for (vector_end..range.end) |index| {
-                dest[index - range.start] = scalar_body(operand[index]);
-            }
         }
     };
 }
