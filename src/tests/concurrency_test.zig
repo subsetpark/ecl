@@ -18,6 +18,16 @@ fn display(runtime: *session.Session) !session.RenderedText {
     return runtime.stackDisplay();
 }
 
+/// Runs a unit that is expected to fail and releases its error, so a test can
+/// observe what the failure left behind.
+fn runErr(runtime: *session.Session, source: []const u8) !void {
+    switch (try runtime.runUnit("concurrency.ecl", source)) {
+        .ok => return error.ExpectedLanguageError,
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| runtime.release(failure),
+    }
+}
+
 test "concurrency: cold sessions start no threads and @spawn starts the fixed pool" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
@@ -523,4 +533,49 @@ test "concurrency: exit is root-owned outside @attempt" {
     defer runtime.deinit();
     try runOk(&runtime, "[] (7 exit) @attempt [] (7 exit) @spawn task.await");
     try std.testing.expectEqual(@as(?u8, null), runtime.requestedExit());
+}
+
+test "concurrency: a task spawned inside @attempt belongs to the enclosing scope" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    // `@attempt` is a stack transaction, not a scope: it returns with the task
+    // alive, and the task then completes normally. A cancelled task could never
+    // yield this value, so the assertion is independent of timing.
+    try runOk(&runtime, "[] ([] (20 clock.sleep 7) @spawn) @attempt 'ok at first task.await");
+    var actual = try display(&runtime);
+    defer actual.deinit();
+    try std.testing.expectEqualStrings("{'ok [7]}", actual.bytes());
+}
+
+test "concurrency: a failing @attempt cancels no spawned task" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    try runOk(&runtime, "[] ([] ((1) () while) @spawn pop 'domain error.new fail) @attempt pop task.pending len");
+    var actual = try display(&runtime);
+    try std.testing.expectEqualStrings("1", actual.bytes());
+    actual.deinit();
+    try runOk(&runtime, "pop task.pending first task.cancel task.await pop");
+    actual = try display(&runtime);
+    defer actual.deinit();
+    try std.testing.expectEqualStrings("", actual.bytes());
+}
+
+test "concurrency: a failing root unit cancels no spawned task" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    try runErr(&runtime, "[] ((1) () while) @spawn pop 'domain error.new fail");
+    try runOk(&runtime, "task.pending len");
+    var actual = try display(&runtime);
+    try std.testing.expectEqualStrings("1", actual.bytes());
+    actual.deinit();
+    try runOk(&runtime, "pop task.pending first task.cancel task.await pop");
+    actual = try display(&runtime);
+    defer actual.deinit();
+    try std.testing.expectEqualStrings("", actual.bytes());
 }
