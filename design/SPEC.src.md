@@ -1249,6 +1249,37 @@ left to right.
 raises `'domain`. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
 
+### Mailboxes
+
+Every task owns one mailbox, open while the task is active and closed when its
+attached unit becomes terminal; closing discards every queued message. An
+address is an opaque value that names a mailbox and nothing else.
+`task.address` derives a task's address from its handle; `task.self` yields the
+executing task's own address and raises `'domain` at the session root, which
+owns tasks but is not one and has no mailbox. Addresses match by mailbox
+identity, print as an unreadable marker, and are rejected by JSON, native
+views, and port messages exactly as task handles are.
+
+A handle reaches a task's result; an address does not. That is why a handle can
+never travel through a mailbox while an address can be sent, stored, and
+forwarded freely: a message holding a handle could close a reference cycle
+through the result it reaches. `task.send ( value address -- )` first checks
+the value for handles, raising `'type` if it finds one, then queues it. A
+mailbox holds sixteen messages; a sender to a full mailbox parks until the
+receiver takes one. Sending to a closed mailbox raises `'io` with
+`'reason 'closed`. Messages from one sender arrive in the order sent; order
+across senders is unspecified.
+
+`task.receive ( -- value )` takes the oldest queued message, parking until one
+arrives. `task.receive-for ( ms -- result )` bounds the wait and returns
+`{'ok value}` or `{'err {'kind 'timeout}}`, with the same `'overflow` rule as
+`task.await-for`. Both raise `'domain` at the root. Cancellation of a parked
+sender or receiver is observed as for any wait.
+
+There is no request/reply primitive. A caller that wants an answer spawns a
+helper task, sends the helper's address along with the request, and awaits the
+helper, whose result is the reply; `task.await-for` bounds the exchange.
+
 ### External ports and processes
 
 An external port created by a unit belongs to that unit's task scope. The

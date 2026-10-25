@@ -1309,6 +1309,18 @@ reachable after its execution and parent membership are stable. A cancelled
 ready task is prevented from dispatching, and cancellation itself performs no
 allocation.
 
+Every `TaskCell` owns a `Mailbox`: a separately counted object created with
+the cell and closed in the terminal transition, before the unit's stack is
+released. The mailbox never points back at the cell or its result, and an
+`'address` value holds a mailbox reference and nothing else, so addresses
+travel through mailboxes without closing a cycle. Handles are refused on
+`task.send` by a bounded walk under the sender's work budget that enters only
+generic spines and dictionaries and accepts a flat specialized list in one
+step. Mailbox waits are external-readiness cells on the wait-set arbitration
+below, keyed for a message or for space, with their own resume family so a
+deadline resumes the receiving driver and becomes a value rather than a raised
+error.
+
 Waits use explicit wait sets for one task, any task, a join, or a deadline.
 Setup publishes the wait only after all registrations are ready. Completion,
 cancellation, and timeout contend through one arbitration state, so exactly one

@@ -2144,15 +2144,19 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Contexts
 
-**`Concurrency`**
+**`Concurrency`**, **`Mailboxes`**
 
 #### Chapter 1
 
 ##### Domains
 
-> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, and the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at exactly two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Other units, such as `@attempt`, combinator applications, `load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently names one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
+> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal, and the lifecycle of the messages a task's mailbox holds.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at exactly two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Other units, such as `@attempt`, combinator applications, `load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently names one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
 
 `Task`.
+
+> Every task owns one mailbox, open exactly while its attached unit is active. A message is created by `task.send` addressed to one task and is queued until that task receives it or its mailbox closes. Message payloads, capacity and parking, per-sender order, and the handle check on send are governed by the surrounding specification; the model carries only existence, target, and the queued/received/discarded lifecycle.
+
+`Message`.
 
 ##### Rules
 
@@ -2165,6 +2169,14 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 {**`Concurrency`**} **task-owner** *task*: `Task` ⇒ `Task`.
 
 **task-capability** *task*: `Task` ⇒ `Value`.
+
+{**`Mailboxes`**} **message-created?** *message*: `Message` ⇒ `Bool`.
+
+{**`Mailboxes`**} **message-target** *message*: `Message` ⇒ `Task`.
+
+{**`Mailboxes`**} **received?** *message*: `Message` ⇒ `Bool`.
+
+{**`Mailboxes`**} **discarded?** *message*: `Message` ⇒ `Bool`.
 
 ---
 
@@ -2182,9 +2194,17 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ∀ *left*: `Task`, *right*: `Task`, **task-created?** *left*, **task-created?** *right*, **task-capability** *left* = **task-capability** *right* · *left* = *right*.
 
-> Initially no task identity has been created.
+> A created message addresses a created task and is in at most one terminal state. A message is queued when it is created and neither received nor discarded; a queued message's target is still active, because closing a mailbox discards everything it holds.
+
+∀ *message*: `Message`, **message-created?** *message* · **task-created?** (**message-target** *message*) ∧ ¬(**received?** *message* ∧ **discarded?** *message*).
+
+∀ *message*: `Message`, **message-created?** *message*, ¬**received?** *message*, ¬**discarded?** *message* · **unit-active?** (**task-unit** (**message-target** *message*)).
+
+> Initially no task identity or message has been created.
 
 initially ∀ *task*: `Task` · ¬**task-created?** *task*.
+
+initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 #### Chapter 2
 
@@ -2244,9 +2264,41 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ##### Action
 
+> `Send` is the formal `task.send`: it creates one message addressed to an active task. Sending to a task whose attached unit is terminal fails and creates nothing; the surrounding specification names that failure. Parking under pressure is outside the model.
+
+**`Mailboxes`** ↝ Send *target*: `Task`, **task-created?** *target*, **unit-active?** (**task-unit** *target*).
+
+---
+
+∃ *message*: `Message`, ¬**message-created?** *message* · **message-created?**′ *message* ∧ **message-target**′ *message* = *target* ∧ ¬**received?**′ *message* ∧ ¬**discarded?**′ *message* ∧ (∀ *other*: `Message`, *other* ≠ *message* · **message-created?**′ *other* = **message-created?** *other* ∧ **message-target**′ *other* = **message-target** *other* ∧ **received?**′ *other* = **received?** *other* ∧ **discarded?**′ *other* = **discarded?** *other*).
+
+#### Chapter 6
+
+##### Action
+
+> `Receive` is the formal `task.receive`: the receiving task takes one queued message addressed to it. Which queued message is taken is governed by the surrounding specification's ordering rule.
+
+**`Mailboxes`** ↝ Receive *receiver*: `Task`, *message*: `Message`, **task-created?** *receiver*, **unit-active?** (**task-unit** *receiver*), **message-created?** *message*, **message-target** *message* = *receiver*, ¬**received?** *message*, ¬**discarded?** *message*.
+
+---
+
+**received?**′ *message*.
+
+¬**discarded?**′ *message*.
+
+**message-created?**′ *message*.
+
+**message-target**′ *message* = **message-target** *message*.
+
+∀ *other*: `Message`, *other* ≠ *message* · **message-created?**′ *other* = **message-created?** *other* ∧ **message-target**′ *other* = **message-target** *other* ∧ **received?**′ *other* = **received?** *other* ∧ **discarded?**′ *other* = **discarded?** *other*.
+
+#### Chapter 7
+
+##### Action
+
 > `Complete spawned task successfully` is the concurrency-layer use of the general unit success transition. The evaluator supplies the final stack. The attached unit can become terminal only after its own task scope has quiesced.
 
-**`Units`**, **`Concurrency`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2276,13 +2328,21 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
 
-#### Chapter 6
+> Becoming terminal closes the mailbox: every message still queued for this task is discarded, and nothing else about messages changes.
+
+∀ *message*: `Message`, **message-created?** *message*, **message-target** *message* = *task*, ¬**received?** *message* · **discarded?**′ *message*.
+
+∀ *message*: `Message`, ¬(**message-created?** *message* ∧ **message-target** *message* = *task* ∧ ¬**received?** *message*) · **discarded?**′ *message* = **discarded?** *message*.
+
+∀ *message*: `Message` · **message-created?**′ *message* = **message-created?** *message* ∧ **message-target**′ *message* = **message-target** *message* ∧ **received?**′ *message* = **received?** *message*.
+
+#### Chapter 8
 
 ##### Action
 
 > `Complete spawned task with failure` is the concurrency-layer use of the general unit failure transition. The evaluator supplies the error. The attached unit restores its entry stack and becomes terminal after its own task scope has quiesced.
 
-**`Units`**, **`Concurrency`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2312,7 +2372,15 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
 
-#### Chapter 7
+> Becoming terminal closes the mailbox: every message still queued for this task is discarded, and nothing else about messages changes.
+
+∀ *message*: `Message`, **message-created?** *message*, **message-target** *message* = *task*, ¬**received?** *message* · **discarded?**′ *message*.
+
+∀ *message*: `Message`, ¬(**message-created?** *message* ∧ **message-target** *message* = *task* ∧ ¬**received?** *message*) · **discarded?**′ *message* = **discarded?** *message*.
+
+∀ *message*: `Message` · **message-created?**′ *message* = **message-created?** *message* ∧ **message-target**′ *message* = **message-target** *message* ∧ **received?**′ *message* = **received?** *message*.
+
+#### Chapter 9
 
 ##### Action
 
@@ -2326,7 +2394,7 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
 
-#### Chapter 8
+#### Chapter 10
 
 ##### Action
 
@@ -2340,13 +2408,13 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
 
-#### Chapter 9
+#### Chapter 11
 
 ##### Action
 
 > `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent.
 
-**`Units`**, **`Concurrency`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
 
 ---
 
@@ -2376,7 +2444,15 @@ initially ∀ *task*: `Task` · ¬**task-created?** *task*.
 
 ∀ *candidate*: `Task` · **task-owner**′ *candidate* = **task-owner** *candidate*.
 
-#### Chapter 10
+> Becoming terminal closes the mailbox: every message still queued for this task is discarded, and nothing else about messages changes.
+
+∀ *message*: `Message`, **message-created?** *message*, **message-target** *message* = *task*, ¬**received?** *message* · **discarded?**′ *message*.
+
+∀ *message*: `Message`, ¬(**message-created?** *message* ∧ **message-target** *message* = *task* ∧ ¬**received?** *message*) · **discarded?**′ *message* = **discarded?** *message*.
+
+∀ *message*: `Message` · **message-created?**′ *message* = **message-created?** *message* ∧ **message-target**′ *message* = **message-target** *message* ∧ **received?**′ *message* = **received?** *message*.
+
+#### Chapter 12
 
 ##### Action
 
@@ -2429,6 +2505,37 @@ left to right.
 `exit` is available only to the root unit outside `@attempt`. Elsewhere it
 raises `'domain`. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
+
+### Mailboxes
+
+Every task owns one mailbox, open while the task is active and closed when its
+attached unit becomes terminal; closing discards every queued message. An
+address is an opaque value that names a mailbox and nothing else.
+`task.address` derives a task's address from its handle; `task.self` yields the
+executing task's own address and raises `'domain` at the session root, which
+owns tasks but is not one and has no mailbox. Addresses match by mailbox
+identity, print as an unreadable marker, and are rejected by JSON, native
+views, and port messages exactly as task handles are.
+
+A handle reaches a task's result; an address does not. That is why a handle can
+never travel through a mailbox while an address can be sent, stored, and
+forwarded freely: a message holding a handle could close a reference cycle
+through the result it reaches. `task.send ( value address -- )` first checks
+the value for handles, raising `'type` if it finds one, then queues it. A
+mailbox holds sixteen messages; a sender to a full mailbox parks until the
+receiver takes one. Sending to a closed mailbox raises `'io` with
+`'reason 'closed`. Messages from one sender arrive in the order sent; order
+across senders is unspecified.
+
+`task.receive ( -- value )` takes the oldest queued message, parking until one
+arrives. `task.receive-for ( ms -- result )` bounds the wait and returns
+`{'ok value}` or `{'err {'kind 'timeout}}`, with the same `'overflow` rule as
+`task.await-for`. Both raise `'domain` at the root. Cancellation of a parked
+sender or receiver is observed as for any wait.
+
+There is no request/reply primitive. A caller that wants an answer spawns a
+helper task, sends the helper's address along with the request, and awaits the
+helper, whose result is the reply; `task.await-for` bounds the exchange.
 
 ### External ports and processes
 

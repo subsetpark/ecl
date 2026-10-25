@@ -3,11 +3,13 @@ module ECL_CONCURRENCY.
 import ECL_UNITS.
 
 context Concurrency.
+context Mailboxes.
 
 > This model is normative for structured task identity, attachment to the
 > general unit lifecycle, task ownership, cached terminal results, observation
-> by `task.await`, deadline expiry, cancellation, and the requirement that a
-> task quiesce the tasks it owns before its attached unit becomes terminal.
+> by `task.await`, deadline expiry, cancellation, the requirement that a
+> task quiesce the tasks it owns before its attached unit becomes terminal,
+> and the lifecycle of the messages a task's mailbox holds.
 >
 > It abstracts over evaluator steps, scheduling policy, elapsed time, I/O
 > interleaving, handle storage and lexical scope, and the selection algorithms
@@ -38,6 +40,17 @@ Task.
 {Concurrency} root-owned? task: Task => Bool.
 {Concurrency} task-owner task: Task => Task.
 task-capability task: Task => Value.
+> Every task owns one mailbox, open exactly while its attached unit is active.
+> A message is created by `task.send` addressed to one task and is queued
+> until that task receives it or its mailbox closes. Message payloads,
+> capacity and parking, per-sender order, and the handle check on send are
+> governed by the surrounding specification; the model carries only
+> existence, target, and the queued/received/discarded lifecycle.
+Message.
+{Mailboxes} message-created? message: Message => Bool.
+{Mailboxes} message-target message: Message => Task.
+{Mailboxes} received? message: Message => Bool.
+{Mailboxes} discarded? message: Message => Bool.
 ---
 > Every created task has a task-valued capability and attaches to a created
 > unit. A task not owned by the root is owned by a distinct created task.
@@ -63,9 +76,26 @@ all left: Task, right: Task,
     task-capability left = task-capability right |
   left = right.
 
-> Initially no task identity has been created.
+> A created message addresses a created task and is in at most one terminal
+> state. A message is queued when it is created and neither received nor
+> discarded; a queued message's target is still active, because closing a
+> mailbox discards everything it holds.
+all message: Message, message-created? message |
+  task-created? (message-target message) and
+  ~(received? message and discarded? message).
+
+all message: Message,
+    message-created? message,
+    ~received? message,
+    ~discarded? message |
+  unit-active? (task-unit (message-target message)).
+
+> Initially no task identity or message has been created.
 initially all task: Task |
   ~task-created? task.
+
+initially all message: Message |
+  ~message-created? message.
 
 where
 
@@ -205,11 +235,49 @@ all owner: Task,
 
 where
 
+> `Send` is the formal `task.send`: it creates one message addressed to an
+> active task. Sending to a task whose
+> attached unit is terminal fails and creates nothing; the surrounding
+> specification names that failure. Parking under pressure is outside the
+> model.
+Mailboxes ~> Send @ target: Task, task-created? target, unit-active? (task-unit target).
+---
+some message: Message, ~message-created? message |
+  message-created?' message and
+  message-target' message = target and
+  ~received?' message and
+  ~discarded?' message and
+  (all other: Message, other != message |
+    message-created?' other = message-created? other and
+    message-target' other = message-target other and
+    received?' other = received? other and
+    discarded?' other = discarded? other).
+
+where
+
+> `Receive` is the formal `task.receive`: the receiving task takes one queued
+> message addressed to it. Which queued message is taken is governed by the
+> surrounding specification's ordering rule.
+Mailboxes ~> Receive @ receiver: Task, message: Message, task-created? receiver, unit-active? (task-unit receiver), message-created? message, message-target message = receiver, ~received? message, ~discarded? message.
+---
+received?' message.
+~discarded?' message.
+message-created?' message.
+message-target' message = message-target message.
+
+all other: Message, other != message |
+  message-created?' other = message-created? other and
+  message-target' other = message-target other and
+  received?' other = received? other and
+  discarded?' other = discarded? other.
+
+where
+
 > `Complete spawned task successfully` is the concurrency-layer use of the
 > general unit success transition. The evaluator supplies the final stack.
 > The attached unit can become terminal only after its own task scope has
 > quiesced.
-Units, Concurrency ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency, Mailboxes ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -240,13 +308,30 @@ all candidate: Task |
 all candidate: Task |
   task-owner' candidate = task-owner candidate.
 
+> Becoming terminal closes the mailbox: every message still queued for this
+> task is discarded, and nothing else about messages changes.
+all message: Message,
+    message-created? message,
+    message-target message = task,
+    ~received? message |
+  discarded?' message.
+
+all message: Message,
+    ~(message-created? message and message-target message = task and ~received? message) |
+  discarded?' message = discarded? message.
+
+all message: Message |
+  message-created?' message = message-created? message and
+  message-target' message = message-target message and
+  received?' message = received? message.
+
 where
 
 > `Complete spawned task with failure` is the concurrency-layer use of the
 > general unit failure transition. The evaluator supplies the error. The
 > attached unit restores its entry stack and becomes terminal after its own
 > task scope has quiesced.
-Units, Concurrency ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency, Mailboxes ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -276,6 +361,23 @@ all candidate: Task |
 
 all candidate: Task |
   task-owner' candidate = task-owner candidate.
+
+> Becoming terminal closes the mailbox: every message still queued for this
+> task is discarded, and nothing else about messages changes.
+all message: Message,
+    message-created? message,
+    message-target message = task,
+    ~received? message |
+  discarded?' message.
+
+all message: Message,
+    ~(message-created? message and message-target message = task and ~received? message) |
+  discarded?' message = discarded? message.
+
+all message: Message |
+  message-created?' message = message-created? message and
+  message-target' message = message-target message and
+  received?' message = received? message.
 
 where
 
@@ -315,7 +417,7 @@ where
 > `Cancel active task` is ordinary unit failure with a cancellation error. It
 > restores the unit's entry stack and becomes terminal only after the task's
 > own descendants are quiescent.
-Units, Concurrency ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency, Mailboxes ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -345,6 +447,23 @@ all candidate: Task |
 
 all candidate: Task |
   task-owner' candidate = task-owner candidate.
+
+> Becoming terminal closes the mailbox: every message still queued for this
+> task is discarded, and nothing else about messages changes.
+all message: Message,
+    message-created? message,
+    message-target message = task,
+    ~received? message |
+  discarded?' message.
+
+all message: Message,
+    ~(message-created? message and message-target message = task and ~received? message) |
+  discarded?' message = discarded? message.
+
+all message: Message |
+  message-created?' message = message-created? message and
+  message-target' message = message-target message and
+  received?' message = received? message.
 
 where
 

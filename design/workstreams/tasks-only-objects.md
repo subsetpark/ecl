@@ -231,14 +231,15 @@ one-shot reply mailbox is recorded in issue #150.
   mailbox identity, unreadable, rejected by JSON, native views, and port
   messages exactly as tasks are. `task.address ( task -- address )` and
   `task.self ( -- address )`; `task.self` is `'domain` outside a task.
-- `task.send ( address value -- )` parks under pressure at capacity 16, is
+- `task.send ( value address -- )` parks under pressure at capacity 16, is
   per-sender FIFO, and is `'io` with `{'reason 'closed}` on a closed
   mailbox. Any value may be sent except one containing a task handle, which
   is `'type`; the check runs under the work budget and skips flat
   specialized lists without traversal.
-- `task.receive ( -- envelope )` parks in the receiving task and returns
-  `{'value v}`; `'domain` outside a task. `task.receive-for ( ms -- result )`
-  returns `{'ok envelope}` or `{'err {'kind 'timeout}}`, with `'overflow` for
+- `task.receive ( -- value )` parks in the receiving task and returns the
+  sent value as it was sent; `'domain` outside a task.
+  `task.receive-for ( ms -- result )`
+  returns `{'ok value}` or `{'err {'kind 'timeout}}`, with `'overflow` for
   an unreachable deadline, as `await-for` does.
 - Mailbox waits park through the external-readiness arbitration ports use,
   with a resume variant that returns a deadline as a value; receiver and
@@ -378,6 +379,12 @@ replacement for `rng` ships before `rng` is deleted.
   `task.self` are `'domain` at the root; `task.send` works anywhere. A root
   mailbox is a separate, additive feature if ever wanted.
 - **Mailbox words are `task.`-qualified only.** No bare `receive`.
+- **`task.receive` returns the sent value, not an envelope.** With the
+  one-shot reply moved to #150 the runtime fills no envelope field, so a
+  `{'value v}` wrapper would be ceremony on every receive. A composed caller
+  that needs a reply address puts it in the value it sends. `task.send` takes
+  the value below the address (`( value address -- )`), matching
+  `(rand.int) rng task.send` and the `agent` words.
 - **`@defm` is the single module constructor and a primitive.** Name
   validation precedes the body; only a registry change during construction
   (an alias now occupying the name) can refuse publication after the body's
@@ -500,7 +507,7 @@ echoed final stack or the error dictionary on stderr.
 - **DoD-7 — composed request and reply round trip**
   - **Assert**: `agent.call`'s composition (a helper task as the reply
     mailbox) returns the server's answer.
-  - **Verify by** `cmd`: `(|a v| [] (task.receive 'value at) @spawn dup task.address {'value v} swap 'from put a task.send task.await 'ok at first) 'call def [] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 call`.
+  - **Verify by** `cmd`: `(|a v| [] (task.receive) @spawn dup task.address {} 'value v put 'from rolldown put a task.send task.await 'ok at first) 'ask def [] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 ask`.
   - **Expected**: `42`.
   - **Traces to**: Milestone 3 — `task.send`/`task.receive` in
     `src/task_prims.zig`; Milestone 4 ships the same composition as
@@ -525,7 +532,7 @@ echoed final stack or the error dictionary on stderr.
 
 - **DoD-10 — sending to a terminated task fails closed**
   - **Assert**: `task.send` to a terminal task is `'io` with reason `'closed`.
-  - **Verify by** `cmd`: `[] (1) @spawn dup task.await pop task.address 1 task.send`.
+  - **Verify by** `cmd`: `[] (1) @spawn dup task.await pop task.address 1 swap task.send`.
   - **Expected**: `'kind 'io` with `'data {'reason 'closed}`.
   - **Traces to**: Milestone 3 — mailbox closure on terminal transition.
 
@@ -537,14 +544,14 @@ echoed final stack or the error dictionary on stderr.
 
 - **DoD-14 — receive deadline**
   - **Assert**: `task.receive-for` on an empty mailbox returns the timeout
-    envelope after the deadline, and a delivered message as `{'ok envelope}`.
-  - **Verify by** `cmd`: `[] (50 task.receive-for) @spawn task.await`; `[] (1000 task.receive-for) @spawn dup task.address 7 task.send task.await`.
-  - **Expected**: `{'ok [{'err {'kind 'timeout}}]}`; `{'ok [{'ok {'value 7}}]}`.
+    result after the deadline, and a delivered message as `{'ok value}`.
+  - **Verify by** `cmd`: `[] (50 task.receive-for) @spawn task.await 'ok at first 'err at 'kind at`; `[] (1000 task.receive-for) @spawn dup task.address 7 swap task.send task.await`.
+  - **Expected**: `'timeout`; `{'ok [{'ok 7}]}`.
   - **Traces to**: Milestone 3 — `task.receive-for`.
 
 - **DoD-15 — per-sender order**
   - **Assert**: messages from one sender arrive in send order.
-  - **Verify by** `cmd`: `[] (3 (task.receive 'value at) times 3 pack) @spawn dup task.address dup 1 task.send dup 2 task.send 3 task.send task.await`.
+  - **Verify by** `cmd`: `[] (3 (task.receive) times 3 pack) @spawn dup task.address 1 over task.send 2 over task.send 3 swap task.send task.await`.
   - **Expected**: `{'ok [[1 2 3]]}`.
   - **Traces to**: Milestone 3 — mailbox queue.
 
