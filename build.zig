@@ -1039,7 +1039,7 @@ pub fn build(b: *std.Build) void {
             "tests.prelude_test.",
             "tests.definition_test.",
             "tests.formatter_test.",
-            "tests.module_value_test.",
+            "tests.module_registration_test.",
             "tests.unit_input_test.",
             "tests.stdlib_test.",
             "tests.archive_test.",

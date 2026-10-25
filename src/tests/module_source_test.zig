@@ -148,11 +148,11 @@ test "loader: private modules belong to their defining file independent of load 
         try writeInput(&fixture, "foo.ecl", "[] ((99) 'answer def) 'root.foo.hidden @defm\n" ++
             "[] ((baz.answer) 'answer def (call) 'apply def " ++
             "(root.foo.hidden.answer) 'own def) 'root.foo @defm\n");
-        try writeInput(&fixture, "bar.ecl", "[] ((42) 'answer def) @module 'baz register\n" ++
+        try writeInput(&fixture, "bar.ecl", "[] ((42) 'answer def) 'baz @defm\n" ++
             "[] ('baz ('answer) import " ++
             "((baz.answer)) 'quoted def " ++
             "(root.foo.answer) 'foreign def " ++
-            "([] ((9) 'answer def) @module 'baz register) 'replace def) 'root.bar @defm\n");
+            "([] ((9) 'answer def) 'baz @defm) 'replace def) 'root.bar @defm\n");
         try writeInput(&fixture, "other.ecl", "[] ((7) 'answer def) 'baz @defm\n" ++
             "[] ((baz.answer) 'answer def) 'root.other @defm\n");
 
@@ -511,8 +511,6 @@ test "scope: an undefined word names the chain it searched" {
     // A dotted reference searched only the registry.
     try expectErrorContains(&runtime, "[] ((7) 'answer def) 'named @defm named.nope", &.{"'scope 'qualified"});
     try expectErrorContains(&runtime, "no.such.word", &.{"'scope 'qualified"});
-    // A missing export of a module *value* is not a scope miss at all.
-    try expectErrorContains(&runtime, "[] ((7) 'answer def) @module 'nope invoke", &.{"'scope 'module-value"});
 }
 
 test "module: a construction sees only its parameters its own definitions and core" {

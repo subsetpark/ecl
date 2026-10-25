@@ -84,7 +84,7 @@ fn checkFormatting(init: std.process.Init) !bool {
 /// combined form.
 ///
 /// The check reads the real parser's top-level forms rather than matching
-/// bytes. A suffix match would accept `@module` followed by a `# @defm`
+/// bytes. A suffix match would accept a bare body followed by a `# @defm`
 /// comment, or a multiline string whose last line happens to end that way.
 fn checkModuleRegistration(init: std.process.Init) !bool {
     var failed = false;

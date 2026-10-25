@@ -221,11 +221,11 @@ test "modules: *module* reports the active canonical registration" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // Identity belongs to the execution home independently of the image: the same image
-    // reports the registration through which the caller reached it.
+    // Identity belongs to the registration the caller reached: two
+    // registrations of the same body report their own names.
     try expectStack(
         &runtime,
-        "[] ((*module*) 'name def) @module dup 'left register 'right register " ++
+        "[] ((*module*) 'name def) 'left @defm [] ((*module*) 'name def) 'right @defm " ++
             "left.name right.name",
         "'left 'right",
     );
@@ -242,11 +242,6 @@ test "modules: *module* reports the active canonical registration" {
         "'kind 'domain",
         "registered module",
     });
-    try expectErrorContains(
-        &runtime,
-        "[] ((*module*) 'name def) @module 'name invoke",
-        &.{ "'kind 'domain", "registered module" },
-    );
     try expectOk(&runtime, "[] ((*module*) 'name set) 'escaped @defm");
     try expectErrorContains(&runtime, "escaped.name call", &.{
         "'kind 'domain",
@@ -315,10 +310,9 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectStack(&runtime, "7 shadow.host.where", "'shadowed");
     try expectErrorContains(&runtime, "core.no-such-binding", &.{ "'kind 'undefined-word", "'scope 'core" });
     // Core is a scope, not a registration: nothing may publish under its name
-    // from either module spelling or as an alias, and it is not a module to
+    // as a module or an alias, and it is not a module to
     // alias, import from, or remove.
     try expectErrorContains(&runtime, "[] () 'core @defm", &.{ "'kind 'domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "[] () @module 'core register", &.{ "'kind 'domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "'core 'shadow.host alias", &.{ "'kind 'domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "'short 'core alias", &.{ "'kind 'undefined-word", "undefined module `core`" });
     try expectErrorContains(&runtime, "'core ('dup) import", &.{ "'kind 'undefined-word", "'scope 'qualified" });
@@ -423,21 +417,19 @@ test "concurrency: within applications serialize and publish exactly the success
     }
 }
 
-test "concurrency: one image registered twice arbitrates two independent slots" {
+test "concurrency: two registrations of one body arbitrate two independent slots" {
     for ([_]usize{ 1, 8 }) |workers| {
         var runtime_inputs = try runtime_fixture.Fixture.init();
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
-        // One immutable image, two registrations. Each slot owns its own
-        // arbiter and durable stack, so concurrent applications through the
-        // two names never serialize against each other and never share a
-        // count.
+        // Two registrations of one body. Each slot owns its own arbiter and
+        // durable stack, so concurrent applications through the two names
+        // never serialize against each other and never share a count.
         try expectStack(
             &runtime,
-            "[0] (((1 + dup without) within) 'tick def " ++
-                "((dup without) within) 'peek def) @module " ++
-                "dup 'shared-left register 'shared-right register",
+            "[0] (((1 + dup without) within) 'tick def ((dup without) within) 'peek def) 'shared-left @defm " ++
+                "[0] (((1 + dup without) within) 'tick def ((dup without) within) 'peek def) 'shared-right @defm",
             "",
         );
         try expectStack(
@@ -451,7 +443,7 @@ test "concurrency: one image registered twice arbitrates two independent slots" 
         try expectStack(
             &runtime,
             "[0] (((10 + dup without) within) 'tick def " ++
-                "((dup without) within) 'peek def) @module 'shared-left register",
+                "((dup without) within) 'peek def) 'shared-left @defm",
             "",
         );
         try expectStack(&runtime, "shared-left.tick shared-right.tick", "50 41");

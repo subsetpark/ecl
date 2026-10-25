@@ -139,17 +139,17 @@ test "multiline child does not force the following sibling to break" {
 }
 
 test "multiline modules break only their local top-level run" {
-    const source = "((1) 'x def) @module dup 'stats register wrap";
+    const source = "((1) 'x def) call dup 'stats pair wrap";
     try expectFormat(
         source,
-        "(\n ### def x\n (1) 'x def) @module dup 'stats register wrap\n",
+        "(\n ### def x\n (1) 'x def) call dup 'stats pair wrap\n",
     );
     try expectParseEquivalent(source);
 
-    const trailing_break = "((1) 'x def\n) @module dup 'stats register wrap";
+    const trailing_break = "((1) 'x def\n) call dup 'stats pair wrap";
     try expectFormat(
         trailing_break,
-        "(\n ### def x\n (1) 'x def\n) @module dup 'stats register wrap\n",
+        "(\n ### def x\n (1) 'x def\n) call dup 'stats pair wrap\n",
     );
     try expectParseEquivalent(trailing_break);
 }
@@ -445,28 +445,17 @@ test "formatter synthesizes and normalizes module navigation headers" {
         "[] ((1) 'x def) chosen-name @defm\n",
         "[]\n(\n ### def x\n (1) 'x def) chosen-name @defm\n",
     );
-    // Anonymous construction names nothing, so it is an ordinary expression
-    // and earns no header — with or without a symbol beside it.
-    try expectFormat(
-        "[] ((1) 'x def) @module\n",
-        "[]\n(\n ### def x\n (1) 'x def) @module\n",
-    );
-    try expectFormat(
-        "[] ((1) 'x def) @module 'stats register\n",
-        "[]\n(\n ### def x\n (1) 'x def) @module 'stats register\n",
-    );
     // A header is synthesized and rewritten only where a registration is
-    // recognized, so above an anonymous construction the text stays an
-    // ordinary comment rather than becoming a navigation header the file has
-    // no definition for.
+    // recognized, so above any other expression the text stays an ordinary
+    // comment rather than becoming a navigation header the file has no
+    // definition for.
     try expectFormat(
-        "### module stats\n[] ((1) 'x def) @module\n",
-        "### module stats\n[]\n(\n ### def x\n (1) 'x def) @module\n",
+        "### module stats\n[] ((1) 'x def) @attempt\n",
+        "### module stats\n[]\n(\n ### def x\n (1) 'x def) @attempt\n",
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);
     try expectParseEquivalent(composed);
-    try expectParseEquivalent("[] ((1) 'x def) @module 'stats register\n");
 }
 
 test "formatter: synthesizes and normalizes test navigation headers" {

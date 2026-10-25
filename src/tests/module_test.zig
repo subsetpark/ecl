@@ -1348,7 +1348,6 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "[] () @module 'dict register", &.{reserved});
     try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
     try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
     try expectOk(&runtime, "{'a 1} 'a dict.has? {'kind 'user 'msg \"dict did not load\"} assert");

@@ -162,14 +162,6 @@ const cases = [_]Case{
     .{ .name = "isolated child", .source = "3 [1 2] [] (+ +) @each" },
     .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
     .{ .name = "seeded module", .source = "[7] ('base set) 'm @defm m.base" },
-    // Anonymous construction, opaque identity, and one image under two names.
-    .{ .name = "anonymous module", .source = "[] () @module type" },
-    .{ .name = "module identity", .source = "[] (1) @module dup match? [] (1) @module [] (1) @module match?" },
-    .{
-        .name = "one image two registrations",
-        .source = "[] (0 ((1 + dup without) within) 'bump def) @module " ++
-            "dup 'l register 'r register l.bump l.bump r.bump",
-    },
     .{ .name = "module marker is unreadable", .source = "\"<module>\" parse" },
     .{ .name = "old spelling", .source = "(1) attempt" },
     .{ .name = "row annotation", .source = "(a -- ...) (dup) 'f def 'f see" },
@@ -1206,27 +1198,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\7
-        \\stderr:
-        \\<empty>
-        \\=== anonymous module ===
-        \\source: [] () @module type
-        \\exit: 0
-        \\stdout:
-        \\'module
-        \\stderr:
-        \\<empty>
-        \\=== module identity ===
-        \\source: [] (1) @module dup match? [] (1) @module [] (1) @module match?
-        \\exit: 0
-        \\stdout:
-        \\1 0
-        \\stderr:
-        \\<empty>
-        \\=== one image two registrations ===
-        \\source: [] (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register l.bump l.bump r.bump
-        \\exit: 0
-        \\stdout:
-        \\1 2 1
         \\stderr:
         \\<empty>
         \\=== module marker is unreadable ===

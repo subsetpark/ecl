@@ -1100,8 +1100,6 @@ fn isLiteralValueForm(form_item: *const Form) bool {
 /// no header, exactly as a definition does. A phrase using ordinary `with`
 /// composition is not constructor metadata and therefore earns no registration
 /// header.
-/// A bare `@module` is an ordinary value-producing expression: it names
-/// nothing, so there is no header to write.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
     return (moduleRegistrationInfo(sequence, start) orelse return null).name;
 }

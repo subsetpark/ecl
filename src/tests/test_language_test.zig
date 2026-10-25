@@ -55,7 +55,7 @@ test "testing: declaration is legal only at a module construction root" {
     try expectOk(&runtime, "[] ((1) 'direct test) 'direct.module @defm");
 }
 
-test "testing: test names are absent from application resolution and module invocation" {
+test "testing: test names are absent from application resolution" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -65,12 +65,10 @@ test "testing: test names are absent from application resolution and module invo
 
     try expectOk(
         &runtime,
-        "[] ((1) 'same def (2) 'same test (3) 'hidden test) @module " ++
-            "dup 'visibility register " ++
+        "[] ((1) 'same def (2) 'same test (3) 'hidden test) 'visibility @defm " ++
             "visibility.same 1 = {'kind 'user} assert",
     );
     try expectErr(&runtime, "visibility.hidden");
-    try expectErr(&runtime, "dup 'hidden invoke");
 }
 
 test "testing: test mode discovers canonical registrations without aliases" {
@@ -84,7 +82,7 @@ test "testing: test mode discovers canonical registrations without aliases" {
     try expectOk(
         &runtime,
         "[] ((1) 'z test (2) 'a test) 'suite.two @defm " ++
-            "[] ((3) 'only test) @module dup 'suite.one register 'suite.copy register " ++
+            "[] ((3) 'only test) 'suite.one @defm [] ((3) 'only test) 'suite.copy @defm " ++
             "'short 'suite.one alias " ++
             "tests dup len 4 = {'kind 'user} assert " ++
             "first dup 'module at 'suite.copy match? {'kind 'user} assert " ++

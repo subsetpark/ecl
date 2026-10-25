@@ -586,7 +586,7 @@ test "e2e: tests retain file-private module visibility" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) @module 'baz register\n" ++
+        .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) 'baz @defm\n" ++
             "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
             "baz.answer 42 = {'kind 'user} assert\n" },
         .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
@@ -612,10 +612,10 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) @module 'helper register\n" ++
-            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) @module 'suite register\n" },
-        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) @module 'helper register\n" ++
-            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) @module 'suite register\n" },
+        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) 'helper @defm\n" ++
+            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) 'helper @defm\n" ++
+            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -1852,34 +1852,10 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
-        // `@defm` is `@module` followed by `register`, so the misplaced symbol
-        // reaches `@module` as its values operand first.
-        .stderr_contains = &.{ "'kind 'type", "@module expected a list", "'trace ['@module '@defm]" },
+        // The name is taken first, so a misplaced name is refused before
+        // anything else is examined.
+        .stderr_contains = &.{ "'kind 'type", "@defm expected a symbol name", "'trace ['@defm]" },
     });
-
-    // Anonymous construction names nothing, so its isolation data names the
-    // construction rather than a registration.
-    var anonymous_isolation = try run(&.{ build_options.ecl_exe, "-e", "3 [1] (+) @module" });
-    defer anonymous_isolation.deinit();
-    try anonymous_isolation.expect(.{
-        .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @module", "@module" },
-    });
-
-    // The value the external binary shows for a module image, and the two
-    // words that name one.
-    var anonymous_value = try run(&.{ build_options.ecl_exe, "-e", "[] (1 'x set) @module" });
-    defer anonymous_value.deinit();
-    try anonymous_value.expect(.{ .exit_code = 0, .stdout = "<module>\n", .stderr = "" });
-
-    var registered_twice = try run(&.{
-        build_options.ecl_exe,
-        "-e",
-        "[] (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register " ++
-            "l.bump l.bump r.bump",
-    });
-    defer registered_twice.deinit();
-    try registered_twice.expect(.{ .exit_code = 0, .stdout = "1 2 1\n", .stderr = "" });
 }
 
 test "e2e: escaped quotation authority acceptance" {

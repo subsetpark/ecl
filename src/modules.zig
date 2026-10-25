@@ -1803,32 +1803,10 @@ fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResol
     };
 }
 
-/// Resolve one public export from an image reached as a *value* rather than
-/// through a registered name.
-///
-/// This is the same lookup a registration performs, because an image's own
-/// environment is where its exports live and the registry contributes nothing
-/// to finding one. What differs is what is pinned: an image reached this way
-/// has no registration, so the `ExecutionHome` a construction body already
-/// runs against serves here too, and retaining it retains the image. That is
-/// also why such a call has no durable state and no generation — there is no
-/// slot to open and no supersession to be current with.
-pub fn handleResolveCursor(handle: ImageRef, id: u32) ModuleResolveCursor {
-    const image = handle.image();
-    return resolveCursorFor(image, ModuleHome.init(&image.construction_home), id);
-}
-
-/// The home a value-reached image executes against. Its registration is null,
-/// so privacy is by public-only lookup, `within` is refused exactly as it is
-/// for a construction root, and the trace spells the bare local name because
-/// the image has no canonical one to qualify with.
-pub fn handleHome(handle: ImageRef, _: *const ExecutionAccess) *ModuleHome {
-    return .init(&handle.image().construction_home);
-}
 pub const ModulePublicNameCursor = Registration.PublicNameCursor;
 
 /// A borrowed reference to one immutable image, valid for the call it is passed
-/// to and no longer. Only a `SealedImage` or a live module value can produce
+/// to and no longer. Only a `SealedImage` can produce
 /// one, so the borrow always starts from something that owns a reference; a
 /// consumer that outlives the call — a publication cursor — upgrades it to a
 /// `RetainedImage` immediately rather than trusting its caller's lifetime.
@@ -1990,22 +1968,7 @@ pub const SealedImage = enum(usize) {
         self.borrow().release();
         self.* = .consumed;
     }
-    /// Wraps the image in a value, transferring this capability's reference to
-    /// it. On failure nothing is published and the capability is untouched.
-    pub fn intoValue(self: *SealedImage, allocator: std.mem.Allocator) error{OutOfMemory}!value.Value {
-        const item = try heap.createModule(ModuleImage, allocator, self.borrow());
-        self.* = .consumed;
-        return item;
-    }
 };
-
-/// The single conversion between a module value and its image, so no raw cast
-/// can be paired at a call site. The reference stays borrowed from the value.
-pub fn imageRef(item: value.Value) ?ImageRef {
-    if (item != .module) return null;
-    const storage = heap.moduleStorage(item.module);
-    return .init(@ptrCast(@alignCast(storage.payload)));
-}
 
 pub const CommitError = error{
     OutOfMemory,

@@ -85,7 +85,7 @@ const MapScratch = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "probe.ecl",
-            .data = "[] ((42) 'answer def) @module 'helper register [] ((helper.answer) 'answer def) 'mapprobe @defm",
+            .data = "[] ((42) 'answer def) 'helper @defm [] ((helper.answer) 'answer def) 'mapprobe @defm",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -636,12 +636,12 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
     try runOk(
         &runtime,
-        "oom-module-value.ecl",
-        // The value wrapper, the registration record, the copied state
-        // template, and the barrier publication each have their own ordinals.
-        // One construction registered twice and one reload reach all four.
-        "[] (1) @module dup 'oom-left register 'oom-right register " ++
-            "[] (2) @module 'oom-left register [] (3) @module pop",
+        "oom-module-registration.ecl",
+        // The registration record, the copied state template, and the barrier
+        // publication each have their own ordinals. Two definitions and one
+        // reload reach all three, and a failed body releases its candidate.
+        "[] (1) 'oom-left @defm [] (1) 'oom-right @defm " ++
+            "[] (2) 'oom-left @defm [] (\"x\" fail) 'oom-failed @defm",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();
