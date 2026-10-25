@@ -218,10 +218,19 @@ public operations are `@defm`, `unmodule`, `alias`, `import`, and `qualify`.
 
 ### Milestone 3: task-mailboxes
 
-**Status**: planned (2026-10-25). Gameplan: `gameplans/task-mailboxes.yaml`
-(local; gitignored). Cut to the minimal layer the runtime alone can provide:
-five words, one kind, one object. Request/reply is composed in ECL; the runtime
-one-shot reply mailbox is recorded in issue #150.
+**Status**: executed (2026-10-25) on branch `zax--tasks-only-objects`, three
+commits. Cut to the minimal layer the runtime alone can provide: five words,
+one kind, one object. Request/reply is composed in ECL; the runtime one-shot
+reply mailbox is recorded in issue #150. Landed with these drifts: `task.send`
+takes `( value address -- )` and `task.receive` returns the sent value with no
+envelope (see Decisions Made); mailbox waits have their own `ParkRequest`
+family in which a deadline is an ordinary wake and the driver re-polls the
+mailbox and the clock, rather than a resume variant that names the timeout;
+the gate also repaired two inherited test programs (the M1 ownership pins
+awaited a handle `task.cancel` had consumed, and the M2 module-registration
+OOM probe let a failing body propagate), because `precommit` runs neither
+`concurrency_test` nor `test-oom`. Gates: `precommit`, `test-workers`,
+`test-oom`, and one Docker TSan run (arm64) all passed.
 
 **Definition of Done**:
 - Every task owns a mailbox: a separately counted object reachable from the
