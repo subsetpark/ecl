@@ -1026,3 +1026,45 @@ test "loader: a mapped file cannot privately register a stdlib name" {
     try expectErrorContains(&runtime, "root.foo.lookup", &.{"module name `dict` is reserved for the standard library"});
     try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
 }
+
+test "module source: unit constructors are refused during construction" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    const refusal = "is legal only outside module construction";
+    try expectErrorContains(&runtime, "[] ([] (1) @spawn pop (1) 'x def) 'm @defm", &.{ "'kind 'domain", "'word '@spawn", refusal });
+    try expectErrorContains(&runtime, "[] ([] [] (1) @give pop (1) 'x def) 'm @defm", &.{ "'kind 'domain", "'word '@give", refusal });
+    // `@each` is a prelude definition over `@spawn`, so the trace names it.
+    try expectErrorContains(&runtime, "[] ([1] [] (1) @each pop (1) 'x def) 'm @defm", &.{ "'kind 'domain", "'@each", refusal });
+    try expectErrorContains(&runtime, "m.x", &.{"'kind 'undefined-word"});
+    try expectOk(&runtime, "task.pending len");
+    try std.testing.expectEqual(@as(i64, 0), runtime.stackItems()[0].int);
+}
+
+test "module source: construction refusal reaches helper words and nested attempts" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    try expectErrorContains(
+        &runtime,
+        "[] (([] (1) @spawn) 'start def start) 'helper @defm",
+        &.{ "'kind 'domain", "'word '@spawn", "'start" },
+    );
+    // An `@attempt` inside the body observes the refusal as data; construction
+    // then completes without having started a task.
+    try expectOk(&runtime, "[] ([] ([] (1) @spawn) @attempt 'err at 'kind at 'k set) 'nested @defm nested.k task.pending len");
+    var stack = try runtime.stackDisplay();
+    defer stack.deinit();
+    try std.testing.expectEqualStrings("'domain 0", stack.bytes());
+    // Outside construction the constructor is unchanged.
+    try expectOk(&runtime, "pop pop [] (1) @spawn task.await");
+    var after = try runtime.stackDisplay();
+    defer after.deinit();
+    try std.testing.expectEqualStrings("{'ok [1]}", after.bytes());
+}

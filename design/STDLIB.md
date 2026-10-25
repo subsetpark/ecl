@@ -201,7 +201,9 @@ per element, contract `( a -- b )` enforced per element. Concurrent
 `each`: ordered results, leftmost failure re-raised after cancelling and
 quiescing the remainder. Each child's stack starts with its element deepest;
 `list values (q) @each` adds the shared values above it. Defined in ecl over
-`@spawn`, `task.await`, and `task.cancel`. See Concurrency.
+`@spawn`, `task.await`, and `task.cancel`. Inside a module construction body,
+at any depth, this constructor is `'domain`: a module body defines words and
+starts no tasks (see Modules). See Concurrency.
 
 ### @module
 `( values body -- module )` — *Unit constructor.* Run the body on a fresh
@@ -213,7 +215,9 @@ See [Modules](SPEC.md#modules).
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack
 from the explicit values list and run the quotation concurrently. Use `[]` for
-no initial values; the ambient stack never crosses the boundary. See
+no initial values; the ambient stack never crosses the boundary. Inside a
+module construction body, at any depth, this constructor is `'domain`: a module
+body defines words and starts no tasks (see Modules). See
 [Concurrency](SPEC.md#concurrency).
 
 #### Examples
@@ -229,7 +233,8 @@ additionally move every port in the ports list into the new unit, which owns
 them from before it starts running: the child's end closes them and the
 calling unit's end no longer does. The child stack is the given ports,
 deepest, then the explicit values. Use `[]` for no ports, which is exactly
-`@spawn`.
+`@spawn`. Inside a module construction body, at any depth, this constructor
+is `'domain`: a module body defines words and starts no tasks (see Modules).
 
 Every kind of port can be given: listeners, connections, and process ports
 alike. A port may only be given by the unit that owns it, so a unit holding a

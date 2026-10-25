@@ -1216,20 +1216,6 @@ test "bindings: a task keeps the bindings that existed when it was spawned" {
     );
 }
 
-test "bindings: a task spawned by a module body reads the image live" {
-    try expectFreshStack(
-        "[] ((1) 'x def [] (20 clock.sleep x) @spawn (2) 'x def task.await 'r set) 'live-image @defm live-image.r",
-        "{'ok [2]}",
-    );
-    // The task reads while the body keeps redefining what it reads.
-    try expectFreshStack(
-        "[] ((0) 'x def [] (0 200 (x +) times) @spawn " ++
-            "(dup 0 = (pop) (1 - (1) 'x def r) if) 'r def 200 r task.await 'ok at 'r set) 'churn-image @defm " ++
-            "churn-image.r 0 at 200 <=",
-        "1",
-    );
-}
-
 test "bindings: a task spawned after a definition observes it" {
     try expectFreshStack("(1) 'f def (2) 'f def [] (f) @spawn task.await", "{'ok [2]}");
     try expectFreshStack("(1) 'f def 'f undef [] (f) @spawn task.await 'err at 'kind at", "'undefined-word");

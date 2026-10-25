@@ -61,7 +61,18 @@ fn spawnTask(
     };
 }
 
+/// A module body defines words and starts no tasks. Refusing at the
+/// constructor, before any operand is consumed, keeps every task owned by a
+/// task or the session root and never by an image under construction.
+fn refuseDuringConstruction(evaluator: *Machine, comptime constructor: []const u8) MachineError!void {
+    if (evaluator.unit.inModuleConstruction()) return evaluator.fail(
+        .domain,
+        constructor ++ " is legal only outside module construction: a module body defines words and starts no tasks",
+    );
+}
+
 fn spawn(evaluator: *Machine) MachineError!void {
+    try refuseDuringConstruction(evaluator, "@spawn");
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());
     const borrowed = input.borrow();
@@ -282,6 +293,7 @@ const GiveDriver = struct {
 };
 
 fn give(evaluator: *Machine) MachineError!void {
+    try refuseDuringConstruction(evaluator, "@give");
     try evaluator.require(3);
     var body = try evaluator.popQuotation();
     errdefer body.deinit();

@@ -2766,6 +2766,20 @@ pub const Unit = struct {
         }
         return false;
     }
+    /// Whether a module construction is open anywhere in this unit's frame
+    /// stack. Unlike the direct-root test `testDeclarationCursor` applies, any
+    /// depth counts: a helper word the body calls and an `@attempt` nested in
+    /// the body are still construction, so a body cannot launder a task launch
+    /// through code it defines first.
+    pub fn inModuleConstruction(self: *const Unit) bool {
+        var index = self.boundary_index;
+        while (index) |frame_index| {
+            const boundary = self.frames.items[@backingInt(frame_index)].boundary;
+            if (boundary.mode == .module) return true;
+            index = boundary.previous_boundary;
+        }
+        return false;
+    }
     pub fn pinGeneration(self: *Unit, generation: *modules.ModuleHome) error{OutOfMemory}!void {
         try self.lifetime.pin(self.allocator, generation, self.module_access);
     }
