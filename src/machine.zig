@@ -5962,7 +5962,11 @@ pub const Machine = struct {
         if (cacheable) if (self.unit.binding_cache.find(word.slot, view)) |cached| {
             // A cached binding has no home, pin, or generation, so a builtin
             // runs exactly as `executeResolved` would run it.
-            if (cached.spec.binding == .builtin) return invokeBuiltin(self, cached.trace_word, cached.spec.binding.builtin);
+            switch (cached.route) {
+                .builtin => return invokeBuiltin(self, cached.trace_word, cached.spec.binding.builtin),
+                .source => return enterCachedWord(self, cached),
+                .resolved => {},
+            }
             var resolved: Resolution = .{
                 .lease = .{ .releases = self.unit.releases, .held = .{ .borrowed = cached.spec } },
                 .execution_generation = null,
@@ -7469,6 +7473,23 @@ pub const BindingCache = struct {
         trace_word: intern.TraceWord,
         origin: ResolutionOrigin,
         defining_scope: ?*env.Scope,
+        /// How a dispatch runs the binding, decided when it is cached.
+        route: Route = .resolved,
+    };
+    /// A builtin runs directly and a source word without a recognition enters
+    /// its body directly; everything else is resolved in full.
+    pub const Route = enum(u8) {
+        builtin,
+        source,
+        resolved,
+
+        fn of(spec: *const env.BindingSpec) Route {
+            return switch (spec.binding) {
+                .builtin => .builtin,
+                .word => if (spec.direct_idiom == null) .source else .resolved,
+                .native => .resolved,
+            };
+        }
     };
     entries: []?Entry = &.{},
     count: usize = 0,
@@ -7495,7 +7516,9 @@ pub const BindingCache = struct {
     /// Records `entry`, replacing one for the same slot.
     pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) error{OutOfMemory}!void {
         if ((self.count + 1) * 4 > self.entries.len * 3) try self.grow(allocator);
-        self.insert(entry);
+        var routed = entry;
+        routed.route = .of(entry.spec);
+        self.insert(routed);
     }
     fn insert(self: *BindingCache, entry: Entry) void {
         const mask = self.entries.len - 1;
@@ -8228,7 +8251,34 @@ fn scheduleWord(
         var consumed = owned;
         try self.unit.adoptGeneration(&consumed);
     } else if (resolved_home) |generation| try self.unit.pinGeneration(generation);
-    var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    return enterBody(self, body, word, .{
+        .scope = scope,
+        .resolution_scope = resolution_scope,
+        .home = home,
+        .defining = defining,
+        .registration_provenance = registration_provenance,
+    }, check);
+}
+/// `scheduleWord` for a source word from the unit's binding cache, which has
+/// no home, pin, or effect: the body runs at its caller's site, resolving
+/// against its defining scope. A trusted word with a recognition takes the
+/// full path instead.
+fn enterCachedWord(self: *Machine, cached: *const BindingCache.Entry) MachineError!void {
+    self.unit.active_word = cached.trace_word;
+    const caller = self.unit.current.?.site;
+    return enterBody(self, env.quotationHeader(cached.spec.binding.word), cached.trace_word, .{
+        .scope = caller.scope,
+        .resolution_scope = cached.defining_scope,
+        .home = caller.home,
+        .defining = caller.defining,
+        .registration_provenance = caller.registration_provenance,
+    }, null);
+}
+/// Suspends the caller and makes `body` the running evaluation at `site`,
+/// under its effect check if it has one.
+fn enterBody(self: *Machine, body: *Header, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
+    var check = effect;
     var effect_tail = self.replaceTailEffectCandidate(body);
     const application_tail = self.tailApplicationIndex();
     _ = self.suspendCurrent() catch return error.OutOfMemory;
@@ -8245,13 +8295,7 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .position = .{ .source = 0 },
-        .site = .{
-            .scope = scope,
-            .resolution_scope = resolution_scope,
-            .home = home,
-            .defining = defining,
-            .registration_provenance = registration_provenance,
-        },
+        .site = site,
         .traced_word = word,
         .body_owner = word,
         .effect_tail = effect_tail,
