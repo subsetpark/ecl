@@ -1185,18 +1185,23 @@ const Eval = struct {
             .invocation, .redispatch => false,
         };
     }
-    fn advanceInstruction(self: *Eval) u32 {
-        const index = switch (self.position) {
-            .source => |index| index,
-            .replay => |index| index,
-            .invocation, .redispatch => unreachable,
-        };
-        self.position = switch (self.position) {
-            .source => .{ .source = index + 1 },
-            .replay => .{ .redispatch = index + 1 },
-            .invocation, .redispatch => unreachable,
-        };
-        return index;
+    /// The index of the next form to dispatch, moving past it, or null when
+    /// none remains: one test of the position where checking and advancing
+    /// tested it twice.
+    fn takeInstruction(self: *Eval) ?u32 {
+        switch (self.position) {
+            .source => |index| {
+                if (index >= self.code.length()) return null;
+                self.position = .{ .source = index + 1 };
+                return index;
+            },
+            .replay => |index| {
+                if (index >= self.code.length()) return null;
+                self.position = .{ .redispatch = index + 1 };
+                return index;
+            },
+            .invocation, .redispatch => return null,
+        }
     }
     fn rewind(self: *Eval, index: u32) void {
         self.position = switch (self.position) {
@@ -6554,11 +6559,11 @@ fn loop(self: *Machine) MachineError!RunStatus {
         // Eval which resumeFrames may also have restored.
         if (self.unit.hasWorkDriver()) continue;
         const current = &self.unit.current.?;
-        if (!current.hasInstructions()) {
+        const index = current.takeInstruction() orelse {
             self.retireCompletedEval(current.*);
             self.unit.current = null;
             continue;
-        }
+        };
         poll(self) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
@@ -6566,8 +6571,12 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 continue;
             },
         };
-        self.unit.active_index = current.advanceInstruction();
-        const form = list.atUnchecked(.{ .list = current.code }, self.unit.active_index);
+        self.unit.active_index = index;
+        // Code is nearly always a spine of forms; any other list runs too.
+        const form = if (current.code.kind() == .generic_spine)
+            heap.valuesConst(current.code)[index]
+        else
+            list.atUnchecked(.{ .list = current.code }, index);
         if (comptime root_execution_metrics_enabled)
             self.unit.root_execution_metrics.logical_transitions += 1;
         dispatch(self, form) catch |err| switch (err) {
