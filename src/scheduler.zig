@@ -185,7 +185,7 @@ const TerminalState = union(enum) {
     oom,
 };
 
-const WaitKind = enum { one, any, deadline, sleep, external };
+const WaitKind = enum { one, any, deadline, sleep, external, mailbox };
 const Finish = enum { success, language_error, oom };
 
 const FinishingWork = union(enum) {
@@ -753,6 +753,15 @@ const WaitSet = struct {
                 .timeout => .timeout,
                 .task, .overflow => unreachable,
             } },
+            // A mailbox reports readiness only, never its own failure, and
+            // its deadline is an ordinary wake: the driver reads the clock.
+            .mailbox => .{ .mailbox = switch (reason) {
+                .external_ready, .timeout => .ready,
+                .cancellation => .cancelled,
+                .io => .io,
+                .out_of_memory => .out_of_memory,
+                .task, .overflow, .external_io => unreachable,
+            } },
             .one, .any, .deadline => .{ .task_wait = switch (reason) {
                 .task => |index| outcome: {
                     const cell = self.registrations[index].cell.?;
@@ -792,7 +801,7 @@ const WaitSet = struct {
                 }
                 const request = initializing.request;
                 self.state = switch (request) {
-                    .external, .external_until => .{ .registering_external = request },
+                    .external, .external_until, .mailbox => .{ .registering_external = request },
                     else => .{ .finding_duplicate = .{ .request = request } },
                 };
             },
@@ -863,6 +872,15 @@ const WaitSet = struct {
                         };
                         break :blk timed.source;
                     },
+                    .mailbox => |waiting| blk: {
+                        if (waiting.deadline) |deadline| self.addAbsoluteTimer(deadline) catch |err| {
+                            self.select(switch (err) {
+                                error.Io => .io,
+                                error.OutOfMemory => .out_of_memory,
+                            });
+                        };
+                        break :blk waiting.source;
+                    },
                     else => unreachable,
                 };
                 std.Io.Threaded.mutexLockUncancelable(&self.mutex);
@@ -893,7 +911,7 @@ const WaitSet = struct {
                 const milliseconds: ?u63 = switch (request) {
                     .deadline => |deadline| deadline.milliseconds,
                     .sleep => |duration| duration,
-                    .task, .any, .external, .external_until => null,
+                    .task, .any, .external, .external_until, .mailbox => null,
                     .close_scope => unreachable,
                 };
                 if (milliseconds) |duration| {
@@ -2975,6 +2993,7 @@ fn requestKind(request: machine.ParkRequest) WaitKind {
         .deadline => .deadline,
         .sleep => .sleep,
         .external, .external_until => .external,
+        .mailbox => .mailbox,
         .close_scope => unreachable,
     };
 }

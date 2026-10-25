@@ -1941,6 +1941,10 @@ pub const ParkRequest = union(enum) {
     close_scope: u8,
     external: external.ReadinessSource,
     external_until: struct { source: external.ReadinessSource, deadline: @import("scheduler.zig").Deadline },
+    /// Park on a task mailbox, for a message or for space to queue one. A
+    /// deadline resumes the driver exactly as readiness does, so a timed
+    /// receive hands back a value instead of raising.
+    mailbox: struct { source: external.ReadinessSource, deadline: ?@import("scheduler.zig").Deadline },
 
     /// The one value graph owned by every parking request that carries one.
     /// Scheduler setup, abandonment, and ordinary deinit all use this mapping.
@@ -1948,7 +1952,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .any => |item| item,
             .deadline => |deadline| deadline.task,
-            .close_scope, .external, .external_until, .sleep => null,
+            .close_scope, .external, .external_until, .mailbox, .sleep => null,
         };
     }
 
@@ -1956,7 +1960,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .deadline => 1,
             .any => |tasks| @intCast(tasks.list.length()),
-            .close_scope, .external, .external_until, .sleep => 0,
+            .close_scope, .external, .external_until, .mailbox, .sleep => 0,
         };
     }
 
@@ -1971,7 +1975,7 @@ pub const ParkRequest = union(enum) {
                 break :single deadline.task;
             },
             .any => |tasks| list.atUnchecked(tasks, index),
-            .close_scope, .external, .external_until, .sleep => unreachable,
+            .close_scope, .external, .external_until, .mailbox, .sleep => unreachable,
         };
     }
 
@@ -1984,6 +1988,10 @@ pub const ParkRequest = union(enum) {
             },
             .external => |source| {
                 var owned = source;
+                owned.deinit();
+            },
+            .mailbox => |waiting| {
+                var owned = waiting.source;
                 owned.deinit();
             },
             else => {},
@@ -2024,6 +2032,10 @@ pub const ExternalResume = union(enum) {
     out_of_memory,
 };
 
+/// How a wait on a task mailbox ended. Readiness and the deadline both
+/// resume the driver, which polls the mailbox and reads the clock itself.
+pub const MailboxResume = enum { ready, cancelled, io, out_of_memory };
+
 /// One family per park request, so a sleep cannot deliver a task outcome, a
 /// task wait cannot report that it slept, and each family's failure wording
 /// describes what the unit was actually doing.
@@ -2031,12 +2043,13 @@ pub const ParkResume = union(enum) {
     task_wait: TaskWaitResume,
     sleep: SleepResume,
     external: ExternalResume,
+    mailbox: MailboxResume,
     scope_closed: u8,
 
     pub fn ownedValue(self: ParkResume) ?Value {
         return switch (self) {
             .task_wait => |wait| wait.ownedValue(),
-            .sleep, .external, .scope_closed => null,
+            .sleep, .external, .mailbox, .scope_closed => null,
         };
     }
 
@@ -2045,6 +2058,7 @@ pub const ParkResume = union(enum) {
         return switch (request) {
             .sleep => .{ .sleep = .io },
             .external, .external_until => .{ .external = .io },
+            .mailbox => .{ .mailbox = .io },
             .task, .any, .deadline => .{ .task_wait = .io },
             .close_scope => unreachable,
         };
@@ -2056,6 +2070,7 @@ pub const ParkResume = union(enum) {
         return switch (request) {
             .sleep => .{ .sleep = .cancelled },
             .external, .external_until => .{ .external = .cancelled },
+            .mailbox => .{ .mailbox = .cancelled },
             .task, .any, .deadline => .{ .task_wait = .cancelled },
             .close_scope => unreachable,
         };
@@ -6867,6 +6882,21 @@ fn resumePark(self: *Machine) MachineError!void {
             .cancelled => {
                 clearWorkDriver(self.unit);
                 return self.fail(.cancelled, "unit cancelled while awaiting host readiness");
+            },
+            .io => {
+                clearWorkDriver(self.unit);
+                return self.fail(.io, "could not start a scheduler wait service");
+            },
+            .out_of_memory => {
+                clearWorkDriver(self.unit);
+                return error.OutOfMemory;
+            },
+        },
+        .mailbox => |ready| switch (ready) {
+            .ready => {},
+            .cancelled => {
+                clearWorkDriver(self.unit);
+                return self.fail(.cancelled, "unit cancelled while awaiting a message");
             },
             .io => {
                 clearWorkDriver(self.unit);

@@ -13,6 +13,9 @@ const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const external = @import("external.zig");
+const poll = @import("poll.zig");
+const list = @import("list.zig");
+const dict = @import("dict.zig");
 
 const Value = value.Value;
 
@@ -34,6 +37,8 @@ pub const Message = struct {
 /// Queue depth. A sender parks when the ring is full, so this bounds the
 /// values a mailbox holds for a receiver that has not asked for them.
 pub const capacity: usize = 16;
+
+pub const EnqueueResult = enum { accepted, full, closed };
 
 pub const Mailbox = struct {
     allocator: std.mem.Allocator,
@@ -95,6 +100,40 @@ pub const Mailbox = struct {
         self.release();
     }
 
+    /// The mailbox an address value names.
+    pub fn fromAddress(address: Value) *Mailbox {
+        return @ptrCast(@alignCast(heap.addressTarget(address.address)));
+    }
+
+    /// Queues a message the caller owns. Ownership moves only on `accepted`;
+    /// a full or closed mailbox leaves it with the caller.
+    pub fn enqueue(self: *Mailbox, message: Message) EnqueueResult {
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.phase == .closed) return .closed;
+        if (self.length == capacity) return .full;
+        self.ring[(self.head + self.length) % capacity] = message;
+        self.length += 1;
+        self.waits.notifyLocked(self);
+        return .accepted;
+    }
+
+    /// Takes the oldest message, waking a sender parked for space.
+    pub fn dequeue(self: *Mailbox) ?Message {
+        std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (self.length == 0) return null;
+        const message = self.ring[self.head];
+        self.head = (self.head + 1) % capacity;
+        self.length -= 1;
+        self.waits.notifyLocked(self);
+        return message;
+    }
+
+    pub fn readinessSource(self: *Mailbox, key: Key) external.ReadinessSource {
+        return external.readinessSource(Mailbox, self, @backingInt(key));
+    }
+
     // The readiness-cell contract `external.WaitList` requires.
 
     pub fn retainReadiness(self: *Mailbox) void {
@@ -119,5 +158,70 @@ pub const Mailbox = struct {
 
     pub fn wakeReasonLocked(_: *Mailbox, _: u64) external.Wake {
         return .ready;
+    }
+};
+
+/// Refuses a payload holding a task handle anywhere, in slices of a lent
+/// work budget. Only generic spines and dicts are entered: a flat specialized
+/// list holds scalars by construction, so it is accepted in one step however
+/// long it is. Addresses and ports pass; a handle would let the receiver
+/// reach a task's cached result and close a reference cycle.
+pub const HandleCheck = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+    const Frame = union(enum) {
+        item: Value,
+        sequence: struct { item: Value, next: usize, count: usize },
+    };
+    frames: poll.ChunkStack(Frame),
+
+    pub fn init(allocator: std.mem.Allocator, root: Value) error{OutOfMemory}!HandleCheck {
+        var frames = poll.ChunkStack(Frame).init(allocator);
+        errdefer frames.deinit();
+        try frames.push(.{ .item = root });
+        return .{ .frames = frames };
+    }
+
+    pub fn retire(self: *HandleCheck, releases: *heap.ReleaseDomain) void {
+        self.frames.retire(releases);
+    }
+
+    fn visit(self: *HandleCheck, item: Value) error{ Handle, OutOfMemory }!void {
+        switch (item) {
+            .task => return error.Handle,
+            .int, .float, .char, .symbol, .word, .port, .address => {},
+            .list => |header| {
+                if (header.kind() != .generic_spine) return;
+                const count: usize = @intCast(header.length());
+                if (count != 0) try self.frames.push(.{ .sequence = .{ .item = item, .next = 0, .count = count } });
+            },
+            .dict => |header| {
+                const count: usize = @as(usize, @intCast(header.length())) * 2;
+                if (count != 0) try self.frames.push(.{ .sequence = .{ .item = item, .next = 0, .count = count } });
+            },
+        }
+    }
+
+    pub fn advance(self: *HandleCheck, budget: *poll.WorkBudget) error{ Handle, OutOfMemory }!poll.Progress(void) {
+        while (budget.spend()) {
+            const frame = self.frames.pop() orelse return .complete;
+            switch (frame) {
+                .item => |item| try self.visit(item),
+                .sequence => |sequence| {
+                    const item = if (sequence.item == .list)
+                        list.atUnchecked(sequence.item, sequence.next)
+                    else if (sequence.next % 2 == 0)
+                        dict.keyAt(sequence.item.dict, sequence.next / 2)
+                    else
+                        dict.valueAt(sequence.item.dict, sequence.next / 2);
+                    if (sequence.next + 1 < sequence.count) try self.frames.push(.{ .sequence = .{
+                        .item = sequence.item,
+                        .next = sequence.next + 1,
+                        .count = sequence.count,
+                    } });
+                    try self.visit(item);
+                },
+            }
+        }
+        return .pending;
     }
 };

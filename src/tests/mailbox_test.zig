@@ -49,7 +49,11 @@ fn clearStack(runtime: *session.Session) !void {
 }
 
 fn openSession(inputs: *runtime_fixture.Fixture) !session.Session {
-    return session.Session.init(allocator, &.{}, inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    return openPool(inputs, 1);
+}
+
+fn openPool(inputs: *runtime_fixture.Fixture, workers: usize) !session.Session {
+    return session.Session.init(allocator, &.{}, inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
 }
 
 test "mailbox: addresses name a task mailbox and are opaque" {
@@ -84,5 +88,109 @@ test "mailbox: task.self is the executing task and is refused at the root" {
         &runtime,
         "[] ([] (task.self) @spawn task.await 'ok at first) @spawn dup task.address swap task.await 'ok at first match?",
         "0",
+    );
+}
+
+test "mailbox: send and receive round trip in order" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try openSession(&inputs);
+    defer runtime.deinit();
+    try expectStack(
+        &runtime,
+        "[] (3 (task.receive) times 3 pack) @spawn dup task.address 1 over task.send 2 over task.send 3 swap task.send task.await 'ok at first",
+        "[1 2 3]",
+    );
+    // A flat list of any length is checked in one step and arrives whole.
+    try expectStack(
+        &runtime,
+        "[] (task.receive len) @spawn dup task.address 1000000 range swap task.send task.await",
+        "{'ok [1000000]}",
+    );
+    // An address is an ordinary value to send, including inside a dict.
+    try expectStack(&runtime, "[] (task.receive type) @spawn dup task.address dup task.send task.await", "{'ok ['address]}");
+    try expectStack(
+        &runtime,
+        "[] (task.receive 'reply at type) @spawn dup task.address dup {} 'reply rolldown put swap task.send task.await",
+        "{'ok ['address]}",
+    );
+}
+
+test "mailbox: send refuses handles, non-addresses, and closed mailboxes" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try openSession(&inputs);
+    defer runtime.deinit();
+    try expectError(&runtime, "[] (task.receive) @spawn 'receiver set receiver dup task.address task.send", .{ .name = "handle", .source = "", .kind = "type" });
+    try expectError(&runtime, "{} 'h receiver put receiver task.address task.send", .{ .name = "nested handle", .source = "", .kind = "type" });
+    try expectError(&runtime, "receiver 1 pack receiver task.address task.send", .{ .name = "handle in a list", .source = "", .kind = "type" });
+    try expectStack(&runtime, "receiver task.cancel receiver task.await 'err at 'kind at", "'cancelled");
+    try expectError(&runtime, "1 receiver task.send", .{ .name = "not an address", .source = "", .kind = "type" });
+    try expectError(&runtime, "[] (1) @spawn dup task.await pop task.address 1 swap task.send", .{
+        .name = "closed",
+        .source = "",
+        .kind = "io",
+        .data = &.{.{ .name = "reason", .expected = .{ .symbol = "closed" } }},
+    });
+    try expectError(&runtime, "task.receive", .{ .name = "root receive", .source = "", .kind = "domain" });
+    try expectError(&runtime, "5 task.receive-for", .{ .name = "root receive-for", .source = "", .kind = "domain" });
+}
+
+fn pressureCase(workers: usize) !void {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try openPool(&inputs, workers);
+    defer runtime.deinit();
+    // The receiver is asleep while forty messages arrive, so the sender
+    // parks at the sixteenth and resumes as the receiver drains.
+    try expectStack(
+        &runtime,
+        "[] (20 clock.sleep 40 (task.receive) times 40 pack) @spawn dup task.address 'box set " ++
+            "0 40 (dup box task.send 1 +) times pop task.await 'ok at first 40 range match?",
+        "1",
+    );
+    // A sender parked on a full mailbox fails once its receiver is cancelled.
+    try expectStack(
+        &runtime,
+        "[] (100000 clock.sleep) @spawn dup task.address 'sink set [] (17 (0 sink task.send) times) @spawn " ++
+            "5 clock.sleep swap task.cancel task.await 'err at 'kind at",
+        "'io",
+    );
+}
+
+test "mailbox: pressure parks the sender and drains in order under one and eight workers" {
+    try pressureCase(1);
+    try pressureCase(8);
+}
+
+test "mailbox: receive-for returns the message or a timeout value" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try openSession(&inputs);
+    defer runtime.deinit();
+    try expectStack(&runtime, "[] (20 task.receive-for) @spawn task.await 'ok at first 'err at 'kind at", "'timeout");
+    try expectStack(&runtime, "[] (1000 task.receive-for) @spawn dup task.address 7 swap task.send task.await 'ok at first", "{'ok 7}");
+    try expectStack(&runtime, "[] (-1 task.receive-for) @spawn task.await 'err at 'kind at", "'domain");
+    try expectStack(&runtime, "[] ('x task.receive-for) @spawn task.await 'err at 'kind at", "'type");
+}
+
+test "mailbox: a composed request and reply round trip through a helper task" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try openSession(&inputs);
+    defer runtime.deinit();
+    // The caller spawns a helper whose address travels as 'from and whose
+    // result is the reply; the only bound is task.await-for.
+    try expectStack(
+        &runtime,
+        "(|a v| [] (task.receive) @spawn dup task.address {} 'value v put 'from rolldown put a task.send task.await 'ok at first) 'ask def " ++
+            "[] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 ask",
+        "42",
+    );
+    try expectStack(
+        &runtime,
+        "(|a v ms| [] (task.receive) @spawn dup task.address {} 'value v put 'from rolldown put a task.send dup ms task.await-for swap task.cancel) 'ask-for def " ++
+            "[] (task.receive pop 100000 clock.sleep) @spawn dup task.address 41 20 ask-for 'err at 'kind at swap task.cancel",
+        "'timeout",
     );
 }

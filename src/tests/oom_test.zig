@@ -579,6 +579,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[] (1) @spawn dup pair task.await-any pop pop " ++
             "[] (1) @spawn dup task.await pop 0 task.await-for pop " ++
             "[] (1) @spawn 1000000 task.await-for pop " ++
+            "[] (task.receive) @spawn dup task.address 1 swap task.send task.await pop " ++
             "[] ((1) () while) @spawn dup task.cancel task.await pop " ++
             "[(1) (missing) (2 3)] ([] swap @spawn) each (task.await) each pop " ++
             "[1 2 3] [] (dup *) @each pop",
@@ -639,9 +640,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-module-registration.ecl",
         // The registration record, the copied state template, and the barrier
         // publication each have their own ordinals. Two definitions and one
-        // reload reach all three, and a failed body releases its candidate.
+        // reload reach all three, and a failed body releases its candidate;
+        // its failure propagates, so the probe observes it as a result.
         "[] (1) 'oom-left @defm [] (1) 'oom-right @defm " ++
-            "[] (2) 'oom-left @defm [] (\"x\" fail) 'oom-failed @defm",
+            "[] (2) 'oom-left @defm [] ([] (\"x\" fail) 'oom-failed @defm) @attempt pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();

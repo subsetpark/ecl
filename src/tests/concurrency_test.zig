@@ -558,7 +558,7 @@ test "concurrency: a failing @attempt cancels no spawned task" {
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("1", actual.bytes());
     actual.deinit();
-    try runOk(&runtime, "pop task.pending first task.cancel task.await pop");
+    try runOk(&runtime, "pop task.pending first dup task.cancel task.await pop");
     actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("", actual.bytes());
@@ -574,7 +574,7 @@ test "concurrency: a failing root unit cancels no spawned task" {
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("1", actual.bytes());
     actual.deinit();
-    try runOk(&runtime, "pop task.pending first task.cancel task.await pop");
+    try runOk(&runtime, "pop task.pending first dup task.cancel task.await pop");
     actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("", actual.bytes());
