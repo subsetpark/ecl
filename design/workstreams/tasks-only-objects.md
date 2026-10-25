@@ -127,10 +127,15 @@ stale; `zig build check-formal` checks the bounded models with z3.
 
 ### Milestone 1: task-scope-ownership
 
-**Status**: planned (2026-10-25). Gameplan: `gameplans/task-scope-ownership.yaml`
-(local; `gameplans/` is gitignored). Three patches: the construction refusal with
-its tests and STDLIB entries; session tests pinning the measured ownership facts;
-the spec, formal-model, and INTERPRETER rewrite with SPEC.md regenerated.
+**Status**: executed (2026-10-25) on branch `zax--tasks-only-objects`, three
+commits after the workstream commit. Landed as planned with two drifts worth
+knowing: the refusal guards only `@spawn` and `@give`, because `@each` had
+already become a prelude definition over `@spawn` (its refusal names `@each` in
+the trace); and one pre-existing test, "bindings: a task spawned by a module body
+reads the image live", was deleted with the behavior it pinned. The formal
+model's `task-owner` is a total rule read only under `~root-owned?`; a guarded
+rule left nine preservation warnings under the bound-2 check. `zig build
+precommit` passed on each commit; the gameplan file is local and gitignored.
 
 **Definition of Done**:
 - `design/SPEC.src.md` Units and Concurrency sections state the rule the
