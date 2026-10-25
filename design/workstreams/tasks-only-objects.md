@@ -171,10 +171,15 @@ true. The mailbox model's closure rule is stated against scopes, not units.
 
 ### Milestone 2: remove-anonymous-modules
 
-**Status**: planned (2026-10-25). Gameplan: `gameplans/remove-anonymous-modules.yaml`
-(local; gitignored). Three patches in order: `@defm` as the single primitive
-constructor with the test rewrite; deletion of the `'module` value kind with
-`values.pant`; the spec, formal-model, and docs rewrite.
+**Status**: executed (2026-10-25) on branch `zax--tasks-only-objects`, three
+commits. Landed as planned with these drifts: the formal `Register` action
+holds a `Construction` context that only it lists, because a context grants
+write authority to every action naming it and `Add alias`/`Remove` otherwise
+failed to preserve image existence; `printing.pant` also named `module-type`
+and was fixed alongside `values.pant`; the registration retention test runs its
+calls in child units, since a unit pins every generation it dispatches through
+and each definition is now its own image; and `@defm`'s own isolation
+diagnostic now names `@defm`. `zig build precommit` passed on each commit.
 
 **Definition of Done**:
 - `@module`, `register`, and `invoke` are gone from `src/module_prims.zig`
