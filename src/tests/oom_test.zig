@@ -847,7 +847,8 @@ fn stdlibSessionAllocationProbe(
         .random => try runOk(
             &runtime,
             "oom-random.ecl",
-            "[7 0] 2 6 rand.ints nip pop [7 0] rand.float pop pop",
+            "[7 0] 2 6 rand.ints nip pop [7 0] rand.float pop pop " ++
+                "[7 0] 2 4 rand.deal pop pop [7 0] [1 2 3] rand.shuffle pop pop",
         ),
         .dict => try runOk(
             &runtime,

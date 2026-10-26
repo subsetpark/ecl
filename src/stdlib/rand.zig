@@ -19,6 +19,26 @@ pub const words = [_]env.BuiltinWord{
         .primitive = random.floatForModule,
     },
     .{
+        .name = "deal",
+        .doc = "( state count pool -- state results ) Draw count distinct integers below a nonnegative pool size, advancing the state by count.",
+        .primitive = random.dealForModule,
+    },
+    .{
+        .name = "shuffle",
+        .doc = "( state values -- state values ) Return a uniformly selected permutation of a list, advancing the state by its length.",
+        .primitive = random.shuffleForModule,
+    },
+    .{
+        .name = "deal",
+        .doc = "( state count pool -- state results ) Draw count distinct integers below a nonnegative pool size, advancing the state by count.",
+        .primitive = random.dealForModule,
+    },
+    .{
+        .name = "shuffle",
+        .doc = "( state values -- state values ) Return a uniformly selected permutation of a list, advancing the state by its length.",
+        .primitive = random.shuffleForModule,
+    },
+    .{
         .name = "entropy",
         .doc = "( -- key ) Read one nondeterministic generator key from the host CSPRNG.",
         .primitive = random.entropyForModule,
