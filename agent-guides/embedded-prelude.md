@@ -20,7 +20,9 @@ apply as well.
   renders the word's entry from it.
 - Order definition blocks by dependency depth, then by codepoint name: a
   definition follows every prelude word its body uses, and definitions at the
-  same depth sort as `cmp` sorts their names. `zig build check-stdlib`, part
+  same depth sort as `cmp` sorts their names. Mutually recursive definitions
+  cannot follow one another, so each such group shares one depth and its
+  members sort by name. `zig build check-stdlib`, part
   of `precommit`, refuses a prelude out of this order.
 - Enforce block structure in the dedicated source audit, whose scanner must
   ignore apparent headers and definition syntax inside multiline strings.

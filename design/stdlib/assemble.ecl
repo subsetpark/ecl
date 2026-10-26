@@ -183,6 +183,7 @@
   lines. Headings inside fenced code are ordinary text.")
 ("\n" split
  dup ("```" starts?) each 0 (+) scan 2 mod 0 =
+ over ("~~~" starts?) each 0 (+) scan 2 mod 0 = and
  over ("### " starts?) each and where 0 swap cons
  cut (trim-trailing "\n" join) each uncons) 'blocks def
 
