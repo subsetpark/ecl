@@ -407,12 +407,58 @@ thing in the system is a task.
   already implements in ECL, addressed by counter so the result is a pure
   function of the state.
 
+### Milestone 6: collapse-module-layers
+
+**Status**: executed (2026-10-26) on branch `zax--tasks-only-objects`, five
+commits after Milestone 5. An audit of the branch found that Milestones 2 and
+5 had deleted module state and the two-step constructor but kept the object
+graph those had justified. Landed with these deviations from the plan: the
+slot deletion and the cursor unification shipped as one commit, because
+rewriting three cursors against image entries only to replace them was
+double work; `*module*` inside a construction body answers with the name (a
+loosening the user chose over keeping a `'domain` branch); a helper word
+called during construction is now spelled `name.word` in traces, since the
+image knows its name before its body runs; and `unmodule` was renamed
+`undefm` in the same pass. Gates: `precommit` (which runs both retention
+soaks: `tests.module_test.` and `tests.module_registration_test.` are in its
+tier), `test-snapshots`, `test-e2e`, `spec`, `check-spec`, and
+`check-formal` passed. `src/modules.zig` went from 4371 to 2794 lines.
+
+**Definition of Done**:
+- The registration cursor owns the sealed image it publishes; `ImageRef`,
+  `RetainedImage`, and `ModuleCompletionDriver.sealed` are gone.
+- `Registration` is merged into `ModuleImage`: the image is created named,
+  learns its generation at publication, and is the one owner every pin,
+  lease, and directory entry retains. `ExecutionHome`, the two embedded
+  homes, `GenerationGuard`, and `ExecutionGeneration` are gone; the handle
+  types are `GenerationLease` and `GenerationPin`. Provenance is one field.
+- The slot layer is gone: `ModuleSlot`, `SlotLease`, the inventory, the
+  live/closing/retired phase, the recycle lists, `MaintenanceCursor`, the
+  retired-generation queue, `RemovalRetirement`, and the second publisher
+  level. A directory snapshot owns one reference per entry and retires
+  boundedly; a replaced or removed generation carries a `superseded` flag
+  for the qualified call-site cache.
+- Registration, removal, and aliasing are one compile-time-specialized
+  `EditCursor`: snapshot, validate, copy with the edit applied, publish under
+  the lock if the snapshot is still current, else discard and restart.
+- `*module*` in a construction body returns the name; `unmodule` is `undefm`.
+- `modules.pant` has no `Slot` and no separate `Generation`; `SPEC.src.md`,
+  `INTERPRETER.md`, and `STDLIB.md` describe one object per generation.
+
+**Why this is a safe pause point**: Observable behavior changes only where
+the user chose it (`*module*` in a body, trace spelling in a body, the
+`undefm` name). Every registry race reduces to one directory CAS.
+
+**Unlocks**: Nothing further in this workstream; the module layer is now the
+size of what it does.
+
 ## Dependency Graph
 - Milestone 1 -> []
 - Milestone 2 -> []
 - Milestone 3 -> [1]
 - Milestone 4 -> [3]
 - Milestone 5 -> [2, 4]
+- Milestone 6 -> [5]
 
 Milestones 1 and 2 may run in parallel. Milestone 5 waits for 4 so that the
 replacement for `rng` ships before `rng` is deleted.
@@ -490,6 +536,17 @@ replacement for `rng` ships before `rng` is deleted.
   module, because the manifest has one entry per name and `rand` is Zig.
 - **Spec slices travel with their code.** No milestone describes behavior a
   later milestone implements.
+- **Reload copies the directory.** Chosen while planning Milestone 6 over
+  keeping a per-name mutable cell: the cell was the whole reason slot
+  storage, leases, phases, and recycling existed. Registration and removal
+  already paid the O(modules) copy; reload now pays it too.
+- **One edit cursor, specialized at compile time.** Register, remove, and
+  alias differ only in validation and in which entries change; a comptime
+  kind gives each its own error set without an unreachable arm.
+- **Loosen rather than preserve.** `*module*` in a body returns the name
+  and traces inside a body are qualified, because keeping the old `'domain`
+  and plain spelling would have cost a published-state branch for no
+  observable benefit.
 
 ## Definition of Done (Acceptance Suite)
 
@@ -721,3 +778,23 @@ echoed final stack or the error dictionary on stderr.
   - **Verify by** `cmd`: `[[7 0]] (agent.serve) @spawn dup task.address 'g set (dup) g agent.call swap dup task.cancel task.await 'err at 'kind at`.
   - **Expected**: `[7 0] 'cancelled`.
   - **Traces to**: Milestone 4 — `agent.serve`.
+
+- **DoD-29 — a reload is seen through a cached qualified call site**
+  - **Assert**: a word whose body is one `m.x` occurrence observes each
+    reload of `m`, and `'undefined-word` after removal.
+  - **Verify by** `cmd`: `[] ((1) 'x def) 'm @defm (m.x) 'via def via [] ((2) 'x def) 'm @defm via via 'm undefm [] ((4) 'x def) 'm @defm via`.
+  - **Expected**: `1 2 2 4`.
+  - **Traces to**: Milestone 6 — `superseded` in `src/modules.zig`, read by
+    `tryEnterCurrent` from the call-site cache in `src/machine.zig`.
+
+- **DoD-30 — a construction body knows its name**
+  - **Assert**: `*module*` inside a `@defm` body is the name being built.
+  - **Verify by** `cmd`: `[] (*module* io.pp) 'named @defm`.
+  - **Expected**: stdout `'named`, exit 0.
+  - **Traces to**: Milestone 6 — named-at-birth image; pinned by `test/e2e.zig`.
+
+- **DoD-31 — `undefm` removes a module and `unmodule` is gone**
+  - **Assert**: removal is spelled `undefm`.
+  - **Verify by** `cmd`: `[] ((7) 'peek def) 'm @defm 'm undefm [] (m.peek) @attempt 'err at 'kind at` and `'unmodule which`.
+  - **Expected**: `'undefined-word` for both.
+  - **Traces to**: Milestone 6 — `src/module_prims.zig`.

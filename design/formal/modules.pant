@@ -8,11 +8,12 @@ context Registry.
 
 RegistryName.
 BindingName.
-> This model is normative for registry names, slots, aliases, generations,
-> and publication, including the construction of the images they publish;
+> This model is normative for registry names, aliases, generations, and
+> publication, including the construction of the images they publish;
 > abstract definitions and visibility; and call contexts and generation pins.
 > Modules are pure code: a registration carries no operand stack and no
-> state of its own.
+> state of its own, and a generation is nothing but an image published under
+> a name.
 >
 > It deliberately abstracts over source spelling and name validation,
 > construction-body evaluation (including the refusal of a body that leaves
@@ -26,64 +27,52 @@ BindingName.
 > performing a registry mutation.
 >
 > A qualified call resolves a registry name and public binding and pins the
-> slot's current generation in one atomic action. Resolution before replacement
-> or removal retains the selected generation; resolution afterward observes
-> only the replacement or the absence of the registration. Explicit
-> qualification always performs this fresh registry dispatch, including when
-> it names the caller's own registration.
+> name's current image in one atomic action. Resolution before replacement
+> or removal retains the selected image; resolution afterward observes only
+> the replacement or the absence of the registration. Explicit qualification
+> always performs this fresh registry dispatch, including when it names the
+> caller's own module.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
 ---
 canonical? module-name or alias? module-name.
 some call: Call,
-     slot: Slot,
-     generation: Generation,
      image: Image,
      definition: Definition,
      ~call-created? call,
-     slot = slot-of module-name,
-     slot-live? slot,
-     generation = current-generation slot,
-     image = generation-image generation,
+     image = image-of module-name,
      binding-present? image binding-name,
      definition = definition-at image binding-name,
      public? definition |
   call-created?' call and
   call-active?' call and
-  registered-call?' call and
-  call-generation' call = generation and
-  call-slot' call = slot and
   call-image' call = image and
   call-definition' call = definition and
   (all other: Call, other != call |
     call-created?' other = call-created? other and
     call-active?' other = call-active? other and
-    registered-call?' other = registered-call? other and
-    call-generation' other = call-generation other and
-    call-slot' other = call-slot other and
     call-image' other = call-image other and
     call-definition' other = call-definition other).
 
 where
 
-> The model distinguishes immutable module images, registration slots, and
-> publication generations. One image may be published into several slots;
-> every successful publication creates a distinct generation. A live slot has
-> exactly one canonical name, zero or more direct aliases, and one current
-> non-retired generation.
+> The model has one kind of module object: an immutable image, published
+> under exactly one canonical name as one generation. Reload publishes a new
+> image under the same name and retires the previous one; removal retires the
+> current image and drops its names. A name is live while it maps to a
+> published, non-retired image, which is that name's current generation. A
+> live canonical name has zero or more direct aliases.
 >
 > Definitions are immutable background relations. Each definition belongs to
 > one image and binding name, binding names are unique within an image, and
 > visibility controls which call actions may select it. The model begins with
-> no constructed images, created or live slots, occupied names, published
-> generations, or calls. Domain atoms are possibilities rather than initially
-> existing language values.
+> no constructed images, occupied names, published generations, or calls.
+> Domain atoms are possibilities rather than initially existing language
+> values.
 >
 > Retirement is monotonic: replacement or removal retires the former current
-> generation and no retired generation becomes current again. Active calls
-> retain their selected images and, for registered calls, their generations.
+> image and no retired image becomes current again. Active calls retain their
+> selected images.
 Call.
-Slot.
-Generation.
 Image.
 Definition.
 WordOccurrence.
@@ -91,9 +80,6 @@ InvocationContext.
 
 {Calls} call-active? call: Call => Bool.
 {Calls} call-created? call: Call => Bool.
-{Calls} registered-call? call: Call => Bool.
-{Calls} call-generation call: Call => Generation.
-{Calls} call-slot call: Call => Slot.
 {Calls} call-image call: Call => Image.
 {Calls} call-definition call: Call => Definition.
 
@@ -107,14 +93,10 @@ invocation-call invoker: InvocationContext => Call.
 
 {Registry} canonical? name: RegistryName => Bool.
 {Registry} alias? name: RegistryName => Bool.
-{Registry} slot-of name: RegistryName => Slot.
-{Registry} slot-created? slot: Slot => Bool.
-{Registry} slot-live? slot: Slot => Bool.
-{Registry} current-generation slot: Slot => Generation.
-{Registry} generation-published? generation: Generation => Bool.
-{Registry} generation-retired? generation: Generation => Bool.
-{Registry} generation-slot generation: Generation => Slot.
-{Registry} generation-image generation: Generation => Image.
+{Registry} image-of name: RegistryName => Image.
+{Registry} image-published? image: Image => Bool.
+{Registry} image-retired? image: Image => Bool.
+{Registry} image-name image: Image => RegistryName.
 
 binding-present? image: Image, name: BindingName => Bool.
 definition-at image: Image, name: BindingName => Definition.
@@ -143,40 +125,37 @@ initially all left: Definition, right: Definition,
 all registry-name: RegistryName |
   ~(canonical? registry-name and alias? registry-name).
 
+> A live name maps to its current generation.
 all registry-name: RegistryName,
     canonical? registry-name or alias? registry-name |
-  slot-live? (slot-of registry-name).
+  image-published? (image-of registry-name) and
+  ~image-retired? (image-of registry-name).
 
-all slot: Slot, slot-live? slot |
-  slot-created? slot.
+all registry-name: RegistryName, canonical? registry-name |
+  image-name (image-of registry-name) = registry-name.
 
-all slot: Slot, slot-live? slot |
-  #(each registry-name: RegistryName,
-         canonical? registry-name and slot-of registry-name = slot |
-      registry-name) = 1.
+> An alias resolves to the current image of a live canonical name.
+all registry-name: RegistryName, alias? registry-name |
+  canonical? (image-name (image-of registry-name)) and
+  image-of (image-name (image-of registry-name)) = image-of registry-name.
 
-all slot: Slot, slot-live? slot |
-  generation-published? (current-generation slot) and
-  ~generation-retired? (current-generation slot) and
-  generation-slot (current-generation slot) = slot.
+all image: Image, image-published? image |
+  constructed? image.
 
-all generation: Generation, generation-published? generation |
-  constructed? (generation-image generation).
-
-> An image exists only as the image of a published generation: no program
-> can hold one any other way.
+> An image exists only as a published generation: no program can hold one
+> any other way.
 all image: Image, constructed? image |
-  some generation: Generation |
-    generation-published? generation and generation-image generation = image.
+  image-published? image.
 
-all generation: Generation, generation-retired? generation |
-  generation-published? generation.
+all image: Image, image-retired? image |
+  image-published? image.
 
-all generation: Generation,
-    generation-published? generation,
-    ~generation-retired? generation |
-  slot-live? (generation-slot generation) and
-  current-generation (generation-slot generation) = generation.
+> A published image that is not retired is current under its own name.
+all image: Image,
+    image-published? image,
+    ~image-retired? image |
+  canonical? (image-name image) and
+  image-of (image-name image) = image.
 
 all call: Call, call-active? call |
   call-created? call.
@@ -185,22 +164,11 @@ all call: Call, call-active? call |
   constructed? (call-image call) and
   definition-image (call-definition call) = call-image call.
 
-all call: Call, call-active? call, registered-call? call |
-  generation-published? (call-generation call) and
-  generation-slot (call-generation call) = call-slot call and
-  generation-image (call-generation call) = call-image call.
-
 initially all image: Image |
-  ~constructed? image.
+  ~constructed? image and ~image-published? image and ~image-retired? image.
 
 initially all registry-name: RegistryName |
   ~canonical? registry-name and ~alias? registry-name.
-
-initially all slot: Slot |
-  ~slot-created? slot and ~slot-live? slot.
-
-initially all generation: Generation |
-  ~generation-published? generation and ~generation-retired? generation.
 
 initially all call: Call |
   ~call-created? call and ~call-active? call.
@@ -214,63 +182,52 @@ where
 > `Register` is `@defm`'s publication: it constructs a fresh image and
 > publishes it in one step, because no program can observe an image between
 > the two. It is an ordered upsert. Publishing under a missing canonical name
-> creates a fresh slot; publishing under an existing canonical name keeps that
-> slot. Every successful registration publishes a fresh generation and retires
-> the previous current generation, and nothing else carries over. The
-> supplied invocation context is the top-level evaluator or the exact call
-> performing the mutation.
+> creates the registration; publishing under an existing canonical name
+> retires that name's current image, and every alias of the name resolves to
+> the new image from then on. Nothing else carries over. The supplied
+> invocation context is the top-level evaluator or the exact call performing
+> the mutation.
 Registry, Construction ~> Register @ invoker: InvocationContext,
                                      image: Image,
                                      module-name: RegistryName,
                                      ~constructed? image,
                                      ~alias? module-name.
 ---
-(some slot: Slot,
-     (canonical? module-name and slot = slot-of module-name) or
-       (~canonical? module-name and ~slot-created? slot),
-     generation: Generation,
-     ~generation-published? generation |
   canonical?' module-name and
   ~alias?' module-name and
-  slot-of' module-name = slot and
+  image-of' module-name = image and
   (all other-name: RegistryName, other-name != module-name |
     canonical?' other-name = canonical? other-name and
     alias?' other-name = alias? other-name and
-    slot-of' other-name = slot-of other-name) and
+    ((canonical? module-name and
+      alias? other-name and
+      image-of other-name = image-of module-name) ->
+      image-of' other-name = image) and
+    (~(canonical? module-name and
+       alias? other-name and
+       image-of other-name = image-of module-name) ->
+      image-of' other-name = image-of other-name)) and
 
-  slot-created?' slot and
-  slot-live?' slot and
-  current-generation' slot = generation and
-  (all other-slot: Slot, other-slot != slot |
-    slot-created?' other-slot = slot-created? other-slot and
-    slot-live?' other-slot = slot-live? other-slot and
-    current-generation' other-slot = current-generation other-slot) and
-
-  generation-published?' generation and
-  ~generation-retired?' generation and
-  generation-slot' generation = slot and
-  generation-image' generation = image and
+  image-published?' image and
+  ~image-retired?' image and
+  image-name' image = module-name and
   constructed?' image and
   (all other-image: Image, other-image != image |
-    constructed?' other-image = constructed? other-image) and
-  (all other-generation: Generation, other-generation != generation |
-    generation-published?' other-generation =
-      generation-published? other-generation and
-    generation-retired?' other-generation =
-      (generation-retired? other-generation or
-       (canonical? module-name and
-        other-generation = current-generation slot)) and
-    generation-slot' other-generation = generation-slot other-generation and
-    generation-image' other-generation = generation-image other-generation)).
+    constructed?' other-image = constructed? other-image and
+    image-published?' other-image = image-published? other-image and
+    image-retired?' other-image =
+      (image-retired? other-image or
+       (canonical? module-name and other-image = image-of module-name)) and
+    image-name' other-image = image-name other-image).
 
 where
 
 > `Add alias` resolves either kind of occupied target name and stores a direct
-> reference to its live slot; semantic alias chains do not exist. The alias
-> shares the slot's current generation and lifetime. Canonical and alias names
-> form one disjoint namespace, and an occupied name cannot be repointed. The
-> supplied invocation context is the top-level evaluator or the exact call
-> performing the mutation.
+> reference to its current image; semantic alias chains do not exist. The
+> alias follows the canonical name through reload and removal. Canonical and
+> alias names form one disjoint namespace, and an occupied name cannot be
+> repointed. The supplied invocation context is the top-level evaluator or the
+> exact call performing the mutation.
 Registry ~> Add alias @ invoker: InvocationContext,
                         alias-name: RegistryName,
                         target-name: RegistryName,
@@ -280,69 +237,51 @@ Registry ~> Add alias @ invoker: InvocationContext,
 ---
   ~canonical?' alias-name and
   alias?' alias-name and
-  slot-of' alias-name = slot-of target-name and
+  image-of' alias-name = image-of target-name and
   (all other-name: RegistryName, other-name != alias-name |
     canonical?' other-name = canonical? other-name and
     alias?' other-name = alias? other-name and
-    slot-of' other-name = slot-of other-name) and
+    image-of' other-name = image-of other-name) and
 
-  (all slot: Slot |
-    slot-created?' slot = slot-created? slot and
-    slot-live?' slot = slot-live? slot and
-    current-generation' slot = current-generation slot) and
-
-  (all generation: Generation |
-    generation-published?' generation = generation-published? generation and
-    generation-retired?' generation = generation-retired? generation and
-    generation-slot' generation = generation-slot generation and
-    generation-image' generation = generation-image generation).
+  (all image: Image |
+    image-published?' image = image-published? image and
+    image-retired?' image = image-retired? image and
+    image-name' image = image-name image).
 
 where
 
-> `Remove` resolves a canonical name or alias to its slot, then atomically
-> closes that slot, removes its canonical name and every alias, and retires
-> its current generation. Removal does not end already active calls, whose
-> pins remain valid. A later registration of the same spelling must allocate
-> a fresh slot. The supplied invocation context is the top-level evaluator or
-> the exact call performing the mutation.
+> `Remove` resolves a canonical name or alias to its current image, then
+> atomically retires that image and removes its canonical name and every
+> alias. Removal does not end already active calls, whose pins remain valid.
+> A later registration of the same spelling is a fresh generation that shares
+> nothing with the removed one. The supplied invocation context is the
+> top-level evaluator or the exact call performing the mutation.
 Registry ~> Remove @ invoker: InvocationContext,
                      module-name: RegistryName,
                      canonical? module-name or alias? module-name.
 ---
-(some slot: Slot,
-     slot = slot-of module-name |
+(some image: Image,
+     image = image-of module-name |
   (all registry-name: RegistryName |
     canonical?' registry-name =
-      (canonical? registry-name and slot-of registry-name != slot) and
+      (canonical? registry-name and image-of registry-name != image) and
     alias?' registry-name =
-      (alias? registry-name and slot-of registry-name != slot) and
-    slot-of' registry-name = slot-of registry-name) and
+      (alias? registry-name and image-of registry-name != image) and
+    image-of' registry-name = image-of registry-name) and
 
-  slot-created?' slot = slot-created? slot and
-  ~slot-live?' slot and
-  current-generation' slot = current-generation slot and
-  (all other-slot: Slot, other-slot != slot |
-    slot-created?' other-slot = slot-created? other-slot and
-    slot-live?' other-slot = slot-live? other-slot and
-    current-generation' other-slot = current-generation other-slot) and
-
-  (all generation: Generation |
-    generation-published?' generation = generation-published? generation and
-    generation-retired?' generation =
-      (generation-retired? generation or
-       generation = current-generation slot) and
-    generation-slot' generation = generation-slot generation and
-    generation-image' generation = generation-image generation)).
+  (all other-image: Image |
+    image-published?' other-image = image-published? other-image and
+    image-retired?' other-image =
+      (image-retired? other-image or other-image = image) and
+    image-name' other-image = image-name other-image)).
 
 where
 
 > `Begin scoped call` resolves the name stored in a word occurrence against the
 > image stored in that occurrence. A quotation or word occurrence owns this
-> scope but does not cache a definition or generation. The image must still be
-> available through a current generation or another active call. Same-image dispatch from a registered caller preserves its pinned slot
-> and generation; other scoped dispatch has no registration context. Private
-> definitions are therefore available to same-image scoped resolution without
-> becoming publicly invocable.
+> scope but does not cache a definition. The image must still be current or
+> held by another active call. Private definitions are available to
+> same-image scoped resolution without becoming publicly invocable.
 Calls ~> Begin scoped call @ caller: Call,
                              occurrence: WordOccurrence,
                              binding-name: BindingName,
@@ -352,10 +291,7 @@ Calls ~> Begin scoped call @ caller: Call,
 some image: Image,
      image = occurrence-image occurrence,
      constructed? image,
-     #(each slot: Slot,
-            slot-live? slot and
-            generation-image (current-generation slot) = image |
-         slot) > 0 or
+     (image-published? image and ~image-retired? image) or
        #(each owner: Call,
               call-active? owner and call-image owner = image |
            owner) > 0,
@@ -367,47 +303,30 @@ some image: Image,
      ~call-created? callee |
   call-created?' callee and
   call-active?' callee and
-  registered-call?' callee =
-    (registered-call? caller and call-image caller = image) and
-  ((registered-call? caller and call-image caller = image) ->
-    call-generation' callee = call-generation caller and
-    call-slot' callee = call-slot caller) and
-  (~(registered-call? caller and call-image caller = image) ->
-    call-generation' callee = call-generation callee and
-    call-slot' callee = call-slot callee) and
   call-image' callee = image and
   call-definition' callee = definition and
   (all other: Call, other != callee |
     call-created?' other = call-created? other and
     call-active?' other = call-active? other and
-    registered-call?' other = registered-call? other and
-    call-generation' other = call-generation other and
-    call-slot' other = call-slot other and
     call-image' other = call-image other and
     call-definition' other = call-definition other).
 
 where
 
-> `Complete call` releases the call's image and generation pins after its
-> invocation has completed. Calls are split
-> into begin and complete actions only to express publication concurrency; the
-> prose-level invocation remains one language operation.
+> `Complete call` releases the call's image pin after its invocation has
+> completed. Calls are split into begin and complete actions only to express
+> publication concurrency; the prose-level invocation remains one language
+> operation.
 Calls ~> Complete call @ completed: Call,
                        call-active? completed.
 ---
 call-created?' completed = call-created? completed and
   ~call-active?' completed and
-  registered-call?' completed = registered-call? completed and
-  call-generation' completed = call-generation completed and
-  call-slot' completed = call-slot completed and
   call-image' completed = call-image completed and
   call-definition' completed = call-definition completed and
 
   (all other: Call, other != completed |
     call-created?' other = call-created? other and
     call-active?' other = call-active? other and
-    registered-call?' other = registered-call? other and
-    call-generation' other = call-generation other and
-    call-slot' other = call-slot other and
     call-image' other = call-image other and
     call-definition' other = call-definition other).

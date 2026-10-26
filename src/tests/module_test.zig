@@ -1091,6 +1091,39 @@ test "registry: old generation leases survive reload and reclaim after release" 
     try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
 }
 
+test "registry: a removed module outlives its directory only through its leases" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var environment = try env.Env.init(&host);
+    defer {
+        host.cleanup().drain();
+        environment.deinit();
+    }
+    var registry = try modules.Registry.init(host.cleanup());
+    defer registry.deinit();
+    // Enough entries that the directory copies and retirements walk more than
+    // one slot, so a release missed on either path would surface as a leak
+    // or a dangling lease under the testing allocator.
+    var names: [8]intern.ModuleName = undefined;
+    for (&names, 0..) |*name, index| {
+        var spelling: [32]u8 = undefined;
+        name.* = try intern.internModuleName(try std.fmt.bufPrint(&spelling, "chain-entry-{d}", .{index}));
+        try commitEmptyModule(&registry, name.*);
+    }
+    var kept = modules.testing.acquire(&registry, names[3]).?;
+    defer kept.deinit();
+    try modules.testing.remove(&registry, names[3]);
+    try modules.testing.remove(&registry, names[5]);
+    for (0..64) |_| _ = host.domain().advance(1);
+    // The name is gone from the current directory, but the generation the
+    // lease holds is intact until the lease goes.
+    try std.testing.expectEqual(@as(?modules.GenerationLease, null), modules.testing.acquire(&registry, names[3]));
+    try std.testing.expectEqual(names[3], kept.name());
+    try std.testing.expectEqual(@as(u64, 1), kept.generationNumber());
+    var still = modules.testing.acquire(&registry, names[4]).?;
+    still.deinit();
+}
+
 test "registry: generation cursors independently pin their snapshot" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();

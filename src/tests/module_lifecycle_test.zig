@@ -225,6 +225,21 @@ test "modules: *module* reports the active canonical registration" {
     });
 }
 
+test "modules: a reload and a removal are seen through a cached qualified call site" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // `via` is one source occurrence of `m.x`, so every call after the first
+    // comes through the per-unit call-site cache. Each reload must evict it.
+    try expectOk(&runtime, "[] ((1) 'x def) 'm @defm (m.x) 'via def");
+    try expectStack(&runtime, "via", "1");
+    try expectStack(&runtime, "[] ((2) 'x def) 'm @defm via via", "2 2");
+    try expectStack(&runtime, "[] ((3) 'x def) 'm @defm via", "3");
+    try expectStack(&runtime, "'m undefm [] ((4) 'x def) 'm @defm via", "4");
+    try expectErrorContains(&runtime, "'m undefm via", &.{"'kind 'undefined-word"});
+}
+
 test "modules: explicit seeds initialize the @defm construction stack in order" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();

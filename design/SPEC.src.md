@@ -58,7 +58,7 @@ Action parameters identify either inputs supplied by ECL execution or existing
 semantic entities whose transition the action records; they need not denote
 first-class ECL values. A fact derived from modeled state is expressed as the
 product of a rule rather than repeated as an independent parameter. Fresh
-runtime identities such as slots, generations, calls, and transactions are
+runtime identities such as generations, calls, and transactions are
 selected existentially from unused domain atoms by the transition that creates
 them. A later action that changes one of those existing entities takes that
 entity as a parameter.
@@ -565,8 +565,9 @@ returns the source name attached to its currently executing reader-authored
 occurrence; a definition therefore keeps reporting the file that authored its
 body when another file calls it. Runtime-assembled code has no source
 provenance, so `*file*` is `'domain` there rather than falling back to its
-caller. `*module*` returns the canonical registration selected by the current
-module activation. The stars are ordinary word characters with no reader
+caller. `*module*` returns the canonical name of the module whose code is
+running, including a construction body that has not yet published; at the
+root there is no module and it is `'domain`. The stars are ordinary word characters with no reader
 meaning, and the convention applies to shipped vocabulary without reserving
 the spelling from user definitions.
 
@@ -918,7 +919,8 @@ that name.
   stack is `'domain` at completion and publishes nothing: a module body
   defines words and keeps no state. Publication is an upsert: a missing name
   creates its registration, and an existing name installs the new image as the
-  current generation and carries nothing else over. A body failure publishes
+  current generation and carries nothing else over; the latter is a reload,
+  whether `@defm` or `load` performs it. A body failure publishes
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
@@ -984,9 +986,7 @@ that name.
 - A test-built module image freezes its definitions and test catalog
   together; an application-built image has an empty catalog. Registration
   publishes that image as one generation: reload replaces code and tests
-  atomically; removal removes both; aliases never create another suite; and
-  registering one image under two canonical names creates two independently
-  discoverable suites.
+  atomically; removal removes both; and aliases never create another suite.
 - **Test discovery and execution form a closed Session mode.** Ordinary
   Sessions reject `tests` and `@test` with `'domain`. A test Session's `tests`
   returns canonical registrations once each, including root sources' private
@@ -1011,12 +1011,11 @@ that name.
   status; project, load, resolve, or runner failures are command failures.
   The default runner is sequential and deterministic, reports every result,
   continues after ordinary failures, and exits 1 when any test failed.
-- `*module*` and every other slot-dependent operation use only the
-  registration context established by actual dispatch; they never infer one
-  from image identity. Missing authority becomes a `'domain` error only when
-  such an operation is reached, so construction roots, escaped quotations, and
-  private calls remain valid. An application through escaped module-authored code still
-  crosses a module boundary for effect checking, despite having no slot. An
+- Module code always runs under the name of the image that defined it:
+  dispatch through a registered name, a construction body, an escaped
+  quotation, and a private call all report the same `*module*` and spell
+  their trace words `name.word`. An application through escaped
+  module-authored code still crosses a module boundary for effect checking. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
@@ -1117,15 +1116,13 @@ that name.
   stack fails with `'domain` and publishes nothing. State that must outlive a
   word lives in a task and is reached through its mailbox (see
   [Mailboxes](#mailboxes)).
-- **Slot lifetime is an owned capability.** Every published generation owns a
-  non-retargetable slot lease for its whole lifetime. Resolution retains an
-  operation lease before dropping the directory snapshot that supplied the
-  slot entry, and reload and removal retain that witness across their
-  complete check/use interval. Removal does not wait for old generation pins,
-  but retired slot storage is not reusable until all such leases and old
-  directory snapshots have drained. A removed generation can therefore
-  observe only its original closed slot, never an unrelated module that later
-  reuses registry capacity.
+- **A generation lives as long as something can reach it.** The registry's
+  current directory holds every published module; resolution retains the
+  generation it finds before releasing the directory it found it in, and a
+  dispatched call keeps its generation for its whole run. Removal and reload
+  do not wait for old generation pins: an already-dispatched call finishes
+  under the generation it resolved, and a later registration of the same
+  spelling is a fresh generation that shares nothing with the removed one.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
 - `undefm` accepts a canonical name or alias. An unregistered name is

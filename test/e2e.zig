@@ -1216,6 +1216,12 @@ test "e2e: reflection acceptance" {
     });
 }
 
+test "e2e: a construction body already knows the name it is built under" {
+    var named = try run(&.{ build_options.ecl_exe, "-e", "[] (*module* io.pp) 'named @defm" });
+    defer named.deinit();
+    try named.expect(.{ .exit_code = 0, .stdout = "'named\n", .stderr = "" });
+}
+
 test "e2e: module removal acceptance" {
     const module = "[] ((7) 'peek def) 'core.c @defm ";
     var by_name = try run(&.{

@@ -698,44 +698,51 @@ invoker's root. `ExecutionSite` carries these together and exposes named
 constructors for root, image, inherited, and resumed execution. They cannot safely be reconstructed
 from one another. A source definition may resolve against its defining chain
 while inheriting a caller's module home, and a construction body runs against
-an image that has private code but no registered state slot yet.
+an image that is named but not yet published.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.
 
-### Images and registrations have different lifetimes
+### A module is one object per generation
 
 A module image is immutable code and metadata with its own environment and
-root scope, created by `@defm` and published in the same step. A registry
-registration publishes an image under a canonical name as one generation and
-owns nothing else: a slot holds its current generation and the lease count
-that keeps its storage valid while old code or a resolution cursor can still
-name it. A construction body that leaves values on its stack is refused
-before publication, so no image carries state out of its body.
+root scope. It is created already named, by `@defm` or by a loader that has
+validated the name, and it learns its generation number when the registry
+publishes it. Nothing else represents a registration: the image is the one
+owner that every pin, lease, and directory entry retains, so a generation
+lives exactly as long as something can still reach it. A construction body
+that leaves values on its stack is refused before publication, so no image
+carries state out of its body.
 
-Separating the concepts supports these cases cleanly:
+The registry is a chain of immutable directory snapshots. Each snapshot maps
+canonical names to images and short names to canonical names, and owns one
+reference to every image it maps. Every mutation — registration, reload,
+removal, alias — is one bounded cursor: snapshot the current directory,
+validate against it, copy it with the edit applied while retaining each entry
+copied, and publish the copy under the writer lock if the snapshot is still
+current; otherwise discard the copy and start over. A superseded snapshot
+stays chained behind its successor until its last reader leaves, then releases
+its entries one per retirement step before freeing itself; a discarded
+candidate takes the same path. Reload therefore copies the directory rather
+than swapping a cell in place. That is the cost accepted for having no mutable
+per-name storage whose lifetime would have to be managed across snapshots.
 
-- replacing a registration publishes a new generation without rewriting the
-  old image; and
-- old code may finish under a generation pin while new qualified calls reach
-  the current generation.
+Replacement and removal mark the generation they displace as superseded under
+the same lock. Old code keeps running: a Unit retains each generation it
+dispatches through, and a call that already resolved finishes under the
+generation it resolved. This resembles Erlang's distinction between old and
+current module code and read-copy-update's separation of publication from
+reclamation; reference-driven lifetimes make both fall out of the one owner.
 
-This resembles Erlang's distinction between old and current module code. ecl
-uses reference-driven lifetimes, so any historical generation remains alive
-while a reader or execution pin needs it. It also resembles read-copy-update:
-publication makes a new immutable version reachable, while reclamation waits
-for readers and execution pins to leave the old version.
-
-Qualified lookup acquires a generation lease, resolves a public binding, and
-turns the result into an execution pin before code runs. A Unit retains each
-generation it dispatches through. A module-local word can therefore keep
-running during replacement without a raw environment pointer escaping.
+Qualified lookup acquires an observation lease on the directory entry while
+the directory lease proves the entry owned, resolves a public binding, and
+turns the lease into an execution pin before code runs.
 
 Qualified words keep a small per-Unit cache keyed by source occurrence. A hit
-holds the binding cell and the registration generation it was found under, and
-is valid only while that generation is still the registration's current one; a
-stale entry is evicted and the word resolves afresh. Plain words need no cache:
-their slots answer directly.
+holds the binding cell and a lease on the generation it was found under, and
+is executable only while that generation is not superseded; a stale entry is
+evicted and the word resolves afresh. The superseded flag exists for this one
+consumer. Plain words need no cache: their slots answer directly.
 
 The reserved qualifier `core` is decided before any of that. When the
 resolution cursor splits a dotted spelling and the module segment is exactly

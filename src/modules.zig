@@ -2782,6 +2782,12 @@ pub const testing = if (builtin.is_test) struct {
         };
     }
 
+    pub fn remove(registry: *Registry, name: intern.ModuleName) RemovalError!void {
+        var cursor = registry.removalCursor(name);
+        defer cursor.deinit();
+        return poll.driveVoidFallible(&cursor, .{});
+    }
+
     pub fn alias(
         registry: *Registry,
         short: intern.BindingName,

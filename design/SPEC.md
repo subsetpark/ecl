@@ -59,7 +59,7 @@ Action parameters identify either inputs supplied by ECL execution or existing
 semantic entities whose transition the action records; they need not denote
 first-class ECL values. A fact derived from modeled state is expressed as the
 product of a rule rather than repeated as an independent parameter. Fresh
-runtime identities such as slots, generations, calls, and transactions are
+runtime identities such as generations, calls, and transactions are
 selected existentially from unused domain atoms by the transition that creates
 them. A later action that changes one of those existing entities takes that
 entity as a parameter.
@@ -1187,8 +1187,9 @@ returns the source name attached to its currently executing reader-authored
 occurrence; a definition therefore keeps reporting the file that authored its
 body when another file calls it. Runtime-assembled code has no source
 provenance, so `*file*` is `'domain` there rather than falling back to its
-caller. `*module*` returns the canonical registration selected by the current
-module activation. The stars are ordinary word characters with no reader
+caller. `*module*` returns the canonical name of the module whose code is
+running, including a construction body that has not yet published; at the
+root there is no module and it is `'domain`. The stars are ordinary word characters with no reader
 meaning, and the convention applies to shipped vocabulary without reserving
 the spelling from user definitions.
 
@@ -1540,7 +1541,8 @@ that name.
   stack is `'domain` at completion and publishes nothing: a module body
   defines words and keeps no state. Publication is an upsert: a missing name
   creates its registration, and an existing name installs the new image as the
-  current generation and carries nothing else over. A body failure publishes
+  current generation and carries nothing else over; the latter is a reload,
+  whether `@defm` or `load` performs it. A body failure publishes
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
@@ -1579,7 +1581,7 @@ that name.
 
 ##### Action
 
-> This model is normative for registry names, slots, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts and generation pins. Modules are pure code: a registration carries no operand stack and no state of its own.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call resolves a registry name and public binding and pins the slot's current generation in one atomic action. Resolution before replacement or removal retains the selected generation; resolution afterward observes only the replacement or the absence of the registration. Explicit qualification always performs this fresh registry dispatch, including when it names the caller's own registration.
+> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts and generation pins. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call resolves a registry name and public binding and pins the name's current image in one atomic action. Resolution before replacement or removal retains the selected image; resolution afterward observes only the replacement or the absence of the registration. Explicit qualification always performs this fresh registry dispatch, including when it names the caller's own module.
 
 **`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
 
@@ -1587,19 +1589,15 @@ that name.
 
 **canonical?** *module-name* ∨ **alias?** *module-name*.
 
-∃ *call*: `Call`, *slot*: `Slot`, *generation*: `Generation`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *slot* = **slot-of** *module-name*, **slot-live?** *slot*, *generation* = **current-generation** *slot*, *image* = **generation-image** *generation*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **registered-call?**′ *call* ∧ **call-generation**′ *call* = *generation* ∧ **call-slot**′ *call* = *slot* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
+∃ *call*: `Call`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *image* = **image-of** *module-name*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
 #### Chapter 2
 
 ##### Domains
 
-> The model distinguishes immutable module images, registration slots, and publication generations. One image may be published into several slots; every successful publication creates a distinct generation. A live slot has exactly one canonical name, zero or more direct aliases, and one current non-retired generation.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, created or live slots, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement or removal retires the former current generation and no retired generation becomes current again. Active calls retain their selected images and, for registered calls, their generations.
+> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one; removal retires the current image and drops its names. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement or removal retires the former current image and no retired image becomes current again. Active calls retain their selected images.
 
 `Call`.
-
-`Slot`.
-
-`Generation`.
 
 `Image`.
 
@@ -1614,12 +1612,6 @@ that name.
 {**`Calls`**} **call-active?** *call*: `Call` ⇒ `Bool`.
 
 {**`Calls`**} **call-created?** *call*: `Call` ⇒ `Bool`.
-
-{**`Calls`**} **registered-call?** *call*: `Call` ⇒ `Bool`.
-
-{**`Calls`**} **call-generation** *call*: `Call` ⇒ `Generation`.
-
-{**`Calls`**} **call-slot** *call*: `Call` ⇒ `Slot`.
 
 {**`Calls`**} **call-image** *call*: `Call` ⇒ `Image`.
 
@@ -1639,21 +1631,13 @@ that name.
 
 {**`Registry`**} **alias?** *name*: `RegistryName` ⇒ `Bool`.
 
-{**`Registry`**} **slot-of** *name*: `RegistryName` ⇒ `Slot`.
+{**`Registry`**} **image-of** *name*: `RegistryName` ⇒ `Image`.
 
-{**`Registry`**} **slot-created?** *slot*: `Slot` ⇒ `Bool`.
+{**`Registry`**} **image-published?** *image*: `Image` ⇒ `Bool`.
 
-{**`Registry`**} **slot-live?** *slot*: `Slot` ⇒ `Bool`.
+{**`Registry`**} **image-retired?** *image*: `Image` ⇒ `Bool`.
 
-{**`Registry`**} **current-generation** *slot*: `Slot` ⇒ `Generation`.
-
-{**`Registry`**} **generation-published?** *generation*: `Generation` ⇒ `Bool`.
-
-{**`Registry`**} **generation-retired?** *generation*: `Generation` ⇒ `Bool`.
-
-{**`Registry`**} **generation-slot** *generation*: `Generation` ⇒ `Slot`.
-
-{**`Registry`**} **generation-image** *generation*: `Generation` ⇒ `Image`.
+{**`Registry`**} **image-name** *image*: `Image` ⇒ `RegistryName`.
 
 **binding-present?** *image*: `Image`, *name*: `BindingName` ⇒ `Bool`.
 
@@ -1677,37 +1661,35 @@ initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** 
 
 ∀ *registry-name*: `RegistryName` · ¬(**canonical?** *registry-name* ∧ **alias?** *registry-name*).
 
-∀ *registry-name*: `RegistryName`, (**canonical?** *registry-name* ∨ **alias?** *registry-name*) · **slot-live?** (**slot-of** *registry-name*).
+> A live name maps to its current generation.
 
-∀ *slot*: `Slot`, **slot-live?** *slot* · **slot-created?** *slot*.
+∀ *registry-name*: `RegistryName`, (**canonical?** *registry-name* ∨ **alias?** *registry-name*) · **image-published?** (**image-of** *registry-name*) ∧ ¬**image-retired?** (**image-of** *registry-name*).
 
-∀ *slot*: `Slot`, **slot-live?** *slot* · #(each *registry-name*: `RegistryName`, **canonical?** *registry-name* ∧ **slot-of** *registry-name* = *slot* · *registry-name*) = 1.
+∀ *registry-name*: `RegistryName`, **canonical?** *registry-name* · **image-name** (**image-of** *registry-name*) = *registry-name*.
 
-∀ *slot*: `Slot`, **slot-live?** *slot* · **generation-published?** (**current-generation** *slot*) ∧ ¬**generation-retired?** (**current-generation** *slot*) ∧ **generation-slot** (**current-generation** *slot*) = *slot*.
+> An alias resolves to the current image of a live canonical name.
 
-∀ *generation*: `Generation`, **generation-published?** *generation* · **constructed?** (**generation-image** *generation*).
+∀ *registry-name*: `RegistryName`, **alias?** *registry-name* · **canonical?** (**image-name** (**image-of** *registry-name*)) ∧ **image-of** (**image-name** (**image-of** *registry-name*)) = **image-of** *registry-name*.
 
-> An image exists only as the image of a published generation: no program can hold one any other way.
+∀ *image*: `Image`, **image-published?** *image* · **constructed?** *image*.
 
-∀ *image*: `Image`, **constructed?** *image* · ∃ *generation*: `Generation` · **generation-published?** *generation* ∧ **generation-image** *generation* = *image*.
+> An image exists only as a published generation: no program can hold one any other way.
 
-∀ *generation*: `Generation`, **generation-retired?** *generation* · **generation-published?** *generation*.
+∀ *image*: `Image`, **constructed?** *image* · **image-published?** *image*.
 
-∀ *generation*: `Generation`, **generation-published?** *generation*, ¬**generation-retired?** *generation* · **slot-live?** (**generation-slot** *generation*) ∧ **current-generation** (**generation-slot** *generation*) = *generation*.
+∀ *image*: `Image`, **image-retired?** *image* · **image-published?** *image*.
+
+> A published image that is not retired is current under its own name.
+
+∀ *image*: `Image`, **image-published?** *image*, ¬**image-retired?** *image* · **canonical?** (**image-name** *image*) ∧ **image-of** (**image-name** *image*) = *image*.
 
 ∀ *call*: `Call`, **call-active?** *call* · **call-created?** *call*.
 
 ∀ *call*: `Call`, **call-active?** *call* · **constructed?** (**call-image** *call*) ∧ **definition-image** (**call-definition** *call*) = **call-image** *call*.
 
-∀ *call*: `Call`, **call-active?** *call*, **registered-call?** *call* · **generation-published?** (**call-generation** *call*) ∧ **generation-slot** (**call-generation** *call*) = **call-slot** *call* ∧ **generation-image** (**call-generation** *call*) = **call-image** *call*.
-
-initially ∀ *image*: `Image` · ¬**constructed?** *image*.
+initially ∀ *image*: `Image` · ¬**constructed?** *image* ∧ ¬**image-published?** *image* ∧ ¬**image-retired?** *image*.
 
 initially ∀ *registry-name*: `RegistryName` · ¬**canonical?** *registry-name* ∧ ¬**alias?** *registry-name*.
-
-initially ∀ *slot*: `Slot` · ¬**slot-created?** *slot* ∧ ¬**slot-live?** *slot*.
-
-initially ∀ *generation*: `Generation` · ¬**generation-published?** *generation* ∧ ¬**generation-retired?** *generation*.
 
 initially ∀ *call*: `Call` · ¬**call-created?** *call* ∧ ¬**call-active?** *call*.
 
@@ -1719,62 +1701,62 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Action
 
-> `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing canonical name creates a fresh slot; publishing under an existing canonical name keeps that slot. Every successful registration publishes a fresh generation and retires the previous current generation, and nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing canonical name creates the registration; publishing under an existing canonical name retires that name's current image, and every alias of the name resolves to the new image from then on. Nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
 **`Registry`**, **`Construction`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, ¬**constructed?** *image*, ¬**alias?** *module-name*.
 
 ---
 
-∃ *slot*: `Slot`, *generation*: `Generation`, (**canonical?** *module-name* ∧ *slot* = **slot-of** *module-name* ∨ ¬**canonical?** *module-name* ∧ ¬**slot-created?** *slot*), ¬**generation-published?** *generation* · **canonical?**′ *module-name* ∧ ¬**alias?**′ *module-name* ∧ **slot-of**′ *module-name* = *slot* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **slot-of**′ *other-name* = **slot-of** *other-name*) ∧ **slot-created?**′ *slot* ∧ **slot-live?**′ *slot* ∧ **current-generation**′ *slot* = *generation* ∧ (∀ *other-slot*: `Slot`, *other-slot* ≠ *slot* · **slot-created?**′ *other-slot* = **slot-created?** *other-slot* ∧ **slot-live?**′ *other-slot* = **slot-live?** *other-slot* ∧ **current-generation**′ *other-slot* = **current-generation** *other-slot*) ∧ **generation-published?**′ *generation* ∧ ¬**generation-retired?**′ *generation* ∧ **generation-slot**′ *generation* = *slot* ∧ **generation-image**′ *generation* = *image* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image*) ∧ (∀ *other-generation*: `Generation`, *other-generation* ≠ *generation* · **generation-published?**′ *other-generation* = **generation-published?** *other-generation* ∧ **generation-retired?**′ *other-generation* = (**generation-retired?** *other-generation* ∨ **canonical?** *module-name* ∧ *other-generation* = **current-generation** *slot*) ∧ **generation-slot**′ *other-generation* = **generation-slot** *other-generation* ∧ **generation-image**′ *other-generation* = **generation-image** *other-generation*).
+**canonical?**′ *module-name* ∧ ¬**alias?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ (**canonical?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name* → **image-of**′ *other-name* = *image*) ∧ (¬(**canonical?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name*) → **image-of**′ *other-name* = **image-of** *other-name*)) ∧ **image-published?**′ *image* ∧ ¬**image-retired?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image* ∧ **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ **canonical?** *module-name* ∧ *other-image* = **image-of** *module-name*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
 
 #### Chapter 4
 
 ##### Action
 
-> `Add alias` resolves either kind of occupied target name and stores a direct reference to its live slot; semantic alias chains do not exist. The alias shares the slot's current generation and lifetime. Canonical and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Add alias` resolves either kind of occupied target name and stores a direct reference to its current image; semantic alias chains do not exist. The alias follows the canonical name through reload and removal. Canonical and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
 **`Registry`** ↝ Add alias *invoker*: `InvocationContext`, *alias-name*: `RegistryName`, *target-name*: `RegistryName`, ¬**canonical?** *alias-name*, ¬**alias?** *alias-name*, (**canonical?** *target-name* ∨ **alias?** *target-name*).
 
 ---
 
-¬**canonical?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **slot-of**′ *alias-name* = **slot-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **slot-of**′ *other-name* = **slot-of** *other-name*) ∧ (∀ *slot*: `Slot` · **slot-created?**′ *slot* = **slot-created?** *slot* ∧ **slot-live?**′ *slot* = **slot-live?** *slot* ∧ **current-generation**′ *slot* = **current-generation** *slot*) ∧ (∀ *generation*: `Generation` · **generation-published?**′ *generation* = **generation-published?** *generation* ∧ **generation-retired?**′ *generation* = **generation-retired?** *generation* ∧ **generation-slot**′ *generation* = **generation-slot** *generation* ∧ **generation-image**′ *generation* = **generation-image** *generation*).
+¬**canonical?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **image-of**′ *alias-name* = **image-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ (∀ *image*: `Image` · **image-published?**′ *image* = **image-published?** *image* ∧ **image-retired?**′ *image* = **image-retired?** *image* ∧ **image-name**′ *image* = **image-name** *image*).
 
 #### Chapter 5
 
 ##### Action
 
-> `Remove` resolves a canonical name or alias to its slot, then atomically closes that slot, removes its canonical name and every alias, and retires its current generation. Removal does not end already active calls, whose pins remain valid. A later registration of the same spelling must allocate a fresh slot. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Remove` resolves a canonical name or alias to its current image, then atomically retires that image and removes its canonical name and every alias. Removal does not end already active calls, whose pins remain valid. A later registration of the same spelling is a fresh generation that shares nothing with the removed one. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
 **`Registry`** ↝ Remove *invoker*: `InvocationContext`, *module-name*: `RegistryName`, (**canonical?** *module-name* ∨ **alias?** *module-name*).
 
 ---
 
-∃ *slot*: `Slot`, *slot* = **slot-of** *module-name* · (∀ *registry-name*: `RegistryName` · **canonical?**′ *registry-name* = (**canonical?** *registry-name* ∧ **slot-of** *registry-name* ≠ *slot*) ∧ **alias?**′ *registry-name* = (**alias?** *registry-name* ∧ **slot-of** *registry-name* ≠ *slot*) ∧ **slot-of**′ *registry-name* = **slot-of** *registry-name*) ∧ **slot-created?**′ *slot* = **slot-created?** *slot* ∧ ¬**slot-live?**′ *slot* ∧ **current-generation**′ *slot* = **current-generation** *slot* ∧ (∀ *other-slot*: `Slot`, *other-slot* ≠ *slot* · **slot-created?**′ *other-slot* = **slot-created?** *other-slot* ∧ **slot-live?**′ *other-slot* = **slot-live?** *other-slot* ∧ **current-generation**′ *other-slot* = **current-generation** *other-slot*) ∧ (∀ *generation*: `Generation` · **generation-published?**′ *generation* = **generation-published?** *generation* ∧ **generation-retired?**′ *generation* = (**generation-retired?** *generation* ∨ *generation* = **current-generation** *slot*) ∧ **generation-slot**′ *generation* = **generation-slot** *generation* ∧ **generation-image**′ *generation* = **generation-image** *generation*).
+∃ *image*: `Image`, *image* = **image-of** *module-name* · (∀ *registry-name*: `RegistryName` · **canonical?**′ *registry-name* = (**canonical?** *registry-name* ∧ **image-of** *registry-name* ≠ *image*) ∧ **alias?**′ *registry-name* = (**alias?** *registry-name* ∧ **image-of** *registry-name* ≠ *image*) ∧ **image-of**′ *registry-name* = **image-of** *registry-name*) ∧ (∀ *other-image*: `Image` · **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ *other-image* = *image*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
 
 #### Chapter 6
 
 ##### Action
 
-> `Begin scoped call` resolves the name stored in a word occurrence against the image stored in that occurrence. A quotation or word occurrence owns this scope but does not cache a definition or generation. The image must still be available through a current generation or another active call. Same-image dispatch from a registered caller preserves its pinned slot and generation; other scoped dispatch has no registration context. Private definitions are therefore available to same-image scoped resolution without becoming publicly invocable.
+> `Begin scoped call` resolves the name stored in a word occurrence against the image stored in that occurrence. A quotation or word occurrence owns this scope but does not cache a definition. The image must still be current or held by another active call. Private definitions are available to same-image scoped resolution without becoming publicly invocable.
 
 **`Calls`** ↝ Begin scoped call *caller*: `Call`, *occurrence*: `WordOccurrence`, *binding-name*: `BindingName`, **call-active?** *caller*, **occurrence-name** *occurrence* = *binding-name*.
 
 ---
 
-∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, (#(each *slot*: `Slot`, **slot-live?** *slot* ∧ **generation-image** (**current-generation** *slot*) = *image* · *slot*) > 0 ∨ #(each *owner*: `Call`, **call-active?** *owner* ∧ **call-image** *owner* = *image* · *owner*) > 0), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
-*binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **registered-call?**′ *callee* = (**registered-call?** *caller* ∧ **call-image** *caller* = *image*) ∧ (**registered-call?** *caller* ∧ **call-image** *caller* = *image* → **call-generation**′ *callee* = **call-generation** *caller* ∧ **call-slot**′ *callee* = **call-slot** *caller*) ∧ (¬(**registered-call?** *caller* ∧ **call-image** *caller* = *image*) → **call-generation**′ *callee* = **call-generation** *callee* ∧ **call-slot**′ *callee* = **call-slot** *callee*) ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
+∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, (**image-published?** *image* ∧ ¬**image-retired?** *image* ∨ #(each *owner*: `Call`, **call-active?** *owner* ∧ **call-image** *owner* = *image* · *owner*) > 0), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
+*binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
 #### Chapter 7
 
 ##### Action
 
-> `Complete call` releases the call's image and generation pins after its invocation has completed. Calls are split into begin and complete actions only to express publication concurrency; the prose-level invocation remains one language operation.
+> `Complete call` releases the call's image pin after its invocation has completed. Calls are split into begin and complete actions only to express publication concurrency; the prose-level invocation remains one language operation.
 
 **`Calls`** ↝ Complete call *completed*: `Call`, **call-active?** *completed*.
 
 ---
 
-**call-created?**′ *completed* = **call-created?** *completed* ∧ ¬**call-active?**′ *completed* ∧ **registered-call?**′ *completed* = **registered-call?** *completed* ∧ **call-generation**′ *completed* = **call-generation** *completed* ∧ **call-slot**′ *completed* = **call-slot** *completed* ∧ **call-image**′ *completed* = **call-image** *completed* ∧ **call-definition**′ *completed* = **call-definition** *completed* ∧ (∀ *other*: `Call`, *other* ≠ *completed* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **registered-call?**′ *other* = **registered-call?** *other* ∧ **call-generation**′ *other* = **call-generation** *other* ∧ **call-slot**′ *other* = **call-slot** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
+**call-created?**′ *completed* = **call-created?** *completed* ∧ ¬**call-active?**′ *completed* ∧ **call-image**′ *completed* = **call-image** *completed* ∧ **call-definition**′ *completed* = **call-definition** *completed* ∧ (∀ *other*: `Call`, *other* ≠ *completed* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
 
 
@@ -1817,9 +1799,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 - A test-built module image freezes its definitions and test catalog
   together; an application-built image has an empty catalog. Registration
   publishes that image as one generation: reload replaces code and tests
-  atomically; removal removes both; aliases never create another suite; and
-  registering one image under two canonical names creates two independently
-  discoverable suites.
+  atomically; removal removes both; and aliases never create another suite.
 - **Test discovery and execution form a closed Session mode.** Ordinary
   Sessions reject `tests` and `@test` with `'domain`. A test Session's `tests`
   returns canonical registrations once each, including root sources' private
@@ -1844,12 +1824,11 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   status; project, load, resolve, or runner failures are command failures.
   The default runner is sequential and deterministic, reports every result,
   continues after ordinary failures, and exits 1 when any test failed.
-- `*module*` and every other slot-dependent operation use only the
-  registration context established by actual dispatch; they never infer one
-  from image identity. Missing authority becomes a `'domain` error only when
-  such an operation is reached, so construction roots, escaped quotations, and
-  private calls remain valid. An application through escaped module-authored code still
-  crosses a module boundary for effect checking, despite having no slot. An
+- Module code always runs under the name of the image that defined it:
+  dispatch through a registered name, a construction body, an escaped
+  quotation, and a private call all report the same `*module*` and spell
+  their trace words `name.word`. An application through escaped
+  module-authored code still crosses a module boundary for effect checking. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
@@ -1950,15 +1929,13 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   stack fails with `'domain` and publishes nothing. State that must outlive a
   word lives in a task and is reached through its mailbox (see
   [Mailboxes](#mailboxes)).
-- **Slot lifetime is an owned capability.** Every published generation owns a
-  non-retargetable slot lease for its whole lifetime. Resolution retains an
-  operation lease before dropping the directory snapshot that supplied the
-  slot entry, and reload and removal retain that witness across their
-  complete check/use interval. Removal does not wait for old generation pins,
-  but retired slot storage is not reusable until all such leases and old
-  directory snapshots have drained. A removed generation can therefore
-  observe only its original closed slot, never an unrelated module that later
-  reuses registry capacity.
+- **A generation lives as long as something can reach it.** The registry's
+  current directory holds every published module; resolution retains the
+  generation it finds before releasing the directory it found it in, and a
+  dispatched call keeps its generation for its whole run. Removal and reload
+  do not wait for old generation pins: an already-dispatched call finishes
+  under the generation it resolved, and a later registration of the same
+  spelling is a fresh generation that shares nothing with the removed one.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
 - `undefm` accepts a canonical name or alias. An unregistered name is
