@@ -3292,7 +3292,7 @@ range runs from `-292275055-05-16T16:47:04.192` through
 ```
 
 ### parse
-`( text -- timestamp )` — Parse an RFC 3339 `date-time`, converting any offset to UTC: `YYYY-MM-DDTHH:MM:SS`, an optional fraction of one or more digits, then `Z` or a numeric `±HH:MM` offset that is subtracted to reach UTC. `T` and `Z` may be lower case. The first three fractional digits are kept and the rest are discarded, so `"…:00.1239Z"` and `"…:00.123Z"` parse alike. Text outside the grammar, such as a space separator, a missing designator, trailing characters, a non-ASCII scalar, or an empty fraction, is `'parse`; a well-formed field outside its range, including second `60`, is `'domain`.
+`( text -- timestamp )` — Parse an RFC 3339 `date-time`, converting any offset to UTC: `YYYY-MM-DDTHH:MM:SS`, an optional fraction, then `Z` or a numeric `±HH:MM` offset that is subtracted to reach UTC. The whole text may be at most 35 characters, so a fraction holds one to fourteen digits before `Z` or one to nine before a numeric offset; longer text is `'parse`. `T` and `Z` may be lower case. The first three fractional digits are kept and the rest are discarded, so `"…:00.1239Z"` and `"…:00.123Z"` parse alike. Text outside the grammar, such as a space separator, a missing designator, trailing characters, a non-ASCII scalar, or an empty fraction, is `'parse`; a well-formed field outside its range, including second `60`, is `'domain`.
 
 #### Examples
 

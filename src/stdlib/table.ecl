@@ -359,6 +359,8 @@
   'type error.new "each aggregate specification is [output-name input-name reducer]"
   error.with-message
   assert
+  specs (first) each (len) each 0 > 1 (and) fold
+  'domain error.new "table column names must not be empty" error.with-message assert
   specs (1 at) each table (swap dict.has?) partial all?
   'domain error.new "table.aggregate requires existing input column names" error.with-message assert
   names specs (first) each cat dup distinct len swap len =
