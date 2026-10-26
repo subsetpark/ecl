@@ -207,14 +207,16 @@ test "modules: *module* reports the active canonical registration" {
     // canonical name rather than the spelling used at the call site.
     try expectStack(&runtime, "'short 'left alias short.name", "'left");
 
-    // A registration-less execution home has no module name to manufacture.
+    // The root has no home and therefore no module name to manufacture.
     try expectErrorContains(&runtime, "*module*", &.{
         "'kind 'domain",
         "registered module",
     });
+    // A construction body already knows the name it is being built under:
+    // `*module*` answers, and the value it leaves is what the body refuses.
     try expectErrorContains(&runtime, "[] (*module*) 'building @defm", &.{
         "'kind 'domain",
-        "registered module",
+        "left 1 value",
     });
     try expectOk(&runtime, "[] ((*module*) 'name set) 'escaped @defm");
     try expectErrorContains(&runtime, "escaped.name call", &.{

@@ -164,11 +164,11 @@ const TestEffect = struct {
 };
 
 fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void {
-    var candidate = try registry.createImage();
+    var candidate = try registry.createImage(name, .ordinary);
     defer candidate.deinit();
     var sealed = try candidate.seal(null);
     defer sealed.deinit();
-    _ = try modules.testing.register(registry, &sealed, name);
+    _ = try modules.testing.register(registry, &sealed);
 }
 
 test "module names: branded factories enforce the reader symbol grammar" {
@@ -982,11 +982,11 @@ const RegistryThreadContext = struct {
 };
 
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
-    var candidate = context.registry.createImage() catch return false;
+    var candidate = context.registry.createImage(name, .ordinary) catch return false;
     defer candidate.deinit();
     var sealed = candidate.seal(null) catch return false;
     defer sealed.deinit();
-    _ = modules.testing.register(context.registry, &sealed, name) catch return false;
+    _ = modules.testing.register(context.registry, &sealed) catch return false;
     return true;
 }
 
@@ -1064,7 +1064,7 @@ test "registry: old generation leases survive reload and reclaim after release" 
     defer releases.releaseValue(body);
     const module_name = try intern.internModuleName("leased-generation");
     const value_name = try intern.internNamespace("leased-value");
-    var first = try registry.createImage();
+    var first = try registry.createImage(module_name, .ordinary);
     defer first.deinit();
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
@@ -1075,13 +1075,13 @@ test "registry: old generation leases survive reload and reclaim after release" 
     } });
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, &first_sealed, module_name);
+    _ = try modules.testing.register(&registry, &first_sealed);
     var old = modules.testing.acquire(&registry, module_name).?;
-    var second = try registry.createImage();
+    var second = try registry.createImage(module_name, .ordinary);
     defer second.deinit();
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, &second_sealed, module_name);
+    _ = try modules.testing.register(&registry, &second_sealed);
     try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
     try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
     // The registration cursor took the sealed image, so the superseded
@@ -1106,7 +1106,7 @@ test "registry: generation cursors independently pin their snapshot" {
     defer registry.deinit();
     const module_name = try intern.internModuleName("cursor-pinned-generation");
     const value_name = try intern.internNamespace("cursor-pinned-value");
-    var first = try registry.createImage();
+    var first = try registry.createImage(module_name, .ordinary);
     defer first.deinit();
     const binding = try TestBinding.init(std.testing.allocator);
     defer binding.release(releases);
@@ -1115,17 +1115,17 @@ test "registry: generation cursors independently pin their snapshot" {
     _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, &first_sealed, module_name);
+    _ = try modules.testing.register(&registry, &first_sealed);
 
     var lease = modules.testing.acquire(&registry, module_name).?;
     var lookup = lease.resolveCursor(intern.namespaceId(value_name));
     var names = lease.publicNameCursor();
     lease.deinit();
-    var second = try registry.createImage();
+    var second = try registry.createImage(module_name, .ordinary);
     defer second.deinit();
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, &second_sealed, module_name);
+    _ = try modules.testing.register(&registry, &second_sealed);
     for (0..64) |_| _ = releases.advance(1);
 
     const old = while (true) switch (lookup.advance()) {
@@ -1235,7 +1235,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const alias_name = try intern.internNamespace("allocation-alias");
     const second_name = try intern.internModuleName("allocation-second-module");
     const word_name = try intern.internNamespace("answer");
-    var first = try registry.createImage();
+    var first = try registry.createImage(first_name, .ordinary);
     defer first.deinit();
     _ = try first.publishDefinition(word_name, .{ .word = .{
         .body = env.quotation(effect_value.list).?,
@@ -1245,11 +1245,11 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, &first_sealed, first_name);
+    _ = try modules.testing.register(&registry, &first_sealed);
     try modules.testing.alias(&registry, alias_name, first_name);
     var lease = modules.testing.acquire(&registry, try intern.internModuleName("allocation-alias")).?;
     defer lease.deinit();
-    var second = try registry.createImage();
+    var second = try registry.createImage(first_name, .ordinary);
     defer second.deinit();
     _ = try second.publishDefinition(word_name, .{ .word = .{
         .body = env.quotation(effect_value.list).?,
@@ -1259,15 +1259,15 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, &second_sealed, first_name);
-    var third = try registry.createImage();
+    _ = try modules.testing.register(&registry, &second_sealed);
+    var third = try registry.createImage(second_name, .ordinary);
     defer third.deinit();
     const constant = try TestBinding.init(allocator);
     defer releases.releaseValue(constant.body);
     _ = try third.publishDefinition(word_name, constant.module(effect, .public));
     var third_sealed = try third.seal(null);
     defer third_sealed.deinit();
-    _ = try modules.testing.register(&registry, &third_sealed, second_name);
+    _ = try modules.testing.register(&registry, &third_sealed);
 }
 
 test "environment and registry APIs propagate every allocation failure" {

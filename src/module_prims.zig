@@ -14,9 +14,8 @@ const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-/// Removal advances one owner transition per cursor step. Keep its scheduler
-/// slice small enough that cancellation can run after the directory close edge
-/// while a user-sized durable stack is still retiring.
+/// Removal advances one owner transition per cursor step, so cancellation can
+/// run between the directory close edge and the slot's retirement.
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
@@ -83,18 +82,14 @@ fn unmoduleWord(evaluator: *Machine) MachineError!void {
 /// Returns the canonical registration selected by the active execution home.
 /// The name belongs to the home rather than the image: one image can be
 /// registered more than once, and an alias still reaches its target's
-/// canonical registration. Construction and module-value invocation have no
-/// registration to report.
+/// canonical registration. A construction body reports the name it is being
+/// built under.
 fn moduleNameWord(evaluator: *Machine) MachineError!void {
     const home = evaluator.currentHome() orelse return evaluator.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    const name = home.name() orelse return evaluator.fail(
-        .domain,
-        "*module* is legal only in code homed in a registered module",
-    );
-    try evaluator.pushOwned(.{ .symbol = intern.moduleId(name) });
+    try evaluator.pushOwned(.{ .symbol = intern.moduleId(home.name()) });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names

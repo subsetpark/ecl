@@ -394,17 +394,6 @@ comptime {
         @compileError("RefAnchor exceeds the parked-anchor budget the retention soaks impose");
 }
 
-/// Whether two homes execute the same image, compared by anchor. Used to decide
-/// whether a module-local hit came out of the image the activation is running or
-/// out of a foreign one.
-pub fn sameImage(
-    left: *const ModuleHome,
-    right: *const ModuleHome,
-    _: *const ExecutionAccess,
-) bool {
-    return anchorHandleInternal(left) == anchorHandleInternal(right);
-}
-
 /// The opaque handle a scope cell stores to name this image's anchor.
 ///
 /// The cell must name the *anchor* and not the home: a home is embedded in the
@@ -416,7 +405,7 @@ pub fn anchorHandle(home: *const ModuleHome, _: *const ExecutionAccess) *anyopaq
 }
 
 fn anchorHandleInternal(home: *const ModuleHome) *anyopaque {
-    return @ptrCast(home.state().image.anchor);
+    return @ptrCast(home.image().anchor);
 }
 
 fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
@@ -424,7 +413,7 @@ fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
     if (!anchor.tryRetain()) return null;
     // Only now is the image pointer readable: before the CAS succeeded this
     // word may have been the parked-list link instead.
-    return .initRetained(&anchor.park.image.construction_home);
+    return .initRetained(anchor.park.image);
 }
 
 /// Acquires one reference through a scope cell's owner handle, or null when the
@@ -454,53 +443,27 @@ pub fn destroyParkedAnchor(
     allocator.destroy(anchor);
 }
 
-/// The execution identity of module code: which image is running, and — when
-/// the code was reached through the registry — which registration owns its
-/// name, durable state, and lifetime. A construction root has no registration,
-/// which is what makes `within` structurally impossible while a body is still
-/// building its image.
-const ExecutionHome = struct {
-    image: *ModuleImage,
-    registration: ?*Registration,
-
-    fn retain(self: *const ExecutionHome) void {
-        if (self.registration) |registration| registration.retain() else self.image.retain();
-    }
-    fn release(self: *const ExecutionHome) void {
-        if (self.registration) |registration| registration.release() else self.image.release();
-    }
-    /// The failable counterpart, for a caller that reached this home through a
-    /// scope cell rather than through a reference it already holds. An
-    /// anonymous image has no registration and is covered by the same call,
-    /// which is why the deleted publisher-lease protocol could not serve here.
-    fn tryRetain(self: *const ExecutionHome) bool {
-        return if (self.registration) |registration|
-            registration.tryRetain()
-        else
-            self.image.tryRetain();
-    }
-};
-
-/// The immutable content of a module: the frozen environment its definitions
-/// live in and the module-root scope they were published through.
-///
-/// An image owns no canonical name, registry slot, generation currency, or
-/// `SlotLease`. That absence is the whole point: it lets one
-/// image back several independent registrations, and it keeps the value heap a
-/// DAG, because a registration retains an image and never the reverse.
+/// One module: the frozen environment its definitions live in, the module-root
+/// scope they were published through, and the registry identity it was built
+/// for. The name is fixed before the body runs; the generation number is
+/// assigned when the registry publishes it. One object carries both because
+/// every image is published exactly once, by the path that created it.
 const ModuleImage = struct {
-    source: ?*const map_state.SourceScope,
     allocator: std.mem.Allocator,
-    refs: std.atomic.Value(u32) = .init(1),
+    name: intern.ModuleName,
+    provenance: RegistrationProvenance,
+    /// Zero until published; reload assigns the prior generation plus one.
+    generation: u64 = 0,
+    /// Publication installs an owned lifetime witness that stays with this
+    /// generation through supersession and delayed retirement, so slot
+    /// storage cannot be recycled while old code can still name it.
+    slot_lifetime: union(enum) {
+        provisional,
+        published: SlotLease,
+    } = .provisional,
     environment: env.Environment,
     scope: env.Scope,
     tests: TestCatalog,
-    /// The registration-free home. Its registration is null, so no state
-    /// application can open against it — which is what a module still being
-    /// built needs, and equally what an image reached as a value needs, since
-    /// neither owns a slot. It embeds a pointer to its own owner, so `create`
-    /// fills it in after the allocation rather than defaulting it.
-    construction_home: ExecutionHome,
     /// The authoritative count lives in this separately owned cell, so it can outlive this
     /// struct for the images a scope cell names.
     anchor: *RefAnchor,
@@ -519,7 +482,8 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        source: ?*const map_state.SourceScope,
+        name: intern.ModuleName,
+        provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*ModuleImage {
         // No scope cell is minted here. An image needs one only if ECL source
         // is stamped against it, which `moduleOwned` arranges lazily; a registry
@@ -533,13 +497,15 @@ const ModuleImage = struct {
         };
         anchor.* = .{ .park = .{ .image = result } };
         result.allocator = allocator;
-        result.source = source;
+        result.name = name;
+        result.provenance = provenance;
+        result.generation = 0;
+        result.slot_lifetime = .provisional;
         result.anchor = anchor;
         result.minted_cell = false;
         result.environment = env.Environment.init(allocator, releases);
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
         result.tests = .init(allocator);
-        result.construction_home = .{ .image = result, .registration = null };
         result.retirement = .{};
         result.retirement_state = .live;
         return result;
@@ -573,6 +539,10 @@ const ModuleImage = struct {
             // A cell outlives this image and names its anchor without holding
             // a reference, so the anchor must survive the image.
             self.minted_cell = true;
+        }
+        switch (self.slot_lifetime) {
+            .provisional => {},
+            .published => |*lease| lease.deinit(),
         }
         self.retirement_state = .{ .tests = .init(&self.tests) };
         self.environment.releases.retire(self, &self.retirement);
@@ -626,16 +596,10 @@ const ModuleImage = struct {
     }
 };
 
-/// One published code generation of one canonical name. It retains the image
-/// it publishes and owns everything the image deliberately does not: the name,
-/// the generation number, and the slot lifetime witness that keeps the durable
-/// state and arbiter reachable while old code can still name them.
 /// Nominal publication provenance. Embedded definitions retain their trusted
 /// origin. Cataloged code carries its defining-file capability, which also
 /// identifies its resolution scope and direct visibility. Interactive root code has
 /// local-scope visibility without access to any file's private namespace.
-/// Images preserve lexical file identity even when invoked without a
-/// registration or republished by another file.
 pub const RegistrationProvenance = union(enum) {
     ordinary,
     standard_library,
@@ -668,174 +632,86 @@ pub const RegistrationProvenance = union(enum) {
     }
 };
 
-const Registration = struct {
+pub const ModuleResolveProgress = poll.Progress(?env.BindingLease);
+/// Export lookup is always public-only: a private is absent from a module's
+/// public face, and no caller has ever wanted otherwise.
+pub const ModuleResolveCursor = struct {
     allocator: std.mem.Allocator,
-    refs: std.atomic.Value(u32) = .init(1),
-    /// One retained image reference held for this generation's whole lifetime.
-    image: *ModuleImage,
-    name: intern.ModuleName,
-    provenance: RegistrationProvenance,
-    generation: u64 = 0,
-    /// A provisional registration exists only inside a publication cursor and
-    /// is never reachable as a home. Publication installs an owned lifetime
-    /// witness that stays with this generation through supersession and
-    /// delayed retirement, so slot storage cannot be recycled while old code
-    /// can still name it.
-    slot_lifetime: union(enum) {
-        provisional,
-        published: SlotLease,
-    } = .provisional,
-    /// The execution home callers reach this registration through. Like the
-    /// image's, it embeds a pointer to its own owner and is therefore filled in
-    /// after the allocation.
-    home: ExecutionHome,
-    retirement: heap.ReleaseDomain.Retirement = .{},
+    lookup: env.DirectLookupCursor,
+    pin: GenerationPin,
 
-    /// Retains `image` on success; on failure the caller still owns its own
-    /// reference and nothing was retained.
-    fn create(
-        allocator: std.mem.Allocator,
-        image: *ModuleImage,
-        name: intern.ModuleName,
-        provenance: RegistrationProvenance,
-    ) error{OutOfMemory}!*Registration {
-        const result = try allocator.create(Registration);
-        image.retain();
-        result.allocator = allocator;
-        result.refs = .init(1);
-        result.image = image;
-        result.name = name;
-        result.provenance = provenance;
-        result.generation = 0;
-        result.slot_lifetime = .provisional;
-        result.home = .{ .image = image, .registration = result };
-        result.retirement = .{};
-        return result;
+    pub fn deinit(self: *ModuleResolveCursor) void {
+        self.lookup.deinit();
+        self.pin.deinit();
+        self.* = undefined;
     }
-
-    fn retain(self: *Registration) void {
-        const old = self.refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-    }
-
-    /// Failable, for the same reason as `ModuleImage.tryRetain`: a home reached
-    /// through a scope cell is not yet held, so the count may already be zero.
-    fn tryRetain(self: *Registration) bool {
-        return tryAcquire(&self.refs);
-    }
-
-    fn release(self: *Registration) void {
-        const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) return;
-        _ = self.refs.load(.acquire);
-        self.image.environment.releases.retire(self, &self.retirement);
-    }
-
-    /// Constant time: the lease and the image reference each drop by one, and
-    /// the image's own user-sized graph retires as separate bounded work.
-    pub fn advanceRetirement(
-        _: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *Registration,
-    ) bool {
-        switch (self.slot_lifetime) {
-            .provisional => {},
-            .published => |*lease| lease.deinit(),
-        }
-        self.image.release();
-        allocator.destroy(self);
-        return true;
-    }
-
-    pub const ResolveProgress = poll.Progress(?env.BindingLease);
-    /// Export lookup is always public-only: a private is absent from a
-    /// module's public face, and no caller has ever wanted otherwise.
-    pub const ResolveCursor = struct {
-        allocator: std.mem.Allocator,
-        lookup: env.DirectLookupCursor,
-        pin: GenerationPin,
-
-        pub fn deinit(self: *ResolveCursor) void {
-            self.lookup.deinit();
-            self.pin.deinit();
-            self.* = undefined;
-        }
-        pub fn advance(self: *ResolveCursor) ResolveProgress {
-            return switch (self.lookup.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    var lease = maybe_lease orelse break :result .{ .complete = null };
-                    if (lease.spec().visibility == .private) {
-                        lease.deinit();
-                        break :result .{ .complete = null };
-                    }
-                    break :result .{ .complete = lease };
-                },
-            };
-        }
-        pub fn captureCell(self: *ResolveCursor) void {
-            self.lookup.captureCell();
-        }
-        pub fn takeCell(self: *ResolveCursor) ?env.BindingCellHandle {
-            return self.lookup.takeCell();
-        }
-    };
-    pub fn resolveCursor(self: *const Registration, id: u32) ResolveCursor {
-        return resolveCursorFor(self.image, ModuleHome.init(&@constCast(self).home), id);
-    }
-
-    pub const PublicNameProgress = poll.StreamProgress(u32);
-    pub const PublicNameCursor = struct {
-        allocator: std.mem.Allocator,
-        inner: env.NameCursor,
-        pin: GenerationPin,
-        pub fn deinit(self: *PublicNameCursor) void {
-            self.inner.deinit();
-            self.pin.deinit();
-            self.* = undefined;
-        }
-        pub fn advance(self: *PublicNameCursor) PublicNameProgress {
-            return switch (self.inner.advance()) {
-                .pending => .pending,
-                .complete => .complete,
-                .item => |entry| result: {
-                    var lease = entry.lease;
-                    defer lease.deinit();
-                    break :result if (lease.spec().visibility == .public)
-                        .{ .item = entry.name }
-                    else
-                        .pending;
-                },
-            };
-        }
-    };
-    pub fn publicNameCursor(self: *const Registration) PublicNameCursor {
-        const home = ModuleHome.init(&@constCast(self).home);
-        return .{
-            .allocator = self.allocator,
-            .inner = self.image.environment.nameCursor(),
-            .pin = home.pinInternal(),
+    pub fn advance(self: *ModuleResolveCursor) ModuleResolveProgress {
+        return switch (self.lookup.advance()) {
+            .pending => .pending,
+            .complete => |maybe_lease| result: {
+                var lease = maybe_lease orelse break :result .{ .complete = null };
+                if (lease.spec().visibility == .private) {
+                    lease.deinit();
+                    break :result .{ .complete = null };
+                }
+                break :result .{ .complete = lease };
+            },
         };
+    }
+    pub fn captureCell(self: *ModuleResolveCursor) void {
+        self.lookup.captureCell();
+    }
+    pub fn takeCell(self: *ModuleResolveCursor) ?env.BindingCellHandle {
+        return self.lookup.takeCell();
     }
 };
 
-/// Fair per-slot ordering of state applications. Waiters are granted in
-/// arrival order and the granted turn is always the queue head, so both
-/// grant and release are O(1) and no waiter can be starved by a later one.
+pub const ModulePublicNameProgress = poll.StreamProgress(u32);
+pub const ModulePublicNameCursor = struct {
+    allocator: std.mem.Allocator,
+    inner: env.NameCursor,
+    pin: GenerationPin,
+    pub fn deinit(self: *ModulePublicNameCursor) void {
+        self.inner.deinit();
+        self.pin.deinit();
+        self.* = undefined;
+    }
+    pub fn advance(self: *ModulePublicNameCursor) ModulePublicNameProgress {
+        return switch (self.inner.advance()) {
+            .pending => .pending,
+            .complete => .complete,
+            .item => |entry| result: {
+                var lease = entry.lease;
+                defer lease.deinit();
+                break :result if (lease.spec().visibility == .public)
+                    .{ .item = entry.name }
+                else
+                    .pending;
+            },
+        };
+    }
+};
+fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
+    return .{
+        .allocator = image.allocator,
+        .inner = image.environment.nameCursor(),
+        .pin = ModuleHome.init(image).pinInternal(),
+    };
+}
+
 /// A retired slot that no lease can still reach.
 fn slotQuiescent(slot: *ModuleSlot) bool {
     return slot.phase.load(.acquire) == .retired and slot.lease_refs.load(.acquire) == 0;
 }
 
-fn registrationSlot(registration: *const Registration) ?*ModuleSlot {
-    return switch (registration.slot_lifetime) {
+fn registrationSlot(image: *const ModuleImage) ?*ModuleSlot {
+    return switch (image.slot_lifetime) {
         .provisional => null,
         .published => |lease| lease.slot(),
     };
 }
 
-const GenerationPublisher = snapshot_api.Publisher(Registration);
+const GenerationPublisher = snapshot_api.Publisher(ModuleImage);
 
 /// Nominal ownership of one permanent registry-inventory node. A slot keeps
 /// this capability for its allocation lifetime, including while retired and
@@ -1116,65 +992,65 @@ pub const TestSessionDiscoveryCursor = struct {
     }
 };
 
-/// Narrow identity used by executing frames: the image that is running plus
-/// the registration, if any, whose name and durable state it is running
-/// against. Observation leases never expose this pointer; only code holding
-/// the Session's execution authority can obtain its scope or another pin.
-///
-/// Because one image may be registered more than once, this — not anything in
-/// the image or in a definition's metadata — is what selects private lookup,
-/// same-home dispatch, diagnostic spelling, and `within`'s slot.
+/// The identity executing frames run under: the image whose code is running,
+/// which fixes private lookup, same-home dispatch, and diagnostic spelling.
+/// Observation leases never expose this pointer; only code holding the
+/// Session's execution authority can obtain its scope or another pin.
 pub const ModuleHome = opaque {
-    fn init(home_state: *ExecutionHome) *ModuleHome {
-        return @ptrCast(home_state);
+    fn init(target: *ModuleImage) *ModuleHome {
+        return @ptrCast(target);
     }
-    fn state(self: *const ModuleHome) *ExecutionHome {
+    fn image(self: *const ModuleHome) *ModuleImage {
         return @ptrCast(@alignCast(@constCast(self)));
     }
     pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
-        return &self.state().image.scope;
+        return &self.image().scope;
     }
-    /// The canonical name this activation was reached through, or null while a
-    /// construction body is still building an anonymous image.
-    pub fn name(self: *const ModuleHome) ?intern.ModuleName {
-        const registration = self.state().registration orelse return null;
-        return registration.name;
+    /// The canonical name this code was built for, fixed before its body ran.
+    pub fn name(self: *const ModuleHome) intern.ModuleName {
+        return self.image().name;
     }
+    /// Zero while the image is still under construction.
     pub fn generationNumber(self: *const ModuleHome) u64 {
-        const registration = self.state().registration orelse return 0;
-        return registration.generation;
+        return self.image().generation;
     }
     pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
-        if (self.state().image.source) |source| return .{ .source = source };
-        const registration = self.state().registration orelse return .ordinary;
-        return registration.provenance;
+        return self.image().provenance;
     }
     fn pinInternal(self: *const ModuleHome) GenerationPin {
-        self.state().retain();
-        return .initRetained(self.state());
+        self.image().retain();
+        return .initRetained(self.image());
     }
     pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
         return self.pinInternal();
     }
 };
 
-/// An owned reference to whichever owner backs one home. The raw image or
-/// registration is never exposed, so a pin can only be consumed by `deinit`
-/// and cannot invoke retirement directly.
+/// An owned execution reference to one image. The raw image is never exposed,
+/// so a pin can only be consumed by `deinit` and cannot invoke retirement
+/// directly.
 pub const GenerationPin = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(retained: *ExecutionHome) GenerationPin {
+    fn initRetained(retained: *ModuleImage) GenerationPin {
         return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
-    fn home(self: GenerationPin) *ModuleHome {
+    fn image(self: GenerationPin) *ModuleImage {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@backingInt(self));
     }
+    fn homeInternal(self: GenerationPin) *ModuleHome {
+        return .init(self.image());
+    }
+    /// Split from `homeInternal` because the audit rejects one function that
+    /// both holds a capability token and casts a pointer.
+    pub fn home(self: GenerationPin, _: *const ExecutionAccess) *ModuleHome {
+        return self.homeInternal();
+    }
     pub fn deinit(self: *GenerationPin) void {
         if (self.* == .consumed) return;
-        self.home().state().release();
+        self.image().release();
         self.* = .consumed;
     }
     /// Whether two pins hold the same owner. Exposes nothing: a pin is already
@@ -1190,21 +1066,17 @@ pub const GenerationPin = enum(usize) {
         expected_home: *const ModuleHome,
         _: *const ExecutionAccess,
     ) bool {
-        return self.home() == expected_home;
+        return self.homeInternal() == expected_home;
     }
 };
 
-/// The registration-less home of the image a module-root scope belongs to, or
-/// null for any other scope.
+/// The home of the image a module-root scope belongs to, or null for any other
+/// scope.
 ///
 /// The cast is sound because `env.Scope.moduleRoot` has exactly one caller —
 /// `ModuleImage.create` — so every module-root scope is an image's own embedded
 /// `scope` field. Re-verified when this was written; a second caller would
 /// falsify it, which is why the check belongs in review and not only here.
-///
-/// The home is deliberately registration-less: see `construction_home`. A word
-/// reached through it therefore owns no slot, so `within` is `'domain` rather
-/// than a write to whichever slot the caller happened to be running.
 ///
 /// Takes no `ExecutionAccess`: the token gates `ModuleHome`'s methods while the
 /// pointer alone grants nothing, and the audit rejects one function that both holds a token and
@@ -1212,10 +1084,10 @@ pub const GenerationPin = enum(usize) {
 pub fn homeForModuleRootScope(scope: *env.Scope) ?*ModuleHome {
     if (!scope.isModuleRoot()) return null;
     const image: *ModuleImage = @fieldParentPtr("scope", scope);
-    return ModuleHome.init(&image.construction_home);
+    return ModuleHome.init(image);
 }
 
-test "modules: an image's registration-less home is reachable from its own root scope" {
+test "modules: an image's home is reachable from its own root scope" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
@@ -1223,16 +1095,13 @@ test "modules: an image's registration-less home is reachable from its own root 
     var container = try env.Env.init(&host);
     defer container.deinit();
 
-    const image = try ModuleImage.create(std.testing.allocator, releases, null);
+    const image = try ModuleImage.create(std.testing.allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
     defer image.release();
 
     const recovered = homeForModuleRootScope(&image.scope) orelse
         return error.ExpectedImageHome;
-    try std.testing.expectEqual(ModuleHome.init(&image.construction_home), recovered);
-    // Registration-less by construction. This is the whole reason the accessor
-    // exists: it is what makes `within` through an escaped quotation a domain
-    // error instead of a write to the caller's slot.
-    try std.testing.expectEqual(@as(?intern.ModuleName, null), recovered.name());
+    try std.testing.expectEqual(ModuleHome.init(image), recovered);
+    try std.testing.expectEqual(image.name, recovered.name());
 
     var session_scope = container.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&session_scope, releases);
@@ -1261,7 +1130,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         host.cleanup().drain();
         const unstamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases, null);
+            const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
             image.release();
             host.cleanup().drain();
         }
@@ -1274,7 +1143,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         // leaves precisely that cell plus its parked anchor behind.
         const stamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases, null);
+            const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
             _ = try container.scopeIdForOwned(&image.scope, @ptrCast(image.anchor));
             image.release();
             host.cleanup().drain();
@@ -1314,7 +1183,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases, null);
+        const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
         const cell = try container.scopeCell(&image.scope, owner);
@@ -1344,7 +1213,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
             cell.scopeUnder(.fresh_pin),
         );
         try std.testing.expectEqual(
-            ModuleHome.init(&image.construction_home),
+            ModuleHome.init(image),
             homeForModuleRootScope(&image.scope),
         );
 
@@ -1377,7 +1246,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases, null);
+        const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
 
@@ -1400,135 +1269,89 @@ test "modules: the same drop with no borrow reclaims the contents" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
-/// Opaque observation capability owning one registration reference.
+/// Opaque observation capability owning one reference to a published image.
 pub const GenerationLease = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(retained: *Registration) GenerationLease {
+    fn initRetained(retained: *ModuleImage) GenerationLease {
         return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
-    fn registration(self: GenerationLease) *Registration {
+    fn image(self: GenerationLease) *ModuleImage {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@backingInt(self));
     }
     pub fn generationNumber(self: GenerationLease) u64 {
-        return self.registration().generation;
+        return self.image().generation;
     }
     pub fn name(self: GenerationLease) intern.ModuleName {
-        return self.registration().name;
+        return self.image().name;
     }
     pub fn provenance(self: GenerationLease) RegistrationProvenance {
-        return self.registration().provenance;
+        return self.image().provenance;
     }
     pub fn resolveCursor(self: GenerationLease, id: u32) ModuleResolveCursor {
-        return self.registration().resolveCursor(id);
+        const retained = self.image();
+        return resolveCursorFor(retained, ModuleHome.init(retained), id);
     }
-    pub fn guard(self: GenerationLease) GenerationGuard {
-        const retained = self.registration();
+    /// A second observation reference to the same generation, for a holder
+    /// that outlives this one: the qualified call-site cache.
+    pub fn clone(self: GenerationLease) GenerationLease {
+        const retained = self.image();
         retained.retain();
         return .initRetained(retained);
     }
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
-        return self.registration().publicNameCursor();
+        return publicNameCursorFor(self.image());
     }
     fn testNameCursor(self: GenerationLease) TestCatalog.NameCursor {
-        return .{ .next = self.registration().image.tests.entries_head };
+        return .{ .next = self.image().tests.entries_head };
     }
     fn testLookupCursor(
         self: GenerationLease,
         test_name: intern.BindingName,
     ) TestCatalog.LookupCursor {
         return .{
-            .current = self.registration().image.tests.root,
+            .current = self.image().tests.root,
             .name = test_name,
         };
     }
+    /// Session-gated transfer from observation to execution. The raw image
+    /// stays hidden on both sides, which is why an activation's home can only
+    /// come from the registry lease it was resolved through.
     pub fn enterExecution(
         self: *GenerationLease,
         _: *const ExecutionAccess,
-    ) ExecutionGeneration {
-        const retained = self.registration();
+    ) GenerationPin {
+        const retained = self.image();
         self.* = .consumed;
+        return .initRetained(retained);
+    }
+    /// Execution only if this exact generation is still its name's current
+    /// one. A derived call-site cache entry becomes executable this way and
+    /// is evicted when it fails.
+    pub fn tryEnterCurrent(
+        self: GenerationLease,
+        _: *const ExecutionAccess,
+    ) ?GenerationPin {
+        const retained = self.image();
+        const slot = registrationSlot(retained) orelse return null;
+        if (!slot.publisher.isCurrent(retained)) return null;
+        // The lease itself keeps the image alive across the current check, so
+        // this retain cannot resurrect a dead generation. A reload racing
+        // immediately after the check is equivalent to ordinary resolution
+        // linearizing immediately before that reload.
+        retained.retain();
         return .initRetained(retained);
     }
     pub fn deinit(self: *GenerationLease) void {
         if (self.* == .consumed) return;
-        self.registration().release();
+        self.image().release();
         self.* = .consumed;
     }
 };
 
-/// A retained registration identity suitable for a derived call-site cache.
-/// It grants no raw registry or slot access. A hit becomes executable only if
-/// this exact generation is still current at the guard check.
-pub const GenerationGuard = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn initRetained(retained: *Registration) GenerationGuard {
-        return @fromBackingInt(@intCast(@intFromPtr(retained)));
-    }
-    fn registration(self: GenerationGuard) *Registration {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    pub fn tryEnterCurrent(
-        self: GenerationGuard,
-        _: *const ExecutionAccess,
-    ) ?ExecutionGeneration {
-        const retained = self.registration();
-        const slot = registrationSlot(retained) orelse return null;
-        if (!slot.publisher.isCurrent(retained)) return null;
-        // The guard itself keeps the registration alive across the current
-        // check, so this retain cannot resurrect a dead generation. A reload
-        // racing immediately after the check is equivalent to ordinary
-        // resolution linearizing immediately before that reload.
-        retained.retain();
-        return .initRetained(retained);
-    }
-    pub fn deinit(self: *GenerationGuard) void {
-        if (self.* == .consumed) return;
-        self.registration().release();
-        self.* = .consumed;
-    }
-};
-
-/// Session-gated execution capability. Observation can be transferred into
-/// execution only by code holding the Session-private authority, and the raw
-/// registration remains hidden on both sides of the transition. This is the
-/// only producer of a registration home, which is why an activation's state
-/// and name can only come from the registry lease it was resolved through.
-pub const ExecutionGeneration = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn initRetained(retained: *Registration) ExecutionGeneration {
-        return @fromBackingInt(@intCast(@intFromPtr(retained)));
-    }
-    fn registration(self: ExecutionGeneration) *Registration {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    pub fn home(
-        self: ExecutionGeneration,
-        _: *const ExecutionAccess,
-    ) *ModuleHome {
-        return .init(&self.registration().home);
-    }
-    pub fn deinit(self: *ExecutionGeneration) void {
-        if (self.* == .consumed) return;
-        self.registration().release();
-        self.* = .consumed;
-    }
-};
-
-/// The cursor types an observation lease hands out. Naming them here keeps the
-/// registration record itself private to this file.
-pub const ModuleResolveCursor = Registration.ResolveCursor;
-
-/// The one export lookup, whether the image was reached through a registered
-/// name or as a value. The registry contributes nothing to finding an export;
+/// The one export lookup. The registry contributes nothing to finding an export;
 /// what the home supplies is the pin that keeps the image alive across a
 /// resumable cursor, and which privacy applies.
 fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResolveCursor {
@@ -1538,8 +1361,6 @@ fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResol
         .pin = home.pinInternal(),
     };
 }
-
-pub const ModulePublicNameCursor = Registration.PublicNameCursor;
 
 /// A borrowed reference to one immutable image, valid for the call it is passed
 /// Unique ownership of an image that no registration holds yet. Every exit
@@ -1559,7 +1380,13 @@ pub const OwnedImage = enum(usize) {
         self: *const OwnedImage,
         _: *const ExecutionAccess,
     ) *ModuleHome {
-        return .init(&self.borrow().construction_home);
+        return .init(self.borrow());
+    }
+    pub fn moduleName(self: *const OwnedImage) intern.ModuleName {
+        return self.borrow().name;
+    }
+    pub fn provenance(self: *const OwnedImage) RegistrationProvenance {
+        return self.borrow().provenance;
     }
     pub fn publishDefinition(
         self: *const OwnedImage,
@@ -1606,10 +1433,8 @@ pub const OwnedImage = enum(usize) {
     }
     pub fn deinit(self: *OwnedImage) void {
         if (self.* == .consumed) return;
-        // The construction owner supplies one lifetime guard. Tasks spawned
-        // during construction may hold independent pins,
-        // so rollback drops only this capability and the image remains alive
-        // until those tasks quiesce.
+        // Rollback drops the construction owner's reference; an activation
+        // still pinning the image keeps it alive until it unwinds.
         self.borrow().release();
         self.* = .consumed;
     }
@@ -1628,6 +1453,12 @@ pub const SealedImage = enum(usize) {
     fn borrow(self: *const SealedImage) *ModuleImage {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@backingInt(self.*));
+    }
+    /// Transfers the reference to the registry at publication.
+    fn take(self: *SealedImage) *ModuleImage {
+        const image = self.borrow();
+        self.* = .consumed;
+        return image;
     }
     pub fn move(self: *SealedImage) SealedImage {
         const result = self.*;
@@ -1771,7 +1602,7 @@ const SlotEntry = struct {
 };
 
 const RetiredGeneration = struct {
-    generation: *Registration,
+    generation: *ModuleImage,
     next: ?*RetiredGeneration = null,
 };
 
@@ -2062,7 +1893,7 @@ pub const Registry = enum(usize) {
     };
 
     pub const TestExecutionTarget = struct {
-        generation: ExecutionGeneration,
+        generation: GenerationPin,
         body: *env.Quotation,
 
         pub fn quotation(self: *const TestExecutionTarget) *value.ListHandle {
@@ -2360,14 +2191,15 @@ pub const Registry = enum(usize) {
         self.privateState().inventory = entry;
     }
 
-    /// A fresh anonymous image. Naming it is a separate, later decision, so
-    /// nothing here validates or reserves a registry name.
-    pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
-        return self.createSourceImage(null);
-    }
-
-    pub fn createSourceImage(self: *Registry, source: ?*const map_state.SourceScope) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), source));
+    /// A fresh image for `name`. The caller has validated the name; the
+    /// registry checks it again at publication, which is the boundary that
+    /// owns registry names.
+    pub fn createImage(
+        self: *Registry,
+        name: intern.ModuleName,
+        provenance: RegistrationProvenance,
+    ) error{OutOfMemory}!OwnedImage {
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), name, provenance));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);
@@ -2383,12 +2215,14 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
+            name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
             return .{
                 .registry = registry,
                 .instance = instance,
-                .candidate = try registry.createImage(),
+                .candidate = try registry.createImage(name, provenance),
             };
         }
 
@@ -2457,13 +2291,15 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
+            name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             words: []const env.BuiltinWord,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
             return .{
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
                 .source = .{ .words = words },
-                .candidate = try registry.createImage(),
+                .candidate = try registry.createImage(name, provenance),
             };
         }
 
@@ -2471,9 +2307,11 @@ pub const Registry = enum(usize) {
         /// cursor owns its independent pin until publication or abandonment.
         pub fn initRegistered(
             registry: *Registry,
+            name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             instance: *@import("module_bindings.zig").Publication,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
-            const candidate = try registry.createImage();
+            const candidate = try registry.createImage(name, provenance);
             instance.retain();
             return .{
                 .allocator = registry.allocator(),
@@ -2678,38 +2516,26 @@ pub const Registry = enum(usize) {
         };
 
         registry: *Registry,
-        /// Owned by the cursor from construction and released by `deinit`;
-        /// the generation record takes its own reference at publication.
+        /// Owned by the cursor until publication moves the reference into the
+        /// slot; an abandoned cursor releases it.
         image: SealedImage,
         name: intern.ModuleName,
-        provenance: RegistrationProvenance,
         state: State,
-        /// The generation record for this publication. It retains the image on
-        /// creation, so an abandoned cursor releases it rather than leaking a
-        /// reference the caller never granted.
-        registration: ?*Registration = null,
         /// Reload reserves its retirement record before entering the writer
         /// lock; publication only links this already-owned node.
         retired_reservation: ?*RetiredGeneration = null,
 
-        pub fn init(
-            registry: *Registry,
-            image: SealedImage,
-            name: intern.ModuleName,
-            provenance: RegistrationProvenance,
-        ) RegistrationCursor {
+        pub fn init(registry: *Registry, image: SealedImage) RegistrationCursor {
             return .{
                 .registry = registry,
                 .image = image,
-                .name = name,
-                .provenance = provenance,
+                .name = image.borrow().name,
                 .state = .{ .maintenance = registry.maintenanceCursor() },
             };
         }
         pub fn deinit(self: *RegistrationCursor) void {
             self.image.deinit();
             if (self.retired_reservation) |record| self.registry.allocator().destroy(record);
-            if (self.registration) |registration| registration.release();
             switch (self.state) {
                 .alias => |*state| state.snapshot.directory.deinit(),
                 .module => |*state| state.snapshot.directory.deinit(),
@@ -2748,22 +2574,6 @@ pub const Registry = enum(usize) {
             }
             build.snapshot.directory.deinit();
             self.registry.allocator().destroy(build);
-        }
-        /// The one place a generation record is created, so both publication
-        /// paths retain the image identically and neither can forget to.
-        fn prepareRegistration(self: *RegistrationCursor) error{OutOfMemory}!void {
-            if (self.registration != null) return;
-            self.registration = try Registration.create(
-                self.registry.allocator(),
-                self.image.borrow(),
-                self.name,
-                self.provenance,
-            );
-        }
-        fn takeRegistration(self: *RegistrationCursor) *Registration {
-            const registration = self.registration.?;
-            self.registration = null;
-            return registration;
         }
         pub fn advance(self: *RegistrationCursor) CommitError!CommitProgress {
             const name = self.name;
@@ -2911,7 +2721,6 @@ pub const Registry = enum(usize) {
                 .insert => |*state| switch (state.cursor.advance()) {
                     .pending => .pending,
                     .complete => result: {
-                        try self.prepareRegistration();
                         self.state = .{ .commit_new = state.build };
                         break :result .pending;
                     },
@@ -2924,9 +2733,8 @@ pub const Registry = enum(usize) {
                     const slot = state.lease.slot();
                     if (self.retired_reservation == null)
                         self.retired_reservation = try self.registry.allocator().create(RetiredGeneration);
-                    try self.prepareRegistration();
                     const retired = self.retired_reservation.?;
-                    const registration = self.registration.?;
+                    const image = self.image.borrow();
                     self.registry.lockBlocking();
                     if (slot.phase.load(.acquire) != .live) {
                         self.registry.unlock();
@@ -2939,9 +2747,9 @@ pub const Registry = enum(usize) {
                     const prior = slot.publisher.currentOwned().?;
                     retired.* = .{ .generation = prior };
                     const generation = prior.generation + 1;
-                    registration.generation = generation;
-                    registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.publisher.publish(self.takeRegistration());
+                    image.generation = generation;
+                    image.slot_lifetime = .{ .published = SlotLease.retain(slot) };
+                    slot.publisher.publish(self.image.take());
                     const release_prior = slot.publisher.quiescent();
                     if (!release_prior) self.registry.enqueueRetiredGenerationLocked(retired);
                     self.registry.unlock();
@@ -2974,10 +2782,10 @@ pub const Registry = enum(usize) {
                         .aliases = build.aliases,
                         .previous = @constCast(build.snapshot.old),
                     };
-                    const registration = self.registration.?;
-                    registration.generation = 1;
-                    registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.publisher.publish(self.takeRegistration());
+                    const image = self.image.borrow();
+                    image.generation = 1;
+                    image.slot_lifetime = .{ .published = SlotLease.retain(slot) };
+                    slot.publisher.publish(self.image.take());
                     self.registry.privateState().directories.publish(next);
                     self.registry.unlock();
                     build.snapshot.directory.deinit();
@@ -2990,13 +2798,8 @@ pub const Registry = enum(usize) {
         }
     };
 
-    pub fn registrationCursor(
-        self: *Registry,
-        image: SealedImage,
-        name: intern.ModuleName,
-        provenance: RegistrationProvenance,
-    ) RegistrationCursor {
-        return .init(self, image, name, provenance);
+    pub fn registrationCursor(self: *Registry, image: SealedImage) RegistrationCursor {
+        return .init(self, image);
     }
 
     /// Cancellation-independent owner of all work after the directory close
@@ -3841,12 +3644,8 @@ pub const testing = if (builtin.is_test) struct {
         return poll.drive(?GenerationLease, &cursor, .{});
     }
 
-    pub fn register(
-        registry: *Registry,
-        image: *SealedImage,
-        name: intern.ModuleName,
-    ) CommitError!u64 {
-        var cursor = registry.registrationCursor(image.move(), name, .ordinary);
+    pub fn register(registry: *Registry, image: *SealedImage) CommitError!u64 {
+        var cursor = registry.registrationCursor(image.move());
         defer cursor.deinit();
         while (true) switch (try cursor.advance()) {
             .pending => {},

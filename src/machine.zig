@@ -1150,7 +1150,7 @@ const Eval = struct {
     },
 
     /// Where this body's definitions land, where its references resolve, and
-    /// whose privacy and durable state it runs against. One value rather than
+    /// whose privacy it runs under. One value rather than
     /// three fields, so a construction site cannot set two of them and leave
     /// the third describing different code.
     site: ExecutionSite,
@@ -1214,20 +1214,15 @@ const Eval = struct {
     pub fn resolutionScope(self: Eval) ?*env.Scope {
         return self.site.resolution_scope;
     }
-    /// Whose privacy and durable state this body runs against.
+    /// Whose privacy this body runs under.
     pub fn home(self: Eval) ?*modules.ModuleHome {
         return self.site.home;
     }
 };
-/// A module construction boundary. The body always produces an anonymous
-/// image; publication is `register`'s alone, which the prelude's `@defm`
-/// composes after it.
+/// A module construction boundary. The body builds the image `@defm` named
+/// before it ran; completion seals and publishes that image.
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
-    provenance: modules.RegistrationProvenance,
-    /// The validated name `@defm` publishes the finished image under. It was
-    /// checked before the body ran, so completion only publishes.
-    registration: intern.ModuleName,
     /// Exact construction body admitted by `@defm`. A declaration
     /// is module-level only while this is the current activation; quotations
     /// called by the body may inherit its home but not its declaration site.
@@ -1396,7 +1391,7 @@ pub const ExecutionSite = struct {
     /// rather than a link in any chain — so `null` means "go straight to
     /// core".
     resolution_scope: ?*env.Scope,
-    /// Whose privacy and durable state this body runs against. Correlated
+    /// Whose privacy this body runs under. Correlated
     /// with the scopes but not derivable from them: a homeless word called
     /// from module code inherits the caller's home while resolving against its
     /// own lexical chain.
@@ -3253,11 +3248,6 @@ pub const Machine = struct {
         });
     }
 
-    pub fn currentSource(self: *const Machine) ?*const map_state.SourceScope {
-        const current = self.unit.current orelse return null;
-        return current.site.registration_provenance.sourceScope();
-    }
-
     /// Standard-library names are reserved, like `core`: only embedded loading
     /// registers them, so a stdlib name means the same module in every scope,
     /// whether or not it has loaded. User registration, aliasing, and removal
@@ -3973,11 +3963,11 @@ pub const Machine = struct {
             // strand the lease and path this driver had already taken.
             const registry = evaluator.unit.inherited.registry;
             const publication = switch (entry) {
-                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, words),
+                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, self.request.module.name, .standard_library, words),
                 .bindings => |registration| registered: {
                     const binding = try registration.bind(evaluator.allocator(), &evaluator.unit.inherited);
                     defer binding.release();
-                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, binding);
+                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, self.request.module.name, .standard_library, binding);
                 },
                 .source, .native => unreachable,
             };
@@ -4078,11 +4068,7 @@ pub const Machine = struct {
                         var built = candidate;
                         errdefer built.deinit();
                         const sealed = try built.seal(evaluator.moduleRecognition(.standard_library));
-                        self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(
-                            sealed,
-                            self.name,
-                            .standard_library,
-                        ));
+                        self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(sealed));
                         return .stepped;
                     },
                 }
@@ -4177,6 +4163,8 @@ pub const Machine = struct {
                 .loaded => |*instance| {
                     const publication = try modules.Registry.NativeCandidateCursor.init(
                         evaluator.unit.inherited.registry,
+                        self.name,
+                        self.provenance,
                         instance.borrow(),
                     );
                     self.state.borrowMut().* = .{ .definitions = .{
@@ -4198,11 +4186,7 @@ pub const Machine = struct {
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        const cursor = evaluator.unit.inherited.registry.registrationCursor(
-                            sealed,
-                            self.name,
-                            self.provenance,
-                        );
+                        const cursor = evaluator.unit.inherited.registry.registrationCursor(sealed);
                         self.state.borrowMut().* = .{ .commit = .{
                             .instance = .init(instance),
                             .cursor = .init(cursor),
@@ -5616,10 +5600,6 @@ pub const Machine = struct {
     pub fn attemptOwned(self: *Machine, input: OwnedUnitInput) error{OutOfMemory}!void {
         return self.beginAttemptOwned(input);
     }
-    /// Publishes an already-constructed image under a validated name. The
-    /// module value is consumed: the driver retains it for its whole lifetime,
-    /// which is what keeps the borrowed image alive across every resumption,
-    /// and releases it on every exit.
     /// Opens a construction boundary for `@defm`. The name has already been
     /// validated; the body evaluates against a fresh image, and completion
     /// publishes that image under the name.
@@ -5633,7 +5613,7 @@ pub const Machine = struct {
         const registry = self.unit.inherited.registry;
         const word = self.unit.active_word;
         const provenance = self.unit.current.?.site.registration_provenance;
-        var candidate = try registry.createSourceImage(self.currentSource());
+        var candidate = try registry.createImage(name, provenance);
         errdefer candidate.deinit();
         // Attribution asks one question, of the exact designated body. The
         // archive consumes that body into either an unchanged owner or an
@@ -5653,21 +5633,11 @@ pub const Machine = struct {
                 var runnable = prepared_body;
                 defer runnable.deinit(self.releaseDomain(), self.allocator());
                 if (owned.seedHeader() == null) {
-                    return self.openImageBoundary(
-                        &candidate,
-                        provenance,
-                        name,
-                        word,
-                        runnable.take(),
-                    );
+                    return self.openImageBoundary(&candidate, word, runnable.take());
                 }
                 try self.startDriver(ConstructionDriver{
                     .state = .init(.{ .open = .{
-                        .target = .init(.{ .image = .{
-                            .candidate = candidate.move(),
-                            .provenance = provenance,
-                            .name = name,
-                        } }),
+                        .target = .init(.{ .image = candidate.move() }),
                         .body = .init(runnable.take()),
                     } }),
                     .materializer = .init(.init(owned.takeSeeds().?)),
@@ -5692,11 +5662,7 @@ pub const Machine = struct {
                 defer cursor.deinit(self.releaseDomain(), self.allocator());
                 try self.startDriver(ConstructionDriver{
                     .state = .init(.{ .rescope = .{
-                        .target = .init(.{ .image = .{
-                            .candidate = candidate.move(),
-                            .provenance = provenance,
-                            .name = name,
-                        } }),
+                        .target = .init(.{ .image = candidate.move() }),
                         .cursor = .init(cursor.take()),
                     } }),
                     .materializer = if (owned.takeSeeds()) |seeds|
@@ -5714,14 +5680,11 @@ pub const Machine = struct {
     fn openImageBoundary(
         self: *Machine,
         candidate: *modules.OwnedImage,
-        provenance: modules.RegistrationProvenance,
-        name: intern.ModuleName,
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
         const home = candidate.executionHome(self.unit.module_access);
-        var site = ExecutionSite.image(home, self.unit.module_access, true);
-        site.registration_provenance = provenance;
+        const site = ExecutionSite.image(home, self.unit.module_access, true);
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(body_header);
             return error.OutOfMemory;
@@ -5733,8 +5696,6 @@ pub const Machine = struct {
         try self.openBoundary(
             .{ .module = .{
                 .image = candidate.move(),
-                .provenance = provenance,
-                .registration = name,
                 .root_code = body_header,
             } },
             @intCast(self.unit.stack.items.len),
@@ -5837,18 +5798,11 @@ pub const Machine = struct {
         return true;
     }
 
-    /// The home a module-local binding in `image` runs under: the running
-    /// home when it is the same image, so `within` keeps targeting the
-    /// registration the call came through, and the image's own
-    /// registration-less home otherwise. The caller has already proven the
-    /// image live, so nothing is acquired here.
+    /// The home a module-local binding in `image` runs under: that image's
+    /// own, or the running home when `image` is not a module root. The caller
+    /// has already proven the image live, so nothing is acquired here.
     fn homeForSlot(self: *Machine, image: *env.Scope) ?*modules.ModuleHome {
-        const current_home = self.unit.current.?.home();
-        const image_home = modules.homeForModuleRootScope(image) orelse return current_home;
-        if (current_home) |running| {
-            if (modules.sameImage(running, image_home, self.unit.module_access)) return running;
-        }
-        return image_home;
+        return modules.homeForModuleRootScope(image) orelse self.unit.current.?.home();
     }
 
     const SlotTarget = struct {
@@ -7150,18 +7104,16 @@ fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
     };
 }
 
-/// How a module-local definition is spelled when reached through `home`. An
-/// anonymous construction root has no name to qualify with, so code running
-/// inside a body under construction traces by its local name alone.
+/// How a module-local definition is spelled when reached through `home`: by
+/// the name the image was built for, during construction as well as after.
 fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) intern.TraceWord {
-    const name = home.name() orelse return .plain(intern.bindingId(local));
-    return .moduleLocal(name, local);
+    return .moduleLocal(home.name(), local);
 }
 
 /// What a qualified resolution leaves behind for its call site: the cell it
 /// found and the registration generation it was found under.
 const CallSiteCacheCandidate = struct {
-    generation: modules.GenerationGuard,
+    generation: modules.GenerationLease,
     cell: env.BindingCellHandle,
 
     fn deinit(self: *CallSiteCacheCandidate) void {
@@ -7559,7 +7511,7 @@ pub const BindingCache = struct {
 
 pub const Resolution = struct {
     lease: env.BindingLease,
-    execution_generation: ?modules.ExecutionGeneration,
+    execution_generation: ?modules.GenerationPin,
     home: ?*modules.ModuleHome,
     /// The reference the borrow acquired for this dispatch, moved out of the
     /// cursor. `scheduleWord` consumes it so no second pin is taken.
@@ -7873,26 +7825,17 @@ pub const ResolutionCursor = struct {
     /// Moving scope onto the word falsified that: a quotation that escaped its
     /// module carries its own image's scope, so the hit can come out of an image
     /// this activation is not running — and taking the caller's home there gave
-    /// the caller's `within` slot to someone else's private code.
+    /// the caller's privacy to someone else's private code.
     ///
-    /// So a *foreign* hit executes against its own image's registration-less
-    /// home. No acquire happens here: the borrow in `executeWord` already proved
+    /// So a hit executes against the home of the image it came out of. No
+    /// acquire happens here: the borrow in `executeWord` already proved
     /// that image live, either by holding a fresh pin or by matching the
     /// activation's own. Re-pinning would be a second reference for one
     /// dispatch, and the unconditional `pin`/`retain` must never appear here —
     /// it is a `fetchAdd` that asserts on a zero refcount and resurrects a
     /// destroyed object in ReleaseFast.
     fn homeForLocalHit(self: *ResolutionCursor, searched: *env.Scope) ?*modules.ModuleHome {
-        const image_home = modules.homeForModuleRootScope(searched) orelse
-            return self.current_home;
-        // A double-registered image entered through either name stays
-        // non-foreign, so `within` keeps targeting the registration the call
-        // actually came through.
-        if (self.current_home) |running| {
-            if (modules.sameImage(running, image_home, self.module_access))
-                return running;
-        }
-        return image_home;
+        return modules.homeForModuleRootScope(searched) orelse self.current_home;
     }
 
     fn directResult(
@@ -7932,7 +7875,7 @@ pub const ResolutionCursor = struct {
                 break :cache null;
             }
             break :cache CallSiteCacheCandidate{
-                .generation = generation_lease.guard(),
+                .generation = generation_lease.clone(),
                 .cell = cell.?,
             };
         };
@@ -8567,7 +8510,7 @@ const AttemptResultDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-/// The registry-mutation half of `register`, the one publication protocol.
+/// Drives one registry publication, mapping its refusals to language errors.
 fn advanceRegistration(
     evaluator: *Machine,
     cursor: *modules.Registry.RegistrationCursor,
@@ -8652,18 +8595,14 @@ const SeedMaterializer = struct {
 const ConstructionTarget = union(enum) {
     /// `@attempt`: a failure boundary in the invoker's scope.
     attempt,
-    /// `@defm`: the candidate image, its constructing site's provenance, and
-    /// the already-validated name it will be published under.
-    image: struct {
-        candidate: modules.OwnedImage,
-        provenance: modules.RegistrationProvenance,
-        name: intern.ModuleName,
-    },
+    /// `@defm`: the candidate image, carrying its validated name and its
+    /// constructing site's provenance.
+    image: modules.OwnedImage,
 
     pub fn deinit(self: *ConstructionTarget) void {
         switch (self.*) {
             .attempt => {},
-            .image => |*owned| owned.candidate.deinit(),
+            .image => |*owned| owned.deinit(),
         }
         self.* = .attempt;
     }
@@ -8756,15 +8695,7 @@ const ConstructionDriver = struct {
                     .attempt => {
                         try evaluator.openAttempt(body);
                     },
-                    .image => |*owned| {
-                        try evaluator.openImageBoundary(
-                            &owned.candidate,
-                            owned.provenance,
-                            owned.name,
-                            self.word,
-                            body,
-                        );
-                    },
+                    .image => |*owned| try evaluator.openImageBoundary(owned, self.word, body),
                 }
                 open.target.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.state.borrowMut().* = .seed;
@@ -8815,9 +8746,10 @@ const ChildSeedDriver = struct {
 /// is published; an empty one freezes the image and publishes it under the
 /// name `@defm` validated before the body ran.
 fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
-    const owned = boundary.mode.module;
-    var image = owned.image;
+    var image = boundary.mode.module.image;
     defer image.deinit();
+    const name = image.moduleName();
+    const provenance = image.provenance();
     const observed = self.unit.stack.items.len - boundary.stack_base;
     if (observed != 0) return self.failFmt(
         .domain,
@@ -8825,17 +8757,13 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         .{ observed, if (observed == 1) "" else "s" },
     );
     var sealed = heap.Owned(modules.SealedImage).init(try image.seal(
-        self.moduleRecognition(owned.provenance),
+        self.moduleRecognition(provenance),
     ));
     errdefer sealed.deinit(self.releaseDomain(), self.allocator());
     const driver = try self.unit.allocator.create(ModuleCompletionDriver);
     // The cursor owns the sealed image from here; nothing can fail after.
     driver.* = .{
-        .cursor = .init(self.publicationRegistry(owned.registration, owned.provenance).registrationCursor(
-            sealed.take(),
-            owned.registration,
-            owned.provenance,
-        )),
+        .cursor = .init(self.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
     };
     self.adoptDriver(driver);
 }

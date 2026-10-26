@@ -1051,8 +1051,10 @@ test "module source: construction refusal reaches helper words and nested attemp
     try expectErrorContains(
         &runtime,
         "[] (([] (1) @spawn) 'start def start) 'helper @defm",
-        &.{ "'kind 'domain", "'word '@spawn", "'start" },
+        &.{ "'kind 'domain", "'word '@spawn", "'helper.start" },
     );
+    // The helper is spelled under the name the body is being built for: an
+    // image knows its name before its body runs.
     // An `@attempt` inside the body observes the refusal as data; construction
     // then completes without having started a task.
     try expectOk(&runtime, "[] ([] ([] (1) @spawn) @attempt 'err at 'kind at 'k set) 'nested @defm nested.k task.pending len");
