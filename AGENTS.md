@@ -54,6 +54,9 @@ in those guides rather than expanding this index with incident-specific history.
   the representation that carries them. Write a change at the level of the
   surrounding section; do not transcribe every mechanism, name, or status code.
   Implementation narrative belongs in code comments.
+- `design/STDLIB.md` is generated. Edit its fragments under `design/stdlib`
+  and run `zig build stdlib`; entry order within a section is computed, not
+  authored.
 - Run every build, test, or script with stdin closed and under a bounded timeout.
   Capture the command's exit status immediately, before `tail`, `grep`, or any
   other helper. A silent command is not evidence that the intended test ran.

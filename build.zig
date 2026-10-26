@@ -1213,6 +1213,29 @@ pub fn build(b: *std.Build) void {
     );
     check_spec_step.dependOn(&check_spec_run.step);
 
+    // STDLIB.md is likewise assembled by ECL, from one fragment per section
+    // under design/stdlib. The script orders each section's entries by
+    // dependency rank and refuses a prelude out of that order. It discovers
+    // fragments and module sources by listing directories, which the build
+    // cannot hash, so both steps always run.
+    const assemble_stdlib = b.addRunArtifact(exe);
+    assemble_stdlib.addFileArg(b.path("design/stdlib/assemble.ecl"));
+    assemble_stdlib.setCwd(b.path("."));
+    assemble_stdlib.has_side_effects = true;
+    const stdlib_step = b.step("stdlib", "Assemble design/STDLIB.md from design/stdlib");
+    stdlib_step.dependOn(&assemble_stdlib.step);
+
+    const check_stdlib_run = b.addRunArtifact(exe);
+    check_stdlib_run.addFileArg(b.path("design/stdlib/assemble.ecl"));
+    check_stdlib_run.addArg("--check");
+    check_stdlib_run.setCwd(b.path("."));
+    check_stdlib_run.has_side_effects = true;
+    const check_stdlib_step = b.step(
+        "check-stdlib",
+        "Check that design/STDLIB.md matches design/stdlib and the prelude is in rank order",
+    );
+    check_stdlib_step.dependOn(&check_stdlib_run.step);
+
     const check_formal_run = b.addSystemCommand(&.{
         "pant", "--check",   "--bound", "2",             "--steps",
         "2",    "--timeout", "8",       "--module-path", "design/formal",
@@ -1304,6 +1327,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&run_audit.step);
     precommit_step.dependOn(&run_ecl_source.step);
     precommit_step.dependOn(&check_spec_run.step);
+    precommit_step.dependOn(&check_stdlib_run.step);
     precommit_step.dependOn(check_formal_step);
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);

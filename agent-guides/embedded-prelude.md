@@ -16,6 +16,10 @@ apply as well.
   effects.
 - Treat the annotation docstring—not the navigation comment—as the reflective
   documentation authority.
+- Order definition blocks by dependency depth, then by codepoint name: a
+  definition follows every prelude word its body uses, and definitions at the
+  same depth sort as `cmp` sorts their names. `zig build check-stdlib`, part
+  of `precommit`, refuses a prelude out of this order.
 - Enforce block structure in the dedicated source audit, whose scanner must
   ignore apparent headers and definition syntax inside multiline strings.
   Whitespace layout belongs to the formatter and its CI check.
