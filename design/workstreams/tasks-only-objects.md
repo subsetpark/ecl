@@ -674,7 +674,8 @@ echoed final stack or the error dictionary on stderr.
   - **Assert**: `agent.call-for` past its deadline raises `'timeout` in the
     caller, and the agent still answers afterwards.
   - **Verify by** `cmd`: `[7 0] agent.start 'g set [] ((100 clock.sleep 1) g 20 agent.call-for) @attempt 'err at 'kind at (dup) g agent.call pair`.
-  - **Expected**: `('timeout [7 0])` or `('timeout [7 0 1])` depending on whether the late quotation has run.
+  - **Expected**: `('timeout [7 0])`; the late quotation's `1` is popped as its
+    unread reply, so the state is unchanged either way.
   - **Traces to**: Milestone 4 — `agent.call-for`.
 
 - **DoD-28 — a directly spawned server is cancellable through its handle**
