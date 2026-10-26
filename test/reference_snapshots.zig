@@ -109,9 +109,9 @@ const cases = [_]Case{
     .{ .name = "qualify execute", .source = "[] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "'qualify doc" },
-    .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
-    .{ .name = "unmodule then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone unmodule gone.x" },
-    .{ .name = "doc unmodule", .source = "'unmodule doc" },
+    .{ .name = "undefm unknown", .source = "'nowhere undefm" },
+    .{ .name = "undefm then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone undefm gone.x" },
+    .{ .name = "doc undefm", .source = "'undefm doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
     .{ .name = "result ok", .source = "[1 2] result.ok" },
@@ -875,25 +875,25 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\"Construct an executable qualified word without reparsing source text."
         \\stderr:
         \\<empty>
-        \\=== unmodule unknown ===
-        \\source: 'nowhere unmodule
+        \\=== undefm unknown ===
+        \\source: 'nowhere undefm
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
         \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'scope 'qualified 'source "<command>" 'line 1 'col 10}}
-        \\=== unmodule then resolve ===
-        \\source: [] ((1) 'x def) 'gone @defm 'gone unmodule gone.x
+        \\=== undefm then resolve ===
+        \\source: [] ((1) 'x def) 'gone @defm 'gone undefm gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 44}}
-        \\=== doc unmodule ===
-        \\source: 'unmodule doc
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 42}}
+        \\=== doc undefm ===
+        \\source: 'undefm doc
         \\exit: 0
         \\stdout:
-        \\"Close, quiesce, and retire a registered module named by a symbol."
+        \\"Remove the module registered under a canonical name or alias."
         \\stderr:
         \\<empty>
         \\=== result ok ===

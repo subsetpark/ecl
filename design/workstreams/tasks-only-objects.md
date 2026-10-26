@@ -212,7 +212,7 @@ module in the tree is built with `@defm` already. The image type remains
 internal for generations.
 
 **Unlocks**: Milestone 5 deletes module state against a registry whose only
-public operations are `@defm`, `unmodule`, `alias`, `import`, and `qualify`.
+public operations are `@defm`, `undefm`, `alias`, `import`, and `qualify`.
 
 ---
 
@@ -364,7 +364,7 @@ after its completion driver is allocated. Gates: `precommit`,
   quiescence plus the lease count.
 - `@defm` with a nonempty final body stack is `'domain`. Registration is
   name → current generation; replacement publishes a new generation and
-  keeps nothing else. `unmodule` closes admission and retires.
+  keeps nothing else. `undefm` closes admission and retires.
 - `src/stdlib/rng.ecl` is deleted and removed from the manifest.
   `src/kernel_random.zig` gains `shuffle ( state values -- state values )`
   and `deal ( state count pool -- state results )` as counter-based kernels

@@ -20,7 +20,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "Validate a module name, then evaluate a module body with an explicit initial stack in a fresh unit and register the result under that name." },
-        .{ .name = "unmodule", .primitive = unmoduleWord, .effect = "module-name --", .doc = "Close, quiesce, and retire a registered module named by a symbol." },
+        .{ .name = "undefm", .primitive = undefmWord, .effect = "module-name --", .doc = "Remove the module registered under a canonical name or alias." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
         .{ .name = "import", .primitive = importWord, .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
@@ -74,9 +74,9 @@ const DefmDriver = struct {
 };
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// through the registry and drives the owner-issued close protocol.
-fn unmoduleWord(evaluator: *Machine) MachineError!void {
+fn undefmWord(evaluator: *Machine) MachineError!void {
     const name = try evaluator.popSymbol();
-    try evaluator.startDriver(UnmoduleDriver{ .validation = .init(name) });
+    try evaluator.startDriver(UndefmDriver{ .validation = .init(name) });
 }
 
 /// Returns the canonical registration selected by the active execution home.
@@ -118,11 +118,11 @@ const FileDriver = struct {
     }
 };
 
-const UnmoduleDriver = struct {
+const UndefmDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     validation: intern.ModuleNameCursor,
     cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
-    pub fn advance(evaluator: *Machine, self: *UnmoduleDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *UndefmDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -131,7 +131,7 @@ const UnmoduleDriver = struct {
                 .complete => |maybe_name| {
                     const name = maybe_name orelse return evaluator.fail(
                         .domain,
-                        "unmodule requires a valid module name",
+                        "undefm requires a valid module name",
                     );
                     try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
                     const registry = evaluator.publicationRegistry(name, evaluator.unit.current.?.site.registration_provenance);

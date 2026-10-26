@@ -1289,13 +1289,13 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
+    try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
     try expectOk(&runtime, "{'a 1} 'a dict.has? {'kind 'user 'msg \"dict did not load\"} assert");
     // Loaded, it is refused the same way, and an alias cannot claim the name.
     try expectErrorContains(&runtime, "[] () 'dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
     try expectErrorContains(&runtime, "[] () 'm @defm 'dict 'm alias", &.{reserved});
-    try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
+    try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
     try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") 'new def) 'error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
@@ -1318,7 +1318,7 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     // inline; neither runs it as standard-library code.
     try expectOk(&runtime, "[] result.ok ('d 'dict alias []) result.and-then 'err at 'kind at 'domain match? " ++
         "{'kind 'user 'msg \"alias escaped\"} assert");
-    try expectErrorContains(&runtime, "[] result.ok ('dict unmodule) () result.either", &.{reserved});
+    try expectErrorContains(&runtime, "[] result.ok ('dict undefm) () result.either", &.{reserved});
     try expectErrorContains(&runtime, "[] result.ok ([] () 'dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
 }

@@ -1342,6 +1342,14 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 when that scope does not bind the name. An exact alias of `unset`; removing a
 local shadow may reveal a parent or core binding.
 
+### undefm
+`( 'module-name -- )` — Remove the module currently registered under a
+canonical name or unqualified alias, resolved exactly as ordinary registry
+lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
+every alias targeting the module in the same publish; an already-dispatched
+call finishes under the generation it resolved. See
+[Modules](SPEC.md#modules).
+
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial
 elements and last element. Equivalent to `reverse uncons reverse swap`.
@@ -1369,14 +1377,6 @@ state and `()`.
 ### unless
 `( bool else -- ... )` — *Inline.* Run the quotation when the condition
 is 0. Equivalent to `() swap if`.
-
-### unmodule
-`( 'module-name -- )` — Close, quiesce, and retire the module currently
-registered under a canonical name or unqualified alias, resolved exactly as
-ordinary registry lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
-every alias targeting the slot in the same publish and is `'domain` when
-initiated from inside any state application, since a unit holds at most one
-slot's turn. See [Modules](SPEC.md#modules).
 
 ### unset
 `( name -- )` — Remove a direct binding from the current scope, or do nothing

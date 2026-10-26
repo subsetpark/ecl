@@ -305,7 +305,7 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
     try expectOk(&runtime, "[] ((1) 'x def) 'a @defm [] ((2) 'x def) 'b @defm " ++
         "'short 'a alias 'a ('x) import short.x a.x x");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
-    try expectOk(&runtime, "'a unmodule");
+    try expectOk(&runtime, "'a undefm");
     // The canonical name and every alias targeting it go in one publish.
     try expectErrorContains(&runtime, "a.x", &.{"'kind 'undefined-word"});
     try expectErrorContains(&runtime, "short.x", &.{"'kind 'undefined-word"});
@@ -352,7 +352,7 @@ test "module: qualified call sites heal generations and bypass aliases" {
             "'short 'alias-a alias (short.v) 'alias-probe def alias-probe " ++
             "'short 'alias-b alias alias-probe " ++
             "[] ((3) 'v def) 'removed-cache @defm (removed-cache.v) 'removed-probe def " ++
-            "removed-probe 'removed-cache unmodule [] (removed-probe) @attempt 'err at 'kind at",
+            "removed-probe 'removed-cache undefm [] (removed-probe) @attempt 'err at 'kind at",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();

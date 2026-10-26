@@ -300,7 +300,7 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
             "[] (reuse-left.bump) @spawn " ++
             "[] ((1) 'bump def) 'reuse-left @defm " ++
             "task.await pop [] (reuse-right.bump) @spawn task.await pop " ++
-            "'reuse-left unmodule 'reuse-right unmodule";
+            "'reuse-left undefm 'reuse-right undefm";
         // Both batches are one unit each and differ only in the cycle count,
         // so their fixed per-unit costs cancel and the only variable is how
         // many define/reload/remove cycles ran. Ten times the
@@ -411,7 +411,7 @@ test "module values: an escaped quotation names the image it was written in" {
     // Removal ends it the same way.
     try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'going @defm going.q 'escaped set");
     try expectStack(&runtime, "escaped call", "1");
-    try expectOk(&runtime, "'going unmodule");
+    try expectOk(&runtime, "'going undefm");
     try expectErrorContains(&runtime, "escaped call", &.{ "'kind 'domain", "retired" });
 }
 

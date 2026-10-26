@@ -1221,7 +1221,7 @@ test "e2e: module removal acceptance" {
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'short 'core.c alias 'short unmodule " ++
+        module ++ "'short 'core.c alias 'short undefm " ++
             "[] (core.c.peek) @attempt 'err at 'kind at io.pp [] (short.peek) @attempt 'err at 'kind at io.pp " ++
             module ++ "core.c.peek io.pp",
     });
@@ -1235,7 +1235,7 @@ test "e2e: module removal acceptance" {
     var by_canonical_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'core.c unmodule [] (core.c.peek) @attempt 'err at 'kind at io.pp",
+        module ++ "'core.c undefm [] (core.c.peek) @attempt 'err at 'kind at io.pp",
     });
     defer by_canonical_name.deinit();
     try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });

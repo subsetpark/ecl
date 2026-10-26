@@ -547,7 +547,7 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `load`, `unmodule` — they publish or retire without taking a
+- `import`, `load`, `undefm` — they publish or retire without taking a
   quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
@@ -636,13 +636,13 @@ skipping the session and every module image, so a shadowed core definition
 remains reachable: after `(2 *) 'dup def`, `core.dup` is still the primitive.
 Only public core bindings resolve this way; a missing or private name is
 `'undefined-word` with `'scope 'core`. `'core 'dup qualify` constructs the same
-word. `import`, `alias`, and `unmodule` observe registrations only and do not
+word. `import`, `alias`, and `undefm` observe registrations only and do not
 accept `core`.
 
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
-first use. `@defm` and `unmodule` with a standard-library module
+first use. `@defm` and `undefm` with a standard-library module
 name are `'domain`, as is `alias` with one as either the alias or its target. A
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
@@ -1128,7 +1128,7 @@ that name.
   reuses registry capacity.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
-- `unmodule` accepts a canonical name or alias. An unregistered name is
+- `undefm` accepts a canonical name or alias. An unregistered name is
   `'undefined-word`. An already-dispatched call may finish after removal.
 - Modules are process-local: there is no persistence across process restart,
   and the native ABI exposes no module capability, so an `.eclmod` word

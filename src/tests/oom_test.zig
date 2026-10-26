@@ -628,7 +628,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // Removal closes, quiesces, and retires through the same bounded
             // work, so its allocation-failure paths belong in the sweep too.
             "[] (([1 2]) 'peek def) 'oom-removed @defm " ++
-            "oom-removed.peek pop 'oom-removed unmodule",
+            "oom-removed.peek pop 'oom-removed undefm",
     );
     try runOk(
         &runtime,

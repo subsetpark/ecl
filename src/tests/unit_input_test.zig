@@ -237,7 +237,7 @@ test "unit inputs: a runtime-built body acquires no attribution" {
         defer measured.deinit();
         const cycle = "[] ((1) 'x def) () cat 'runtime-built @defm " ++
             "[] ((1) 'x def) () cat 'runtime-built @defm " ++
-            "runtime-built.x pop 'runtime-built unmodule";
+            "runtime-built.x pop 'runtime-built undefm";
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ cycle ++ ") for";
         try expectStack(&measured, small, "");

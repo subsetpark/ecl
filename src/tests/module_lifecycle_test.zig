@@ -1,6 +1,6 @@
 //! Module lifecycle: optional source annotations, construction seeds,
 //! namespaced lookup, the `core` qualifier, `execute`, auto-loading, hot
-//! reload, and the `unmodule` removal typestate, including removal racing
+//! reload, and the `undefm` removal typestate, including removal racing
 //! calls and the memory bound across construct/remove churn. Tests carrying
 //! the `concurrency: ` prefix enter `test-workers` (1 and 8) and `test-tsan`
 //! through build-file name routing; the rest run in the ordinary suite.
@@ -262,7 +262,7 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "g", "42");
     try expectOk(&runtime, "[] ((43) 'f def) 'base.utils @defm");
     try expectStack(&runtime, "base.utils.f 'base.utils 'f qualify execute", "43 43");
-    try expectOk(&runtime, "'utils unmodule");
+    try expectOk(&runtime, "'utils undefm");
     try expectErrorContains(&runtime, "base.utils.f", &.{ "'kind 'undefined-word", "base.utils.f" });
     try expectErrorContains(&runtime, "utils.f", &.{ "'kind 'undefined-word", "utils.f" });
     try expectOk(&runtime, "[] ((44) 'f def) 'base.utils @defm");
@@ -291,7 +291,7 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectErrorContains(&runtime, "'core 'shadow.host alias", &.{ "'kind 'domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "'short 'core alias", &.{ "'kind 'undefined-word", "undefined module `core`" });
     try expectErrorContains(&runtime, "'core ('dup) import", &.{ "'kind 'undefined-word", "'scope 'qualified" });
-    try expectErrorContains(&runtime, "'core unmodule", &.{ "'kind 'undefined-word", "undefined word `core`" });
+    try expectErrorContains(&runtime, "'core undefm", &.{ "'kind 'undefined-word", "undefined word `core`" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
     try expectOk(&runtime, "[] ((1) 'f def) 'core.utils @defm");
@@ -330,7 +330,7 @@ test "modules: removed identity builtin has no reservation and names validate by
         try expectErrorContains(&runtime, source, &.{"'kind 'parse"});
     try expectErrorContains(&runtime, "[] () 1 @defm", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "'x 1 import", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "1 unmodule", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "1 undefm", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "[] ((1) 'bad.name def) 'core.utils @defm", &.{"'kind 'domain"});
     try expectErrorContains(&runtime, "1 'f qualify", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "'core.utils 1 qualify", &.{"'kind 'type"});
@@ -342,7 +342,7 @@ test "modules: removed identity builtin has no reservation and names validate by
 
 const removable_module = "[] ((1) 'tick def (7) 'peek def) 'c @defm";
 
-test "concurrency: unmodule retires a module with its names and aliases in one publish" {
+test "concurrency: undefm retires a module with its names and aliases in one publish" {
     for ([_]usize{ 1, 8 }) |workers| {
         var runtime_inputs = try runtime_fixture.Fixture.init();
         defer runtime_inputs.deinit();
@@ -355,7 +355,7 @@ test "concurrency: unmodule retires a module with its names and aliases in one p
         try expectStack(
             &runtime,
             "[1] 20 take (pop [] ([] (c.tick) @attempt pop) @spawn) each " ++
-                "'c unmodule (task.await) each pop",
+                "'c undefm (task.await) each pop",
             "",
         );
         try expectErrorContains(&runtime, "c.peek", &.{"'kind 'undefined-word"});
@@ -364,10 +364,10 @@ test "concurrency: unmodule retires a module with its names and aliases in one p
         try expectErrorContains(&runtime, "'short ('peek) import", &.{"'kind 'undefined-word"});
         // Reusing the public name creates no way to refer to the removed module.
         try expectOk(&runtime, removable_module);
-        try expectStack(&runtime, "'c unmodule " ++ removable_module ++ " c.tick c.peek", "1 7");
-        try expectStack(&runtime, "'c unmodule", "");
+        try expectStack(&runtime, "'c undefm " ++ removable_module ++ " c.tick c.peek", "1 7");
+        try expectStack(&runtime, "'c undefm", "");
         try expectErrorContains(&runtime, "c.tick", &.{"'kind 'undefined-word"});
-        try expectErrorContains(&runtime, "'nowhere unmodule", &.{"'kind 'undefined-word"});
+        try expectErrorContains(&runtime, "'nowhere undefm", &.{"'kind 'undefined-word"});
         // Re-registration racing removal of the same name: whichever edit
         // publishes second finds its snapshot stale and starts over against
         // the other's directory. Both orders leave exactly one live module.
@@ -375,20 +375,20 @@ test "concurrency: unmodule retires a module with its names and aliases in one p
             try expectOk(&runtime, removable_module);
             try expectStack(
                 &runtime,
-                "[(" ++ removable_module ++ ") ('c unmodule)] ([] swap @spawn) each " ++
-                    "(task.await) each pop [] ('c unmodule) @attempt pop " ++
+                "[(" ++ removable_module ++ ") ('c undefm)] ([] swap @spawn) each " ++
+                    "(task.await) each pop [] ('c undefm) @attempt pop " ++
                     removable_module ++ " c.tick c.peek",
                 "1 7",
             );
-            try expectStack(&runtime, "'c unmodule", "");
+            try expectStack(&runtime, "'c undefm", "");
         }
     }
 }
 
 const churn_cycle = "[] ((\"a module string\" [1 2 3] {'k 'v}) 'peek def) 'churn @defm " ++
-    "churn.peek pop pop pop 'churn unmodule";
+    "churn.peek pop pop pop 'churn undefm";
 
-test "concurrency: a cancelled unmodule leaves nothing stranded" {
+test "concurrency: a cancelled undefm leaves nothing stranded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
@@ -398,19 +398,19 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
         defer runtime.deinit();
         // The observer detects the published close through ordinary name
         // resolution. The removal task deliberately remains cancellable
-        // after `unmodule`, so cancellation is issued after that edge rather
+        // after `undefm`, so cancellation is issued after that edge rather
         // than pre-armed. Each batch is one Unit and the source differs only
         // in its count, excluding per-Unit archive/task costs from the bound.
         const cancellation_cycle = "[] (8192 range 'big setp " ++
             "(1) 'alive def) 'doomed @defm" ++
             " [] (([] ('doomed.alive execute) @attempt result.ok?) () while) @spawn 'close-watcher set" ++
-            " [] ('doomed unmodule (1) () while) @spawn 'removal-task set" ++
+            " [] ('doomed undefm (1) () while) @spawn 'removal-task set" ++
             " close-watcher task.await pop removal-task task.cancel" ++
             " removal-task task.await 'err at 'kind at 'cancelled match? pop" ++
             // A successful public mutation drives reuse settlement while the
             // Session remains live; shutdown is not the cleanup mechanism.
             " [] ((1) 'peek def) 'settler @defm" ++
-            " settler.peek pop 'settler unmodule";
+            " settler.peek pop 'settler undefm";
         const small = "2 (" ++ cancellation_cycle ++ ") times";
         const large = "8 (" ++ cancellation_cycle ++ ") times";
         try expectStack(&runtime, small, "");
@@ -498,7 +498,7 @@ test "concurrency: applying an escaped quotation races reload and removal" {
     defer runtime.deinit();
     // A quotation that escaped `racer` names the image it was written in, and
     // an application from a spawned task has no home, so nothing pins that
-    // image while the words resolve. A concurrent `@defm` or `unmodule` can
+    // image while the words resolve. A concurrent `@defm` or `undefm` can
     // therefore free the scope under the resolving worker.
     //
     // This test exists to catch that. It is named into the `concurrency:` tier
@@ -514,7 +514,7 @@ test "concurrency: applying an escaped quotation races reload and removal" {
     // And against removal, where acquisition must fail rather than race.
     try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'goner @defm goner.q 'gone set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
-        "'goner unmodule (task.await) each pop");
+        "'goner undefm (task.await) each pop");
 }
 
 // Stubs. Implemented by the patch each one names; see
@@ -530,7 +530,7 @@ test "concurrency: a resolver racing an image's last release never dereferences 
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
         // The quotation escapes its module, so its words are stamped against an
-        // image nothing holds. Tasks apply it while `unmodule` drives that image
+        // image nothing holds. Tasks apply it while `undefm` drives that image
         // to its last release underneath them.
         //
         // This is the test that separates this design from the one it replaced.
@@ -546,7 +546,7 @@ test "concurrency: a resolver racing an image's last release never dereferences 
         try expectStack(
             &runtime,
             "[1] 64 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
-                "'goner unmodule (task.await) each pop",
+                "'goner undefm (task.await) each pop",
             "",
         );
     }
