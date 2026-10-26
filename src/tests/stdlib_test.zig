@@ -73,38 +73,7 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
 test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // No search path is configured; embedded modules resolve independently
     // of the isolated filesystem inputs.
-    const exports = [_][]const u8{
-        "port.await",
-        "port.core.await",
-        "task.pending",
-        "dict.from-pairs",
-        "error.new",
-        "result.ok",
-        "str.upper",
-        "io.print",
-        "csv.parse",
-        "json.parse",
-        "host.cwd",
-        "source.declarations",
-        "table.valid?",
-        "http.get-bytes",
-        "http.server.route",
-        "http.request.new",
-        "http.response.new",
-        "proc.wait",
-        "proc.core.process",
-        "fs.read-text",
-        "net.listen",
-        "net.core.listener",
-        "path.normalize",
-        "archive.sha256",
-        "clock.now",
-        "time.parse",
-        "rng.float",
-        "rand.float",
-        "test.default.run",
-    };
-    for (stdlib.names(), exports) |name, qualified| {
+    for (stdlib.names(), support.stdlib_exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
         var runtime_inputs = try runtime_fixture.Fixture.init();

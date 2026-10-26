@@ -10,6 +10,7 @@ const std = @import("std");
 const formatter = @import("../formatter.zig");
 const session = @import("../session.zig");
 const stdlib = @import("../stdlib.zig");
+const support = @import("kernel_test_support.zig");
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
     switch (try runtime.runUnit("module-registration-test.ecl", source)) {
@@ -372,38 +373,7 @@ test "module sources: formatter and standard modules use @defm" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    const exports = [_][]const u8{
-        "port.await",
-        "port.core.await",
-        "task.pending",
-        "dict.from-pairs",
-        "error.new",
-        "result.ok",
-        "str.upper",
-        "io.print",
-        "csv.parse",
-        "json.parse",
-        "host.cwd",
-        "source.declarations",
-        "table.valid?",
-        "http.get-bytes",
-        "http.server.route",
-        "http.request.new",
-        "http.response.new",
-        "proc.wait",
-        "proc.core.process",
-        "fs.read-text",
-        "net.listen",
-        "net.core.listener",
-        "path.normalize",
-        "archive.sha256",
-        "clock.now",
-        "time.parse",
-        "rng.float",
-        "rand.float",
-        "test.default.run",
-    };
-    for (stdlib.names(), exports) |name, qualified| {
+    for (stdlib.names(), support.stdlib_exports) |name, qualified| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
             "'{s} ('{s}) import",
