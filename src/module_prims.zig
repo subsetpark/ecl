@@ -14,8 +14,8 @@ const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-/// Removal advances one owner transition per cursor step, so cancellation can
-/// run between the directory close edge and the slot's retirement.
+/// Removal is one directory edit; the retired generation's images release
+/// through the superseded directory's own bounded retirement.
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
@@ -142,15 +142,11 @@ const UnmoduleDriver = struct {
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.MissingModule => return evaluator.undefinedNameIn(
-                    intern.moduleId(self.cursor.?.borrow().requested),
+                    intern.moduleId(self.cursor.?.borrow().request),
                     .qualified,
                 ),
             }) {
                 .pending => {},
-                // The close edge has transferred all remaining ownership to
-                // scheduler retirement. Yield before polling cancellation
-                // again so abandoning this Unit cannot abandon module state.
-                .detached => return .{ .yielded = .settle },
                 .complete => return .completed,
             }
         }

@@ -342,7 +342,7 @@ test "modules: removed identity builtin has no reservation and names validate by
 
 const removable_module = "[] ((1) 'tick def (7) 'peek def) 'c @defm";
 
-test "concurrency: unmodule closes quiesces and retires slots names and aliases" {
+test "concurrency: unmodule retires a module with its names and aliases in one publish" {
     for ([_]usize{ 1, 8 }) |workers| {
         var runtime_inputs = try runtime_fixture.Fixture.init();
         defer runtime_inputs.deinit();
@@ -359,19 +359,18 @@ test "concurrency: unmodule closes quiesces and retires slots names and aliases"
             "",
         );
         try expectErrorContains(&runtime, "c.peek", &.{"'kind 'undefined-word"});
-        // Every alias targeting the slot goes with it in the same publish.
+        // Every alias targeting the module goes with it in the same publish.
         try expectErrorContains(&runtime, "short.peek", &.{"'kind 'undefined-word"});
         try expectErrorContains(&runtime, "'short ('peek) import", &.{"'kind 'undefined-word"});
-        // Reusing the public name creates no way to refer to the removed slot.
+        // Reusing the public name creates no way to refer to the removed module.
         try expectOk(&runtime, removable_module);
         try expectStack(&runtime, "'c unmodule " ++ removable_module ++ " c.tick c.peek", "1 7");
         try expectStack(&runtime, "'c unmodule", "");
         try expectErrorContains(&runtime, "c.tick", &.{"'kind 'undefined-word"});
         try expectErrorContains(&runtime, "'nowhere unmodule", &.{"'kind 'undefined-word"});
-        // Re-registration racing removal of the same name: the commit either
-        // reloads the live slot or finds it closed and starts over as a first
-        // registration. Both outcomes leave exactly one live module — never a
-        // panic, and never a candidate published into somebody else's slot.
+        // Re-registration racing removal of the same name: whichever edit
+        // publishes second finds its snapshot stale and starts over against
+        // the other's directory. Both orders leave exactly one live module.
         for (0..12) |_| {
             try expectOk(&runtime, removable_module);
             try expectStack(

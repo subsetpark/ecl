@@ -4,7 +4,7 @@
 //! resulting image as the registration's new generation. Every test here pins
 //! one publicly observable clause of that contract through the ordinary
 //! `Session` interface — no accessor exposes `ModuleImage`,
-//! `RegistrationHome`, `ModuleSlot`, `Environment`, or any registry internal.
+//! `ModuleHome`, `Environment`, or any registry internal.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const formatter = @import("../formatter.zig");
