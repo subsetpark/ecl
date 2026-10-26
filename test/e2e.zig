@@ -585,8 +585,10 @@ test "e2e: ecl test runs the default runner" {
 test "e2e: tests retain file-private module visibility" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
+    // A helper constructed inside a quotation is not a discoverable
+    // declaration, so it is never exported: the file keeps it private.
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) 'baz @defm\n" ++
+        .{ .path = "bar.ecl", .source = "([] ((42) 'answer def) 'baz @defm) call\n" ++
             "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
             "baz.answer 42 = {'kind 'user} assert\n" },
         .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
@@ -612,10 +614,12 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) 'helper @defm\n" ++
-            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
-        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) 'helper @defm\n" ++
-            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm\n" },
+        // Both files construct inside quotations so nothing is discoverable:
+        // each `helper` and `suite` stays private to its own source.
+        .{ .path = "private.ecl", .source = "([] ((42) 'answer def) 'helper @defm) call\n" ++
+            "([] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm) call\n" },
+        .{ .path = "other.ecl", .source = "([] ((7) 'answer def) 'helper @defm) call\n" ++
+            "([] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm) call\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
