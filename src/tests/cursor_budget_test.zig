@@ -446,11 +446,13 @@ const RenderAdapter = struct {
 /// is exercised at every grain.
 const ByteComparator = struct {
     pub const Context = void;
+    pub const Error = error{};
+    pub fn deinit(_: *Cursor) void {}
     pub const Cursor = struct { left: u32, right: u32, shift: u5 = 24 };
     pub fn init(_: Context, left: u32, right: u32) Cursor {
         return .{ .left = left, .right = right };
     }
-    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) Error!poll.Progress(std.math.Order) {
         while (true) {
             if (!work.spend()) return .pending;
             const left: u8 = @truncate(cursor.left >> cursor.shift);
@@ -474,7 +476,7 @@ const SortAdapter = struct {
         return .{ .items = items, .sorter = try .init(allocator, items, {}) };
     }
     fn step(cursor: *Cursor, work: *poll.WorkBudget) !?Outcome {
-        return switch (cursor.sorter.advance(work)) {
+        return switch (cursor.sorter.advance(work) catch |err| switch (err) {}) {
             .pending => null,
             .complete => cursor.items,
         };

@@ -124,12 +124,6 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "1 0 0 0",
         },
         .{
-            .name = "lexicographic comparison",
-            .source = "[1 2] [1 3] lex-cmp [1 3] [1 2] lex-cmp " ++
-                "[1] [1 0] lex-cmp [1 0] [1] lex-cmp [] [] lex-cmp",
-            .expected = "-1 1 -1 1 0",
-        },
-        .{
             .name = "custom lexicographic comparison stops at the first difference",
             .source = "0 'lex-calls set [1 2 3] [9 0 0] " ++
                 "(lex-calls 1 + 'lex-calls set cmp) lex-cmp-with lex-calls",
@@ -175,18 +169,18 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose nonempty documentation" {
     const names = [_][]const u8{
-        "compose",   "first",      "wrap",    "literal",     "dip",          "over",
-        "rollup",    "rolldown",   "partial", "with",        "mod",          "neg",
-        "abs",       "<>",         "<=",      ">=",          "and",          "or",
-        "nip",       "keep",       "bi",      "tri",         "bi2",          "tri2",
-        "both",      "when",       "unless",  "case",        "signum",       "clamp",
-        "last",      "pair",       "pack",    "append",      "rest",         "reverse",
-        "uncons",    "unappend",   "empty?",  "zip",         "lex-cmp-with", "lex-cmp",
-        "min-of",    "max-of",     "sort",    "distinct",    "at-path",      "filter",
-        "partition", "any?",       "all?",    "sum",         "product",      "mean",
-        "fail",      "find",       "set",     "setp",        "assert",       "rotate",
-        "windows",   "each-prior", "fold1",   "scan1",       "iterations",   "while-values",
-        "converges", "converge",   "chunk",   "from-digits", "to-digits",    "collect",
+        "compose",    "first",    "wrap",        "literal",    "dip",          "over",
+        "rollup",     "rolldown", "partial",     "with",       "mod",          "neg",
+        "abs",        "<>",       "<=",          ">=",         "and",          "or",
+        "nip",        "keep",     "bi",          "tri",        "bi2",          "tri2",
+        "both",       "when",     "unless",      "case",       "signum",       "clamp",
+        "last",       "pair",     "pack",        "append",     "rest",         "reverse",
+        "uncons",     "unappend", "empty?",      "zip",        "lex-cmp-with", "min-of",
+        "max-of",     "sort",     "distinct",    "at-path",    "filter",       "partition",
+        "any?",       "all?",     "sum",         "product",    "mean",         "fail",
+        "find",       "set",      "setp",        "assert",     "rotate",       "windows",
+        "each-prior", "fold1",    "scan1",       "iterations", "while-values", "converges",
+        "converge",   "chunk",    "from-digits", "to-digits",  "collect",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

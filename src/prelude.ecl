@@ -219,11 +219,6 @@
   over 0 = (nip) (pop) if)
  call) 'lex-cmp-with def
 
-### def lex-cmp
-(left right -- order :
- "Compare two sequences lexicographically using cmp on corresponding elements.")
-((cmp) lex-cmp-with) 'lex-cmp def
-
 ### def min-of
 (sequence -- value : "Return the least element of a nonempty sequence.")
 (dup first (min) fold) 'min-of def

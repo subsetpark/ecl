@@ -104,7 +104,7 @@
 
  ### defp representable?
  (digits -- bool : "Return 1 when a zero-stripped digit string fits a signed 64-bit int.")
- (dup len 19 < (pop 1) (dup len 19 = ("9223372036854775807" lex-cmp 1 <) (pop 0) if) if)
+ (dup len 19 < (pop 1) (dup len 19 = ("9223372036854775807" cmp 1 <) (pop 0) if) if)
  'representable? defp
 
  ### def content-length

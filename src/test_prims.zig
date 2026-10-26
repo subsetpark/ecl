@@ -59,6 +59,8 @@ const Collected = struct {
 
 const CollectedComparator = struct {
     pub const Context = void;
+    pub const Error = error{};
+    pub fn deinit(_: *Cursor) void {}
     pub const Cursor = struct {
         left_module: []const u8,
         right_module: []const u8,
@@ -79,7 +81,7 @@ const CollectedComparator = struct {
         };
     }
 
-    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) Error!poll.Progress(std.math.Order) {
         while (true) {
             const left = if (cursor.phase == .module) cursor.left_module else cursor.left_name;
             const right = if (cursor.phase == .module) cursor.right_module else cursor.right_name;
@@ -186,7 +188,7 @@ const DiscoveryDriver = struct {
             .sort => {
                 if (self.sorter == null)
                     self.sorter = try .init(evaluator.allocator(), self.items.items, {});
-                switch (self.sorter.?.advance(work)) {
+                switch (self.sorter.?.advance(work) catch |err| switch (err) {}) {
                     .pending => _ = work.spend(),
                     .complete => {
                         self.sorter.?.deinit();

@@ -135,8 +135,11 @@ pub fn driveVoidFallible(cursor: anytype, args: anytype) !void {
 }
 
 /// Bottom-up stable merge sort whose comparisons and copying are both
-/// resumable. `Comparator` supplies `Context`, `Cursor`, `init`, and
-/// `advance`; the latter returns `Progress(std.math.Order)`.
+/// resumable. `Comparator` supplies `Context`, `Cursor`, `Error`, `init`,
+/// `advance`, and `deinit`; `advance` returns
+/// `Error!Progress(std.math.Order)`. A failed comparison ends the sort with
+/// its cursor still held, so the caller can name the pair that failed;
+/// `deinit` releases it with everything else.
 pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
     return struct {
         const Self = @This();
@@ -171,14 +174,21 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.comparator) |*comparator| Comparator.deinit(comparator);
             self.allocator.free(self.scratch);
             self.* = undefined;
+        }
+
+        /// The comparison in progress, which is the failed one after `advance`
+        /// returns an error.
+        pub fn comparing(self: *const Self) ?*const Comparator.Cursor {
+            return if (self.comparator) |*comparator| comparator else null;
         }
 
         /// Each merge step draws one unit, spent before its comparison so a
         /// completed comparison is never lost to an exhausted allowance; the
         /// comparator draws its own work from the same budget.
-        pub fn advance(self: *Self, work: *WorkBudget) Progress(void) {
+        pub fn advance(self: *Self, work: *WorkBudget) Comparator.Error!Progress(void) {
             while (true) {
                 if (self.width >= self.items.len) {
                     if (!self.source_scratch) return .complete;
@@ -220,9 +230,10 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
                             source[self.right],
                         );
                     }
-                    switch (Comparator.advance(&self.comparator.?, work)) {
+                    switch (try Comparator.advance(&self.comparator.?, work)) {
                         .pending => return .pending,
                         .complete => |ordering| {
+                            Comparator.deinit(&self.comparator.?);
                             self.comparator = null;
                             choose_left = ordering != .gt;
                         },

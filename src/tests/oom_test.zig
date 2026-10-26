@@ -514,7 +514,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var display = try runtime.stackDisplay();
     display.deinit();
     try runOk(&runtime, "oom-display-cleanup.ecl", "pop");
-    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop [[1 2] [2 1]] group-columns pop [1 2] [[0 1]] 'sum reduce-groups pop");
+    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop [[1 2] [2 1]] group-columns pop [1 2] [[0 1]] 'sum reduce-groups pop [[[1]] [[0]]] grade pop [[1]] [[2]] cmp pop");
     try runOk(
         &runtime,
         "oom-dict-text.ecl",

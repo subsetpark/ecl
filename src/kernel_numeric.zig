@@ -3931,7 +3931,7 @@ const GroupReduceDriver = struct {
     group: usize = 0,
     index: usize = 0,
     accumulator: Value = .{ .int = 0 },
-    comparison: ?@import("kernel_order.zig").CompareCursor = null,
+    comparison: ?heap.Owned(@import("kernel_order.zig").CompareCursor) = null,
 
     fn reduceRun(
         self: *GroupReduceDriver,
@@ -4021,12 +4021,13 @@ const GroupReduceDriver = struct {
                 },
                 .min, .max => {
                     if (self.index == 0) self.accumulator = item;
-                    if (self.comparison == null) self.comparison = .init(self.accumulator, item);
-                    switch (self.comparison.?.advance(work)) {
+                    if (self.comparison == null) self.comparison = .init(.init(evaluator.allocator(), self.accumulator, item));
+                    switch (try self.comparison.?.borrowMut().advance(work)) {
                         .pending => continue,
                         .not_comparable => return evaluator.typeError("comparable group values"),
                         .complete => |order| {
                             if ((self.operation == .min and order == .gt) or (self.operation == .max and order == .lt)) self.accumulator = item;
+                            self.comparison.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             self.comparison = null;
                         },
                     }

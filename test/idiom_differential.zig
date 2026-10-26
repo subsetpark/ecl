@@ -712,9 +712,9 @@ test "idioms: a caller's quotation is recognized inside prelude definitions" {
     try expectHits("[1 2 3 4 5 6] (3 mod) filter", 2);
     // The shadowed `neg` declines; only the fold is recognized.
     try expectHits("(pop 1) 'neg def [5 6] (neg) all?", 1);
-    // `lex-cmp`'s own `(cmp)`, offered by `lex-cmp-with`.
-    try expectHits("[1 2 3] [1 2 4] lex-cmp", 1);
-    try expectHits("\"abc\" \"abd\" lex-cmp", 1);
+    // A `(cmp)` comparator offered by `lex-cmp-with`.
+    try expectHits("[1 2 3] [1 2 4] (cmp) lex-cmp-with", 1);
+    try expectHits("\"abc\" \"abd\" (cmp) lex-cmp-with", 1);
 }
 
 test "idioms: scalar programs preserve generic behavior" {
