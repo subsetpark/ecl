@@ -286,9 +286,8 @@ test "module: privacy module-body contract top-level private and qualified trace
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "private-word.g", &.{ "'kind 'undefined-word", "'word 'private-word.g" });
     try expectErrorContains(&runtime, "1 'x setp", &.{ "'kind 'domain", "defp/setp" });
-    // A body that leaves values behind registers: they become the slot's
-    // durable stack. They create no bindings, so no name appears for them.
-    try expectOk(&runtime, "[] (1) 'bad @defm");
+    // A body that leaves a value behind is refused and registers nothing.
+    try expectErrorContains(&runtime, "[] (1) 'bad @defm", &.{ "'kind 'domain", "left 1 value" });
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "[] (( -- n ) (missing) 'boom def) 'trace-module @defm");
     try expectErrorContains(&runtime, "trace-module.boom", &.{ "'word 'missing", "'trace ['missing 'trace-module.boom]" });

@@ -109,10 +109,6 @@ const cases = [_]Case{
     .{ .name = "qualify execute", .source = "[] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "'qualify doc" },
-    .{ .name = "within top level", .source = "(1) within" },
-    .{ .name = "without top level", .source = "without" },
-    .{ .name = "see within", .source = "'within see" },
-    .{ .name = "doc without", .source = "'without doc" },
     .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
     .{ .name = "unmodule then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone unmodule gone.x" },
     .{ .name = "doc unmodule", .source = "'unmodule doc" },
@@ -155,7 +151,6 @@ const cases = [_]Case{
     .{ .name = "rand.ints", .source = "[7 0] 4 6 rand.ints" },
     .{ .name = "rand.float", .source = "[7 0] rand.float" },
     .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
-    .{ .name = "rng deal", .source = "'rng ('deal) import 3 10 deal" },
     // The unit-constructor convention: the guided boundary error and the
     // seeding composition that replaced the `-with` family.
     .{ .name = "isolated substack", .source = "3 [1] (+) @attempt" },
@@ -878,36 +873,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\"Construct an executable qualified word without reparsing source text."
         \\stderr:
         \\<empty>
-        \\=== within top level ===
-        \\source: (1) within
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{'kind 'domain 'msg "within is legal only in code homed in a module" 'word 'within 'trace ['within] 'data {'source "<command>" 'line 1 'col 5}}
-        \\=== without top level ===
-        \\source: without
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{'kind 'domain 'msg "without is legal only inside a within application" 'word 'without 'trace ['without] 'data {'source "<command>" 'line 1 'col 1}}
-        \\=== see within ===
-        \\source: 'within see
-        \\exit: 0
-        \\stdout:
-        \\(quotation -- ... :
-        \\ "Run a quotation against a private draft of the home module's durable stack and publish the result.")
-        \\<primitive>
-        \\stderr:
-        \\<empty>
-        \\=== doc without ===
-        \\source: 'without doc
-        \\exit: 0
-        \\stdout:
-        \\"Move the draft's top value onto the pending outputs a within application returns to its caller."
-        \\stderr:
-        \\<empty>
         \\=== unmodule unknown ===
         \\source: 'nowhere unmodule
         \\exit: 1
@@ -1149,13 +1114,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'domain 'msg "rand.int expected a positive bound, not 0" 'word 'rand.int 'trace ['rand.int] 'data {'source "<command>" 'line 1 'col 9}}
-        \\=== rng deal ===
-        \\source: 'rng ('deal) import 3 10 deal
-        \\exit: 0
-        \\stdout:
-        \\[5 0 7]
-        \\stderr:
-        \\<empty>
         \\=== isolated substack ===
         \\source: 3 [1] (+) @attempt
         \\exit: 0

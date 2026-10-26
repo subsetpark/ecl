@@ -143,7 +143,7 @@ const test_files = [_][]const u8{
     "tests/test_heap.zig",
     "tests/runtime_fixture.zig",
     "oom_root.zig",
-    "tests/stateful_module_test.zig",
+    "tests/module_lifecycle_test.zig",
     "tests/stdlib_test.zig",
     "tests/hostio_test.zig",
 
@@ -683,7 +683,6 @@ fn auditSourceBodies() bool {
         &.{ "MissingModule", "=>", "unreachable" },
         &.{ "NameConflict", "=>", "unreachable" },
         &.{ "InvalidDefinition", "=>", "unreachable" },
-        &.{ "StateApplicationActive", "=>", "unreachable" },
     };
     for (source_groups) |component| {
         if (!component.production) continue;
@@ -1264,9 +1263,9 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/result.ecl"),
     @embedFile("../stdlib/str.ecl"),
     @embedFile("../stdlib/table.ecl"),
-    @embedFile("../stdlib/rng.ecl"),
     @embedFile("../stdlib/path.ecl"),
     @embedFile("../stdlib/time.ecl"),
+    @embedFile("../stdlib/agent.ecl"),
     @embedFile("../stdlib/http/server.ecl"),
     @embedFile("../stdlib/http/request.ecl"),
     @embedFile("../stdlib/http/response.ecl"),

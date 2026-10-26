@@ -235,7 +235,6 @@ pub const stdlib_exports = [_][]const u8{
     "clock.now",
     "time.parse",
     "agent.start",
-    "rng.float",
     "rand.float",
     "test.default.run",
 };

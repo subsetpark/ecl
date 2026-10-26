@@ -469,13 +469,6 @@ test "linrec: quotations keep source scope module home and within authority" {
             .expected = "13",
         },
         .{
-            .name = "same-home recursive descent retains private within authority",
-            .source = "[2] ((dup 0 =) 'terminal? defp " ++
-                "(((terminal?) (pop 10) (dup 1 -) (+) linrec without) within) " ++
-                "'run def) 'linrec-state @defm linrec-state.run",
-            .expected = "13",
-        },
-        .{
             .name = "cross-module quotations remain inside one caller effect boundary",
             .source = "[] (((dup 0 =)) 'predicate def ((pop 10)) 'base def " ++
                 "((dup 1 -)) 'pre def ((+)) 'post def) 'linrec-source @defm " ++

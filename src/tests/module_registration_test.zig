@@ -107,16 +107,6 @@ test "module registration: @defm validates its name before running the body" {
     });
     try expectEmptyStack(&runtime);
     try expectStack(&runtime, "aliased.v", "1");
-
-    // Re-definition from inside a state application is refused at publication:
-    // the initiating unit already holds one slot's turn.
-    try expectOk(&runtime, "[] ((0) 'v def) 'reloaded @defm");
-    try expectErrorContains(
-        &runtime,
-        "[] (0 (([] ((1) 'v def) 'reloaded @defm) within) 'go def) 'outer @defm outer.go",
-        &.{ "'kind 'domain", "inside a state application" },
-    );
-    try expectStack(&runtime, "reloaded.v", "0");
 }
 
 test "module registration: nested definitions and reloads publish through the registry" {
@@ -132,34 +122,25 @@ test "module registration: nested definitions and reloads publish through the re
     // Re-definition publishes new code under the same name.
     try expectStack(&runtime, "[] ((1) 'x def) 'm @defm [] ((2) 'x def) 'm @defm m.x", "2");
 
-    // An explicitly seeded construction stack becomes the initial durable
-    // state, and a reload keeps the state the registration already owns.
+    // Seeded values are the body's entry stack, which the body consumes.
     try expectStack(&runtime, "[4 5] (+ 'sum set) 'seeded @defm seeded.sum", "9");
-    try expectStack(
-        &runtime,
-        "[0] (((1 + dup without) within) 'tick def) 'c @defm c.tick " ++
-            "[9] (((1 + dup without) within) 'tick def) 'c @defm c.tick",
-        "1 2",
-    );
 }
 
-test "module registration: reload preserves slot state and a fresh name starts from its template" {
+test "module registration: a construction body must leave its stack empty" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) 'counter @defm");
-    try expectStack(&runtime, "counter.bump counter.bump", "1 2");
-
-    // Replacement installs new code over the state the slot already owns, and
-    // the new body's template is not consulted for that slot.
-    try expectOk(&runtime, "[] (99 ((10 + dup without) within) 'bump def) 'counter @defm");
-    try expectStack(&runtime, "counter.bump", "12");
-
-    // A fresh name with the same body seeds from its own template.
-    try expectOk(&runtime, "[] (99 ((10 + dup without) within) 'bump def) 'fresh @defm");
-    try expectStack(&runtime, "fresh.bump", "109");
+    // A module body defines words and keeps no state: anything left on its
+    // stack is refused at completion and nothing is registered.
+    try expectErrorContains(&runtime, "[] (1 (2) 'x def) 'm @defm", &.{ "'kind 'domain", "'word '@defm", "left 1 value" });
+    try expectEmptyStack(&runtime);
+    try expectErrorContains(&runtime, "m.x", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "[] (7) 'left @defm", &.{ "'kind 'domain", "left 1 value" });
+    try expectErrorContains(&runtime, "[1 2] () 'two @defm", &.{ "'kind 'domain", "left 2 values" });
+    // A body that consumes its seeds publishes as before.
+    try expectStack(&runtime, "[4 5] (+ pop (1) 'one def) 'ok @defm ok.one", "1");
 }
 
 test "module registration: invocation context comes from the registration" {
@@ -171,9 +152,9 @@ test "module registration: invocation context comes from the registration" {
     defer runtime.deinit();
 
     // Two registrations with identical bodies: the registration the call
-    // entered through supplies the state and the reported spelling.
+    // entered through supplies the reported spelling.
     const body = "[] (" ++
-        "0 ((1 + dup without) within) 'tick defp " ++
+        "(1) 'tick defp " ++
         "(tick) 'bump def " ++
         "('bump which) 'report def " ++
         "( -- n ) (1 2) 'liar def " ++
@@ -182,9 +163,9 @@ test "module registration: invocation context comes from the registration" {
     try expectOk(&runtime, body ++ "'left @defm " ++ body ++ "'right @defm");
     try expectEmptyStack(&runtime);
 
-    // A private word reached through a public one sees the state of the
-    // registration the call entered through, regardless of which was registered last.
-    try expectStack(&runtime, "left.bump left.bump right.bump", "1 2 1");
+    // A private word reached through a public one resolves in either
+    // registration, regardless of which was registered last.
+    try expectStack(&runtime, "left.bump left.bump right.bump", "1 1 1");
 
     // Reflection reports the invoking registration's spelling and generation.
     try expectOk(&runtime, "right.report left.report");
@@ -246,7 +227,7 @@ test "module registration: failures leave prior registrations atomic" {
 
     // A refused publication leaves the prior directory entry, generation, and
     // durable state exactly as they were.
-    try expectOk(&runtime, "[] (0 ((1 + dup without) within) 'bump def) 'kept @defm");
+    try expectOk(&runtime, "[] ((1) 'bump def) 'kept @defm");
     try expectStack(&runtime, "kept.bump", "1");
     try expectOk(&runtime, "'kept-alias 'kept alias");
     try expectErrorContains(&runtime, "[] ((2) 'bump def) 'kept-alias @defm", &.{
@@ -254,7 +235,7 @@ test "module registration: failures leave prior registrations atomic" {
         "collides with an alias",
     });
     try expectEmptyStack(&runtime);
-    try expectStack(&runtime, "kept.bump", "2");
+    try expectStack(&runtime, "kept.bump", "1");
 }
 
 test "module loader: observation and dispatch require the requested registration" {
@@ -314,10 +295,10 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
         // lives inside one unit, so the measurement sees image and
         // registration retention rather than the per-unit source provenance
         // every session accumulates.
-        const cycle = "[] (0 ((1 + dup without) within) 'bump def) 'reuse-left @defm " ++
-            "[] (0 ((1 + dup without) within) 'bump def) 'reuse-right @defm " ++
+        const cycle = "[] ((1) 'bump def) 'reuse-left @defm " ++
+            "[] ((1) 'bump def) 'reuse-right @defm " ++
             "[] (reuse-left.bump) @spawn " ++
-            "[] (0 ((1 + dup without) within) 'bump def) 'reuse-left @defm " ++
+            "[] ((1) 'bump def) 'reuse-left @defm " ++
             "task.await pop [] (reuse-right.bump) @spawn task.await pop " ++
             "'reuse-left unmodule 'reuse-right unmodule";
         // Both batches are one unit each and differ only in the cycle count,
@@ -390,7 +371,7 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "[1] result.ok result.ok?", "1");
     try expectStack(&runtime, "\"ab\" str.upper", "\"AB\"");
     try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height", "2");
-    try expectStack(&runtime, "7 rng.seed 6 rng.int type", "'int");
+    try expectStack(&runtime, "[7 0] 6 rand.int nip type", "'int");
 }
 
 test "module values: a pushed quotation resolves in the image it was written in" {
@@ -448,22 +429,4 @@ test "module values: an escaped locals body rejects a retired scope through its 
     try expectErrorContains(&runtime, "7 held call", &.{ "'kind 'domain", "retired" });
     // Locals alone name nothing in the image.
     try expectStack(&runtime, "7 plain call", "7");
-}
-
-test "module values: local call sites do not grant an escaped quotation the caller home" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-
-    try expectStack(
-        &runtime,
-        "[] (0 ((1 + dup without) within) 'tick defp " ++
-            "((tick)) 'q def (q call) 'warm def (q) 'escape def) " ++
-            "'local-cache-owner @defm " ++
-            "[] ((|q| q call) 'apply def) 'foreign-caller @defm " ++
-            "local-cache-owner.warm local-cache-owner.escape 'held set " ++
-            "[] (held foreign-caller.apply) @attempt 'err at 'kind at",
-        "1 'domain",
-    );
 }

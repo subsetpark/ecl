@@ -119,10 +119,6 @@ const modules = [_]Module{
         .name = "<stdlib:agent>",
         .text = @embedFile("stdlib/agent.ecl"),
     } } },
-    .{ .name = "rng", .entry = .{ .source = .{
-        .name = "<stdlib:rng>",
-        .text = @embedFile("stdlib/rng.ecl"),
-    } } },
     .{ .name = "rand", .entry = .{ .builtin = &rand_module.words } },
     .{ .name = "test.default", .entry = .{ .source = .{
         .name = "<stdlib:test.default>",

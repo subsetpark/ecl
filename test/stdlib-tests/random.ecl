@@ -38,33 +38,8 @@
   ([0 0] 1.5 rand.int) 'type 'rand.int raises-word)
  'invalid-input test
 
- ### test durable-state
- (-- : "Draw reproducibly from the rng module's durable state.")
- (0 rng.seed
-  100 rng.int 35 equal
-  100 rng.int 0 equal
-  42 rng.seed 100 rng.int 42 rng.seed 100 rng.int = 1 equal
-  42 rng.seed 100 rng.int 43 rng.seed 100 rng.int <> 1 equal
-  42 rng.seed 3 6 rng.ints 42 rng.seed 3 6 rng.ints match? 1 equal
-  rng.float dup 0.0 >= 1 equal 1.0 < 1 equal)
- 'durable-state test
-
- ### test deal-and-shuffle
- (-- : "Deal without replacement and shuffle without changing the multiset.")
- (5 10 rng.deal dup distinct len 5 equal
-  dup len 5 equal
-  dup (0 <) any? 0 equal
-  (10 >=) any? 0 equal
-  8 8 rng.deal sort [0 1 2 3 4 5 6 7] equal
-  0 0 rng.deal len 0 equal
-  0 5 rng.deal len 0 equal
-  [10 20 30 40] rng.shuffle sort [10 20 30 40] equal
-  (11 10 rng.deal) 'domain "more values than the pool" raises-containing
-  (-1 10 rng.deal) 'domain "nonnegative count" raises-containing)
- 'deal-and-shuffle test
-
  ### test documentation
- (-- : "Require documentation for every stateful RNG export.")
- (('rng.seed 'rng.int 'rng.ints 'rng.float 'rng.deal 'rng.shuffle) documented)
+ (-- : "Require documentation for every rand word.")
+ (('rand.int 'rand.ints 'rand.float 'rand.entropy) documented)
  'documentation test
 ) 'stdlib.test.random @defm

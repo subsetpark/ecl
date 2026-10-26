@@ -24,8 +24,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "unmodule", .primitive = unmoduleWord, .effect = "module-name --", .doc = "Close, quiesce, and retire a registered module named by a symbol." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
-        .{ .name = "within", .primitive = withinWord, .effect = "quotation -- ...", .doc = "Run a quotation against a private draft of the home module's durable stack and publish the result." },
-        .{ .name = "without", .primitive = withoutWord, .effect = null, .doc = "Move the draft's top value onto the pending outputs a within application returns to its caller." },
         .{ .name = "import", .primitive = importWord, .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
         .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register a short alias for a qualified module name." },
         .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Construct an executable qualified word without reparsing source text." },
@@ -142,10 +140,7 @@ const UnmoduleDriver = struct {
                     );
                     try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
                     const registry = evaluator.publicationRegistry(name, evaluator.unit.current.?.site.registration_provenance);
-                    self.cursor = .init(registry.removalCursor(
-                        name,
-                        &evaluator.unit.turn_authority,
-                    ));
+                    self.cursor = .init(registry.removalCursor(name));
                     continue;
                 },
             };
@@ -155,13 +150,8 @@ const UnmoduleDriver = struct {
                     intern.moduleId(self.cursor.?.borrow().requested),
                     .qualified,
                 ),
-                error.StateApplicationActive => return evaluator.fail(
-                    .domain,
-                    "a module cannot be removed from inside a state application",
-                ),
             }) {
                 .pending => {},
-                .blocked => return .{ .yielded = .wait },
                 // The close edge has transferred all remaining ownership to
                 // scheduler retirement. Yield before polling cancellation
                 // again so abandoning this Unit cannot abandon module state.
@@ -172,19 +162,6 @@ const UnmoduleDriver = struct {
         return .stepped;
     }
 };
-
-/// The explicit stack boundary: the quotation runs against a private draft
-/// of the home module's durable stack rather than the ambient caller stack.
-fn withinWord(evaluator: *Machine) MachineError!void {
-    var quotation = try evaluator.popQuotation();
-    return evaluator.beginWithin(quotation.take().list);
-}
-
-/// The explicit outward boundary: one draft value joins the pending output
-/// sequence, which reaches the caller only if the transaction publishes.
-fn withoutWord(evaluator: *Machine) MachineError!void {
-    return evaluator.moveWithout();
-}
 
 fn importWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);

@@ -146,23 +146,6 @@ test "testing: test execution reaches private definitions and reifies its isolat
     );
 }
 
-test "testing: test executions share durable module state" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
-    defer runtime.deinit();
-
-    try expectOk(
-        &runtime,
-        "[] (0 ((1 + dup without) within) 'first test " ++
-            "((dup without) within) 'second test) 'stateful @defm " ++
-            "tests first @test 'ok at first 1 = {'kind 'user} assert " ++
-            "tests 1 at @test 'ok at first 1 = {'kind 'user} assert",
-    );
-}
-
 test "testing: reload and removal replace the discoverable test catalog coherently" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);

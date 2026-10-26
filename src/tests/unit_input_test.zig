@@ -137,7 +137,7 @@ test "unit inputs: large seeds and bodies preserve order and postconditions" {
     // postcondition still enforced on what it leaves behind.
     try expectStack(
         &runtime,
-        "[1 2] (+ ( -- n ) ((dup without) within) 'go def) 'sized @defm sized.go",
+        "[1 2] (+ 'sum setp ( -- n ) (sum) 'go def) 'sized @defm sized.go",
         "3",
     );
     // One seed list initializes a whole fan-out identically.
@@ -194,12 +194,11 @@ test "unit inputs: seeds are never traversed or stamped" {
         "3 'k set [{'a (k)}] ('deps set ( -- n ) (deps 'a at call) 'go def) 'dictseed @defm dictseed.go",
         "3",
     );
-    // A seed the body never consumes is left on the construction stack as the
-    // image's initial state, unchanged — and it is still the caller's text, so
+    // A seed the body defines a word from is still the caller's text, so
     // running it back at the session resolves `k` there.
     try expectStack(
         &runtime,
-        "7 'k set [(k)] (((dup without) within) 'peek def) 'inert @defm inert.peek call",
+        "7 'k set [(k)] ('peek def) 'inert @defm inert.peek",
         "7",
     );
 }
@@ -262,11 +261,11 @@ test "unit inputs: one reader body serves two images independently" {
 
     try expectOk(
         &runtime,
-        "(( -- n ) (state) 'read def ((dup without) within) 'state def) 'shared set",
+        "('state set ( -- n ) (state) 'read def) 'shared set",
     );
     try expectOk(&runtime, "[10] shared 'left @defm");
     try expectOk(&runtime, "[100] shared 'right @defm");
-    // Each image stamped its own copy, so each reads its own durable state.
+    // Each image stamped its own copy, so each reads its own seed.
     try expectStack(&runtime, "left.read", "10");
     try expectStack(&runtime, "right.read", "100");
     // The original body is unchanged and still constructs.
