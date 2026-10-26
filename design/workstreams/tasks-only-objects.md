@@ -285,9 +285,15 @@ note that the design chose mailboxes.
 
 ### Milestone 4: agent-module
 
-**Status**: planned (2026-10-25). Gameplan: `gameplans/agent-module.yaml`
-(local; gitignored), two patches: the module with its first-class tests, and
-the STDLIB section. Pure ECL over the Milestone 3 words; no runtime change.
+**Status**: executed (2026-10-26) on branch `zax--tasks-only-objects`, two
+commits. Pure ECL over the Milestone 3 words; no runtime change. Landed as
+planned with these notes: `agent.call-for` validates its deadline before
+sending, so a refused duration never reaches the agent (a deadline the clock
+cannot represent is still `'overflow` after the send); the module's loop is
+stack-shuffled because a local cannot be read inside an `if` branch; the two
+stdlib export tables the Zig tests zipped against `stdlib.names()` became one
+shared table in `kernel_test_support.zig`. Gates: `precommit` and `test-ecl`
+passed; the first-class suite `stdlib.test.agent` has six tests.
 
 **Definition of Done**:
 - `src/stdlib/agent.ecl`, registered in `src/stdlib.zig`, exports:
