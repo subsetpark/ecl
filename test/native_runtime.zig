@@ -78,24 +78,6 @@ test "native runtime: inadmissible values and duplicate keys are language errors
         .stderr_contains = &.{ "'kind 'type", "native words cannot observe task capabilities" },
     });
 
-    // A module image is a runtime capability on the same terms as a task: the
-    // ABI has no representation for it, in scalar or in view position.
-    var module_input = try run("[] (1) @module sample.forward", "1", false);
-    defer module_input.deinit();
-    try module_input.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{ "'kind 'type", "native words cannot observe module capabilities" },
-    });
-
-    var module_element = try run("[] (1) @module wrap sample.sum-list", "1", false);
-    defer module_element.deinit();
-    try module_element.expect(.{
-        .exit_code = 1,
-        .stdout = "",
-        .stderr_contains = &.{ "'kind 'type", "native words cannot observe module capabilities" },
-    });
-
     var duplicate = try run("sample.duplicate-dict", "1", false);
     defer duplicate.deinit();
     try duplicate.expect(.{

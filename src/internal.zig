@@ -112,8 +112,8 @@ test {
     _ = @import("tests/line_editor_test.zig");
     _ = @import("tests/native_test.zig");
     _ = @import("tests/fuzz_test.zig");
-    _ = @import("tests/stateful_module_test.zig");
-    _ = @import("tests/module_value_test.zig");
+    _ = @import("tests/module_lifecycle_test.zig");
+    _ = @import("tests/module_registration_test.zig");
     _ = @import("tests/unit_input_test.zig");
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
@@ -124,5 +124,6 @@ test {
     _ = @import("tests/conversion_test.zig");
     _ = @import("tests/cursor_budget_test.zig");
     _ = @import("tests/interleaving_test.zig");
+    _ = @import("tests/mailbox_test.zig");
     _ = @import("tests/kernel_typed_test.zig");
 }

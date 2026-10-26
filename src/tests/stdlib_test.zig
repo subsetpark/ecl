@@ -73,38 +73,7 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
 test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // No search path is configured; embedded modules resolve independently
     // of the isolated filesystem inputs.
-    const exports = [_][]const u8{
-        "port.await",
-        "port.core.await",
-        "task.pending",
-        "dict.from-pairs",
-        "error.new",
-        "result.ok",
-        "str.upper",
-        "io.print",
-        "csv.parse",
-        "json.parse",
-        "host.cwd",
-        "source.declarations",
-        "table.valid?",
-        "http.get-bytes",
-        "http.server.route",
-        "http.request.new",
-        "http.response.new",
-        "proc.wait",
-        "proc.core.process",
-        "fs.read-text",
-        "net.listen",
-        "net.core.listener",
-        "path.normalize",
-        "archive.sha256",
-        "clock.now",
-        "time.parse",
-        "rng.float",
-        "rand.float",
-        "test.default.run",
-    };
-    for (stdlib.names(), exports) |name, qualified| {
+    for (stdlib.names(), support.stdlib_exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -290,7 +259,7 @@ test "stdlib: embedded module names complete before anything has loaded them" {
     // stdlib name used to appear as a completion only after an import or a
     // qualified call had already loaded it — you had to type the name in
     // full before the editor would offer it.
-    const expected = [_][]const u8{ "result", "rng" };
+    const expected = [_][]const u8{ "result", "rand" };
     var cold = try runtime.completionCandidates("r");
     defer cold.deinit();
     for (expected) |name| {
@@ -304,12 +273,12 @@ test "stdlib: embedded module names complete before anything has loaded them" {
         }
     }
     // Loading one must not make it appear twice.
-    try expectOk(&runtime, "rng.float pop");
-    var warm = try runtime.completionCandidates("rng");
+    try expectOk(&runtime, "[7 0] rand.float pop pop");
+    var warm = try runtime.completionCandidates("rand");
     defer warm.deinit();
     var occurrences: usize = 0;
     for (warm.items()) |candidate| {
-        if (std.mem.eql(u8, candidate, "rng")) occurrences += 1;
+        if (std.mem.eql(u8, candidate, "rand")) occurrences += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), occurrences);
 }

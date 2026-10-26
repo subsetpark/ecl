@@ -164,11 +164,11 @@ const TestEffect = struct {
 };
 
 fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void {
-    var candidate = try registry.createImage();
+    var candidate = try registry.createImage(name, .ordinary);
     defer candidate.deinit();
     var sealed = try candidate.seal(null);
     defer sealed.deinit();
-    _ = try modules.testing.register(registry, sealed.ref(), name);
+    _ = try modules.testing.register(registry, &sealed);
 }
 
 test "module names: branded factories enforce the reader symbol grammar" {
@@ -982,11 +982,11 @@ const RegistryThreadContext = struct {
 };
 
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
-    var candidate = context.registry.createImage() catch return false;
+    var candidate = context.registry.createImage(name, .ordinary) catch return false;
     defer candidate.deinit();
     var sealed = candidate.seal(null) catch return false;
     defer sealed.deinit();
-    _ = modules.testing.register(context.registry, sealed.ref(), name) catch return false;
+    _ = modules.testing.register(context.registry, &sealed) catch return false;
     return true;
 }
 
@@ -1005,64 +1005,6 @@ fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
         if (lease.generationNumber() == 0) context.failed.store(true, .release);
         lease.deinit();
     }
-}
-
-test "registry: reload reports blocked while another registration holds the slot" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    defer host.cleanup().drain();
-    var registry = try modules.Registry.init(host.cleanup());
-    defer registry.deinit();
-    const name = try intern.internModuleName("held-reload-slot");
-    try commitEmptyModule(&registry, name);
-
-    var image = try registry.createImage();
-    defer image.deinit();
-    var sealed = try image.seal(null);
-    defer sealed.deinit();
-    var holder_authority: modules.TurnAuthority = .available;
-    var holder = registry.registrationCursor(sealed.ref(), name, .ordinary, &holder_authority);
-    defer holder.deinit();
-
-    // Spending the authority admits this registration to the slot's FIFO.
-    // With no predecessor it owns the turn, but has not published yet.
-    for (0..64) |_| {
-        try std.testing.expect((try holder.advance()) == .pending);
-        if (holder_authority == .spent) break;
-    } else return error.SlotTurnNotAcquired;
-
-    var waiter_authority: modules.TurnAuthority = .available;
-    var waiter = registry.registrationCursor(sealed.ref(), name, .ordinary, &waiter_authority);
-    defer waiter.deinit();
-    for (0..64) |_| switch (try waiter.advance()) {
-        .pending => {},
-        .blocked => break,
-        .complete => return error.PublishedThroughHeldSlot,
-    } else return error.SlotWaitDidNotBlock;
-
-    // A blocked result asks the driver to yield immediately rather than spend
-    // the rest of its quantum polling. Repeated polls cannot progress while
-    // the holder remains suspended, and the prior generation stays visible.
-    for (0..3) |_| try std.testing.expect((try waiter.advance()) == .blocked);
-    var prior = modules.testing.acquire(&registry, name).?;
-    defer prior.deinit();
-    try std.testing.expectEqual(@as(u64, 1), prior.generationNumber());
-
-    for (0..64) |_| switch (try holder.advance()) {
-        .pending => {},
-        .blocked => return error.UncontendedHolderBlocked,
-        .complete => |generation| {
-            try std.testing.expectEqual(@as(u64, 2), generation);
-            break;
-        },
-    } else return error.HolderDidNotComplete;
-    for (0..64) |_| switch (try waiter.advance()) {
-        .pending => {},
-        .blocked => return error.ReleasedSlotStillBlocked,
-        .complete => |generation| {
-            try std.testing.expectEqual(@as(u64, 3), generation);
-            break;
-        },
-    } else return error.WaiterDidNotComplete;
 }
 
 test "registry: concurrent commits are linearized without lost names" {
@@ -1122,7 +1064,7 @@ test "registry: old generation leases survive reload and reclaim after release" 
     defer releases.releaseValue(body);
     const module_name = try intern.internModuleName("leased-generation");
     const value_name = try intern.internNamespace("leased-value");
-    var first = try registry.createImage();
+    var first = try registry.createImage(module_name, .ordinary);
     defer first.deinit();
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
@@ -1133,22 +1075,53 @@ test "registry: old generation leases survive reload and reclaim after release" 
     } });
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &first_sealed);
     var old = modules.testing.acquire(&registry, module_name).?;
-    var second = try registry.createImage();
+    var second = try registry.createImage(module_name, .ordinary);
     defer second.deinit();
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &second_sealed);
     try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
     try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
+    // The registration cursor took the sealed image, so the superseded
+    // generation's lease is the last thing keeping the definition body alive.
     old.deinit();
-    // Construction and registration are independent owners now, so the test's
-    // own sealed-image reference is the other retainer of the definition body;
-    // the superseded generation reclaims only once both are gone.
-    first_sealed.deinit();
     host.cleanup().drain();
     try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
+}
+
+test "registry: a removed module outlives its directory only through its leases" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var environment = try env.Env.init(&host);
+    defer {
+        host.cleanup().drain();
+        environment.deinit();
+    }
+    var registry = try modules.Registry.init(host.cleanup());
+    defer registry.deinit();
+    // Enough entries that the directory copies and retirements walk more than
+    // one slot, so a release missed on either path would surface as a leak
+    // or a dangling lease under the testing allocator.
+    var names: [8]intern.ModuleName = undefined;
+    for (&names, 0..) |*name, index| {
+        var spelling: [32]u8 = undefined;
+        name.* = try intern.internModuleName(try std.fmt.bufPrint(&spelling, "chain-entry-{d}", .{index}));
+        try commitEmptyModule(&registry, name.*);
+    }
+    var kept = modules.testing.acquire(&registry, names[3]).?;
+    defer kept.deinit();
+    try modules.testing.remove(&registry, names[3]);
+    try modules.testing.remove(&registry, names[5]);
+    for (0..64) |_| _ = host.domain().advance(1);
+    // The name is gone from the current directory, but the generation the
+    // lease holds is intact until the lease goes.
+    try std.testing.expectEqual(@as(?modules.GenerationLease, null), modules.testing.acquire(&registry, names[3]));
+    try std.testing.expectEqual(names[3], kept.name());
+    try std.testing.expectEqual(@as(u64, 1), kept.generationNumber());
+    var still = modules.testing.acquire(&registry, names[4]).?;
+    still.deinit();
 }
 
 test "registry: generation cursors independently pin their snapshot" {
@@ -1166,7 +1139,7 @@ test "registry: generation cursors independently pin their snapshot" {
     defer registry.deinit();
     const module_name = try intern.internModuleName("cursor-pinned-generation");
     const value_name = try intern.internNamespace("cursor-pinned-value");
-    var first = try registry.createImage();
+    var first = try registry.createImage(module_name, .ordinary);
     defer first.deinit();
     const binding = try TestBinding.init(std.testing.allocator);
     defer binding.release(releases);
@@ -1175,17 +1148,17 @@ test "registry: generation cursors independently pin their snapshot" {
     _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &first_sealed);
 
     var lease = modules.testing.acquire(&registry, module_name).?;
     var lookup = lease.resolveCursor(intern.namespaceId(value_name));
     var names = lease.publicNameCursor();
     lease.deinit();
-    var second = try registry.createImage();
+    var second = try registry.createImage(module_name, .ordinary);
     defer second.deinit();
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &second_sealed);
     for (0..64) |_| _ = releases.advance(1);
 
     const old = while (true) switch (lookup.advance()) {
@@ -1295,7 +1268,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const alias_name = try intern.internNamespace("allocation-alias");
     const second_name = try intern.internModuleName("allocation-second-module");
     const word_name = try intern.internNamespace("answer");
-    var first = try registry.createImage();
+    var first = try registry.createImage(first_name, .ordinary);
     defer first.deinit();
     _ = try first.publishDefinition(word_name, .{ .word = .{
         .body = env.quotation(effect_value.list).?,
@@ -1305,11 +1278,11 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, first_sealed.ref(), first_name);
+    _ = try modules.testing.register(&registry, &first_sealed);
     try modules.testing.alias(&registry, alias_name, first_name);
     var lease = modules.testing.acquire(&registry, try intern.internModuleName("allocation-alias")).?;
     defer lease.deinit();
-    var second = try registry.createImage();
+    var second = try registry.createImage(first_name, .ordinary);
     defer second.deinit();
     _ = try second.publishDefinition(word_name, .{ .word = .{
         .body = env.quotation(effect_value.list).?,
@@ -1319,15 +1292,15 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, second_sealed.ref(), first_name);
-    var third = try registry.createImage();
+    _ = try modules.testing.register(&registry, &second_sealed);
+    var third = try registry.createImage(second_name, .ordinary);
     defer third.deinit();
     const constant = try TestBinding.init(allocator);
     defer releases.releaseValue(constant.body);
     _ = try third.publishDefinition(word_name, constant.module(effect, .public));
     var third_sealed = try third.seal(null);
     defer third_sealed.deinit();
-    _ = try modules.testing.register(&registry, third_sealed.ref(), second_name);
+    _ = try modules.testing.register(&registry, &third_sealed);
 }
 
 test "environment and registry APIs propagate every allocation failure" {
@@ -1348,15 +1321,14 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "[] () @module 'dict register", &.{reserved});
     try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
+    try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
     try expectOk(&runtime, "{'a 1} 'a dict.has? {'kind 'user 'msg \"dict did not load\"} assert");
     // Loaded, it is refused the same way, and an alias cannot claim the name.
     try expectErrorContains(&runtime, "[] () 'dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
     try expectErrorContains(&runtime, "[] () 'm @defm 'dict 'm alias", &.{reserved});
-    try expectErrorContains(&runtime, "'dict unmodule", &.{reserved});
+    try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
     try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") 'new def) 'error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
@@ -1379,7 +1351,7 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     // inline; neither runs it as standard-library code.
     try expectOk(&runtime, "[] result.ok ('d 'dict alias []) result.and-then 'err at 'kind at 'domain match? " ++
         "{'kind 'user 'msg \"alias escaped\"} assert");
-    try expectErrorContains(&runtime, "[] result.ok ('dict unmodule) () result.either", &.{reserved});
+    try expectErrorContains(&runtime, "[] result.ok ('dict undefm) () result.either", &.{reserved});
     try expectErrorContains(&runtime, "[] result.ok ([] () 'dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
 }

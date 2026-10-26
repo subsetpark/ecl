@@ -548,16 +548,16 @@ fn writeTestProject(
     });
 }
 
-test "e2e: ecl test runs the default stateful runner" {
+test "e2e: ecl test runs the default runner" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     try writeTestProject(
         scratch.dir,
         &.{.{
             .path = "suite.ecl",
-            .source = "[] (0 " ++
-                "((1 + dup without) within dup 1 = {'kind 'user} assert) 'first test " ++
-                "((dup without) within dup 1 = {'kind 'user} assert) 'second test " ++
+            .source = "[] (" ++
+                "(1 1 = {'kind 'user} assert) 'first test " ++
+                "(2 2 = {'kind 'user} assert) 'second test " ++
                 "(missing) 'third-fails test " ++
                 "(1) 'z-after test" ++
                 ") 'app.suite @defm\n",
@@ -585,8 +585,10 @@ test "e2e: ecl test runs the default stateful runner" {
 test "e2e: tests retain file-private module visibility" {
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
+    // A helper constructed inside a quotation is not a discoverable
+    // declaration, so it is never exported: the file keeps it private.
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "bar.ecl", .source = "[] ((42) 'answer def) @module 'baz register\n" ++
+        .{ .path = "bar.ecl", .source = "([] ((42) 'answer def) 'baz @defm) call\n" ++
             "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
             "baz.answer 42 = {'kind 'user} assert\n" },
         .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
@@ -612,10 +614,12 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "private.ecl", .source = "[] ((42) 'answer def) @module 'helper register\n" ++
-            "[] ((helper.answer 42 = {'kind 'user} assert) 'answer test) @module 'suite register\n" },
-        .{ .path = "other.ecl", .source = "[] ((7) 'answer def) @module 'helper register\n" ++
-            "[] ((helper.answer 7 = {'kind 'user} assert) 'answer test) @module 'suite register\n" },
+        // Both files construct inside quotations so nothing is discoverable:
+        // each `helper` and `suite` stays private to its own source.
+        .{ .path = "private.ecl", .source = "([] ((42) 'answer def) 'helper @defm) call\n" ++
+            "([] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm) call\n" },
+        .{ .path = "other.ecl", .source = "([] ((7) 'answer def) 'helper @defm) call\n" ++
+            "([] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm) call\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -1212,38 +1216,18 @@ test "e2e: reflection acceptance" {
     });
 }
 
-test "e2e: stateful module instance acceptance" {
-    const expected = "10\n100\n15\n107\n15\n107\n" ++
-        "0\n'word\n1\n" ++
-        "3\n'a\n2\n3\n" ++
-        "65\n" ++
-        "'type\n'domain\n'domain\n";
-    for ([_][]const u8{ "1", "8" }) |workers| {
-        var result = try runWithWorkers(
-            &.{ build_options.ecl_exe, "test/acceptance/stateful-module-instances.ecl" },
-            workers,
-        );
-        defer result.deinit();
-        try result.expect(.{ .exit_code = 0, .stdout = expected, .stderr = "" });
-    }
-}
-
-test "e2e: stateful module reload acceptance" {
-    var result = try run(&.{ build_options.ecl_exe, "test/acceptance/stateful-module-reload.ecl" });
-    defer result.deinit();
-    try result.expect(.{
-        .exit_code = 0,
-        .stdout = "6\n6\n16\n32\n1600\n'domain\n1600\n160000\n160000\n",
-        .stderr = "",
-    });
+test "e2e: a construction body already knows the name it is built under" {
+    var named = try run(&.{ build_options.ecl_exe, "-e", "[] (*module* io.pp) 'named @defm" });
+    defer named.deinit();
+    try named.expect(.{ .exit_code = 0, .stdout = "'named\n", .stderr = "" });
 }
 
 test "e2e: module removal acceptance" {
-    const module = "[7] (((dup without) within) 'peek def) 'core.c @defm ";
+    const module = "[] ((7) 'peek def) 'core.c @defm ";
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'short 'core.c alias 'short unmodule " ++
+        module ++ "'short 'core.c alias 'short undefm " ++
             "[] (core.c.peek) @attempt 'err at 'kind at io.pp [] (short.peek) @attempt 'err at 'kind at io.pp " ++
             module ++ "core.c.peek io.pp",
     });
@@ -1257,7 +1241,7 @@ test "e2e: module removal acceptance" {
     var by_canonical_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'core.c unmodule [] (core.c.peek) @attempt 'err at 'kind at io.pp",
+        module ++ "'core.c undefm [] (core.c.peek) @attempt 'err at 'kind at io.pp",
     });
     defer by_canonical_name.deinit();
     try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
@@ -1278,7 +1262,7 @@ test "e2e: optional module annotation acceptance" {
             "(: \"The answer.\") [42]\n" ++
             "[42]\n" ++
             "'contract\n'domain\n'domain\n" ++
-            "(dup)\n(a b)\n",
+            "'domain\n",
         .stderr = "",
     });
 }
@@ -1670,11 +1654,9 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
             .qualified = "{\"a\" [1]} table.valid? io.pp",
         },
         .{
-            .name = "rng",
-            // The default key is fixed, so an unseeded draw from a fresh
-            // process is as reproducible as any other embedded module's output.
-            .imported = "'rng ('int) import 6 int io.pp",
-            .qualified = "6 rng.int io.pp",
+            .name = "time",
+            .imported = "'time ('from-unix) import 0 from-unix time.format io.pp",
+            .qualified = "0 time.from-unix time.format io.pp",
         },
         .{
             .name = "http",
@@ -1683,12 +1665,12 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         },
     };
     const used_output = [_][]const u8{
-        "{'a 1}\n", "[5]\n", "\"HI\"\n", "hi\n", "((\"a\" \"b\"))\n",
-        "[1]\n",    "1\n",   "1\n",      "1\n",
+        "{'a 1}\n", "[5]\n", "\"HI\"\n",                       "hi\n", "((\"a\" \"b\"))\n",
+        "[1]\n",    "1\n",   "\"1970-01-01T00:00:00.000Z\"\n", "1\n",
     };
     const qualified_output = [_][]const u8{
-        "{'a 1}\n", "[5]\n", "\"HI\"\n", "hi\n", "((\"a\" \"b\"))\n",
-        "[1]\n",    "1\n",   "1\n",      "1\n",
+        "{'a 1}\n", "[5]\n", "\"HI\"\n",                       "hi\n", "((\"a\" \"b\"))\n",
+        "[1]\n",    "1\n",   "\"1970-01-01T00:00:00.000Z\"\n", "1\n",
     };
     for (modules, used_output, qualified_output) |module, want, qualified_want| {
         var used = try cli.runOptions(.{
@@ -1792,8 +1774,8 @@ test "e2e: entropy is the one draw that differs between processes" {
     var seeded = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "'rng ('seed 'ints) import " ++
-            "rand.entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
+        "rand.entropy dup 'k set 0 pair 100 6 rand.ints nip 'a set " ++
+            "k 0 pair 100 6 rand.ints nip a match? io.pp",
     });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -1852,52 +1834,8 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
-        // `@defm` is `@module` followed by `register`, so the misplaced symbol
-        // reaches `@module` as its values operand first.
-        .stderr_contains = &.{ "'kind 'type", "@module expected a list", "'trace ['@module '@defm]" },
-    });
-
-    // Anonymous construction names nothing, so its isolation data names the
-    // construction rather than a registration.
-    var anonymous_isolation = try run(&.{ build_options.ecl_exe, "-e", "3 [1] (+) @module" });
-    defer anonymous_isolation.deinit();
-    try anonymous_isolation.expect(.{
-        .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @module", "@module" },
-    });
-
-    // The value the external binary shows for a module image, and the two
-    // words that name one.
-    var anonymous_value = try run(&.{ build_options.ecl_exe, "-e", "[] (1 'x set) @module" });
-    defer anonymous_value.deinit();
-    try anonymous_value.expect(.{ .exit_code = 0, .stdout = "<module>\n", .stderr = "" });
-
-    var registered_twice = try run(&.{
-        build_options.ecl_exe,
-        "-e",
-        "[] (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register " ++
-            "l.bump l.bump r.bump",
-    });
-    defer registered_twice.deinit();
-    try registered_twice.expect(.{ .exit_code = 0, .stdout = "1 2 1\n", .stderr = "" });
-}
-
-test "e2e: escaped quotation authority acceptance" {
-    // Confirmed to discriminate against a pre-change reference binary built in a
-    // worktree at f2c5cf5: there this fixture printed 'contract / 'other.run and
-    // left other's stack at 1000, because the escaped quotation's `within` wrote
-    // the caller's slot. Now it is 'domain / 'within with other's stack at 999.
-    var result = try run(&.{
-        build_options.ecl_exe,
-        "test/acceptance/escaped-quotation-authority.ecl",
-    });
-    defer result.deinit();
-    try result.expect(.{
-        .exit_code = 0,
-        // A foreign private still reaches its own privates (99); `within`
-        // through it is 'domain, spelled by its unqualified local name; and
-        // neither durable stack moved (10, 999).
-        .stdout = "99\n'domain\n'within\n10\n999\n",
-        .stderr = "",
+        // The name is taken first, so a misplaced name is refused before
+        // anything else is examined.
+        .stderr_contains = &.{ "'kind 'type", "@defm expected a symbol name", "'trace ['@defm]" },
     });
 }

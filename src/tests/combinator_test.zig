@@ -469,13 +469,6 @@ test "linrec: quotations keep source scope module home and within authority" {
             .expected = "13",
         },
         .{
-            .name = "same-home recursive descent retains private within authority",
-            .source = "[2] ((dup 0 =) 'terminal? defp " ++
-                "(((terminal?) (pop 10) (dup 1 -) (+) linrec without) within) " ++
-                "'run def) 'linrec-state @defm linrec-state.run",
-            .expected = "13",
-        },
-        .{
             .name = "cross-module quotations remain inside one caller effect boundary",
             .source = "[] (((dup 0 =)) 'predicate def ((pop 10)) 'base def " ++
                 "((dup 1 -)) 'pre def ((+)) 'post def) 'linrec-source @defm " ++
@@ -1213,20 +1206,6 @@ test "bindings: a task keeps the bindings that existed when it was spawned" {
     try expectFreshStack(
         "(1) 'f def [] (40 clock.sleep f) @spawn (2) 'f def [] (20 clock.sleep f) @spawn (3) 'f def task.await swap task.await",
         "{'ok [2]} {'ok [1]}",
-    );
-}
-
-test "bindings: a task spawned by a module body reads the image live" {
-    try expectFreshStack(
-        "[] ((1) 'x def [] (20 clock.sleep x) @spawn (2) 'x def task.await 'r set) 'live-image @defm live-image.r",
-        "{'ok [2]}",
-    );
-    // The task reads while the body keeps redefining what it reads.
-    try expectFreshStack(
-        "[] ((0) 'x def [] (0 200 (x +) times) @spawn " ++
-            "(dup 0 = (pop) (1 - (1) 'x def r) if) 'r def 200 r task.await 'ok at 'r set) 'churn-image @defm " ++
-            "churn-image.r 0 at 200 <=",
-        "1",
     );
 }
 

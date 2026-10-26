@@ -148,11 +148,11 @@ test "loader: private modules belong to their defining file independent of load 
         try writeInput(&fixture, "foo.ecl", "[] ((99) 'answer def) 'root.foo.hidden @defm\n" ++
             "[] ((baz.answer) 'answer def (call) 'apply def " ++
             "(root.foo.hidden.answer) 'own def) 'root.foo @defm\n");
-        try writeInput(&fixture, "bar.ecl", "[] ((42) 'answer def) @module 'baz register\n" ++
+        try writeInput(&fixture, "bar.ecl", "[] ((42) 'answer def) 'baz @defm\n" ++
             "[] ('baz ('answer) import " ++
             "((baz.answer)) 'quoted def " ++
             "(root.foo.answer) 'foreign def " ++
-            "([] ((9) 'answer def) @module 'baz register) 'replace def) 'root.bar @defm\n");
+            "([] ((9) 'answer def) 'baz @defm) 'replace def) 'root.bar @defm\n");
         try writeInput(&fixture, "other.ecl", "[] ((7) 'answer def) 'baz @defm\n" ++
             "[] ((baz.answer) 'answer def) 'root.other @defm\n");
 
@@ -286,9 +286,8 @@ test "module: privacy module-body contract top-level private and qualified trace
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "private-word.g", &.{ "'kind 'undefined-word", "'word 'private-word.g" });
     try expectErrorContains(&runtime, "1 'x setp", &.{ "'kind 'domain", "defp/setp" });
-    // A body that leaves values behind registers: they become the slot's
-    // durable stack. They create no bindings, so no name appears for them.
-    try expectOk(&runtime, "[] (1) 'bad @defm");
+    // A body that leaves a value behind is refused and registers nothing.
+    try expectErrorContains(&runtime, "[] (1) 'bad @defm", &.{ "'kind 'domain", "left 1 value" });
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "[] (( -- n ) (missing) 'boom def) 'trace-module @defm");
     try expectErrorContains(&runtime, "trace-module.boom", &.{ "'word 'missing", "'trace ['missing 'trace-module.boom]" });
@@ -306,7 +305,7 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
     try expectOk(&runtime, "[] ((1) 'x def) 'a @defm [] ((2) 'x def) 'b @defm " ++
         "'short 'a alias 'a ('x) import short.x a.x x");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
-    try expectOk(&runtime, "'a unmodule");
+    try expectOk(&runtime, "'a undefm");
     // The canonical name and every alias targeting it go in one publish.
     try expectErrorContains(&runtime, "a.x", &.{"'kind 'undefined-word"});
     try expectErrorContains(&runtime, "short.x", &.{"'kind 'undefined-word"});
@@ -353,7 +352,7 @@ test "module: qualified call sites heal generations and bypass aliases" {
             "'short 'alias-a alias (short.v) 'alias-probe def alias-probe " ++
             "'short 'alias-b alias alias-probe " ++
             "[] ((3) 'v def) 'removed-cache @defm (removed-cache.v) 'removed-probe def " ++
-            "removed-probe 'removed-cache unmodule [] (removed-probe) @attempt 'err at 'kind at",
+            "removed-probe 'removed-cache undefm [] (removed-probe) @attempt 'err at 'kind at",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
@@ -511,8 +510,6 @@ test "scope: an undefined word names the chain it searched" {
     // A dotted reference searched only the registry.
     try expectErrorContains(&runtime, "[] ((7) 'answer def) 'named @defm named.nope", &.{"'scope 'qualified"});
     try expectErrorContains(&runtime, "no.such.word", &.{"'scope 'qualified"});
-    // A missing export of a module *value* is not a scope miss at all.
-    try expectErrorContains(&runtime, "[] ((7) 'answer def) @module 'nope invoke", &.{"'scope 'module-value"});
 }
 
 test "module: a construction sees only its parameters its own definitions and core" {
@@ -1025,4 +1022,48 @@ test "loader: a mapped file cannot privately register a stdlib name" {
 
     try expectErrorContains(&runtime, "root.foo.lookup", &.{"module name `dict` is reserved for the standard library"});
     try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+}
+
+test "module source: unit constructors are refused during construction" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    const refusal = "is legal only outside module construction";
+    try expectErrorContains(&runtime, "[] ([] (1) @spawn pop (1) 'x def) 'm @defm", &.{ "'kind 'domain", "'word '@spawn", refusal });
+    try expectErrorContains(&runtime, "[] ([] [] (1) @give pop (1) 'x def) 'm @defm", &.{ "'kind 'domain", "'word '@give", refusal });
+    // `@each` is a prelude definition over `@spawn`, so the trace names it.
+    try expectErrorContains(&runtime, "[] ([1] [] (1) @each pop (1) 'x def) 'm @defm", &.{ "'kind 'domain", "'@each", refusal });
+    try expectErrorContains(&runtime, "m.x", &.{"'kind 'undefined-word"});
+    try expectOk(&runtime, "task.pending len");
+    try std.testing.expectEqual(@as(i64, 0), runtime.stackItems()[0].int);
+}
+
+test "module source: construction refusal reaches helper words and nested attempts" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
+    defer runtime.deinit();
+    try expectErrorContains(
+        &runtime,
+        "[] (([] (1) @spawn) 'start def start) 'helper @defm",
+        &.{ "'kind 'domain", "'word '@spawn", "'helper.start" },
+    );
+    // The helper is spelled under the name the body is being built for: an
+    // image knows its name before its body runs.
+    // An `@attempt` inside the body observes the refusal as data; construction
+    // then completes without having started a task.
+    try expectOk(&runtime, "[] ([] ([] (1) @spawn) @attempt 'err at 'kind at 'k set) 'nested @defm nested.k task.pending len");
+    var stack = try runtime.stackDisplay();
+    defer stack.deinit();
+    try std.testing.expectEqualStrings("'domain 0", stack.bytes());
+    // Outside construction the constructor is unchanged.
+    try expectOk(&runtime, "pop pop [] (1) @spawn task.await");
+    var after = try runtime.stackDisplay();
+    defer after.deinit();
+    try std.testing.expectEqualStrings("{'ok [1]}", after.bytes());
 }

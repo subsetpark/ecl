@@ -929,7 +929,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
         .neg => switch (operand) {
             .int => |integer| .{ .int = std.math.sub(i64, 0, integer) catch return error.Overflow },
             .float => |number| .{ .float = -number },
-            .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
         },
         .abs => switch (operand) {
             .int => |integer| if (integer == std.math.minInt(i64))
@@ -937,7 +937,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
             else
                 .{ .int = if (integer < 0) -integer else integer },
             .float => |number| .{ .float = @abs(number) },
-            .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
         },
         .sqrt => switch (operand) {
             .int => |integer| if (integer < 0)
@@ -948,7 +948,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 error.Domain
             else
                 .{ .float = @sqrt(number) },
-            .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
         },
         .floor, .ceil, .round => switch (operand) {
             .int => operand,
@@ -958,12 +958,12 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 .round => @round(number),
                 else => unreachable,
             }),
-            .char, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
         },
         .exp, .log, .sin, .cos => transcendental(operation, operand),
         .bnot => switch (operand) {
             .int => |integer| .{ .int = ~integer },
-            .char, .float, .symbol, .word, .list, .dict, .task, .module, .port => error.Type,
+            .char, .float, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
         },
     };
 }
@@ -1153,7 +1153,7 @@ fn asFloat(operand: Value) f64 {
     return switch (operand) {
         .int => |integer| @floatFromInt(integer),
         .float => |number| number,
-        .char, .symbol, .word, .list, .dict, .task, .module, .port => unreachable,
+        .char, .symbol, .word, .list, .dict, .task, .port, .address => unreachable,
     };
 }
 
@@ -1221,7 +1221,7 @@ fn scalarNumber(item: Value) ?Number {
     return switch (item) {
         .int => .integer,
         .float => .real,
-        .char, .symbol, .word, .list, .dict, .task, .module, .port => null,
+        .char, .symbol, .word, .list, .dict, .task, .port, .address => null,
     };
 }
 
@@ -2233,7 +2233,7 @@ fn firstFlatElement(item: Value) ?Value {
         .leaf_char2 => .{ .char = heap.chars16(item.list)[0] },
         .leaf_char4 => .{ .char = @intCast(heap.chars32(item.list)[0]) },
         .leaf_symbol => .{ .symbol = heap.symbols(item.list)[0] },
-        .generic_spine, .dict, .task, .module, .port, .reserved_mask => null,
+        .generic_spine, .dict, .task, .port, .address, .reserved_mask => null,
     };
 }
 
@@ -2528,7 +2528,7 @@ pub fn typedUnaryCandidate(operand: Value) bool {
 /// constant would broadcast per element into a nested result, which is a
 /// different computation from an elementwise pass.
 pub fn typedConstantCandidate(operation: BinaryOp, input: Value, constant: Value, constant_left: bool) bool {
-    if (constant == .list or constant == .dict or constant == .task) return false;
+    if (constant == .list or constant == .dict or constant == .task or constant == .address) return false;
     if (constant_left) return typedBinaryCandidate(operation, constant, input);
     return typedBinaryCandidate(operation, input, constant);
 }
@@ -2540,7 +2540,8 @@ pub fn typedBinaryCandidate(operation: BinaryOp, left: Value, right: Value) bool
     const right_flat = right == .list and right.list.kind() != .generic_spine;
     if (!left_flat and !right_flat) return false;
     if ((left == .list and !left_flat) or (right == .list and !right_flat) or
-        left == .dict or right == .dict or left == .task or right == .task) return false;
+        left == .dict or right == .dict or left == .task or right == .task or
+        left == .address or right == .address) return false;
     const length: usize = if (left_flat) @intCast(left.list.length()) else @intCast(right.list.length());
     if (length == 0) return false;
     // The only successful flat result with no single representation is the

@@ -14,72 +14,82 @@ const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-/// Removal advances one owner transition per cursor step. Keep its scheduler
-/// slice small enough that cancellation can run after the directory close edge
-/// while a user-sized durable stack is still retiring.
+/// Removal is one directory edit; the retired generation's images release
+/// through the superseded directory's own bounded retirement.
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@module", .primitive = moduleWord, .effect = "values body -- module", .doc = "Evaluate a module body with an explicit initial stack in a fresh unit and return its definitions as an anonymous immutable module value." },
-        .{ .name = "register", .primitive = registerWord, .effect = "module module-name --", .doc = "Register a module value under a canonical name, creating that registration or replacing its code while keeping its durable state." },
-        .{ .name = "unmodule", .primitive = unmoduleWord, .effect = "module-name --", .doc = "Close, quiesce, and retire a registered module named by a symbol." },
+        .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "Validate a module name, then evaluate a module body with an explicit initial stack in a fresh unit and register the result under that name." },
+        .{ .name = "undefm", .primitive = undefmWord, .effect = "module-name --", .doc = "Remove the module registered under a canonical name or alias." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
-        .{ .name = "within", .primitive = withinWord, .effect = "quotation -- ...", .doc = "Run a quotation against a private draft of the home module's durable stack and publish the result." },
-        .{ .name = "without", .primitive = withoutWord, .effect = null, .doc = "Move the draft's top value onto the pending outputs a within application returns to its caller." },
         .{ .name = "import", .primitive = importWord, .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
         .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register a short alias for a qualified module name." },
         .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Construct an executable qualified word without reparsing source text." },
-        .{ .name = "invoke", .primitive = invoke, .effect = "module binding-name -- ...", .doc = "Call one public export of a module value, which carries no name to qualify." },
         .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
         .{ .name = "load", .primitive = load, .effect = "path --", .doc = "Read and evaluate a source file as one transactional unit." },
     };
     try core.installBuiltins(&definitions);
 }
-/// Construction alone: seeds initialize the construction stack, the body
-/// builds an anonymous immutable image, and the program decides later whether,
-/// and under what name, to register it.
-fn moduleWord(evaluator: *Machine) MachineError!void {
-    var input = try evaluator.popUnitInput();
-    defer input.deinit(evaluator.releaseDomain());
-    return evaluator.moduleOwned(input.move());
-}
-/// Publication alone: name an already-constructed image. A missing name
-/// creates its registration; an existing one installs this image over the
-/// state that registration already owns.
-fn registerWord(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
+/// The one module constructor. The name is validated before the body runs, so
+/// a name that could never be published costs no evaluation and no effect.
+/// Only a registry change during construction can still refuse publication.
+fn defmWord(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
     const name = try evaluator.popSymbol();
-    var item = try evaluator.popValue();
-    errdefer item.deinit();
-    if (item.borrow() != .module) return evaluator.typeError("a module");
-    try evaluator.startDriver(RegisterDriver{
-        .module = .init(item.take()),
+    var input = try evaluator.popUnitInput();
+    errdefer input.deinit(evaluator.releaseDomain());
+    try evaluator.startDriver(DefmDriver{
+        .input = .init(input.move()),
         .validation = .init(name),
     });
 }
+
+const DefmDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    input: heap.Owned(machine.OwnedUnitInput),
+    validation: intern.ModuleNameCursor,
+
+    pub fn advance(evaluator: *Machine, self: *DefmDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.validation.advance()) {
+            .pending => {},
+            .complete => |maybe_name| {
+                const name = maybe_name orelse
+                    return evaluator.fail(.domain, "@defm requires a valid module name");
+                // The registry refuses `core` too, but only at publication; a
+                // name that can never publish must fail before the body runs.
+                if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
+                    return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier");
+                try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
+                const input = self.input.take();
+                evaluator.retireDriver(self);
+                try evaluator.moduleOwned(name, input);
+                return .detached;
+            },
+        };
+        return .stepped;
+    }
+};
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// through the registry and drives the owner-issued close protocol.
-fn unmoduleWord(evaluator: *Machine) MachineError!void {
+fn undefmWord(evaluator: *Machine) MachineError!void {
     const name = try evaluator.popSymbol();
-    try evaluator.startDriver(UnmoduleDriver{ .validation = .init(name) });
+    try evaluator.startDriver(UndefmDriver{ .validation = .init(name) });
 }
 
 /// Returns the canonical registration selected by the active execution home.
 /// The name belongs to the home rather than the image: one image can be
 /// registered more than once, and an alias still reaches its target's
-/// canonical registration. Construction and module-value invocation have no
-/// registration to report.
+/// canonical registration. A construction body reports the name it is being
+/// built under.
 fn moduleNameWord(evaluator: *Machine) MachineError!void {
     const home = evaluator.currentHome() orelse return evaluator.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    const name = home.name() orelse return evaluator.fail(
-        .domain,
-        "*module* is legal only in code homed in a registered module",
-    );
-    try evaluator.pushOwned(.{ .symbol = intern.moduleId(name) });
+    try evaluator.pushOwned(.{ .symbol = intern.moduleId(home.name()) });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names
@@ -108,11 +118,11 @@ const FileDriver = struct {
     }
 };
 
-const UnmoduleDriver = struct {
+const UndefmDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     validation: intern.ModuleNameCursor,
     cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
-    pub fn advance(evaluator: *Machine, self: *UnmoduleDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *UndefmDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -121,53 +131,28 @@ const UnmoduleDriver = struct {
                 .complete => |maybe_name| {
                     const name = maybe_name orelse return evaluator.fail(
                         .domain,
-                        "unmodule requires a valid module name",
+                        "undefm requires a valid module name",
                     );
                     try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
                     const registry = evaluator.publicationRegistry(name, evaluator.unit.current.?.site.registration_provenance);
-                    self.cursor = .init(registry.removalCursor(
-                        name,
-                        &evaluator.unit.turn_authority,
-                    ));
+                    self.cursor = .init(registry.removalCursor(name));
                     continue;
                 },
             };
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.MissingModule => return evaluator.undefinedNameIn(
-                    intern.moduleId(self.cursor.?.borrow().requested),
+                    intern.moduleId(self.cursor.?.borrow().request),
                     .qualified,
-                ),
-                error.StateApplicationActive => return evaluator.fail(
-                    .domain,
-                    "a module cannot be removed from inside a state application",
                 ),
             }) {
                 .pending => {},
-                .blocked => return .{ .yielded = .wait },
-                // The close edge has transferred all remaining ownership to
-                // scheduler retirement. Yield before polling cancellation
-                // again so abandoning this Unit cannot abandon module state.
-                .detached => return .{ .yielded = .settle },
                 .complete => return .completed,
             }
         }
         return .stepped;
     }
 };
-
-/// The explicit stack boundary: the quotation runs against a private draft
-/// of the home module's durable stack rather than the ambient caller stack.
-fn withinWord(evaluator: *Machine) MachineError!void {
-    var quotation = try evaluator.popQuotation();
-    return evaluator.beginWithin(quotation.take().list);
-}
-
-/// The explicit outward boundary: one draft value joins the pending output
-/// sequence, which reaches the caller only if the transaction publishes.
-fn withoutWord(evaluator: *Machine) MachineError!void {
-    return evaluator.moveWithout();
-}
 
 fn importWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -193,33 +178,6 @@ fn aliasModule(evaluator: *Machine) MachineError!void {
         .target_validation = .init(target),
     });
 }
-
-/// Validates the requested canonical name before any registry mutation, then
-/// hands the retained module value to the publication driver.
-const RegisterDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    module: ?heap.Owned(Value),
-    validation: intern.ModuleNameCursor,
-    pub fn advance(evaluator: *Machine, self: *RegisterDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        while (work.spend()) switch (self.validation.advance()) {
-            .pending => {},
-            .complete => |maybe_name| {
-                const name = maybe_name orelse return evaluator.fail(
-                    .domain,
-                    "register requires a valid module name",
-                );
-                const item = self.module.?.take();
-                self.module = null;
-                evaluator.retireDriver(self);
-                try evaluator.registerModuleOwned(item, name);
-                return .detached;
-            },
-        };
-        return .stepped;
-    }
-};
 
 const ImportName = struct {
     binding: intern.BindingName,
@@ -492,20 +450,6 @@ const AliasDriver = struct {
         return .stepped;
     }
 };
-
-/// Calls one public export of a module value. A handle carries no name, so
-/// there is nothing to `qualify` and nothing for the symbol-keyed observation
-/// words to look up; this is the one operation a nameless module supports.
-/// The image is taken here, where the value has to be inspected anyway, so
-/// nothing downstream re-checks the type.
-fn invoke(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    const binding = try evaluator.popSymbol();
-    var item = try evaluator.popValue();
-    errdefer item.deinit();
-    const image = modules.imageRef(item.borrow()) orelse return evaluator.typeError("a module");
-    return evaluator.invokeModuleOwned(item.take(), image, binding);
-}
 
 fn qualify(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);

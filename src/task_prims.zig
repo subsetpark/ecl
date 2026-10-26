@@ -7,6 +7,8 @@ const env = @import("env.zig");
 const machine = @import("machine.zig");
 const poll = @import("poll.zig");
 const scheduler_api = @import("scheduler.zig");
+const mailbox = @import("mailbox.zig");
+const intern = @import("intern.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -27,6 +29,11 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
     .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
     .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
+    .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "( task -- address ) Return the address of a task's mailbox. Two addresses of one task match; an address never reaches the task's result." },
+    .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "( -- address ) Return the address of the executing task's own mailbox. 'domain outside a task." },
+    .{ .name = "send", .primitive = send, .effect = "value address --", .doc = "( value address -- ) Queue a value in the mailbox an address names, parking while it holds 16 messages. 'io with 'reason 'closed once the task has ended; 'type for a value containing a task handle." },
+    .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "( -- value ) Take the oldest message from the executing task's mailbox, parking until one arrives. 'domain outside a task." },
+    .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "( milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a message: {'ok value}, or {'err {'kind 'timeout}} when none arrives. 'domain outside a task." },
 };
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
@@ -61,7 +68,18 @@ fn spawnTask(
     };
 }
 
+/// A module body defines words and starts no tasks. Refusing at the
+/// constructor, before any operand is consumed, keeps every task owned by a
+/// task or the session root and never by an image under construction.
+fn refuseDuringConstruction(evaluator: *Machine, comptime constructor: []const u8) MachineError!void {
+    if (evaluator.unit.inModuleConstruction()) return evaluator.fail(
+        .domain,
+        constructor ++ " is legal only outside module construction: a module body defines words and starts no tasks",
+    );
+}
+
 fn spawn(evaluator: *Machine) MachineError!void {
+    try refuseDuringConstruction(evaluator, "@spawn");
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());
     const borrowed = input.borrow();
@@ -282,6 +300,7 @@ const GiveDriver = struct {
 };
 
 fn give(evaluator: *Machine) MachineError!void {
+    try refuseDuringConstruction(evaluator, "@give");
     try evaluator.require(3);
     var body = try evaluator.popQuotation();
     errdefer body.deinit();
@@ -329,6 +348,140 @@ fn cancelSelf(evaluator: *Machine) MachineError!void {
     if (!scheduler(evaluator).cancelScopeOwner(scope(evaluator)))
         return evaluator.fail(.domain, "task.cancel-self is legal only inside a task");
 }
+
+fn address(evaluator: *Machine) MachineError!void {
+    var task = try evaluator.popValue();
+    defer task.deinit();
+    if (task.borrow() != .task) return evaluator.typeError("a task");
+    try evaluator.pushOwned(try scheduler(evaluator).taskAddress(task.borrow()));
+}
+
+fn selfAddress(evaluator: *Machine) MachineError!void {
+    const own = try ownMailbox(evaluator, "task.self");
+    try evaluator.pushOwned(try own.createAddress(evaluator.unit.allocator));
+}
+
+/// The executing task's mailbox. The root has none: it owns tasks but is
+/// not one, so nothing could ever address it.
+fn ownMailbox(evaluator: *Machine, comptime word: []const u8) MachineError!*mailbox.Mailbox {
+    return scheduler(evaluator).currentMailbox(scope(evaluator)) orelse
+        evaluator.fail(.domain, word ++ " is legal only inside a task");
+}
+
+fn send(evaluator: *Machine) MachineError!void {
+    const pair = try evaluator.popPair();
+    var payload = pair[0];
+    defer payload.deinit();
+    var target = pair[1];
+    defer target.deinit();
+    if (target.borrow() != .address) return evaluator.typeError("a value followed by an address");
+    const check = try mailbox.HandleCheck.init(evaluator.unit.allocator, payload.borrow());
+    try evaluator.startDriver(SendDriver{
+        .payload = .init(payload.take()),
+        .target = .init(target.take()),
+        .check = .init(check),
+    });
+}
+
+/// Checks the payload for handles under the work budget, then queues it,
+/// parking for space while the target is full. The address value keeps the
+/// mailbox alive across the park.
+const SendDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    payload: heap.Owned(Value),
+    target: heap.Owned(Value),
+    check: heap.Owned(mailbox.HandleCheck),
+    checked: bool = false,
+
+    pub fn advance(evaluator: *Machine, self: *SendDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (!self.checked) {
+            const progress = self.check.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Handle => return evaluator.fail(.type, "task.send cannot carry a task handle"),
+            };
+            if (progress == .pending) return .stepped;
+            self.checked = true;
+        }
+        const target = mailbox.Mailbox.fromAddress(self.target.borrow());
+        switch (target.enqueue(.{ .value = self.payload.borrow() })) {
+            .accepted => {
+                _ = self.payload.take();
+                return .completed;
+            },
+            .closed => {
+                const reason = try intern.intern("closed");
+                const failure = evaluator.fail(.io, "task.send target has ended and its mailbox is closed");
+                evaluator.addErrorReason(.{ .symbol = reason });
+                return failure;
+            },
+            .full => {
+                try evaluator.park(.{ .mailbox = .{ .source = target.readinessSource(.space), .deadline = null } });
+                return .{ .yielded = .park };
+            },
+        }
+    }
+};
+
+fn receive(evaluator: *Machine) MachineError!void {
+    _ = try ownMailbox(evaluator, "task.receive");
+    try evaluator.startDriver(ReceiveDriver{ .deadline = null });
+}
+
+fn receiveFor(evaluator: *Machine) MachineError!void {
+    var duration = try evaluator.popValue();
+    defer duration.deinit();
+    if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
+    if (duration.borrow().int < 0) return evaluator.fail(.domain, "task.receive-for duration must be nonnegative");
+    _ = try ownMailbox(evaluator, "task.receive-for");
+    const milliseconds: u63 = @intCast(duration.borrow().int);
+    const deadline = scheduler(evaluator).deadlineAfter(milliseconds) catch
+        return evaluator.fail(.overflow, "task.receive-for deadline lies beyond the clock's range");
+    try evaluator.startDriver(ReceiveDriver{ .deadline = deadline });
+}
+
+/// Polls the executing task's own mailbox and parks until a message or the
+/// deadline wakes it; the deadline is checked against the scheduler clock
+/// after every wake, so a late message still wins over a timeout.
+const ReceiveDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    deadline: ?scheduler_api.Deadline,
+
+    pub fn advance(evaluator: *Machine, self: *ReceiveDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const own = scheduler(evaluator).currentMailbox(scope(evaluator)).?;
+        if (own.dequeue()) |message| {
+            if (self.deadline == null) return .{ .output = message.value };
+            return .{ .output = try machine.outcomeDict(
+                evaluator.unit.allocator,
+                evaluator.releaseDomain(),
+                "ok",
+                message.value,
+            ) };
+        }
+        if (self.deadline) |deadline| {
+            if (deadline.reachedBy(scheduler(evaluator).now())) {
+                var timeout = machine.EclErr.init(.timeout, "task.receive-for timed out");
+                defer timeout.retire(evaluator.releaseDomain());
+                const failure = try machine.errorValue(
+                    evaluator.unit.allocator,
+                    evaluator.releaseDomain(),
+                    &timeout,
+                    .{},
+                    null,
+                );
+                return .{ .output = try machine.outcomeDict(
+                    evaluator.unit.allocator,
+                    evaluator.releaseDomain(),
+                    "err",
+                    failure,
+                ) };
+            }
+        }
+        try evaluator.park(.{ .mailbox = .{ .source = own.readinessSource(.receive), .deadline = self.deadline } });
+        return .{ .yielded = .park };
+    }
+};
 
 fn tasks(evaluator: *Machine) MachineError!void {
     try scheduler(evaluator).installTasksDriver(evaluator, scope(evaluator));

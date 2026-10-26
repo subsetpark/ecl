@@ -93,18 +93,21 @@ io.pp
 [] ('forms.bare doc) @attempt 'err at 'kind at io.pp
 
 ### A list beneath the body that recognizes no marker is not consumed as an
-### annotation and remains durable module state.
-
-### module positional
+### annotation. It stays on the construction stack, and a module body that
+### leaves anything there is 'domain.
 []
 (
- ### def peek
- ((dup without) within) 'peek def (dup)
+ []
+ (### def f
+  (a b)
 
- ### def f
- (a b)
-
- ### def f
- (dup) 'f def) 'positional @defm
-'positional.f see
-positional.peek io.pp
+  ### def f
+  (dup) 'f def)
+ 'positional
+ @defm)
+@attempt
+'err
+at
+'kind
+at
+io.pp

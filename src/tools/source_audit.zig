@@ -103,11 +103,11 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",       "scheduler_core.zig",    "turn_core.zig",         "external.zig",        "console.zig",       "task_prims.zig",      "archive_document.zig",
-        "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",  "port_builder.zig",    "port_bytes.zig",
-        "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig", "port_result.zig",     "port_error_data.zig",
-        "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",  "filesystem_port.zig", "directory_resource.zig",
-        "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
+        "scheduler.zig",          "scheduler_core.zig",  "turn_core.zig",         "external.zig",          "console.zig",         "task_prims.zig",    "archive_document.zig",
+        "mailbox.zig",            "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",  "port_builder.zig",
+        "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig", "port_result.zig",
+        "port_error_data.zig",    "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",  "filesystem_port.zig",
+        "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
@@ -143,7 +143,7 @@ const test_files = [_][]const u8{
     "tests/test_heap.zig",
     "tests/runtime_fixture.zig",
     "oom_root.zig",
-    "tests/stateful_module_test.zig",
+    "tests/module_lifecycle_test.zig",
     "tests/stdlib_test.zig",
     "tests/hostio_test.zig",
 
@@ -151,7 +151,7 @@ const test_files = [_][]const u8{
     "tests/http_test.zig",
     "tests/random_test.zig",
     "tests/kernel_typed_test.zig",
-    "tests/module_value_test.zig",
+    "tests/module_registration_test.zig",
     "tests/unit_input_test.zig",
     "tests/module_source_test.zig",
     "tests/test_language_test.zig",
@@ -162,6 +162,7 @@ const test_files = [_][]const u8{
     "tests/conversion_test.zig",
     "tests/cursor_budget_test.zig",
     "tests/interleaving_test.zig",
+    "tests/mailbox_test.zig",
     "tests/http_server_test.zig",
 };
 const repository_verification_files = [_][]const u8{
@@ -682,7 +683,6 @@ fn auditSourceBodies() bool {
         &.{ "MissingModule", "=>", "unreachable" },
         &.{ "NameConflict", "=>", "unreachable" },
         &.{ "InvalidDefinition", "=>", "unreachable" },
-        &.{ "StateApplicationActive", "=>", "unreachable" },
     };
     for (source_groups) |component| {
         if (!component.production) continue;
@@ -834,10 +834,9 @@ fn auditUnsafeCasts() bool {
         "capability payload erasure",
         @embedFile("../heap.zig"),
         &.{
-            "TaskDestroyAdapter",     "PortReleaseAdapter",
-            "PortTransferAdapter",    "ModuleReleaseAdapter",
-            "RetirementAdapters",     "RetirementWakeAdapters",
-            "CodeRetirementAdapters",
+            "TaskDestroyAdapter",     "PortReleaseAdapter",     "AddressReleaseAdapter",
+            "PortTransferAdapter",    "ModuleReleaseAdapter",   "RetirementAdapters",
+            "RetirementWakeAdapters", "CodeRetirementAdapters",
         },
     ) or failed;
     failed = auditErasedCasts(
@@ -1244,12 +1243,12 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@module", "@test" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@defm", "@test" };
 
 /// First-party ECL words that apply their quotation in a fresh unit and are
 /// therefore marked too. Each must be defined by some first-party source;
 /// the compiler cannot see that either, so the audit checks both directions.
-const source_unit_constructors = [_][]const u8{ "@defm", "@each", "@serve" };
+const source_unit_constructors = [_][]const u8{ "@each", "@serve" };
 
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from
@@ -1264,9 +1263,9 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/result.ecl"),
     @embedFile("../stdlib/str.ecl"),
     @embedFile("../stdlib/table.ecl"),
-    @embedFile("../stdlib/rng.ecl"),
     @embedFile("../stdlib/path.ecl"),
     @embedFile("../stdlib/time.ecl"),
+    @embedFile("../stdlib/agent.ecl"),
     @embedFile("../stdlib/http/server.ecl"),
     @embedFile("../stdlib/http/request.ecl"),
     @embedFile("../stdlib/http/response.ecl"),

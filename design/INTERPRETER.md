@@ -56,7 +56,7 @@ The main components are these:
 | Session | Lifetime root, persistent operand stack, host services, and unit transaction | `session.zig` |
 | Reader and source archive | Turn source into executable values while retaining optional diagnostic lineage | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
-| Names and modules | Late binding, scopes, immutable module images, generations, and durable module state | `env.zig`, `modules.zig` |
+| Names and modules | Late binding, scopes, immutable module images, and generations | `env.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
@@ -403,7 +403,7 @@ provenance stays focused on diagnostics.
 
 The evaluator moves one closed `Value` union. The layout is fixed at 16 bytes:
 integers, floats, Unicode scalars, symbols, and word references are inline;
-lists, dictionaries, tasks, module values, and ports carry kind-specific
+lists, dictionaries, tasks, and ports carry kind-specific
 opaque handles. External code inspects handles through their public semantic surfaces.
 Allocation and mutation require capabilities issued by `heap.zig`.
 The precommit source audit compares this closed Zig tag universe exactly with
@@ -687,8 +687,7 @@ An activation needs three related but non-identical facts:
 
 - `scope`: the root its own definitions land in, and whether they may;
 - `resolution_scope`: the root reflection and unlinked words resolve in; and
-- `home`: the module image and registration whose privacy and durable state it
-  may use.
+- `home`: the module image and registration whose privacy it may use.
 
 Whether definitions may land is a flag on the site. Top-level code and module
 construction set it; isolated combinator applications, `@attempt`, and tasks
@@ -698,44 +697,52 @@ child scope, is what keeps those bodies from defining: they run in their
 invoker's root. `ExecutionSite` carries these together and exposes named
 constructors for root, image, inherited, and resumed execution. They cannot safely be reconstructed
 from one another. A source definition may resolve against its defining chain
-while inheriting a caller's module home, and an anonymous module image may have
-private code but no registered state slot.
+while inheriting a caller's module home, and a construction body runs against
+an image that is named but not yet published.
 
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.
 
-### Images, registrations, and state have different lifetimes
+### A module is one object per generation
 
 A module image is immutable code and metadata with its own environment and
-root scope. A registry registration publishes an image under a canonical name
-as one generation. The registry slot owns the durable stack and the FIFO
-arbiter used by `within`; an image supplies the initial stack template.
+root scope. It is created already named, by `@defm` or by a loader that has
+validated the name, and it learns its generation number when the registry
+publishes it. Nothing else represents a registration: the image is the one
+owner that every pin, lease, and directory entry retains, so a generation
+lives exactly as long as something can still reach it. A construction body
+that leaves values on its stack is refused before publication, so no image
+carries state out of its body.
 
-Separating the three concepts supports all of these cases cleanly:
+The registry is a chain of immutable directory snapshots. Each snapshot maps
+canonical names to images and short names to canonical names, and owns one
+reference to every image it maps. Every mutation — registration, reload,
+removal, alias — is one bounded cursor: snapshot the current directory,
+validate against it, copy it with the edit applied while retaining each entry
+copied, and publish the copy under the writer lock if the snapshot is still
+current; otherwise discard the copy and start over. A superseded snapshot
+stays chained behind its successor until its last reader leaves, then releases
+its entries one per retirement step before freeing itself; a discarded
+candidate takes the same path. Reload therefore copies the directory rather
+than swapping a cell in place. That is the cost accepted for having no mutable
+per-name storage whose lifetime would have to be managed across snapshots.
 
-- an anonymous image exists as a first-class value with no registered state;
-- one immutable image may be registered under more than one name;
-- replacing a registration publishes a new generation without rewriting the
-  old image; and
-- old code may finish under a generation pin while new qualified calls reach
-  the current generation.
+Replacement and removal mark the generation they displace as superseded under
+the same lock. Old code keeps running: a Unit retains each generation it
+dispatches through, and a call that already resolved finishes under the
+generation it resolved. This resembles Erlang's distinction between old and
+current module code and read-copy-update's separation of publication from
+reclamation; reference-driven lifetimes make both fall out of the one owner.
 
-This resembles Erlang's distinction between old and current module code. ecl
-uses reference-driven lifetimes, so any historical generation remains alive
-while a reader or execution pin needs it. It also resembles read-copy-update:
-publication makes a new immutable version reachable, while reclamation waits
-for readers and execution pins to leave the old version.
-
-Qualified lookup acquires a generation lease, resolves a public binding, and
-turns the result into an execution pin before code runs. A Unit retains each
-generation it dispatches through. A module-local word can therefore keep
-running during replacement without a raw environment pointer escaping.
+Qualified lookup acquires an observation lease on the directory entry while
+the directory lease proves the entry owned, resolves a public binding, and
+turns the lease into an execution pin before code runs.
 
 Qualified words keep a small per-Unit cache keyed by source occurrence. A hit
-holds the binding cell and the registration generation it was found under, and
-is valid only while that generation is still the registration's current one; a
-stale entry is evicted and the word resolves afresh. Plain words need no cache:
-their slots answer directly.
+holds the binding cell and a lease on the generation it was found under, and
+is executable only while that generation is not superseded; a stale entry is
+evicted and the word resolves afresh. The superseded flag exists for this one
+consumer. Plain words need no cache: their slots answer directly.
 
 The reserved qualifier `core` is decided before any of that. When the
 resolution cursor splits a dotted spelling and the module segment is exactly
@@ -746,18 +753,6 @@ call-site cache involved. Core is not an image and gains no module lifecycle
 by being nameable: the registry refuses the exact name `core` for both module
 registration and alias publication, which is the single boundary that owns
 registry names, so no later registration can capture the qualifier.
-
-### Stateful module application is an explicit transaction
-
-`within` requests one FIFO state turn, snapshots or drafts the slot's durable
-stack, runs the application against that draft, and publishes only after
-successful completion. The granted turn is the mutation capability. A Unit has
-one consumable turn authority, so the type system excludes nested or
-cross-module state applications.
-
-Old code remains executable, but a superseded home cannot publish new durable
-state. Removal closes admission, lets outstanding turns settle, and separates
-the slot's teardown from delayed generation retirement.
 
 ### Module visibility belongs to the defining source
 
@@ -1295,11 +1290,33 @@ closing a scope stops new children before teardown advances. This is the
 structured-concurrency rule that lets a parent own the resources its children
 borrow.
 
+Scopes and units are different granularities. A `TaskScope` exists in exactly
+two places: the session root, shared by every root unit and closed only at
+exit, and each `TaskCell`. `@attempt`, combinator applications, `load`, and
+module construction are boundary frames inside the unit that runs them: stack
+transactions that checkpoint and restore operands, owning nothing. A spawn
+registers under the nearest enclosing scope, so a task started inside an
+`@attempt` outlives it. The constructor primitives refuse while a
+module-construction boundary is open anywhere in the frame stack, so an image
+never owns a task and modules stay pure code.
+
 Task handles refer to write-once task cells. Construction, active execution,
 and published terminal results are distinct tagged states. The task becomes
 reachable after its execution and parent membership are stable. A cancelled
 ready task is prevented from dispatching, and cancellation itself performs no
 allocation.
+
+Every `TaskCell` owns a `Mailbox`: a separately counted object created with
+the cell and closed in the terminal transition, before the unit's stack is
+released. The mailbox never points back at the cell or its result, and an
+`'address` value holds a mailbox reference and nothing else, so addresses
+travel through mailboxes without closing a cycle. Handles are refused on
+`task.send` by a bounded walk under the sender's work budget that enters only
+generic spines and dictionaries and accepts a flat specialized list in one
+step. Mailbox waits are external-readiness cells on the wait-set arbitration
+below, keyed for a message or for space, with their own resume family so a
+deadline resumes the receiving driver and becomes a value rather than a raised
+error.
 
 Waits use explicit wait sets for one task, any task, a join, or a deadline.
 Setup publishes the wait only after all registrations are ready. Completion,

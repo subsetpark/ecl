@@ -1397,7 +1397,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         },
     };
     defer loaded.releasePin();
-    var publication = try modules.Registry.NativeCandidateCursor.init(&registry, loaded);
+    var publication = try modules.Registry.NativeCandidateCursor.init(&registry, requested, .ordinary, loaded);
     defer publication.deinit();
     var candidate = while (true) switch (try publication.advance()) {
         .pending => {},
@@ -1406,7 +1406,7 @@ test "native: the static transport publishes a linked descriptor through the sam
     defer candidate.deinit();
     var candidate_sealed = try candidate.seal(null);
     defer candidate_sealed.deinit();
-    _ = try modules.testing.register(&registry, candidate_sealed.ref(), requested);
+    _ = try modules.testing.register(&registry, &candidate_sealed);
     var generation = modules.testing.acquire(&registry, requested).?;
     defer generation.deinit();
     const increment = try intern.internNamespace("increment");

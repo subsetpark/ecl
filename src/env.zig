@@ -29,7 +29,7 @@ pub const EffectQuotation = opaque {};
 pub fn quotation(header: *value.ListHandle) ?*Quotation {
     return switch (header.kind()) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => @ptrCast(@alignCast(header)),
-        .dict, .task, .module, .port, .reserved_mask => null,
+        .dict, .task, .port, .address, .reserved_mask => null,
     };
 }
 
@@ -40,7 +40,7 @@ pub fn quotationHeader(body: *const Quotation) *value.ListHandle {
 pub fn documentation(header: *value.ListHandle) ?*DocumentationString {
     return switch (header.kind()) {
         .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .port, .reserved_mask => null,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .address, .reserved_mask => null,
     };
 }
 
@@ -1903,18 +1903,17 @@ pub const Env = enum(usize) {
         // write-after-free, and the path is short enough to walk: teardown
         // defers each binding cell, whose retirement releases its snapshots,
         // whose `spec.retire` releases a `.word` body's header, whose
-        // destruction releases that quotation's elements. A module value
-        // element drops the last reference to a stamped image, and
-        // `ModuleImage.release` retires the image's `label_cell` -- an
-        // Env-owned cell -- before any other teardown step. `drainOwned` runs
-        // to quiescence, so every one of those generations lands inside the
-        // single drain below.
+        // destruction releases that quotation's elements. If one of those
+        // drops the last reference to a stamped image, `ModuleImage.release`
+        // retires the image's `label_cell` -- an Env-owned cell -- before any
+        // other teardown step. `drainOwned` runs to quiescence, so every one of
+        // those generations lands inside the single drain below.
         //
-        // The reachable shape is an *unregistered* image held only by a
-        // binding: `((1) 'x def) @module 'm set`. A registered one dies in
-        // `Session.deinit`'s earlier registry drain instead, with the cells
-        // still alive, which is why the obvious `@defm` repro never reaches
-        // this. Note also that a leak checker cannot witness the failure --
+        // An image held only by a binding used to be the reachable shape; with
+        // module values gone, a registered image normally dies in
+        // `Session.deinit`'s earlier registry drain with the cells still alive.
+        // The ordering stays because it is correct regardless of which owner
+        // releases last. Note also that a leak checker cannot witness the failure --
         // `DebugAllocator` reports double frees and leaks but cannot report a stray write
         // into freed-but-mapped memory -- so a green allocator result here is
         // not evidence about this ordering. Only a sanitizer or this argument

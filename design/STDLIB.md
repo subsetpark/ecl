@@ -98,9 +98,8 @@ no source provenance; there is no fallback to the caller's file.
 `( -- 'module-name )` — Return the canonical registration name selected by
 the current module activation. The same image registered under different names
 reports the name through which it was called; an alias reports its target's
-canonical name. `'domain` at top level, during module construction, through an
-anonymous module value, or through an escaped quotation whose image has no
-invoking registration.
+canonical name. `'domain` at top level, during module construction, or through
+an escaped quotation whose image has no invoking registration.
 
 ### +
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
@@ -185,11 +184,13 @@ Errors.
 ```
 
 ### @defm
-`( values body 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
-by `register`: run the body on a fresh environment, then validate the
-canonical module path and register the resulting image under it. The body is
-evaluated before the name is validated, so the two spellings agree on every
-observable outcome. Defined in ecl.
+`( values body 'module-name -- )` — *Unit constructor.* The one module
+constructor. Validate the name first: a non-symbol is `'type`; an invalid
+module path, the reserved name `core`, or a standard-library module name is
+`'domain`, and the body never runs. Then run the body on a fresh environment
+and publish the resulting image under the name. A body failure publishes
+nothing; a registry change during construction may still refuse publication
+after the body has run.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore `values (body) 'name @defm`. See
@@ -201,19 +202,16 @@ per element, contract `( a -- b )` enforced per element. Concurrent
 `each`: ordered results, leftmost failure re-raised after cancelling and
 quiescing the remainder. Each child's stack starts with its element deepest;
 `list values (q) @each` adds the shared values above it. Defined in ecl over
-`@spawn`, `task.await`, and `task.cancel`. See Concurrency.
-
-### @module
-`( values body -- module )` — *Unit constructor.* Run the body on a fresh
-environment and return the resulting anonymous immutable module image. No
-registry name is claimed and no name is validated. The body's final operand
-stack becomes the image's initial-state template. Use `values (body) @module`.
-See [Modules](SPEC.md#modules).
+`@spawn`, `task.await`, and `task.cancel`. Inside a module construction body,
+at any depth, this constructor is `'domain`: a module body defines words and
+starts no tasks (see Modules). See Concurrency.
 
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack
 from the explicit values list and run the quotation concurrently. Use `[]` for
-no initial values; the ambient stack never crosses the boundary. See
+no initial values; the ambient stack never crosses the boundary. Inside a
+module construction body, at any depth, this constructor is `'domain`: a module
+body defines words and starts no tasks (see Modules). See
 [Concurrency](SPEC.md#concurrency).
 
 #### Examples
@@ -229,7 +227,8 @@ additionally move every port in the ports list into the new unit, which owns
 them from before it starts running: the child's end closes them and the
 calling unit's end no longer does. The child stack is the given ports,
 deepest, then the explicit values. Use `[]` for no ports, which is exactly
-`@spawn`.
+`@spawn`. Inside a module construction body, at any depth, this constructor
+is `'domain`: a module body defines words and starts no tasks (see Modules).
 
 Every kind of port can be given: listeners, connections, and process ports
 alike. A port may only be given by the unit that owns it, so a unit holding a
@@ -618,8 +617,8 @@ to `len 0 =`.
 `( word -- ... )` — Resolve and apply a word value late through the ordinary
 word-dispatch path, exactly as if that word appeared in executable position.
 Non-words are `'type`; missing words are `'undefined-word`. Module homes,
-private resolution, annotations, tracing, builtins, native calls,
-cancellation, and `within` authority are preserved.
+private resolution, annotations, tracing, builtins, native calls, and
+cancellation are preserved.
 
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`'domain` otherwise):
@@ -1052,7 +1051,7 @@ the selector is always one whole-value key, including a list key.
 module path, or the reserved qualifier `'core`, and one unqualified,
 non-reserved binding segment, then construct their qualified executable word
 directly from the interned components. It does not parse source, intern
-anything new, or grant module-state/lifecycle authority; use `execute` to
+anything new, or grant lifecycle authority; use `execute` to
 invoke the result dynamically. `'core 'dup qualify` reaches the primitive even
 where `dup` is shadowed.
 
@@ -1072,14 +1071,6 @@ nonnegative int.
 
 ### raze
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
-
-### register
-`( module 'module-name -- )` — Validate a canonical module path and publish a
-module value under it. A missing name creates its registration and copies the
-image's initial-state template into the new durable stack; an existing name
-installs the new image and retains that registration's durable stack. One
-image may be registered under any number of names, each with independent
-state and lifetime. See [Modules](SPEC.md#modules).
 
 ### reshape
 `( list shape -- list )` — Cycle the data into the exact nested-list
@@ -1337,7 +1328,7 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'module`, or `'task`.
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`, `'port`, or `'address`.
 
 #### Examples
 
@@ -1350,6 +1341,14 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `unset`; removing a
 local shadow may reveal a parent or core binding.
+
+### undefm
+`( 'module-name -- )` — Remove the module currently registered under a
+canonical name or unqualified alias, resolved exactly as ordinary registry
+lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
+every alias targeting the module in the same publish; an already-dispatched
+call finishes under the generation it resolved. See
+[Modules](SPEC.md#modules).
 
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial
@@ -1378,14 +1377,6 @@ state and `()`.
 ### unless
 `( bool else -- ... )` — *Inline.* Run the quotation when the condition
 is 0. Equivalent to `() swap if`.
-
-### unmodule
-`( 'module-name -- )` — Close, quiesce, and retire the module currently
-registered under a canonical name or unqualified alias, resolved exactly as
-ordinary registry lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
-every alias targeting the slot in the same publish and is `'domain` when
-initiated from inside any state application, since a unit holds at most one
-slot's turn. See [Modules](SPEC.md#modules).
 
 ### unset
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
@@ -1471,7 +1462,7 @@ with the list's elements as separate stack values. Defined in ecl as
 
 This is ordinary quotation composition and constructs nothing. It is not a
 unit's seed operand: the flattened quotation it returns is a runtime-built
-body, so `@module` and `@defm` give it no reader attribution. Pass initial
+body, so `@defm` gives it no reader attribution. Pass initial
 values as the constructor's separate list operand.
 
 #### Examples
@@ -1480,20 +1471,6 @@ values as the constructor's separate list operand.
 [3] (dup) with call
 # => 3 3
 ```
-
-### within
-`( quotation -- ... )` — Run the quotation against a
-private draft of the home module's durable stack, then publish the
-remaining draft as that stack and deliver whatever `without` moved
-outward, in invocation order. Legal only in a published word whose
-definition-site home is a live, current module generation; everywhere else
-it is `'domain`. Parking, nesting, and a second module's slot are
-`'domain`. Any failure publishes nothing. See [Modules](SPEC.md#modules).
-
-### without
-`( -- )` — Move the draft's top value onto the pending outputs of the
-active `within` application. `'domain` outside one, `'underflow` on an
-empty draft. Outputs reach the caller only if the application publishes.
 
 ### word
 `( symbol -- word )` — Convert a symbol to an executable word with the same
@@ -1527,6 +1504,69 @@ extends). Each-left/each-right are `partial` compositions.
 [1 2 3] [10 20 30] (+) zip-with
 # => [11 22 33]
 ```
+
+## agent
+
+An agent is a task whose stack is its state. Quotations sent to it run in
+arrival order, each as an isolated unit over that stack, so a failing
+quotation leaves the state exactly as it was. A `call` quotation is
+`( state... -- state... result )`: the top of its result stack is the reply and
+the rest is the new state. A `send` quotation is `( state... -- state... )` and
+keeps its whole result stack. This is how a program keeps state that outlives
+a word, for example an ambient random generator:
+
+```ecl
+[0 0] agent.start 'rng set
+(5 rand.int) rng agent.call
+# => 0
+```
+
+A call to an agent that has ended raises `'io`. A call whose request was
+accepted waits forever if the agent ends before replying, unless it bounds the
+call with `call-for`.
+
+### call
+`( quotation address -- result )` — Apply the quotation to the agent's stack
+and return the top of the result stack; the agent keeps the rest. The
+quotation's own error is re-raised here with the agent unchanged. A result
+stack with nothing on it is `'domain`. Replies travel through a helper task.
+A call to an agent that has ended raises `'io`; a call whose request was
+accepted never returns if the agent ends before replying.
+
+#### Examples
+
+```ecl
+[0 0] agent.start 'g set
+(100 rand.int) g agent.call (100 rand.int) g agent.call pair
+# => [35 0]
+[7 0] agent.start 'g set
+[] ((1 0 div) g agent.call) @attempt 'err at 'kind at (dup) g agent.call pair
+# => ('domain [7 0])
+```
+
+### call-for
+`( quotation address milliseconds -- result )` — `agent.call` with a
+nonnegative int deadline, checked before anything is sent: a negative duration
+is `'domain` and a non-int is `'type`. When no reply arrives in time the call
+raises `'timeout`, whether the deadline passed while waiting for room in a full
+mailbox or for the reply; the quotation, if it was sent, still runs on the
+agent when its turn comes, and its reply is discarded.
+
+### send
+`( quotation address -- )` — Apply the quotation to the agent's stack without
+waiting. The whole result stack becomes the new state; a failing quotation
+changes nothing and reports nothing.
+
+### serve
+Stack-polymorphic. Turn the current task into an agent whose state is the
+stack it has now, and serve until cancelled. Spawn it directly to keep the
+handle: `[[7 0]] (agent.serve) @spawn` serves `[7 0]` and `task.cancel` on the
+handle ends it with `'cancelled`.
+
+### start
+`( state -- address )` — Spawn a server whose stack holds the one value
+`state` and return its address. The server is owned by the spawning task
+scope, as any `@spawn` is.
 
 ## archive
 
@@ -1616,8 +1656,7 @@ scheduler and resumes on its next turn without starting the timer thread.
 Cancellation before or after registration wakes the unit with `'cancelled`
 and retires its timer entry. A negative duration is `'domain`, a non-int is
 `'type`, and a duration whose deadline lies beyond any instant the clock can
-report is `'overflow`; all three fail before anything is registered. Sleeping
-inside a `within` application is `'domain`.
+report is `'overflow`; all three fail before anything is registered.
 
 #### Examples
 
@@ -3139,7 +3178,22 @@ one of the listed symbols; leave every other result unchanged.
 
 Explicit-state pseudorandom draws are pure except for `entropy`; see
 [Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw
-returns the advanced state alongside its result.
+returns the advanced state alongside its result. An ambient generator is an
+agent holding that state: `[0 0] agent.start 'rng set` then
+`(5 rand.int) rng agent.call`.
+
+### deal
+`( state count pool -- state results )` — Draw `count` distinct ints in
+`[0, pool)` without replacement, advancing the state by `count`. Work and
+memory follow `count`, never `pool`. A negative count or pool, or a count
+above the pool, is `'domain`; a non-int count or pool is `'type`.
+
+#### Examples
+
+```ecl
+[7 0] 3 10 rand.deal pair
+# => ([7 3] [7 0 4])
+```
 
 ### entropy
 `( -- result )` — Read one int from the host CSPRNG. This is the language's
@@ -3171,51 +3225,16 @@ own counter position, so materialization order cannot change the list.
 # => ([7 4] [3 0 0 3])
 ```
 
-## rng
-
-These words transact against the module's durable `[key counter]` state. A
-fresh process begins with a fixed key; use `rand.entropy rng.seed` to opt into
-nondeterminism.
-
-### deal
-`( count pool -- results )` — Draw distinct values below `pool` without
-replacement. The sample is unbiased; `count > pool` is `'domain`.
-
-#### Examples
-
-```ecl
-42 rng.seed 4 8 rng.deal
-# => [5 7 0 4]
-```
-
-### float
-`( -- result )` — Draw one uniform float in `[0, 1)`.
-
-### int
-`( bound -- result )` — Draw one uniform integer below a positive bound.
-
-### ints
-`( count bound -- results )` — Draw a vector of uniform integers below a
-positive bound.
-
-#### Examples
-
-```ecl
-42 rng.seed 5 10 rng.ints
-# => [3 1 8 4 0]
-```
-
-### seed
-`( key -- )` — Rekey the generator and reset its counter.
-
 ### shuffle
-`( values -- values )` — Return a uniformly random permutation of a list.
+`( state values -- state values )` — Return a uniformly selected permutation
+of a list, advancing the state by the list's length. Any element kind is
+permuted and the list keeps its representation. A non-list is `'type`.
 
 #### Examples
 
 ```ecl
-42 rng.seed [10 20 30 40] rng.shuffle
-# => [20 40 10 30]
+[7 0] [10 20 30 40] rand.shuffle pair
+# => ([7 4] [40 20 30 10])
 ```
 
 ## str
@@ -3443,7 +3462,25 @@ one, keeping the row count exact.
 ## task
 
 Task handles are created by the core unit constructors `@spawn` and `@give`.
-Use `(task.await) each` to collect results in input order without cancelling siblings or re-raising task errors.
+A handle observes a task's lifetime and result. `task.address` derives the
+task's address, which names only its mailbox, and `task.self` is the
+executing task's own. Use `(task.await) each` to collect results in input
+order without cancelling siblings or re-raising task errors.
+
+Request and reply is a composition over `send` and `receive`: spawn a helper
+task, send its address with the request, and await the helper, whose result
+is the reply. `task.await-for` bounds the exchange.
+
+```ecl
+(|a v| [] (task.receive) @spawn dup task.address {} 'value v put 'from rolldown put a task.send task.await 'ok at first) 'ask def
+[] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 ask
+# => 42
+```
+
+### address
+`( task -- address )` — The address of a task's mailbox. Two addresses of
+one task match. An address outlives its task; after the task ends it names a
+closed mailbox.
 
 ### await
 `( task -- result )` — Park until the task completes; return its cached
@@ -3476,6 +3513,35 @@ can never retain its own task.
 ### pending
 `( -- tasks )` — Pending descendant tasks in deterministic spawn
 preorder.
+
+### receive
+`( -- value )` — Take the oldest message from the executing task's mailbox,
+parking until one arrives. `'domain` outside a task.
+
+### receive-for
+`( milliseconds -- result )` — `task.receive` with a nonnegative int
+deadline: `{'ok value}`, or `{'err {'kind 'timeout}}` when nothing arrives in
+time. A deadline beyond any instant the scheduler clock can report is
+`'overflow`. `'domain` outside a task.
+
+### self
+`( -- address )` — The executing task's own address. `'domain` outside a
+task: the session root owns tasks but has no mailbox.
+
+### send
+`( value address -- )` — Queue a value in the mailbox an address names. Any
+value may be sent except one containing a task handle, which is `'type`;
+addresses and ports pass. A mailbox holds sixteen messages, and a sender to a
+full one parks until the receiver takes a message. Sending to a task that has
+ended is `'io` with `'reason 'closed`. Messages from one sender arrive in
+order; order across senders is unspecified.
+
+#### Examples
+
+```ecl
+[] (task.receive 1 +) @spawn dup task.address 41 swap task.send task.await
+# => {'ok [42]}
+```
 
 ## test.default
 

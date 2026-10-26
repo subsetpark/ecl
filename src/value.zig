@@ -12,7 +12,7 @@ pub const Tag = enum(u8) {
     dict,
     task,
     port,
-    module,
+    address,
 };
 
 /// The representation tag is a construction-time fact. Extending this enum is
@@ -29,7 +29,7 @@ pub const HeapKind = enum(u8) {
     dict,
     task,
     port,
-    module,
+    address,
     reserved_mask,
 };
 
@@ -83,10 +83,9 @@ pub const PortVariant = enum {
 /// or PID.
 pub const PortHandle = opaque {};
 
-/// An immutable module image. The handle carries identity only: its content,
-/// lifetime, and registration semantics belong to modules.zig, and the heap
-/// knows nothing about them beyond a release callback.
-pub const ModuleHandle = opaque {};
+/// A task mailbox's name. It reaches the mailbox and nothing else, which is
+/// what lets an address be sent where a task handle cannot.
+pub const AddressHandle = opaque {};
 
 /// Kept beside Header so equality can inspect dicts without importing the
 /// operations layer and creating a module cycle.
@@ -137,7 +136,7 @@ pub const Value = union(Tag) {
     dict: *DictHandle,
     task: *TaskHandle,
     port: *PortHandle,
-    module: *ModuleHandle,
+    address: *AddressHandle,
 
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);
@@ -150,7 +149,7 @@ pub const Value = union(Tag) {
             .dict => |header| @import("heap.zig").headerFromDict(header),
             .task => |header| @import("heap.zig").headerFromTask(header),
             .port => |header| @import("heap.zig").headerFromPort(header),
-            .module => |header| @import("heap.zig").headerFromModule(header),
+            .address => |header| @import("heap.zig").headerFromAddress(header),
         };
     }
 
@@ -163,7 +162,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .module, .reserved_mask => false,
+            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .address, .reserved_mask => false,
         };
     }
 };

@@ -1354,7 +1354,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     // Publish through the production candidate/registration boundary. Only
     // setup uses the owning registry; assertions observe public Session output.
     const registry = &runtime.coreState().registry;
-    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, &.{
+    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try intern.internModuleName("probe"), .ordinary, &.{
         .{ .name = "immediate", .primitive = Probe.immediate, .effect = "-- n", .doc = "Return one number." },
         .{ .name = "host-yield", .primitive = Probe.hostYield, .effect = "-- n", .doc = "Yield without parking before returning a number." },
         .{ .name = "empty", .primitive = Probe.empty, .effect = "-- n", .doc = "Violate the output contract immediately." },
@@ -1379,7 +1379,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     defer image.deinit();
     var sealed = try image.seal(null);
     defer sealed.deinit();
-    _ = try modules.testing.register(registry, sealed.ref(), try intern.internModuleName("probe"));
+    _ = try modules.testing.register(registry, &sealed);
 
     try Probe.runOk(&runtime, "'task.pending probe.reflect 99");
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);

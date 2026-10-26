@@ -394,17 +394,6 @@ comptime {
         @compileError("RefAnchor exceeds the parked-anchor budget the retention soaks impose");
 }
 
-/// Whether two homes execute the same image, compared by anchor. Used to decide
-/// whether a module-local hit came out of the image the activation is running or
-/// out of a foreign one.
-pub fn sameImage(
-    left: *const ModuleHome,
-    right: *const ModuleHome,
-    _: *const ExecutionAccess,
-) bool {
-    return anchorHandleInternal(left) == anchorHandleInternal(right);
-}
-
 /// The opaque handle a scope cell stores to name this image's anchor.
 ///
 /// The cell must name the *anchor* and not the home: a home is embedded in the
@@ -416,7 +405,7 @@ pub fn anchorHandle(home: *const ModuleHome, _: *const ExecutionAccess) *anyopaq
 }
 
 fn anchorHandleInternal(home: *const ModuleHome) *anyopaque {
-    return @ptrCast(home.state().image.anchor);
+    return @ptrCast(home.image().anchor);
 }
 
 fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
@@ -424,7 +413,7 @@ fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
     if (!anchor.tryRetain()) return null;
     // Only now is the image pointer readable: before the CAS succeeded this
     // word may have been the parked-list link instead.
-    return .initRetained(&anchor.park.image.construction_home);
+    return .initRetained(anchor.park.image);
 }
 
 /// Acquires one reference through a scope cell's owner handle, or null when the
@@ -454,59 +443,25 @@ pub fn destroyParkedAnchor(
     allocator.destroy(anchor);
 }
 
-/// The execution identity of module code: which image is running, and — when
-/// the code was reached through the registry — which registration owns its
-/// name, durable state, and lifetime. A construction root has no registration,
-/// which is what makes `within` structurally impossible while a body is still
-/// building its image.
-const ExecutionHome = struct {
-    image: *ModuleImage,
-    registration: ?*Registration,
-
-    fn retain(self: *const ExecutionHome) void {
-        if (self.registration) |registration| registration.retain() else self.image.retain();
-    }
-    fn release(self: *const ExecutionHome) void {
-        if (self.registration) |registration| registration.release() else self.image.release();
-    }
-    /// The failable counterpart, for a caller that reached this home through a
-    /// scope cell rather than through a reference it already holds. An
-    /// anonymous image has no registration and is covered by the same call,
-    /// which is why the deleted publisher-lease protocol could not serve here.
-    fn tryRetain(self: *const ExecutionHome) bool {
-        return if (self.registration) |registration|
-            registration.tryRetain()
-        else
-            self.image.tryRetain();
-    }
-};
-
-/// The immutable content of a module: the frozen environment its definitions
-/// live in, the module-root scope they were published through, and the
-/// construction body's final operand stack as an initial-state template.
-///
-/// An image owns no canonical name, registry slot, arbiter, generation
-/// currency, or `SlotLease`. That absence is the whole point: it lets one
-/// image back several independent registrations, and it keeps the value heap a
-/// DAG, because a registration retains an image and never the reverse.
+/// One module: the frozen environment its definitions live in, the module-root
+/// scope they were published through, and the registry identity it was built
+/// for. The name is fixed before the body runs; the generation number is
+/// assigned when the registry publishes it. One object carries both because
+/// every image is published exactly once, by the path that created it.
 const ModuleImage = struct {
-    source: ?*const map_state.SourceScope,
     allocator: std.mem.Allocator,
-    refs: std.atomic.Value(u32) = .init(1),
+    name: intern.ModuleName,
+    provenance: RegistrationProvenance,
+    /// Zero until published; reload assigns the prior generation plus one.
+    generation: u64 = 0,
+    /// Set under the registry's writer lock when a later generation or a
+    /// removal replaces this one in the directory. Old code keeps running
+    /// under its pins; only a cached qualified call site consults this, to
+    /// re-resolve instead of entering a stale generation.
+    superseded: std.atomic.Value(bool) = .init(false),
     environment: env.Environment,
     scope: env.Scope,
     tests: TestCatalog,
-    /// The construction body's final operand stack, bottom first. A first
-    /// registration copies it into that slot's durable stack and a
-    /// re-registration discards it for that slot; entries are scalars until
-    /// the capture fills them, so every element is releasable at any point.
-    initial_state: []value.Value = &.{},
-    /// The registration-free home. Its registration is null, so no state
-    /// application can open against it — which is what a module still being
-    /// built needs, and equally what an image reached as a value needs, since
-    /// neither owns a slot. It embeds a pointer to its own owner, so `create`
-    /// fills it in after the allocation rather than defaulting it.
-    construction_home: ExecutionHome,
     /// The authoritative count lives in this separately owned cell, so it can outlive this
     /// struct for the images a scope cell names.
     anchor: *RefAnchor,
@@ -518,7 +473,6 @@ const ModuleImage = struct {
     retirement_state: union(enum) {
         live,
         tests: TestCatalog.TeardownCursor,
-        template: usize,
         scope: env.Scope.EmbeddedTeardownCursor,
         environment: env.Environment.TeardownCursor,
     } = .live,
@@ -526,7 +480,8 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        source: ?*const map_state.SourceScope,
+        name: intern.ModuleName,
+        provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*ModuleImage {
         // No scope cell is minted here. An image needs one only if ECL source
         // is stamped against it, which `moduleOwned` arranges lazily; a registry
@@ -540,14 +495,15 @@ const ModuleImage = struct {
         };
         anchor.* = .{ .park = .{ .image = result } };
         result.allocator = allocator;
-        result.source = source;
+        result.name = name;
+        result.provenance = provenance;
+        result.generation = 0;
+        result.superseded = .init(false);
         result.anchor = anchor;
         result.minted_cell = false;
         result.environment = env.Environment.init(allocator, releases);
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
         result.tests = .init(allocator);
-        result.initial_state = &.{};
-        result.construction_home = .{ .image = result, .registration = null };
         result.retirement = .{};
         result.retirement_state = .live;
         return result;
@@ -586,12 +542,6 @@ const ModuleImage = struct {
         self.environment.releases.retire(self, &self.retirement);
     }
 
-    /// The heap's module value calls this on final release; whatever the drop
-    /// makes unreachable retires through the same domain in later steps.
-    pub fn releaseImage(self: *ModuleImage) void {
-        self.release();
-    }
-
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
@@ -601,20 +551,6 @@ const ModuleImage = struct {
             .live => unreachable,
             .tests => |*tests| {
                 if (!tests.advance(releases)) return false;
-                self.retirement_state = if (self.initial_state.len == 0)
-                    .{ .scope = .init(&self.scope) }
-                else
-                    .{ .template = self.initial_state.len };
-                return false;
-            },
-            .template => |remaining| {
-                releases.releaseValue(self.initial_state[remaining - 1]);
-                if (remaining != 1) {
-                    self.retirement_state = .{ .template = remaining - 1 };
-                    return false;
-                }
-                allocator.free(self.initial_state);
-                self.initial_state = &.{};
                 self.retirement_state = .{ .scope = .init(&self.scope) };
                 return false;
             },
@@ -654,16 +590,10 @@ const ModuleImage = struct {
     }
 };
 
-/// One published code generation of one canonical name. It retains the image
-/// it publishes and owns everything the image deliberately does not: the name,
-/// the generation number, and the slot lifetime witness that keeps the durable
-/// state and arbiter reachable while old code can still name them.
 /// Nominal publication provenance. Embedded definitions retain their trusted
 /// origin. Cataloged code carries its defining-file capability, which also
 /// identifies its resolution scope and direct visibility. Interactive root code has
 /// local-scope visibility without access to any file's private namespace.
-/// Images preserve lexical file identity even when invoked without a
-/// registration or republished by another file.
 pub const RegistrationProvenance = union(enum) {
     ordinary,
     standard_library,
@@ -696,528 +626,107 @@ pub const RegistrationProvenance = union(enum) {
     }
 };
 
-const Registration = struct {
+pub const ModuleResolveProgress = poll.Progress(?env.BindingLease);
+/// Export lookup is always public-only: a private is absent from a module's
+/// public face, and no caller has ever wanted otherwise.
+pub const ModuleResolveCursor = struct {
     allocator: std.mem.Allocator,
-    refs: std.atomic.Value(u32) = .init(1),
-    /// One retained image reference held for this generation's whole lifetime.
-    image: *ModuleImage,
-    name: intern.ModuleName,
-    provenance: RegistrationProvenance,
-    generation: u64 = 0,
-    /// A provisional registration exists only inside a publication cursor and
-    /// is never reachable as a home, which makes `within` at registration
-    /// time structurally impossible. Publication installs an owned lifetime
-    /// witness that stays with this generation through supersession and
-    /// delayed retirement, so slot storage cannot be recycled while old code
-    /// can still name it.
-    slot_lifetime: union(enum) {
-        provisional,
-        published: SlotLease,
-    } = .provisional,
-    /// The execution home callers reach this registration through. Like the
-    /// image's, it embeds a pointer to its own owner and is therefore filled in
-    /// after the allocation.
-    home: ExecutionHome,
-    retirement: heap.ReleaseDomain.Retirement = .{},
+    lookup: env.DirectLookupCursor,
+    pin: GenerationPin,
 
-    /// Retains `image` on success; on failure the caller still owns its own
-    /// reference and nothing was retained.
-    fn create(
-        allocator: std.mem.Allocator,
-        image: *ModuleImage,
-        name: intern.ModuleName,
-        provenance: RegistrationProvenance,
-    ) error{OutOfMemory}!*Registration {
-        const result = try allocator.create(Registration);
-        image.retain();
-        result.allocator = allocator;
-        result.refs = .init(1);
-        result.image = image;
-        result.name = name;
-        result.provenance = provenance;
-        result.generation = 0;
-        result.slot_lifetime = .provisional;
-        result.home = .{ .image = image, .registration = result };
-        result.retirement = .{};
-        return result;
+    pub fn deinit(self: *ModuleResolveCursor) void {
+        self.lookup.deinit();
+        self.pin.deinit();
+        self.* = undefined;
     }
-
-    fn retain(self: *Registration) void {
-        const old = self.refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-    }
-
-    /// Failable, for the same reason as `ModuleImage.tryRetain`: a home reached
-    /// through a scope cell is not yet held, so the count may already be zero.
-    fn tryRetain(self: *Registration) bool {
-        return tryAcquire(&self.refs);
-    }
-
-    fn release(self: *Registration) void {
-        const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) return;
-        _ = self.refs.load(.acquire);
-        self.image.environment.releases.retire(self, &self.retirement);
-    }
-
-    /// Constant time: the lease and the image reference each drop by one, and
-    /// the image's own user-sized graph retires as separate bounded work.
-    pub fn advanceRetirement(
-        _: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *Registration,
-    ) bool {
-        switch (self.slot_lifetime) {
-            .provisional => {},
-            .published => |*lease| lease.deinit(),
-        }
-        self.image.release();
-        allocator.destroy(self);
-        return true;
-    }
-
-    pub const ResolveProgress = poll.Progress(?env.BindingLease);
-    /// Export lookup is always public-only: a private is absent from a
-    /// module's public face, and no caller has ever wanted otherwise.
-    pub const ResolveCursor = struct {
-        allocator: std.mem.Allocator,
-        lookup: env.DirectLookupCursor,
-        pin: GenerationPin,
-
-        pub fn deinit(self: *ResolveCursor) void {
-            self.lookup.deinit();
-            self.pin.deinit();
-            self.* = undefined;
-        }
-        pub fn advance(self: *ResolveCursor) ResolveProgress {
-            return switch (self.lookup.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    var lease = maybe_lease orelse break :result .{ .complete = null };
-                    if (lease.spec().visibility == .private) {
-                        lease.deinit();
-                        break :result .{ .complete = null };
-                    }
-                    break :result .{ .complete = lease };
-                },
-            };
-        }
-        pub fn captureCell(self: *ResolveCursor) void {
-            self.lookup.captureCell();
-        }
-        pub fn takeCell(self: *ResolveCursor) ?env.BindingCellHandle {
-            return self.lookup.takeCell();
-        }
-    };
-    pub fn resolveCursor(self: *const Registration, id: u32) ResolveCursor {
-        return resolveCursorFor(self.image, ModuleHome.init(&@constCast(self).home), id);
-    }
-
-    pub const PublicNameProgress = poll.StreamProgress(u32);
-    pub const PublicNameCursor = struct {
-        allocator: std.mem.Allocator,
-        inner: env.NameCursor,
-        pin: GenerationPin,
-        pub fn deinit(self: *PublicNameCursor) void {
-            self.inner.deinit();
-            self.pin.deinit();
-            self.* = undefined;
-        }
-        pub fn advance(self: *PublicNameCursor) PublicNameProgress {
-            return switch (self.inner.advance()) {
-                .pending => .pending,
-                .complete => .complete,
-                .item => |entry| result: {
-                    var lease = entry.lease;
-                    defer lease.deinit();
-                    break :result if (lease.spec().visibility == .public)
-                        .{ .item = entry.name }
-                    else
-                        .pending;
-                },
-            };
-        }
-    };
-    pub fn publicNameCursor(self: *const Registration) PublicNameCursor {
-        const home = ModuleHome.init(&@constCast(self).home);
-        return .{
-            .allocator = self.allocator,
-            .inner = self.image.environment.nameCursor(),
-            .pin = home.pinInternal(),
+    pub fn advance(self: *ModuleResolveCursor) ModuleResolveProgress {
+        return switch (self.lookup.advance()) {
+            .pending => .pending,
+            .complete => |maybe_lease| result: {
+                var lease = maybe_lease orelse break :result .{ .complete = null };
+                if (lease.spec().visibility == .private) {
+                    lease.deinit();
+                    break :result .{ .complete = null };
+                }
+                break :result .{ .complete = lease };
+            },
         };
     }
-};
-
-/// Fair per-slot ordering of state applications. Waiters are granted in
-/// arrival order and the granted turn is always the queue head, so both
-/// grant and release are O(1) and no waiter can be starved by a later one.
-const Arbiter = struct {
-    mutex: std.Io.Mutex = .init,
-    head: ?*StateTurn = null,
-    tail: ?*StateTurn = null,
-    /// Whether the head has taken the slot. Grants live here rather than on
-    /// each waiting turn, so nothing a second thread writes is ever read
-    /// outside this mutex.
-    active: bool = false,
-};
-
-/// The durable-state owner behind a live module home. Obtaining one proves
-/// the executing code is homed in a committed slot; it grants nothing by
-/// itself, because reading and publishing both additionally require a
-/// granted turn.
-/// The slot behind an executing home, or null when the home is an
-/// uncommitted candidate: a registration root operates directly on its
-/// construction stack and can never open a state application.
-/// Whether every turn that could still touch this slot's arbiter has
-/// unlinked. A retired slot's queue drains on its own: admission is closed,
-/// so each waiter that is granted discovers a superseded home and releases.
-fn arbiterQuiescent(owning: *ModuleSlot) bool {
-    std.Io.Threaded.mutexLockUncancelable(&owning.arbiter.mutex);
-    defer std.Io.Threaded.mutexUnlock(&owning.arbiter.mutex);
-    return owning.arbiter.head == null and !owning.arbiter.active;
-}
-
-/// Closes admission from inside the arbiter lock, so no turn can be queued
-/// after the owner decides to remove the slot.
-fn closeArbiter(owning: *ModuleSlot) void {
-    std.Io.Threaded.mutexLockUncancelable(&owning.arbiter.mutex);
-    defer std.Io.Threaded.mutexUnlock(&owning.arbiter.mutex);
-    owning.phase.store(.closing, .release);
-}
-
-/// A retired slot that no turn or lease can still reach.
-fn slotQuiescent(slot: *ModuleSlot) bool {
-    return slot.phase.load(.acquire) == .retired and
-        arbiterQuiescent(slot) and slot.lease_refs.load(.acquire) == 0;
-}
-
-fn registrationSlot(registration: *const Registration) ?*ModuleSlot {
-    return switch (registration.slot_lifetime) {
-        .provisional => null,
-        .published => |lease| lease.slot(),
-    };
-}
-
-/// The slot behind an executing home, or null when the home is a construction
-/// root: an anonymous image has no registration, so it has no durable state to
-/// open a transaction against.
-fn homeSlot(home: *const ModuleHome) ?*ModuleSlot {
-    return registrationSlot(home.state().registration orelse return null);
-}
-
-/// Retains the published generation's slot witness. The returned capability
-/// crosses the gap between inspecting a home and joining the slot arbiter;
-/// callers never carry an unprotected slot pointer through that gap.
-pub fn retainHomeSlot(home: *const ModuleHome, _: *const ExecutionAccess) ?SlotLease {
-    const registration = home.state().registration orelse return null;
-    return switch (registration.slot_lifetime) {
-        .provisional => null,
-        .published => |lease| lease.clone(),
-    };
-}
-
-/// Whether the executing home is still its slot's current code generation.
-/// Old code keeps running under its pin exactly as it always has, but it may
-/// not publish state once a replacement representation is current.
-pub fn homeIsCurrent(home: *const ModuleHome, _: *const ExecutionAccess) bool {
-    const registration = home.state().registration orelse return false;
-    const owning = registrationSlot(registration) orelse return false;
-    return owning.publisher.isCurrent(registration);
-}
-
-/// One place in a slot's fair FIFO, and the only capability that authorizes
-/// reading or replacing the durable stack. It is requested once, granted at
-/// most once, and released exactly once; publication is legal only while
-/// granted, which makes the durable stack single-writer without holding a
-/// lock while ECL code runs.
-/// A unit's single right to hold one module slot's turn.
-///
-/// Requesting a turn consumes it and releasing returns it, so "already
-/// inside a state application" stops being a condition three call sites
-/// have to remember to check. A nested `within`, a draft on a second
-/// module, and a reload or removal issued from inside a state application
-/// are all the same thing — a second request with nothing left to spend —
-/// and the compiler makes every acquisition site handle it.
-pub const TurnAuthority = enum(u8) { available, spent };
-
-pub const StateTurn = struct {
-    lease: SlotLease,
-    authority: union(enum) {
-        unit: *TurnAuthority,
-        detached,
-    },
-    previous: ?*StateTurn = null,
-    next: ?*StateTurn = null,
-    /// Owner-thread only. `linked` says whether the arbiter still holds this
-    /// node; `holding` mirrors a grant this thread already observed under
-    /// the arbiter mutex, so reading or publishing the durable stack needs
-    /// no second acquisition. The arbiter owns the grant itself — a turn
-    /// carries no shared typestate of its own to read unlocked.
-    linked: bool = false,
-    holding: bool = false,
-
-    pub const RequestError = error{
-        /// The unit already holds a turn on some slot.
-        StateApplicationActive,
-        /// The owner closed before this request reached the arbiter.
-        ModuleRemoved,
-    };
-
-    /// An unrequested turn owns nothing: no place in the queue and no
-    /// authority. `request` is the only transition that changes that.
-    pub fn init(lease: SlotLease, authority: *TurnAuthority) StateTurn {
-        return .{ .lease = lease, .authority = .{ .unit = authority } };
+    pub fn captureCell(self: *ModuleResolveCursor) void {
+        self.lookup.captureCell();
     }
-
-    pub fn sameSlot(self: *const StateTurn, home: *const ModuleHome, _: *const ExecutionAccess) bool {
-        return homeSlot(home) == self.lease.slot();
-    }
-
-    /// Spends the unit's authority and joins the queue. Admission and the
-    /// close edge share the arbiter lock, so a turn is never queued against
-    /// a slot that is already closing.
-    pub fn request(self: *StateTurn) RequestError!void {
-        std.debug.assert(!self.linked and !self.holding);
-        const authority = switch (self.authority) {
-            .unit => |unit| unit,
-            .detached => unreachable,
-        };
-        if (authority.* == .spent) return error.StateApplicationActive;
-        const owning = self.lease.slot();
-        const arbiter = &owning.arbiter;
-        std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
-        defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
-        if (owning.phase.load(.acquire) != .live) return error.ModuleRemoved;
-        self.previous = arbiter.tail;
-        if (arbiter.tail) |tail| tail.next = self else arbiter.head = self;
-        arbiter.tail = self;
-        self.linked = true;
-        authority.* = .spent;
-    }
-
-    /// Transfers a granted, closing-slot turn out of its Unit. The Unit gets
-    /// its authority back immediately; subsequent retirement owns only the
-    /// queue node and slot lease, never a pointer into Unit storage.
-    fn detachUnitAuthority(self: *StateTurn) void {
-        std.debug.assert(self.holding);
-        const authority = switch (self.authority) {
-            .unit => |unit| unit,
-            .detached => unreachable,
-        };
-        std.debug.assert(authority.* == .spent);
-        authority.* = .available;
-        self.authority = .detached;
-    }
-
-    /// Whether this turn holds the slot. The arbiter owns the grant, so this is
-    /// the only node field read under the mutex
-    /// that is also the happens-before edge between the previous holder's
-    /// publication and this holder's read of the durable stack.
-    pub fn granted(self: *StateTurn) bool {
-        if (self.holding) return true;
-        std.debug.assert(self.linked);
-        const arbiter = &self.lease.slot().arbiter;
-        std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
-        defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
-        if (arbiter.active) {
-            self.holding = arbiter.head == self;
-        } else if (arbiter.head == self) {
-            arbiter.active = true;
-            self.holding = true;
-        }
-        return self.holding;
-    }
-
-    /// Leaves the queue and returns the unit's authority: a waiter unlinks
-    /// without ever having run, and a holder hands the slot to its
-    /// successor.
-    pub fn release(self: *StateTurn) void {
-        if (!self.linked) {
-            self.lease.deinit();
-            return;
-        }
-        const arbiter = &self.lease.slot().arbiter;
-        {
-            std.Io.Threaded.mutexLockUncancelable(&arbiter.mutex);
-            defer std.Io.Threaded.mutexUnlock(&arbiter.mutex);
-            if (self.previous) |before| before.next = self.next else arbiter.head = self.next;
-            if (self.next) |after| after.previous = self.previous else arbiter.tail = self.previous;
-            if (arbiter.active and self.holding) arbiter.active = false;
-            self.previous = null;
-            self.next = null;
-        }
-        self.linked = false;
-        self.holding = false;
-        switch (self.authority) {
-            .unit => |authority| authority.* = .available,
-            .detached => {},
-        }
-        self.lease.deinit();
-    }
-
-    /// The durable stack, borrowed for the duration of this turn.
-    pub fn stack(self: *const StateTurn) []const value.Value {
-        std.debug.assert(self.holding);
-        return self.lease.slot().state;
-    }
-
-    pub fn allocator(self: *const StateTurn) std.mem.Allocator {
-        return self.lease.slot().allocator;
-    }
-
-    /// Installs a replacement durable stack and hands back the previous one
-    /// for the caller to retire. This is the whole mutation surface.
-    pub fn publish(self: *StateTurn, next: []value.Value) []value.Value {
-        std.debug.assert(self.holding);
-        const owning = self.lease.slot();
-        const previous = owning.state;
-        owning.state = next;
-        return previous;
+    pub fn takeCell(self: *ModuleResolveCursor) ?env.BindingCellHandle {
+        return self.lookup.takeCell();
     }
 };
 
-const GenerationPublisher = snapshot_api.Publisher(Registration);
-
-/// Nominal ownership of one permanent registry-inventory node. A slot keeps
-/// this capability for its allocation lifetime, including while retired and
-/// awaiting reuse, so removal never searches a mutable global container.
-const InventoryEntry = enum(usize) {
-    detached = 0,
-    _,
-
-    fn init(entry: *SlotEntry) InventoryEntry {
-        return @fromBackingInt(@intCast(@intFromPtr(entry)));
-    }
-
-    fn node(self: InventoryEntry) *SlotEntry {
-        std.debug.assert(self != .detached);
-        return @ptrFromInt(@backingInt(self));
-    }
-};
-
-/// The internal state owner for one live registration. It spans every code
-/// generation published before removal and solely owns that registration's
-/// durable operand-stack snapshot; no ECL value exposes its identity, and its
-/// storage may represent a later registration only after every witness drains.
-const ModuleSlot = struct {
-    publisher: GenerationPublisher = .init(null),
-    inventory: InventoryEntry,
-    /// Owned witnesses held by published generations, cursors, and
-    /// arbiter turns. The registry owns the allocation itself; recycling is
-    /// legal only after this count reaches zero.
-    lease_refs: std.atomic.Value(u32) = .init(0),
-    /// The registry allocator, kept on the slot so a granted turn can size a
-    /// replacement stack without a second correlated capability.
+pub const ModulePublicNameProgress = poll.StreamProgress(u32);
+pub const ModulePublicNameCursor = struct {
     allocator: std.mem.Allocator,
-    /// Fair FIFO ordering of state applications. It is held only for O(1)
-    /// pointer surgery, never across ECL execution.
-    arbiter: Arbiter = .{},
-    /// The durable stack, bottom first. Initialized exactly once from the
-    /// construction body and replaced only by transactional publication.
-    state: []value.Value = &.{},
-    /// The owner lifecycle. Removal and Session shutdown consume the same
-    /// live -> closing -> retired transitions, and a retired slot owns
-    /// nothing but its own struct.
-    phase: std.atomic.Value(Phase) = .init(.live),
-
-    /// Retired slots are recycled rather than freed. Resolution cursors reach
-    /// a slot through a directory snapshot that removal may
-    /// already have replaced, so the struct must stay valid memory for as
-    /// long as the registry does; reuse is what keeps that bounded by peak
-    /// simultaneously live slots instead of by registration history.
-    next_recycled: ?*ModuleSlot = null,
-
-    const Phase = enum(u8) { live, closing, retired };
-
-    fn resetForReuse(self: *ModuleSlot) void {
-        const inventory = self.inventory;
-        const allocator = self.allocator;
-        self.* = .{ .inventory = inventory, .allocator = allocator };
-        std.debug.assert(inventory.node().slot == self);
+    inner: env.NameCursor,
+    pin: GenerationPin,
+    pub fn deinit(self: *ModulePublicNameCursor) void {
+        self.inner.deinit();
+        self.pin.deinit();
+        self.* = undefined;
     }
-
-    /// Releases everything the slot owns exactly once, so removal and
-    /// Session teardown can both reach it.
-    fn retire(self: *ModuleSlot, releases: *heap.ReleaseDomain) void {
-        if (self.phase.load(.acquire) == .retired) return;
-        self.phase.store(.retired, .release);
-        if (self.publisher.currentOwned()) |generation| {
-            self.publisher.publish(null);
-            generation.release();
-        }
-        for (self.state) |item| releases.releaseValue(item);
-        if (self.state.len != 0) self.allocator.free(self.state);
-        self.state = &.{};
-    }
-
-    /// Finish retirement after a detached worker has released every durable
-    /// state value. This transition is constant-time and never walks payload.
-    fn retireEmpty(self: *ModuleSlot) void {
-        std.debug.assert(self.state.len == 0);
-        if (self.phase.load(.acquire) == .retired) return;
-        self.phase.store(.retired, .release);
-        if (self.publisher.currentOwned()) |generation| {
-            self.publisher.publish(null);
-            generation.release();
-        }
+    pub fn advance(self: *ModulePublicNameCursor) ModulePublicNameProgress {
+        return switch (self.inner.advance()) {
+            .pending => .pending,
+            .complete => .complete,
+            .item => |entry| result: {
+                var lease = entry.lease;
+                defer lease.deinit();
+                break :result if (lease.spec().visibility == .public)
+                    .{ .item = entry.name }
+                else
+                    .pending;
+            },
+        };
     }
 };
+fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
+    return .{
+        .allocator = image.allocator,
+        .inner = image.environment.nameCursor(),
+        .pin = ModuleHome.init(image).pinInternal(),
+    };
+}
 
-/// An owned, nominal witness for one allocation of a module slot. Its
-/// constructor is private to this file, and every copy is an explicit retain.
-/// The consumed sentinel makes transfers visible in the implementation and
-/// prevents an abandoned cursor from releasing the same witness twice.
-const SlotLease = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn retain(slot_ptr: *ModuleSlot) SlotLease {
-        const old = slot_ptr.lease_refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != std.math.maxInt(u32));
-        return @fromBackingInt(@intCast(@intFromPtr(slot_ptr)));
-    }
-
-    fn slot(self: SlotLease) *ModuleSlot {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-
-    fn clone(self: SlotLease) SlotLease {
-        return retain(self.slot());
-    }
-
-    fn move(self: *SlotLease) SlotLease {
-        const result = self.*;
-        std.debug.assert(result != .consumed);
-        self.* = .consumed;
-        return result;
-    }
-
-    pub fn deinit(self: *SlotLease) void {
-        if (self.* == .consumed) return;
-        const owning = self.slot();
-        const old = owning.lease_refs.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old == 1) _ = owning.lease_refs.load(.acquire);
-        self.* = .consumed;
-    }
-};
-
+/// One immutable snapshot of the registry's names. A directory owns one
+/// reference to every image it maps, so a reader holding a directory lease can
+/// retain any entry it finds, and a retired directory releases its entries as
+/// bounded work before it frees itself. Nothing else keeps a published image
+/// alive on the registry's behalf.
 const Directory = struct {
-    const ModuleMap = poll.FixedMap(intern.ModuleName, *ModuleSlot);
+    const ModuleMap = poll.FixedMap(intern.ModuleName, *ModuleImage);
     const AliasMap = poll.FixedMap(intern.BindingName, intern.ModuleName);
 
     modules: ModuleMap,
     aliases: AliasMap,
     previous: ?*Directory,
     retirement: heap.ReleaseDomain.Retirement = .{},
+    /// The entry walk a retirement is partway through.
+    releasing: ?ModuleMap.RawEntryCursor = null,
 
+    /// Releases one entry per step, then frees the maps and hands the next
+    /// older directory to the release domain. A discarded edit candidate
+    /// takes the same path with no `previous`, so abandoning a registry edit
+    /// never releases a user-sized map in one call.
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         self: *Directory,
     ) bool {
+        if (self.releasing == null) self.releasing = self.modules.rawEntries();
+        switch (self.releasing.?.advance()) {
+            .pending => return false,
+            .item => |entry| {
+                entry.value.release();
+                return false;
+            },
+            .complete => {},
+        }
         const previous = self.previous;
         self.modules.deinit();
         self.aliases.deinit();
@@ -1226,17 +735,21 @@ const Directory = struct {
         return true;
     }
 
-    fn destroy(self: *Directory, allocator: std.mem.Allocator) void {
-        self.modules.deinit();
-        self.aliases.deinit();
-        allocator.destroy(self);
-    }
-
+    /// Session teardown walks the chain synchronously: execution has already
+    /// stopped, and the host drains every image retirement this starts.
     fn destroyChain(first: ?*Directory, allocator: std.mem.Allocator) void {
         var cursor = first;
         while (cursor) |directory| {
             cursor = directory.previous;
-            directory.destroy(allocator);
+            var entries = directory.modules.rawEntries();
+            while (true) switch (entries.advance()) {
+                .pending => {},
+                .item => |entry| entry.value.release(),
+                .complete => break,
+            };
+            directory.modules.deinit();
+            directory.aliases.deinit();
+            allocator.destroy(directory);
         }
     }
 };
@@ -1380,65 +893,65 @@ pub const TestSessionDiscoveryCursor = struct {
     }
 };
 
-/// Narrow identity used by executing frames: the image that is running plus
-/// the registration, if any, whose name and durable state it is running
-/// against. Observation leases never expose this pointer; only code holding
-/// the Session's execution authority can obtain its scope or another pin.
-///
-/// Because one image may be registered more than once, this — not anything in
-/// the image or in a definition's metadata — is what selects private lookup,
-/// same-home dispatch, diagnostic spelling, and `within`'s slot.
+/// The identity executing frames run under: the image whose code is running,
+/// which fixes private lookup, same-home dispatch, and diagnostic spelling.
+/// Observation leases never expose this pointer; only code holding the
+/// Session's execution authority can obtain its scope or another pin.
 pub const ModuleHome = opaque {
-    fn init(home_state: *ExecutionHome) *ModuleHome {
-        return @ptrCast(home_state);
+    fn init(target: *ModuleImage) *ModuleHome {
+        return @ptrCast(target);
     }
-    fn state(self: *const ModuleHome) *ExecutionHome {
+    fn image(self: *const ModuleHome) *ModuleImage {
         return @ptrCast(@alignCast(@constCast(self)));
     }
     pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
-        return &self.state().image.scope;
+        return &self.image().scope;
     }
-    /// The canonical name this activation was reached through, or null while a
-    /// construction body is still building an anonymous image.
-    pub fn name(self: *const ModuleHome) ?intern.ModuleName {
-        const registration = self.state().registration orelse return null;
-        return registration.name;
+    /// The canonical name this code was built for, fixed before its body ran.
+    pub fn name(self: *const ModuleHome) intern.ModuleName {
+        return self.image().name;
     }
+    /// Zero while the image is still under construction.
     pub fn generationNumber(self: *const ModuleHome) u64 {
-        const registration = self.state().registration orelse return 0;
-        return registration.generation;
+        return self.image().generation;
     }
     pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
-        if (self.state().image.source) |source| return .{ .source = source };
-        const registration = self.state().registration orelse return .ordinary;
-        return registration.provenance;
+        return self.image().provenance;
     }
     fn pinInternal(self: *const ModuleHome) GenerationPin {
-        self.state().retain();
-        return .initRetained(self.state());
+        self.image().retain();
+        return .initRetained(self.image());
     }
     pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
         return self.pinInternal();
     }
 };
 
-/// An owned reference to whichever owner backs one home. The raw image or
-/// registration is never exposed, so a pin can only be consumed by `deinit`
-/// and cannot invoke retirement directly.
+/// An owned execution reference to one image. The raw image is never exposed,
+/// so a pin can only be consumed by `deinit` and cannot invoke retirement
+/// directly.
 pub const GenerationPin = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(retained: *ExecutionHome) GenerationPin {
+    fn initRetained(retained: *ModuleImage) GenerationPin {
         return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
-    fn home(self: GenerationPin) *ModuleHome {
+    fn image(self: GenerationPin) *ModuleImage {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@backingInt(self));
     }
+    fn homeInternal(self: GenerationPin) *ModuleHome {
+        return .init(self.image());
+    }
+    /// Split from `homeInternal` because the audit rejects one function that
+    /// both holds a capability token and casts a pointer.
+    pub fn home(self: GenerationPin, _: *const ExecutionAccess) *ModuleHome {
+        return self.homeInternal();
+    }
     pub fn deinit(self: *GenerationPin) void {
         if (self.* == .consumed) return;
-        self.home().state().release();
+        self.image().release();
         self.* = .consumed;
     }
     /// Whether two pins hold the same owner. Exposes nothing: a pin is already
@@ -1454,21 +967,17 @@ pub const GenerationPin = enum(usize) {
         expected_home: *const ModuleHome,
         _: *const ExecutionAccess,
     ) bool {
-        return self.home() == expected_home;
+        return self.homeInternal() == expected_home;
     }
 };
 
-/// The registration-less home of the image a module-root scope belongs to, or
-/// null for any other scope.
+/// The home of the image a module-root scope belongs to, or null for any other
+/// scope.
 ///
 /// The cast is sound because `env.Scope.moduleRoot` has exactly one caller —
 /// `ModuleImage.create` — so every module-root scope is an image's own embedded
 /// `scope` field. Re-verified when this was written; a second caller would
 /// falsify it, which is why the check belongs in review and not only here.
-///
-/// The home is deliberately registration-less: see `construction_home`. A word
-/// reached through it therefore owns no slot, so `within` is `'domain` rather
-/// than a write to whichever slot the caller happened to be running.
 ///
 /// Takes no `ExecutionAccess`: the token gates `ModuleHome`'s methods while the
 /// pointer alone grants nothing, and the audit rejects one function that both holds a token and
@@ -1476,10 +985,10 @@ pub const GenerationPin = enum(usize) {
 pub fn homeForModuleRootScope(scope: *env.Scope) ?*ModuleHome {
     if (!scope.isModuleRoot()) return null;
     const image: *ModuleImage = @fieldParentPtr("scope", scope);
-    return ModuleHome.init(&image.construction_home);
+    return ModuleHome.init(image);
 }
 
-test "modules: an image's registration-less home is reachable from its own root scope" {
+test "modules: an image's home is reachable from its own root scope" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
@@ -1487,16 +996,13 @@ test "modules: an image's registration-less home is reachable from its own root 
     var container = try env.Env.init(&host);
     defer container.deinit();
 
-    const image = try ModuleImage.create(std.testing.allocator, releases, null);
+    const image = try ModuleImage.create(std.testing.allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
     defer image.release();
 
     const recovered = homeForModuleRootScope(&image.scope) orelse
         return error.ExpectedImageHome;
-    try std.testing.expectEqual(ModuleHome.init(&image.construction_home), recovered);
-    // Registration-less by construction. This is the whole reason the accessor
-    // exists: it is what makes `within` through an escaped quotation a domain
-    // error instead of a write to the caller's slot.
-    try std.testing.expectEqual(@as(?intern.ModuleName, null), recovered.name());
+    try std.testing.expectEqual(ModuleHome.init(image), recovered);
+    try std.testing.expectEqual(image.name, recovered.name());
 
     var session_scope = container.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&session_scope, releases);
@@ -1525,7 +1031,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         host.cleanup().drain();
         const unstamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases, null);
+            const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
             image.release();
             host.cleanup().drain();
         }
@@ -1538,7 +1044,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         // leaves precisely that cell plus its parked anchor behind.
         const stamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
-            const image = try ModuleImage.create(allocator, releases, null);
+            const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
             _ = try container.scopeIdForOwned(&image.scope, @ptrCast(image.anchor));
             image.release();
             host.cleanup().drain();
@@ -1565,8 +1071,8 @@ test "modules: a borrow holds an image's contents across a full drain" {
     // The stochastic version -- racing a resolver against an image's last
     // release from ECL -- cannot discriminate, because four separate mechanisms
     // already narrow the window to instruction scale that no ECL-level yield can
-    // land inside: `unmodule` quiesces the slot before retiring, a live module
-    // value legitimately holds its image, the resolution walk's counted lookup cursor
+    // land inside: a superseded directory keeps its entries until its last reader
+    // leaves, the resolution walk's counted lookup cursor
     // together with the environment teardown wait covers the lookup, and
     // `scheduleWord`'s pin covers the frame. So the borrow's necessity is stated
     // here as an API fact instead, where the drop can be constructed exactly and
@@ -1578,7 +1084,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases, null);
+        const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
         const cell = try container.scopeCell(&image.scope, owner);
@@ -1608,7 +1114,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
             cell.scopeUnder(.fresh_pin),
         );
         try std.testing.expectEqual(
-            ModuleHome.init(&image.construction_home),
+            ModuleHome.init(image),
             homeForModuleRootScope(&image.scope),
         );
 
@@ -1641,7 +1147,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
         const releases = host.domain();
         var container = try env.Env.init(&host);
 
-        const image = try ModuleImage.create(allocator, releases, null);
+        const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
 
@@ -1664,137 +1170,90 @@ test "modules: the same drop with no borrow reclaims the contents" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
-/// Opaque observation capability owning one registration reference.
+/// Opaque observation capability owning one reference to a published image.
 pub const GenerationLease = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(retained: *Registration) GenerationLease {
+    fn initRetained(retained: *ModuleImage) GenerationLease {
         return @fromBackingInt(@intCast(@intFromPtr(retained)));
     }
-    fn registration(self: GenerationLease) *Registration {
+    fn image(self: GenerationLease) *ModuleImage {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@backingInt(self));
     }
     pub fn generationNumber(self: GenerationLease) u64 {
-        return self.registration().generation;
+        return self.image().generation;
     }
     pub fn name(self: GenerationLease) intern.ModuleName {
-        return self.registration().name;
+        return self.image().name;
     }
     pub fn provenance(self: GenerationLease) RegistrationProvenance {
-        return self.registration().provenance;
+        return self.image().provenance;
     }
     pub fn resolveCursor(self: GenerationLease, id: u32) ModuleResolveCursor {
-        return self.registration().resolveCursor(id);
+        const retained = self.image();
+        return resolveCursorFor(retained, ModuleHome.init(retained), id);
     }
-    pub fn guard(self: GenerationLease) GenerationGuard {
-        const retained = self.registration();
+    /// A second observation reference to the same generation, for a holder
+    /// that outlives this one: the qualified call-site cache.
+    pub fn clone(self: GenerationLease) GenerationLease {
+        const retained = self.image();
         retained.retain();
         return .initRetained(retained);
     }
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
-        return self.registration().publicNameCursor();
+        return publicNameCursorFor(self.image());
     }
     fn testNameCursor(self: GenerationLease) TestCatalog.NameCursor {
-        return .{ .next = self.registration().image.tests.entries_head };
+        return .{ .next = self.image().tests.entries_head };
     }
     fn testLookupCursor(
         self: GenerationLease,
         test_name: intern.BindingName,
     ) TestCatalog.LookupCursor {
         return .{
-            .current = self.registration().image.tests.root,
+            .current = self.image().tests.root,
             .name = test_name,
         };
     }
+    /// Session-gated transfer from observation to execution. The raw image
+    /// stays hidden on both sides, which is why an activation's home can only
+    /// come from the registry lease it was resolved through.
     pub fn enterExecution(
         self: *GenerationLease,
         _: *const ExecutionAccess,
-    ) ExecutionGeneration {
-        const retained = self.registration();
+    ) GenerationPin {
+        const retained = self.image();
         self.* = .consumed;
+        return .initRetained(retained);
+    }
+    /// Execution only if this exact generation is still its name's current
+    /// one. A derived call-site cache entry becomes executable this way and
+    /// is evicted when it fails.
+    pub fn tryEnterCurrent(
+        self: GenerationLease,
+        _: *const ExecutionAccess,
+    ) ?GenerationPin {
+        const retained = self.image();
+        if (retained.superseded.load(.acquire)) return null;
+        // The lease itself keeps the image alive across the current check, so
+        // this retain cannot resurrect a dead generation. A reload racing
+        // immediately after the check is equivalent to ordinary resolution
+        // linearizing immediately before that reload.
+        retained.retain();
         return .initRetained(retained);
     }
     pub fn deinit(self: *GenerationLease) void {
         if (self.* == .consumed) return;
-        self.registration().release();
+        self.image().release();
         self.* = .consumed;
     }
 };
 
-/// A retained registration identity suitable for a derived call-site cache.
-/// It grants no raw registry or slot access. A hit becomes executable only if
-/// this exact generation is still current at the guard check.
-pub const GenerationGuard = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn initRetained(retained: *Registration) GenerationGuard {
-        return @fromBackingInt(@intCast(@intFromPtr(retained)));
-    }
-    fn registration(self: GenerationGuard) *Registration {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    pub fn tryEnterCurrent(
-        self: GenerationGuard,
-        _: *const ExecutionAccess,
-    ) ?ExecutionGeneration {
-        const retained = self.registration();
-        const slot = registrationSlot(retained) orelse return null;
-        if (!slot.publisher.isCurrent(retained)) return null;
-        // The guard itself keeps the registration alive across the current
-        // check, so this retain cannot resurrect a dead generation. A reload
-        // racing immediately after the check is equivalent to ordinary
-        // resolution linearizing immediately before that reload.
-        retained.retain();
-        return .initRetained(retained);
-    }
-    pub fn deinit(self: *GenerationGuard) void {
-        if (self.* == .consumed) return;
-        self.registration().release();
-        self.* = .consumed;
-    }
-};
-
-/// Session-gated execution capability. Observation can be transferred into
-/// execution only by code holding the Session-private authority, and the raw
-/// registration remains hidden on both sides of the transition. This is the
-/// only producer of a registration home, which is why an activation's state
-/// and name can only come from the registry lease it was resolved through.
-pub const ExecutionGeneration = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn initRetained(retained: *Registration) ExecutionGeneration {
-        return @fromBackingInt(@intCast(@intFromPtr(retained)));
-    }
-    fn registration(self: ExecutionGeneration) *Registration {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    pub fn home(
-        self: ExecutionGeneration,
-        _: *const ExecutionAccess,
-    ) *ModuleHome {
-        return .init(&self.registration().home);
-    }
-    pub fn deinit(self: *ExecutionGeneration) void {
-        if (self.* == .consumed) return;
-        self.registration().release();
-        self.* = .consumed;
-    }
-};
-
-/// The cursor types an observation lease hands out. Naming them here keeps the
-/// registration record itself private to this file.
-pub const ModuleResolveCursor = Registration.ResolveCursor;
-
-/// The one export lookup, whether the image was reached through a registered
-/// name or as a value. The registry contributes nothing to finding an export;
+/// The one export lookup. The registry contributes nothing to finding an export;
 /// what the home supplies is the pin that keeps the image alive across a
-/// resumable cursor, and which privacy and durable-state authority apply.
+/// resumable cursor, and which privacy applies.
 fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResolveCursor {
     return .{
         .allocator = image.allocator,
@@ -1803,74 +1262,9 @@ fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResol
     };
 }
 
-/// Resolve one public export from an image reached as a *value* rather than
-/// through a registered name.
-///
-/// This is the same lookup a registration performs, because an image's own
-/// environment is where its exports live and the registry contributes nothing
-/// to finding one. What differs is what is pinned: an image reached this way
-/// has no registration, so the `ExecutionHome` a construction body already
-/// runs against serves here too, and retaining it retains the image. That is
-/// also why such a call has no durable state and no generation — there is no
-/// slot to open and no supersession to be current with.
-pub fn handleResolveCursor(handle: ImageRef, id: u32) ModuleResolveCursor {
-    const image = handle.image();
-    return resolveCursorFor(image, ModuleHome.init(&image.construction_home), id);
-}
-
-/// The home a value-reached image executes against. Its registration is null,
-/// so privacy is by public-only lookup, `within` is refused exactly as it is
-/// for a construction root, and the trace spells the bare local name because
-/// the image has no canonical one to qualify with.
-pub fn handleHome(handle: ImageRef, _: *const ExecutionAccess) *ModuleHome {
-    return .init(&handle.image().construction_home);
-}
-pub const ModulePublicNameCursor = Registration.PublicNameCursor;
-
 /// A borrowed reference to one immutable image, valid for the call it is passed
-/// to and no longer. Only a `SealedImage` or a live module value can produce
-/// one, so the borrow always starts from something that owns a reference; a
-/// consumer that outlives the call — a publication cursor — upgrades it to a
-/// `RetainedImage` immediately rather than trusting its caller's lifetime.
-pub const ImageRef = enum(usize) {
-    _,
-
-    fn init(target: *ModuleImage) ImageRef {
-        return @fromBackingInt(@intCast(@intFromPtr(target)));
-    }
-    fn image(self: ImageRef) *ModuleImage {
-        return @ptrFromInt(@backingInt(self));
-    }
-};
-
-/// One retained image reference, owned for as long as its holder lives. A
-/// publication cursor is resumable across many scheduler turns, so it owns what
-/// it dereferences instead of trusting a caller to outlive it: an `ImageRef` is
-/// a borrow valid at the call that produced it, and nothing stops the caller
-/// from releasing its sealed image before the cursor next advances.
-const RetainedImage = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn retain(borrowed: ImageRef) RetainedImage {
-        const target = borrowed.image();
-        target.retain();
-        return @fromBackingInt(@intCast(@intFromPtr(target)));
-    }
-    fn image(self: RetainedImage) *ModuleImage {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    fn deinit(self: *RetainedImage) void {
-        if (self.* == .consumed) return;
-        self.image().release();
-        self.* = .consumed;
-    }
-};
-
-/// Unique ownership of an image that no value and no registration holds yet.
-/// Every exit either transfers the reference into a module value or releases
-/// it; publication never consumes it, because a registration retains its own.
+/// Unique ownership of an image that no registration holds yet. Every exit
+/// either seals it into a `SealedImage` or releases it.
 pub const OwnedImage = enum(usize) {
     consumed = 0,
     _,
@@ -1886,7 +1280,13 @@ pub const OwnedImage = enum(usize) {
         self: *const OwnedImage,
         _: *const ExecutionAccess,
     ) *ModuleHome {
-        return .init(&self.borrow().construction_home);
+        return .init(self.borrow());
+    }
+    pub fn moduleName(self: *const OwnedImage) intern.ModuleName {
+        return self.borrow().name;
+    }
+    pub fn provenance(self: *const OwnedImage) RegistrationProvenance {
+        return self.borrow().provenance;
     }
     pub fn publishDefinition(
         self: *const OwnedImage,
@@ -1908,24 +1308,6 @@ pub const OwnedImage = enum(usize) {
             effect,
             doc,
         ) } };
-    }
-    /// Reserves the construction stack the body left behind. Entries start as
-    /// scalars so a partly filled template is always releasable, and the
-    /// capture fills them from the top down.
-    pub fn reserveTemplate(self: *const OwnedImage, count: usize) error{OutOfMemory}!void {
-        const image = self.borrow();
-        std.debug.assert(image.initial_state.len == 0);
-        if (count == 0) return;
-        const buffer = try image.allocator.alloc(value.Value, count);
-        @memset(buffer, .{ .int = 0 });
-        image.initial_state = buffer;
-    }
-    /// Moves one construction-stack value into the template. Ownership
-    /// transfers to the image, which retires it when the image does; a
-    /// registration copies rather than consumes it, so the same template can
-    /// seed a second registration.
-    pub fn placeTemplate(self: *const OwnedImage, index: usize, item: value.Value) void {
-        self.borrow().initial_state[index] = item;
     }
     /// Ends construction. Freezing the environment and consuming this
     /// capability are one transition, so nothing that mutates an image — a
@@ -1951,18 +1333,16 @@ pub const OwnedImage = enum(usize) {
     }
     pub fn deinit(self: *OwnedImage) void {
         if (self.* == .consumed) return;
-        // The construction owner supplies one lifetime guard. Tasks spawned
-        // during construction may hold independent pins,
-        // so rollback drops only this capability and the image remains alive
-        // until those tasks quiesce.
+        // Rollback drops the construction owner's reference; an activation
+        // still pinning the image keeps it alive until it unwinds.
         self.borrow().release();
         self.* = .consumed;
     }
 };
 
 /// Unique ownership of a finished image. It has no mutation surface at all:
-/// the only things left to do with an image are register it, hand it to a
-/// program as a value, and release it.
+/// the only things left to do with an image are move it into a registration
+/// cursor or release it.
 pub const SealedImage = enum(usize) {
     consumed = 0,
     _,
@@ -1973,11 +1353,6 @@ pub const SealedImage = enum(usize) {
     fn borrow(self: *const SealedImage) *ModuleImage {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@backingInt(self.*));
-    }
-    /// A borrow for publication. Registration retains its own reference, so
-    /// this capability's holder keeps owning the one it was sealed with.
-    pub fn ref(self: *const SealedImage) ImageRef {
-        return .init(self.borrow());
     }
     pub fn move(self: *SealedImage) SealedImage {
         const result = self.*;
@@ -1990,36 +1365,17 @@ pub const SealedImage = enum(usize) {
         self.borrow().release();
         self.* = .consumed;
     }
-    /// Wraps the image in a value, transferring this capability's reference to
-    /// it. On failure nothing is published and the capability is untouched.
-    pub fn intoValue(self: *SealedImage, allocator: std.mem.Allocator) error{OutOfMemory}!value.Value {
-        const item = try heap.createModule(ModuleImage, allocator, self.borrow());
-        self.* = .consumed;
-        return item;
-    }
 };
-
-/// The single conversion between a module value and its image, so no raw cast
-/// can be paired at a call site. The reference stays borrowed from the value.
-pub fn imageRef(item: value.Value) ?ImageRef {
-    if (item != .module) return null;
-    const storage = heap.moduleStorage(item.module);
-    return .init(@ptrCast(@alignCast(storage.payload)));
-}
 
 pub const CommitError = error{
     OutOfMemory,
     NameConflict,
     /// The exact name `core` is the core qualifier, never a registration.
     ReservedName,
-    /// The initiating unit already holds a slot's turn, so it cannot wait
-    /// for a second one.
-    StateApplicationActive,
 };
 pub const RemovalError = error{
     OutOfMemory,
     MissingModule,
-    StateApplicationActive,
 };
 pub const AliasError = error{
     OutOfMemory,
@@ -2131,31 +1487,10 @@ pub const LoadingLease = enum(usize) {
         self.* = .finished;
     }
 };
-/// Permanent registry inventory node for one slot allocation. The slot owns
-/// its nominal `InventoryEntry`; removal moves the slot itself between reuse
-/// queues and never scans, detaches, or reallocates this node.
-const SlotEntry = struct {
-    slot: *ModuleSlot,
-    next: ?*SlotEntry = null,
-};
-
-const RetiredGeneration = struct {
-    generation: *Registration,
-    next: ?*RetiredGeneration = null,
-};
-
 const RegistryState = struct {
     host: *const heap.HostCleanup,
     writer: std.Io.Mutex = .init,
     directories: DirectoryPublisher,
-    inventory: ?*SlotEntry = null,
-    slots_pending_head: ?*ModuleSlot = null,
-    slots_pending_tail: ?*ModuleSlot = null,
-    slots_pending_count: usize = 0,
-    slots_ready: ?*ModuleSlot = null,
-    retired_head: ?*RetiredGeneration = null,
-    retired_tail: ?*RetiredGeneration = null,
-    retired_count: usize = 0,
     loading: std.atomic.Value(?*LoadingNode) = .init(null),
 };
 
@@ -2200,35 +1535,10 @@ pub const Registry = enum(usize) {
         const owner_allocator = backing.host.allocator();
         std.debug.assert(backing.directories.quiescent());
         Directory.destroyChain(backing.directories.currentOwned(), self.allocator());
-        // First close and detach payloads, but keep slot storage alive while
-        // generation retirement releases its SlotLeases.
-        var inventory = backing.inventory;
-        while (inventory) |entry| : (inventory = entry.next) {
-            const owning = entry.slot;
-            closeArbiter(owning);
-            owning.retire(self.releaseDomain());
-        }
-        var retired = backing.retired_head;
-        while (retired) |entry| {
-            const next = entry.next;
-            entry.generation.release();
-            self.allocator().destroy(entry);
-            retired = next;
-        }
         var loading = backing.loading.load(.acquire);
         while (loading) |node| {
             loading = node.next;
             self.allocator().destroy(node);
-        }
-        backing.host.drain();
-        inventory = backing.inventory;
-        while (inventory) |entry| {
-            const next = entry.next;
-            const owning = entry.slot;
-            std.debug.assert(owning.lease_refs.load(.acquire) == 0);
-            self.allocator().destroy(owning);
-            self.allocator().destroy(entry);
-            inventory = next;
         }
         backing.host.drain();
         owner_allocator.destroy(backing);
@@ -2330,8 +1640,6 @@ pub const Registry = enum(usize) {
         current_module: ?intern.ModuleName = null,
         current_generation: ?GenerationLease = null,
         names: ?TestCatalog.NameCursor = null,
-        maintenance: ?MaintenanceCursor = null,
-        pending_generation: ?GenerationLease = null,
         complete: bool = false,
 
         fn init(registry: *Registry) TestDiscoveryCursor {
@@ -2345,7 +1653,6 @@ pub const Registry = enum(usize) {
 
         pub fn deinit(self: *TestDiscoveryCursor) void {
             if (self.current_generation) |*generation| generation.deinit();
-            if (self.pending_generation) |*generation| generation.deinit();
             self.directory.deinit();
             self.* = undefined;
         }
@@ -2362,16 +1669,6 @@ pub const Registry = enum(usize) {
 
         pub fn advance(self: *TestDiscoveryCursor) TestDiscoveryProgress {
             std.debug.assert(!self.complete);
-            if (self.maintenance) |*maintenance| switch (maintenance.advance()) {
-                .pending => return .pending,
-                .complete => {
-                    const generation = self.pending_generation;
-                    self.pending_generation = null;
-                    self.maintenance = null;
-                    if (generation) |owned| self.beginGeneration(self.current_module.?, owned);
-                    return .pending;
-                },
-            };
             if (self.names) |*names| switch (names.advance()) {
                 .pending => return .pending,
                 .item => |metadata| return .{ .item = .{
@@ -2398,14 +1695,8 @@ pub const Registry = enum(usize) {
                     break :result .complete;
                 },
                 .item => |entry| result: {
-                    self.current_module = entry.key;
-                    const protected = self.registry.leaseSlot(entry.value);
-                    if (protected.needs_maintenance) {
-                        self.pending_generation = protected.lease;
-                        self.maintenance = self.registry.maintenanceCursor();
-                    } else if (protected.lease) |generation| {
-                        self.beginGeneration(entry.key, generation);
-                    }
+                    entry.value.retain();
+                    self.beginGeneration(entry.key, GenerationLease.initRetained(entry.value));
                     break :result .pending;
                 },
             };
@@ -2433,7 +1724,7 @@ pub const Registry = enum(usize) {
     };
 
     pub const TestExecutionTarget = struct {
-        generation: ExecutionGeneration,
+        generation: GenerationPin,
         body: *env.Quotation,
 
         pub fn quotation(self: *const TestExecutionTarget) *value.ListHandle {
@@ -2462,10 +1753,6 @@ pub const Registry = enum(usize) {
         const State = union(enum) {
             absent,
             module: Directory.ModuleMap.RawLookupCursor,
-            maintenance: struct {
-                lease: ?GenerationLease,
-                cursor: MaintenanceCursor,
-            },
             catalog: struct {
                 lease: GenerationLease,
                 cursor: TestCatalog.LookupCursor,
@@ -2493,7 +1780,6 @@ pub const Registry = enum(usize) {
 
         pub fn deinit(self: *TestLookupCursor) void {
             switch (self.state) {
-                .maintenance => |*maintenance| if (maintenance.lease) |*lease| lease.deinit(),
                 .catalog => |*catalog| catalog.lease.deinit(),
                 .absent, .module, .complete => {},
             }
@@ -2516,37 +1802,13 @@ pub const Registry = enum(usize) {
                 },
                 .module => |*lookup| switch (lookup.advance()) {
                     .pending => .pending,
-                    .complete => |slot| result: {
-                        const found = slot orelse {
+                    .complete => |image| result: {
+                        const found = image orelse {
                             self.state = .complete;
                             break :result .{ .complete = null };
                         };
-                        const protected = self.registry.leaseSlot(found);
-                        if (protected.needs_maintenance) {
-                            self.state = .{ .maintenance = .{
-                                .lease = protected.lease,
-                                .cursor = self.registry.maintenanceCursor(),
-                            } };
-                        } else if (protected.lease) |lease| {
-                            self.beginCatalog(lease);
-                        } else {
-                            self.state = .complete;
-                            break :result .{ .complete = null };
-                        }
-                        break :result .pending;
-                    },
-                },
-                .maintenance => |*maintenance| switch (maintenance.cursor.advance()) {
-                    .pending => .pending,
-                    .complete => result: {
-                        const lease = maintenance.lease;
-                        maintenance.lease = null;
-                        if (lease) |owned| {
-                            self.beginCatalog(owned);
-                        } else {
-                            self.state = .complete;
-                            break :result .{ .complete = null };
-                        }
+                        found.retain();
+                        self.beginCatalog(GenerationLease.initRetained(found));
                         break :result .pending;
                     },
                 },
@@ -2579,166 +1841,15 @@ pub const Registry = enum(usize) {
         return retired;
     }
 
-    const MaintenanceProgress = poll.Progress(void);
-    /// Bounded registry bookkeeping after the ownership-bearing retirement
-    /// has happened. Each step either releases one quiescent generation
-    /// record or evaluates one empty slot for reuse.
-    const MaintenanceCursor = struct {
-        registry: *Registry,
-        generation_remaining: usize,
-        slot_remaining: usize,
-        phase: enum { generations, slots } = .generations,
-        fn advance(self: *MaintenanceCursor) MaintenanceProgress {
-            return switch (self.phase) {
-                .generations => result: {
-                    if (self.generation_remaining == 0) {
-                        self.phase = .slots;
-                        break :result .pending;
-                    }
-                    self.generation_remaining -= 1;
-                    self.registry.lockBlocking();
-                    const entry = self.registry.popRetiredGenerationLocked() orelse {
-                        self.phase = .slots;
-                        self.registry.unlock();
-                        break :result .pending;
-                    };
-                    const generation = entry.generation;
-                    const reusable = registrationSlot(generation).?.publisher.quiescent();
-                    if (!reusable) self.registry.enqueueRetiredGenerationLocked(entry);
-                    self.registry.unlock();
-                    if (reusable) {
-                        generation.release();
-                        self.registry.allocator().destroy(entry);
-                    }
-                    break :result .pending;
-                },
-                .slots => result: {
-                    if (self.slot_remaining == 0) break :result .complete;
-                    self.slot_remaining -= 1;
-                    self.registry.lockBlocking();
-                    const slot = self.registry.popPendingSlotLocked() orelse {
-                        self.slot_remaining = 0;
-                        self.registry.unlock();
-                        break :result .complete;
-                    };
-                    if (self.registry.slotReusableLocked(slot))
-                        self.registry.pushReadySlotLocked(slot)
-                    else
-                        self.registry.enqueuePendingSlotLocked(slot);
-                    self.registry.unlock();
-                    break :result .pending;
-                },
-            };
-        }
-    };
-    fn maintenanceCursor(self: *Registry) MaintenanceCursor {
-        self.lockBlocking();
-        defer self.unlock();
-        return .{
-            .registry = self,
-            .generation_remaining = self.privateState().retired_count,
-            .slot_remaining = self.privateState().slots_pending_count,
-        };
-    }
-
-    fn enqueueRetiredGenerationLocked(self: *Registry, entry: *RetiredGeneration) void {
-        const backing = self.privateState();
-        std.debug.assert(entry.next == null);
-        if (backing.retired_tail) |tail|
-            tail.next = entry
-        else
-            backing.retired_head = entry;
-        backing.retired_tail = entry;
-        backing.retired_count += 1;
-    }
-
-    fn popRetiredGenerationLocked(self: *Registry) ?*RetiredGeneration {
-        const backing = self.privateState();
-        const entry = backing.retired_head orelse return null;
-        backing.retired_head = entry.next;
-        if (backing.retired_head == null) backing.retired_tail = null;
-        backing.retired_count -= 1;
-        entry.next = null;
-        return entry;
-    }
-
-    /// Pop one already-proven reusable slot. Potentially blocked slots are
-    /// serviced one at a time by `MaintenanceCursor`; publication never scans the
-    /// pending history while holding the writer lock.
-    fn takeRecycledSlot(self: *Registry) ?*ModuleSlot {
-        self.lockBlocking();
-        defer self.unlock();
-        const backing = self.privateState();
-        const ready = backing.slots_ready orelse return null;
-        backing.slots_ready = ready.next_recycled;
-        ready.next_recycled = null;
-        std.debug.assert(slotQuiescent(ready));
-        return ready;
-    }
-
-    /// Admission to the ready list. A retired slot may still be reached
-    /// through a directory older than the current one, so admission also
-    /// waits until no previous directory is alive. Once admitted, nothing can
-    /// lease the slot again: every directory published since was built
-    /// without it. Readiness is therefore re-checked against the slot alone,
-    /// since a later publication with lingering readers says nothing about
-    /// this slot.
-    fn slotReusableLocked(self: *Registry, slot: *ModuleSlot) bool {
-        const backing = self.privateState();
-        if (backing.directories.currentOwned()) |current| {
-            if (current.previous != null) return false;
-        }
-        return slotQuiescent(slot);
-    }
-
-    fn enqueuePendingSlotLocked(self: *Registry, slot: *ModuleSlot) void {
-        const backing = self.privateState();
-        std.debug.assert(slot.next_recycled == null);
-        if (backing.slots_pending_tail) |tail|
-            tail.next_recycled = slot
-        else
-            backing.slots_pending_head = slot;
-        backing.slots_pending_tail = slot;
-        backing.slots_pending_count += 1;
-    }
-
-    fn popPendingSlotLocked(self: *Registry) ?*ModuleSlot {
-        const backing = self.privateState();
-        const slot = backing.slots_pending_head orelse return null;
-        backing.slots_pending_head = slot.next_recycled;
-        if (backing.slots_pending_head == null) backing.slots_pending_tail = null;
-        backing.slots_pending_count -= 1;
-        slot.next_recycled = null;
-        return slot;
-    }
-
-    fn pushReadySlotLocked(self: *Registry, slot: *ModuleSlot) void {
-        std.debug.assert(slot.next_recycled == null);
-        slot.next_recycled = self.privateState().slots_ready;
-        self.privateState().slots_ready = slot;
-    }
-
-    fn recycleSlot(self: *Registry, owning: *ModuleSlot) void {
-        self.lockBlocking();
-        defer self.unlock();
-        self.enqueuePendingSlotLocked(owning);
-    }
-
-    fn recordFreshSlotLocked(self: *Registry, owning: *ModuleSlot) void {
-        const entry = owning.inventory.node();
-        std.debug.assert(entry.slot == owning and entry.next == null);
-        entry.next = self.privateState().inventory;
-        self.privateState().inventory = entry;
-    }
-
-    /// A fresh anonymous image. Naming it is a separate, later decision, so
-    /// nothing here validates or reserves a registry name.
-    pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
-        return self.createSourceImage(null);
-    }
-
-    pub fn createSourceImage(self: *Registry, source: ?*const map_state.SourceScope) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), source));
+    /// A fresh image for `name`. The caller has validated the name; the
+    /// registry checks it again at publication, which is the boundary that
+    /// owns registry names.
+    pub fn createImage(
+        self: *Registry,
+        name: intern.ModuleName,
+        provenance: RegistrationProvenance,
+    ) error{OutOfMemory}!OwnedImage {
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain(), name, provenance));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);
@@ -2754,12 +1865,14 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
+            name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
             return .{
                 .registry = registry,
                 .instance = instance,
-                .candidate = try registry.createImage(),
+                .candidate = try registry.createImage(name, provenance),
             };
         }
 
@@ -2828,13 +1941,15 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
+            name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             words: []const env.BuiltinWord,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
             return .{
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
                 .source = .{ .words = words },
-                .candidate = try registry.createImage(),
+                .candidate = try registry.createImage(name, provenance),
             };
         }
 
@@ -2842,9 +1957,11 @@ pub const Registry = enum(usize) {
         /// cursor owns its independent pin until publication or abandonment.
         pub fn initRegistered(
             registry: *Registry,
+            name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             instance: *@import("module_bindings.zig").Publication,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
-            const candidate = try registry.createImage();
+            const candidate = try registry.createImage(name, provenance);
             instance.retain();
             return .{
                 .allocator = registry.allocator(),
@@ -2962,1122 +2079,468 @@ pub const Registry = enum(usize) {
         }
     };
 
-    /// `blocked` means the cursor is waiting for another unit to release the
-    /// slot's turn; unlike `pending`, polling again cannot make progress.
-    pub const CommitProgress = union(enum) { pending, blocked, complete: u64 };
-    /// Publishes one image under one canonical name. Registration is an
-    /// upsert: a missing name creates a slot and seeds its durable stack from
-    /// a *copy* of the image's template, while an existing name installs the
-    /// new image and keeps the state that slot already owns.
+    pub const CommitProgress = union(enum) { pending, complete: u64 };
+    pub const RemovalProgress = poll.Progress(void);
+    pub const AliasProgress = poll.Progress(void);
+
+    const EditKind = enum { register, remove, alias };
+
+    /// The one registry mutation. Snapshot the current directory, validate the
+    /// request against it, build a successor with the edit applied, and publish
+    /// the successor under the writer lock if the snapshot is still current;
+    /// otherwise discard the candidate and start over. A racing edit of any
+    /// kind is therefore observed as exactly one restart, never as a
+    /// half-applied entry. Registration, removal, and aliasing differ only in
+    /// validation and in which entries change, so each is this cursor
+    /// specialized at compile time.
     ///
-    /// The cursor retains the image for its whole lifetime and releases it on
-    /// every exit; the registration it publishes retains an independent
-    /// reference. Every abandoned path leaves the caller's reference, the prior
-    /// directory, the prior generation, and the slot's durable stack exactly as
-    /// they were.
-    pub const RegistrationCursor = struct {
-        const ModuleBuilder = union(enum) {
-            initialize: Directory.ModuleMap.InitCursor,
-            clone: Directory.ModuleMap.CloneCursor,
-
-            fn deinit(self: *ModuleBuilder) void {
-                switch (self.*) {
-                    inline else => |*cursor| cursor.deinit(),
-                }
-            }
-        };
-        const AliasBuilder = union(enum) {
-            initialize: Directory.AliasMap.InitCursor,
-            clone: Directory.AliasMap.CloneCursor,
-
-            fn deinit(self: *AliasBuilder) void {
-                switch (self.*) {
-                    inline else => |*cursor| cursor.deinit(),
-                }
-            }
-        };
-        const Snapshot = struct {
-            directory: DirectoryLease,
-            old: ?*const Directory,
-        };
-        const NewBuild = struct {
-            snapshot: Snapshot,
-            modules: Directory.ModuleMap,
-            aliases: Directory.AliasMap,
-            slot: union(enum) {
-                fresh: *ModuleSlot,
-                recycled: *ModuleSlot,
-
-                fn get(self: @This()) *ModuleSlot {
-                    return switch (self) {
-                        inline else => |slot| slot,
-                    };
-                }
-            },
-            /// The new slot's durable stack, copied from the image template.
-            /// Entries are scalars until the copy fills them, so an abandoned
-            /// build is always releasable.
-            state: []value.Value = &.{},
-            copied: usize = 0,
-        };
-        const State = union(enum) {
-            maintenance: MaintenanceCursor,
-            snapshot,
-            alias: struct {
-                snapshot: Snapshot,
-                cursor: Directory.AliasMap.RawLookupCursor,
-            },
-            module: struct {
-                snapshot: Snapshot,
-                cursor: ?Directory.ModuleMap.RawLookupCursor,
-            },
-            modules: struct {
-                snapshot: Snapshot,
-                builder: ModuleBuilder,
-            },
-            aliases: struct {
-                snapshot: Snapshot,
-                modules: Directory.ModuleMap,
-                builder: AliasBuilder,
-            },
-            prepare_insert: struct {
-                snapshot: Snapshot,
-                modules: Directory.ModuleMap,
-                aliases: Directory.AliasMap,
-            },
-            insert: struct {
-                build: *NewBuild,
-                cursor: Directory.ModuleMap.PutCursor,
-            },
-            seed_state: *NewBuild,
-            barrier: struct {
-                lease: SlotLease,
-                requested: bool = false,
-            },
-            commit_existing,
-            commit_new: *NewBuild,
-            complete,
-        };
-
-        registry: *Registry,
-        /// Retained for the cursor's whole lifetime and released by `deinit`,
-        /// so the template stays readable across every resumption regardless of
-        /// what the caller does with its own reference.
-        image: RetainedImage,
-        name: intern.ModuleName,
-        provenance: RegistrationProvenance,
-        authority: *TurnAuthority,
-        state: State,
-        /// The generation record for this publication. It retains the image on
-        /// creation, so an abandoned cursor releases it rather than leaking a
-        /// reference the caller never granted.
-        registration: ?*Registration = null,
-        /// The barrier turn, held outside the state union so publication can
-        /// release it after the state has advanced to `.complete`. Its
-        /// address is what the arbiter links, and the cursor never moves
-        /// once a turn is requested.
-        barrier_turn: ?StateTurn = null,
-        /// Reload reserves its retirement record before entering the writer
-        /// lock; publication only links this already-owned node.
-        retired_reservation: ?*RetiredGeneration = null,
-
-        pub fn init(
-            registry: *Registry,
-            image: ImageRef,
-            name: intern.ModuleName,
-            provenance: RegistrationProvenance,
-            authority: *TurnAuthority,
-        ) RegistrationCursor {
-            return .{
-                .registry = registry,
-                .image = .retain(image),
-                .name = name,
-                .provenance = provenance,
-                .authority = authority,
-                .state = .{ .maintenance = registry.maintenanceCursor() },
+    /// The candidate owns one reference per image it copies, taken as the copy
+    /// proceeds. Both outcomes retire it through `Directory.advanceRetirement`:
+    /// publication chains it in front of the snapshot, and discard retires it
+    /// alone, so neither path releases a user-sized map in one step.
+    fn EditCursor(comptime kind: EditKind) type {
+        return struct {
+            const Self = @This();
+            pub const Error = switch (kind) {
+                .register => CommitError,
+                .remove => RemovalError,
+                .alias => AliasError,
             };
-        }
-        pub fn deinit(self: *RegistrationCursor) void {
-            self.image.deinit();
-            if (self.barrier_turn) |*turn| turn.release();
-            if (self.retired_reservation) |record| self.registry.allocator().destroy(record);
-            if (self.registration) |registration| registration.release();
-            switch (self.state) {
-                .alias => |*state| state.snapshot.directory.deinit(),
-                .module => |*state| state.snapshot.directory.deinit(),
-                .modules => |*state| {
-                    state.builder.deinit();
-                    state.snapshot.directory.deinit();
+            pub const Progress = switch (kind) {
+                .register => CommitProgress,
+                .remove => RemovalProgress,
+                .alias => AliasProgress,
+            };
+            const Request = switch (kind) {
+                .register => SealedImage,
+                .remove => intern.ModuleName,
+                .alias => struct { short: intern.BindingName, target: intern.ModuleName },
+            };
+            const ModuleLookup = Directory.ModuleMap.RawLookupCursor;
+            const AliasLookup = Directory.AliasMap.RawLookupCursor;
+
+            /// What validation establishes: the canonical name the edit is
+            /// about and, for a reload or a removal, the entry it replaces.
+            const Target = struct {
+                canonical: intern.ModuleName,
+                prior: ?*ModuleImage,
+            };
+            const Validation = switch (kind) {
+                .register => union(enum) {
+                    /// The short form must not already be an alias.
+                    alias_free: AliasLookup,
+                    /// The generation a reload replaces, if any.
+                    prior: ModuleLookup,
                 },
-                .aliases => |*state| {
-                    state.builder.deinit();
-                    state.modules.deinit();
-                    state.snapshot.directory.deinit();
+                .remove => union(enum) {
+                    /// A short spelling resolves through the alias map.
+                    resolve_alias: AliasLookup,
+                    existing: struct { canonical: intern.ModuleName, lookup: ModuleLookup },
                 },
-                .prepare_insert => |*state| {
-                    state.modules.deinit();
-                    state.aliases.deinit();
-                    state.snapshot.directory.deinit();
+                .alias => union(enum) {
+                    /// The short form must not be a module name.
+                    short_free: ModuleLookup,
+                    target_module: ModuleLookup,
+                    target_alias: AliasLookup,
+                    /// An alias that already names its target is a no-op.
+                    same_alias: struct { canonical: intern.ModuleName, lookup: AliasLookup },
                 },
-                .insert => |state| self.destroyBuild(state.build),
-                .seed_state => |build| self.destroyBuild(build),
-                .commit_new => |build| self.destroyBuild(build),
-                .barrier => |*state| if (!state.requested) state.lease.deinit(),
-                .maintenance, .snapshot, .commit_existing, .complete => {},
-            }
-            self.* = undefined;
-        }
-        fn destroyBuild(self: *RegistrationCursor, build: *NewBuild) void {
-            build.modules.deinit();
-            build.aliases.deinit();
-            for (build.state) |item| self.registry.releaseDomain().releaseValue(item);
-            if (build.state.len != 0) self.registry.allocator().free(build.state);
-            switch (build.slot) {
-                .fresh => |slot| {
-                    // Never published, so the slot owns nothing beyond its own
-                    // storage and its inventory node.
-                    self.registry.allocator().destroy(slot.inventory.node());
-                    self.registry.allocator().destroy(slot);
+            };
+            const Build = struct {
+                directory: DirectoryLease,
+                target: Target,
+                candidate: *Directory,
+            };
+            const State = union(enum) {
+                snapshot,
+                validate: struct { directory: DirectoryLease, step: Validation },
+                init_modules: struct {
+                    directory: DirectoryLease,
+                    target: Target,
+                    cursor: Directory.ModuleMap.InitCursor,
                 },
-                .recycled => |slot| self.registry.recycleSlot(slot),
-            }
-            build.snapshot.directory.deinit();
-            self.registry.allocator().destroy(build);
-        }
-        /// The one place a generation record is created, so both publication
-        /// paths retain the image identically and neither can forget to.
-        fn prepareRegistration(self: *RegistrationCursor) error{OutOfMemory}!void {
-            if (self.registration != null) return;
-            self.registration = try Registration.create(
-                self.registry.allocator(),
-                self.image.image(),
-                self.name,
-                self.provenance,
-            );
-        }
-        fn takeRegistration(self: *RegistrationCursor) *Registration {
-            const registration = self.registration.?;
-            self.registration = null;
-            return registration;
-        }
-        pub fn advance(self: *RegistrationCursor) CommitError!CommitProgress {
-            const name = self.name;
-            return switch (self.state) {
-                .maintenance => |*maintenance| {
-                    // Refused before any directory work so the cursor is still
-                    // in its initial state when the caller retires it.
-                    if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
-                        return error.ReservedName;
-                    return switch (maintenance.advance()) {
-                        .pending => .pending,
-                        .complete => result: {
-                            self.state = .snapshot;
-                            break :result .pending;
-                        },
-                    };
+                init_aliases: struct {
+                    directory: DirectoryLease,
+                    target: Target,
+                    modules: Directory.ModuleMap,
+                    cursor: Directory.AliasMap.InitCursor,
                 },
-                .snapshot => result: {
-                    const directory = self.registry.acquireDirectory();
-                    const snapshot = Snapshot{
-                        .old = directory.directory,
-                        .directory = directory,
-                    };
-                    if (snapshot.old) |old| {
-                        if (intern.moduleBindingName(name)) |alias_name| {
-                            self.state = .{ .alias = .{
-                                .snapshot = snapshot,
-                                .cursor = old.aliases.rawLookup(alias_name),
-                            } };
-                        } else {
-                            self.state = .{ .module = .{
-                                .snapshot = snapshot,
-                                .cursor = old.modules.rawLookup(name),
-                            } };
-                        }
-                    } else {
-                        self.state = .{ .module = .{
-                            .snapshot = snapshot,
-                            .cursor = null,
-                        } };
-                    }
-                    break :result .pending;
+                copy_modules: struct {
+                    build: Build,
+                    entries: Directory.ModuleMap.RawEntryCursor,
+                    insertion: ?Directory.ModuleMap.PutCursor = null,
                 },
-                .alias => |*state| switch (state.cursor.advance()) {
-                    .pending => .pending,
-                    .complete => |existing_alias| result: {
-                        if (existing_alias != null) return error.NameConflict;
-                        self.state = .{ .module = .{
-                            .snapshot = state.snapshot,
-                            .cursor = state.snapshot.old.?.modules.rawLookup(name),
-                        } };
-                        break :result .pending;
+                put_module: struct { build: Build, cursor: Directory.ModuleMap.PutCursor },
+                copy_aliases: struct {
+                    build: Build,
+                    entries: Directory.AliasMap.RawEntryCursor,
+                    insertion: ?Directory.AliasMap.PutCursor = null,
+                },
+                put_alias: struct { build: Build, cursor: Directory.AliasMap.PutCursor },
+                commit: Build,
+                complete,
+            };
+
+            registry: *Registry,
+            request: Request,
+            state: State = .snapshot,
+
+            pub fn deinit(self: *Self) void {
+                if (kind == .register) self.request.deinit();
+                switch (self.state) {
+                    .snapshot, .complete => {},
+                    .validate => |*state| state.directory.deinit(),
+                    .init_modules => |*state| {
+                        state.cursor.deinit();
+                        state.directory.deinit();
                     },
-                },
-                .module => |*state| if (state.cursor) |*lookup| switch (lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |maybe_slot| result: {
-                        if (maybe_slot) |slot| {
-                            const lease = SlotLease.retain(slot);
-                            state.snapshot.directory.deinit();
-                            self.state = .{ .barrier = .{ .lease = lease } };
-                        } else {
-                            self.state = .{ .modules = .{
-                                .snapshot = state.snapshot,
-                                .builder = .{ .clone = state.snapshot.old.?.modules.cloneCursor(1) },
-                            } };
-                        }
-                        break :result .pending;
+                    .init_aliases => |*state| {
+                        state.cursor.deinit();
+                        state.modules.deinit();
+                        state.directory.deinit();
                     },
-                } else result: {
-                    self.state = .{ .modules = .{
-                        .snapshot = state.snapshot,
-                        .builder = .{ .initialize = Directory.ModuleMap.initCursor(
-                            self.registry.allocator(),
-                            1,
-                        ) },
-                    } };
-                    break :result .pending;
-                },
-                .modules => |*state| switch (state.builder) {
-                    inline else => |*builder| switch (try builder.advance()) {
-                        .pending => .pending,
-                        .complete => |modules| result: {
-                            builder.deinit();
-                            const alias_builder: AliasBuilder = if (state.snapshot.old) |old|
-                                .{ .clone = old.aliases.cloneCursor(0) }
-                            else
-                                .{ .initialize = Directory.AliasMap.initCursor(
-                                    self.registry.allocator(),
-                                    0,
-                                ) };
-                            self.state = .{ .aliases = .{
-                                .snapshot = state.snapshot,
+                    .copy_modules => |*state| self.discard(&state.build),
+                    .put_module => |*state| self.discard(&state.build),
+                    .copy_aliases => |*state| self.discard(&state.build),
+                    .put_alias => |*state| self.discard(&state.build),
+                    .commit => |*build| self.discard(build),
+                }
+                self.* = undefined;
+            }
+
+            fn discard(self: *Self, build: *Build) void {
+                build.candidate.previous = null;
+                self.registry.releaseDomain().retire(build.candidate, &build.candidate.retirement);
+                build.directory.deinit();
+            }
+
+            fn requestedName(self: *const Self) intern.ModuleName {
+                return switch (kind) {
+                    .register => self.request.borrow().name,
+                    .remove => self.request,
+                    .alias => self.request.target,
+                };
+            }
+
+            pub fn advance(self: *Self) Error!Progress {
+                switch (self.state) {
+                    .snapshot => return self.beginSnapshot(),
+                    .validate => |*state| return self.validate(state),
+                    .init_modules => |*state| switch (try state.cursor.advance()) {
+                        .pending => {},
+                        .complete => |modules| {
+                            const expected = (if (state.directory.directory) |old| old.aliases.count() else 0) + 1;
+                            self.state = .{ .init_aliases = .{
+                                .directory = state.directory,
+                                .target = state.target,
                                 .modules = modules,
-                                .builder = alias_builder,
+                                .cursor = Directory.AliasMap.initCursor(self.registry.allocator(), expected),
                             } };
-                            break :result .pending;
                         },
                     },
-                },
-                .aliases => |*state| switch (state.builder) {
-                    inline else => |*builder| switch (try builder.advance()) {
-                        .pending => .pending,
-                        .complete => |aliases| result: {
-                            builder.deinit();
-                            self.state = .{ .prepare_insert = .{
-                                .snapshot = state.snapshot,
+                    .init_aliases => |*state| switch (try state.cursor.advance()) {
+                        .pending => {},
+                        .complete => |aliases| {
+                            // On failure the completed cursor frees nothing and
+                            // `deinit` still owns the module map.
+                            const candidate = self.registry.allocator().create(Directory) catch |err| {
+                                var owned = aliases;
+                                owned.deinit();
+                                return err;
+                            };
+                            candidate.* = .{
                                 .modules = state.modules,
                                 .aliases = aliases,
-                            } };
-                            break :result .pending;
+                                .previous = null,
+                            };
+                            const build = Build{
+                                .directory = state.directory,
+                                .target = state.target,
+                                .candidate = candidate,
+                            };
+                            if (build.directory.directory) |old| {
+                                self.state = .{ .copy_modules = .{
+                                    .build = build,
+                                    .entries = old.modules.rawEntries(),
+                                } };
+                            } else self.enterPutModule(build);
                         },
                     },
-                },
-                .prepare_insert => |*state| result: {
-                    const build = try self.registry.allocator().create(NewBuild);
-                    errdefer self.registry.allocator().destroy(build);
-                    const prepared_slot = try self.registry.allocator().create(ModuleSlot);
-                    errdefer self.registry.allocator().destroy(prepared_slot);
-                    const prepared_entry = try self.registry.allocator().create(SlotEntry);
-                    errdefer self.registry.allocator().destroy(prepared_entry);
-                    prepared_entry.* = .{ .slot = prepared_slot };
-                    prepared_slot.* = .{
-                        .inventory = .init(prepared_entry),
-                        .allocator = self.registry.allocator(),
-                    };
-                    const slot_source: @TypeOf(build.slot) = if (self.registry.takeRecycledSlot()) |recycled| source: {
-                        self.registry.allocator().destroy(prepared_entry);
-                        self.registry.allocator().destroy(prepared_slot);
-                        break :source .{ .recycled = recycled };
-                    } else .{ .fresh = prepared_slot };
-                    const slot = slot_source.get();
-                    build.* = .{
-                        .snapshot = state.snapshot,
-                        .modules = state.modules,
-                        .aliases = state.aliases,
-                        .slot = slot_source,
-                    };
-                    self.state = .{ .insert = .{
-                        .build = build,
-                        .cursor = build.modules.putCursor(name, slot),
-                    } };
-                    break :result .pending;
-                },
-                .insert => |*state| switch (state.cursor.advance()) {
-                    .pending => .pending,
-                    .complete => result: {
-                        const template = self.image.image().initial_state;
-                        if (template.len != 0)
-                            state.build.state = try self.registry.allocator().alloc(
-                                value.Value,
-                                template.len,
-                            );
-                        @memset(state.build.state, .{ .int = 0 });
-                        self.state = .{ .seed_state = state.build };
-                        break :result .pending;
-                    },
-                },
-                // A first registration *copies* the template rather than
-                // consuming it: the same image may seed another slot later, so
-                // the template stays the image's own immutable property.
-                .seed_state => |build| result: {
-                    const template = self.image.image().initial_state;
-                    if (build.copied != template.len) {
-                        const item = template[build.copied];
-                        heap.retainValue(item);
-                        build.state[build.copied] = item;
-                        build.copied += 1;
-                        break :result .pending;
-                    }
-                    try self.prepareRegistration();
-                    self.state = .{ .commit_new = build };
-                    break :result .pending;
-                },
-                // Re-registration takes an ordinary place in the slot's fair
-                // FIFO. Every application queued before it therefore runs
-                // against the old generation and finishes first, and every
-                // later one queues behind the publication, so no application
-                // ever straddles the swap. An idle slot grants the turn on
-                // request, which keeps the sequential reload immediate.
-                .barrier => |*state| result: {
-                    if (!state.requested) {
-                        state.requested = true;
-                        self.barrier_turn = .init(state.lease.move(), self.authority);
-                        self.barrier_turn.?.request() catch |err| switch (err) {
-                            // A unit inside a state application already holds
-                            // one slot; waiting for a second is the deadlock
-                            // shape `within` refuses everywhere else.
-                            error.StateApplicationActive => {
-                                self.barrier_turn.?.release();
-                                self.barrier_turn = null;
-                                return error.StateApplicationActive;
-                            },
-                            // The slot closed while this cursor was
-                            // resolving: start over, so the name is looked up
-                            // again in the directory the close published.
-                            error.ModuleRemoved => {
-                                self.barrier_turn.?.release();
-                                self.barrier_turn = null;
-                                self.state = .snapshot;
-                                break :result .pending;
+                    .copy_modules => |*state| {
+                        if (state.insertion) |*insertion| switch (insertion.advance()) {
+                            .pending => return .pending,
+                            .complete => {
+                                state.insertion = null;
+                                return .pending;
                             },
                         };
-                    }
-                    if (!self.barrier_turn.?.granted()) break :result .blocked;
-                    if (self.retired_reservation == null)
-                        self.retired_reservation = try self.registry.allocator().create(RetiredGeneration);
-                    // Removal may have won the turn ahead of this cursor, so
-                    // the slot is re-validated after the grant rather than
-                    // only at lookup. Nothing has been published yet, so the
-                    // retry still owns everything it arrived with.
-                    const slot = self.barrier_turn.?.lease.slot();
-                    if (slot.phase.load(.acquire) != .live) {
-                        self.registry.allocator().destroy(self.retired_reservation.?);
-                        self.retired_reservation = null;
-                        self.barrier_turn.?.release();
-                        self.barrier_turn = null;
-                        self.state = .snapshot;
-                        break :result .pending;
-                    }
-                    try self.prepareRegistration();
-                    self.state = .commit_existing;
-                    break :result .pending;
-                },
-                // Replacement installs new code over live state: the slot
-                // keeps the durable stack it already owns and this image's
-                // template is simply not consulted for that slot.
-                .commit_existing => result: {
-                    const slot = self.barrier_turn.?.lease.slot();
-                    const retired = self.retired_reservation.?;
-                    const registration = self.registration.?;
-                    self.registry.lockBlocking();
-                    const prior = slot.publisher.currentOwned().?;
-                    std.debug.assert(slot.phase.load(.acquire) == .live);
-                    retired.* = .{ .generation = prior };
-                    // Read before publishing: once the turn is released, a
-                    // waiting removal may retire this registration.
-                    const generation = prior.generation + 1;
-                    registration.generation = generation;
-                    registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.publisher.publish(self.takeRegistration());
-                    const release_prior = slot.publisher.quiescent();
-                    if (!release_prior) self.registry.enqueueRetiredGenerationLocked(retired);
-                    self.registry.unlock();
-                    self.retired_reservation = null;
-                    if (release_prior) {
-                        prior.release();
-                        self.registry.allocator().destroy(retired);
-                    }
-                    if (self.barrier_turn) |*turn| turn.release();
-                    self.state = .complete;
-                    break :result .{ .complete = generation };
-                },
-                .commit_new => |build| result: {
-                    const slot = build.slot.get();
-                    const next = try self.registry.allocator().create(Directory);
-                    self.registry.lockBlocking();
-                    if (!self.registry.privateState().directories.isCurrent(build.snapshot.old)) {
+                        switch (state.entries.advance()) {
+                            .pending => {},
+                            .item => |entry| {
+                                const replaced = switch (kind) {
+                                    .register, .remove => entry.key == state.build.target.canonical,
+                                    .alias => false,
+                                };
+                                if (!replaced) {
+                                    entry.value.retain();
+                                    state.insertion = state.build.candidate.modules.putCursor(entry.key, entry.value);
+                                }
+                            },
+                            .complete => self.enterPutModule(state.build),
+                        }
+                    },
+                    .put_module => |*state| switch (state.cursor.advance()) {
+                        .pending => {},
+                        .complete => self.enterCopyAliases(state.build),
+                    },
+                    .copy_aliases => |*state| {
+                        if (state.insertion) |*insertion| switch (insertion.advance()) {
+                            .pending => return .pending,
+                            .complete => {
+                                state.insertion = null;
+                                return .pending;
+                            },
+                        };
+                        switch (state.entries.advance()) {
+                            .pending => {},
+                            .item => |entry| {
+                                // Removal takes every alias of the module with it.
+                                const dropped = kind == .remove and entry.value == state.build.target.canonical;
+                                if (!dropped)
+                                    state.insertion = state.build.candidate.aliases.putCursor(entry.key, entry.value);
+                            },
+                            .complete => self.enterPutAlias(state.build),
+                        }
+                    },
+                    .put_alias => |*state| switch (state.cursor.advance()) {
+                        .pending => {},
+                        .complete => self.state = .{ .commit = state.build },
+                    },
+                    .commit => |*build| {
+                        self.registry.lockBlocking();
+                        if (!self.registry.privateState().directories.isCurrent(build.directory.directory)) {
+                            self.registry.unlock();
+                            var stale = build.*;
+                            self.state = .snapshot;
+                            self.discard(&stale);
+                            return .pending;
+                        }
+                        const outcome = self.apply(build.target);
+                        build.candidate.previous = @constCast(build.directory.directory);
+                        self.registry.privateState().directories.publish(build.candidate);
                         self.registry.unlock();
-                        self.registry.allocator().destroy(next);
-                        self.destroyBuild(build);
-                        self.state = .snapshot;
-                        break :result .pending;
-                    }
-                    switch (build.slot) {
-                        .fresh => self.registry.recordFreshSlotLocked(slot),
-                        .recycled => slot.resetForReuse(),
-                    }
-                    next.* = .{
-                        .modules = build.modules,
-                        .aliases = build.aliases,
-                        .previous = @constCast(build.snapshot.old),
-                    };
-                    const registration = self.registration.?;
-                    registration.generation = 1;
-                    registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.state = build.state;
-                    build.state = &.{};
-                    slot.publisher.publish(self.takeRegistration());
-                    self.registry.privateState().directories.publish(next);
-                    self.registry.unlock();
-                    build.snapshot.directory.deinit();
-                    self.registry.allocator().destroy(build);
-                    self.state = .complete;
-                    break :result .{ .complete = 1 };
-                },
-                .complete => unreachable,
-            };
-        }
-    };
-
-    pub fn registrationCursor(
-        self: *Registry,
-        image: ImageRef,
-        name: intern.ModuleName,
-        provenance: RegistrationProvenance,
-        authority: *TurnAuthority,
-    ) RegistrationCursor {
-        return .init(self, image, name, provenance, authority);
-    }
-
-    /// Cancellation-independent owner of all work after the directory close
-    /// edge. The initiating Unit transfers its granted turn and detached
-    /// durable stack here before it can observe cancellation again.
-    const RemovalRetirement = struct {
-        registry: *Registry,
-        turn: StateTurn,
-        state: []value.Value = &.{},
-        remaining: usize = 0,
-        retirement: heap.ReleaseDomain.Retirement = .{},
-
-        fn abort(self: *RemovalRetirement) void {
-            std.debug.assert(self.state.len == 0);
-            self.turn.release();
-            self.registry.allocator().destroy(self);
-        }
-
-        pub fn advanceRetirement(
-            releases: *heap.ReleaseDomain,
-            owner_allocator: std.mem.Allocator,
-            self: *RemovalRetirement,
-        ) bool {
-            if (self.remaining != 0) {
-                self.remaining -= 1;
-                const stale = self.state[self.remaining];
-                self.state[self.remaining] = .{ .int = 0 };
-                releases.releaseValue(stale);
-                return false;
-            }
-            if (self.state.len != 0) owner_allocator.free(self.state);
-            self.state = &.{};
-            const owning = self.turn.lease.slot();
-            owning.retireEmpty();
-            self.registry.recycleSlot(owning);
-            self.turn.release();
-            owner_allocator.destroy(self);
-            return true;
-        }
-    };
-
-    /// `blocked` means the cursor is waiting for another unit to release the
-    /// slot's turn; unlike `pending`, polling again cannot make progress.
-    pub const RemovalProgress = enum { pending, blocked, detached, complete };
-    /// The owner-issued removal protocol: close new resolution, take the
-    /// slot's barrier turn so no state application straddles the close, then
-    /// retire the code generation and every durable value through bounded
-    /// work. Session shutdown consumes the same transitions.
-    pub const RemovalCursor = struct {
-        registry: *Registry,
-        requested: intern.ModuleName,
-        authority: *TurnAuthority,
-        state: State = .snapshot,
-
-        const State = union(enum) {
-            snapshot,
-            alias: struct {
-                directory: DirectoryLease,
-                lookup: Directory.AliasMap.RawLookupCursor,
-            },
-            module: struct {
-                canonical: intern.ModuleName,
-                directory: DirectoryLease,
-                lookup: Directory.ModuleMap.RawLookupCursor,
-            },
-            barrier: struct {
-                canonical: intern.ModuleName,
-                directory: DirectoryLease,
-                retirement: *RemovalRetirement,
-            },
-            modules_map: struct {
-                canonical: intern.ModuleName,
-                directory: DirectoryLease,
-                retirement: *RemovalRetirement,
-                cloner: Directory.ModuleMap.CloneExcludingCursor,
-            },
-            aliases_map: struct {
-                canonical: intern.ModuleName,
-                directory: DirectoryLease,
-                retirement: *RemovalRetirement,
-                modules: Directory.ModuleMap,
-                cloner: Directory.AliasMap.CloneExcludingCursor,
-            },
-            commit: struct {
-                canonical: intern.ModuleName,
-                directory: DirectoryLease,
-                retirement: *RemovalRetirement,
-                modules: Directory.ModuleMap,
-                aliases: Directory.AliasMap,
-            },
-            /// Observation-only witness used to report ordinary completion
-            /// after detached retirement reaches `.retired`. Cancellation may
-            /// drop it; it owns none of the cleanup work.
-            transferred: SlotLease,
-            settle_reuse: MaintenanceCursor,
-            failed: DirectoryLease,
-            complete,
-        };
-
-        pub fn deinit(self: *RemovalCursor) void {
-            switch (self.state) {
-                .snapshot, .settle_reuse, .complete => {},
-                .alias => |*state| state.directory.deinit(),
-                .module => |*state| state.directory.deinit(),
-                .barrier => |*state| {
-                    state.retirement.abort();
-                    state.directory.deinit();
-                },
-                .modules_map => |*state| {
-                    state.cloner.deinit();
-                    state.retirement.abort();
-                    state.directory.deinit();
-                },
-                .aliases_map => |*state| {
-                    state.cloner.deinit();
-                    state.modules.deinit();
-                    state.retirement.abort();
-                    state.directory.deinit();
-                },
-                .commit => |*state| {
-                    state.modules.deinit();
-                    state.aliases.deinit();
-                    state.retirement.abort();
-                    state.directory.deinit();
-                },
-                .transferred => |*completion| completion.deinit(),
-                .failed => |*directory| directory.deinit(),
-            }
-            self.* = undefined;
-        }
-
-        pub fn advance(self: *RemovalCursor) RemovalError!RemovalProgress {
-            return switch (self.state) {
-                .snapshot => result: {
-                    var directory = self.registry.acquireDirectory();
-                    const old = directory.directory orelse {
-                        directory.deinit();
-                        return error.MissingModule;
-                    };
-                    if (intern.moduleBindingName(self.requested)) |alias_name| {
-                        self.state = .{ .alias = .{
-                            .directory = directory,
-                            .lookup = old.aliases.rawLookup(alias_name),
-                        } };
-                    } else {
-                        self.state = .{ .module = .{
-                            .canonical = self.requested,
-                            .directory = directory,
-                            .lookup = old.modules.rawLookup(self.requested),
-                        } };
-                    }
-                    break :result .pending;
-                },
-                // Every name that can reach a module can also remove it, so a
-                // A short alias canonicalizes through the registry directory.
-                .alias => |*alias_state| switch (alias_state.lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |canonical_name| result: {
-                        const canonical = canonical_name orelse self.requested;
-                        const directory = alias_state.directory;
-                        self.state = .{ .module = .{
-                            .canonical = canonical,
-                            .directory = directory,
-                            .lookup = directory.directory.?.modules.rawLookup(canonical),
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .module => |*module| switch (module.lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |maybe_slot| result: {
-                        const found = maybe_slot orelse return error.MissingModule;
-                        const retirement = try self.registry.allocator().create(RemovalRetirement);
-                        retirement.* = .{
-                            .registry = self.registry,
-                            .turn = .init(SlotLease.retain(found), self.authority),
-                        };
-                        const canonical = module.canonical;
-                        const directory = module.directory;
-                        self.state = .{ .barrier = .{
-                            .canonical = canonical,
-                            .directory = directory,
-                            .retirement = retirement,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .barrier => |*barrier| result: {
-                    const retirement = barrier.retirement;
-                    if (!retirement.turn.linked) {
-                        retirement.turn.request() catch |err| switch (err) {
-                            error.StateApplicationActive => {
-                                const directory = barrier.directory;
-                                self.state = .{ .failed = directory };
-                                retirement.abort();
-                                return error.StateApplicationActive;
-                            },
-                            // Another removal of the same name won the race.
-                            error.ModuleRemoved => {
-                                const directory = barrier.directory;
-                                self.state = .{ .failed = directory };
-                                retirement.abort();
-                                return error.MissingModule;
-                            },
-                        };
-                        break :result .pending;
-                    }
-                    if (!retirement.turn.granted()) break :result .blocked;
-                    const canonical = barrier.canonical;
-                    const directory = barrier.directory;
-                    const cloner = directory.directory.?.modules
-                        .cloneExcludingCursor(canonical, null);
-                    self.state = .{ .modules_map = .{
-                        .canonical = canonical,
-                        .directory = directory,
-                        .retirement = retirement,
-                        .cloner = cloner,
-                    } };
-                    break :result .pending;
-                },
-                .modules_map => |*modules_state| switch (try modules_state.cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        const canonical = modules_state.canonical;
-                        const directory = modules_state.directory;
-                        const retirement = modules_state.retirement;
-                        modules_state.cloner.deinit();
-                        const cloner = directory.directory.?.aliases
-                            .cloneExcludingCursor(null, canonical);
-                        self.state = .{ .aliases_map = .{
-                            .canonical = canonical,
-                            .directory = directory,
-                            .retirement = retirement,
-                            .modules = map,
-                            .cloner = cloner,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .aliases_map => |*aliases_state| switch (try aliases_state.cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        const canonical = aliases_state.canonical;
-                        const directory = aliases_state.directory;
-                        const retirement = aliases_state.retirement;
-                        const modules = aliases_state.modules;
-                        aliases_state.cloner.deinit();
-                        self.state = .{ .commit = .{
-                            .canonical = canonical,
-                            .directory = directory,
-                            .retirement = retirement,
-                            .modules = modules,
-                            .aliases = map,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                // One publish is the close edge: concurrent resolution sees
-                // either the live module or nothing, never a half-removed
-                // entry, and every alias targeting the slot goes with it.
-                .commit => |*commit| result: {
-                    const next = try self.registry.allocator().create(Directory);
-                    self.registry.lockBlocking();
-                    if (!self.registry.privateState().directories.isCurrent(commit.directory.directory)) {
-                        self.registry.unlock();
-                        self.registry.allocator().destroy(next);
-                        var directory = commit.directory;
-                        var modules = commit.modules;
-                        var aliases = commit.aliases;
-                        const retirement = commit.retirement;
-                        self.state = .snapshot;
-                        modules.deinit();
-                        aliases.deinit();
-                        retirement.abort();
-                        directory.deinit();
-                        break :result .pending;
-                    }
-                    next.* = .{
-                        .modules = commit.modules,
-                        .aliases = commit.aliases,
-                        .previous = @constCast(commit.directory.directory),
-                    };
-                    const retirement = commit.retirement;
-                    const owning = retirement.turn.lease.slot();
-                    closeArbiter(owning);
-                    retirement.state = owning.state;
-                    retirement.remaining = owning.state.len;
-                    owning.state = &.{};
-                    retirement.turn.detachUnitAuthority();
-                    const completion = retirement.turn.lease.clone();
-                    self.registry.privateState().directories.publish(next);
-                    self.registry.unlock();
-                    commit.directory.deinit();
-                    self.state = .{ .transferred = completion };
-                    self.registry.releaseDomain().retire(retirement, &retirement.retirement);
-                    break :result .detached;
-                },
-                .transferred => |*completion| result: {
-                    if (completion.slot().phase.load(.acquire) != .retired)
-                        break :result .pending;
-                    completion.deinit();
-                    self.state = .{ .settle_reuse = self.registry.maintenanceCursor() };
-                    break :result .detached;
-                },
-                .settle_reuse => |*maintenance| switch (maintenance.advance()) {
-                    .pending => .pending,
-                    .complete => result: {
+                        var published = build.*;
                         self.state = .complete;
-                        break :result .complete;
+                        published.directory.deinit();
+                        return if (kind == .register) .{ .complete = outcome } else .complete;
                     },
-                },
-                .failed, .complete => unreachable,
-            };
-        }
-    };
-    pub fn removalCursor(
-        self: *Registry,
-        requested: intern.ModuleName,
-        authority: *TurnAuthority,
-    ) RemovalCursor {
-        return .{
-            .registry = self,
-            .requested = requested,
-            .authority = authority,
+                    .complete => unreachable,
+                }
+                return .pending;
+            }
+
+            fn beginSnapshot(self: *Self) Error!Progress {
+                switch (kind) {
+                    .register => if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(self.request.borrow().name))))
+                        return error.ReservedName,
+                    .alias => if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.request.short))))
+                        return error.ReservedName,
+                    .remove => {},
+                }
+                var directory = self.registry.acquireDirectory();
+                const old = directory.directory orelse {
+                    switch (kind) {
+                        .register => {
+                            self.beginBuild(directory, .{ .canonical = self.requestedName(), .prior = null });
+                            return .pending;
+                        },
+                        .remove, .alias => {
+                            directory.deinit();
+                            return error.MissingModule;
+                        },
+                    }
+                };
+                const step: Validation = switch (kind) {
+                    .register => if (intern.moduleBindingName(self.requestedName())) |short|
+                        .{ .alias_free = old.aliases.rawLookup(short) }
+                    else
+                        .{ .prior = old.modules.rawLookup(self.requestedName()) },
+                    .remove => if (intern.moduleBindingName(self.request)) |short|
+                        .{ .resolve_alias = old.aliases.rawLookup(short) }
+                    else
+                        .{ .existing = .{ .canonical = self.request, .lookup = old.modules.rawLookup(self.request) } },
+                    .alias => .{ .short_free = old.modules.rawLookup(intern.moduleNameFromBinding(self.request.short)) },
+                };
+                self.state = .{ .validate = .{ .directory = directory, .step = step } };
+                return .pending;
+            }
+
+            /// A refusal leaves the lease in place for `deinit`; no caller
+            /// advances a cursor past an error.
+            fn validate(self: *Self, state: *@FieldType(State, "validate")) Error!Progress {
+                const old = state.directory.directory.?;
+                switch (kind) {
+                    .register => switch (state.step) {
+                        .alias_free => |*lookup| switch (lookup.advance()) {
+                            .pending => {},
+                            .complete => |existing| {
+                                if (existing != null) return error.NameConflict;
+                                state.step = .{ .prior = old.modules.rawLookup(self.requestedName()) };
+                            },
+                        },
+                        .prior => |*lookup| switch (lookup.advance()) {
+                            .pending => {},
+                            .complete => |prior| self.beginBuild(
+                                state.directory,
+                                .{ .canonical = self.requestedName(), .prior = prior },
+                            ),
+                        },
+                    },
+                    .remove => switch (state.step) {
+                        .resolve_alias => |*lookup| switch (lookup.advance()) {
+                            .pending => {},
+                            .complete => |canonical| {
+                                const name = canonical orelse self.request;
+                                state.step = .{ .existing = .{ .canonical = name, .lookup = old.modules.rawLookup(name) } };
+                            },
+                        },
+                        .existing => |*existing| switch (existing.lookup.advance()) {
+                            .pending => {},
+                            .complete => |found| {
+                                const prior = found orelse return error.MissingModule;
+                                self.beginBuild(state.directory, .{ .canonical = existing.canonical, .prior = prior });
+                            },
+                        },
+                    },
+                    .alias => switch (state.step) {
+                        .short_free => |*lookup| switch (lookup.advance()) {
+                            .pending => {},
+                            .complete => |found| {
+                                if (found != null) return error.NameConflict;
+                                state.step = .{ .target_module = old.modules.rawLookup(self.request.target) };
+                            },
+                        },
+                        .target_module => |*lookup| switch (lookup.advance()) {
+                            .pending => {},
+                            .complete => |found| {
+                                if (found != null) {
+                                    state.step = .{ .same_alias = .{
+                                        .canonical = self.request.target,
+                                        .lookup = old.aliases.rawLookup(self.request.short),
+                                    } };
+                                } else if (intern.moduleBindingName(self.request.target)) |short| {
+                                    state.step = .{ .target_alias = old.aliases.rawLookup(short) };
+                                } else return error.MissingModule;
+                            },
+                        },
+                        .target_alias => |*lookup| switch (lookup.advance()) {
+                            .pending => {},
+                            .complete => |canonical| {
+                                const target = canonical orelse return error.MissingModule;
+                                state.step = .{ .same_alias = .{
+                                    .canonical = target,
+                                    .lookup = old.aliases.rawLookup(self.request.short),
+                                } };
+                            },
+                        },
+                        .same_alias => |*same| switch (same.lookup.advance()) {
+                            .pending => {},
+                            .complete => |existing| {
+                                if (existing != null and existing.? == same.canonical) {
+                                    var directory = state.directory;
+                                    self.state = .complete;
+                                    directory.deinit();
+                                    return .complete;
+                                }
+                                self.beginBuild(state.directory, .{ .canonical = same.canonical, .prior = null });
+                            },
+                        },
+                    },
+                }
+                return .pending;
+            }
+
+            fn beginBuild(self: *Self, directory: DirectoryLease, target: Target) void {
+                const expected = (if (directory.directory) |old| old.modules.count() else 0) + 1;
+                self.state = .{ .init_modules = .{
+                    .directory = directory,
+                    .target = target,
+                    .cursor = Directory.ModuleMap.initCursor(self.registry.allocator(), expected),
+                } };
+            }
+
+            fn enterPutModule(self: *Self, build: Build) void {
+                if (kind == .register) {
+                    const image = self.request.borrow();
+                    image.retain();
+                    self.state = .{ .put_module = .{
+                        .build = build,
+                        .cursor = build.candidate.modules.putCursor(build.target.canonical, image),
+                    } };
+                } else self.enterCopyAliases(build);
+            }
+
+            fn enterCopyAliases(self: *Self, build: Build) void {
+                if (build.directory.directory) |old| {
+                    self.state = .{ .copy_aliases = .{
+                        .build = build,
+                        .entries = old.aliases.rawEntries(),
+                    } };
+                } else self.enterPutAlias(build);
+            }
+
+            fn enterPutAlias(self: *Self, build: Build) void {
+                if (kind == .alias) {
+                    self.state = .{ .put_alias = .{
+                        .build = build,
+                        .cursor = build.candidate.aliases.putCursor(self.request.short, build.target.canonical),
+                    } };
+                } else self.state = .{ .commit = build };
+            }
+
+            /// The edit's effect on the images themselves, applied under the
+            /// writer lock just before the candidate becomes current: a
+            /// replaced or removed generation is marked superseded, which is
+            /// what evicts qualified call-site cache entries that still hold
+            /// it, and a published image learns its generation number.
+            fn apply(self: *Self, target: Target) switch (kind) {
+                .register => u64,
+                .remove, .alias => void,
+            } {
+                switch (kind) {
+                    .register => {
+                        const image = self.request.borrow();
+                        image.generation = if (target.prior) |prior| prior.generation + 1 else 1;
+                        if (target.prior) |prior| prior.superseded.store(true, .release);
+                        return image.generation;
+                    },
+                    .remove => target.prior.?.superseded.store(true, .release),
+                    .alias => {},
+                }
+            }
         };
     }
 
-    pub const AliasProgress = poll.Progress(void);
-    pub const AliasCursor = struct {
-        registry: *Registry,
-        short: intern.BindingName,
-        target: intern.ModuleName,
-        state: State = .snapshot,
+    pub const RegistrationCursor = EditCursor(.register);
+    pub const RemovalCursor = EditCursor(.remove);
+    pub const AliasCursor = EditCursor(.alias);
 
-        const State = union(enum) {
-            snapshot,
-            short_module: struct {
-                directory: DirectoryLease,
-                lookup: Directory.ModuleMap.RawLookupCursor,
-            },
-            target_module: struct {
-                directory: DirectoryLease,
-                lookup: Directory.ModuleMap.RawLookupCursor,
-            },
-            target_alias: struct {
-                directory: DirectoryLease,
-                lookup: Directory.AliasMap.RawLookupCursor,
-            },
-            short_alias: struct {
-                directory: DirectoryLease,
-                canonical_target: intern.ModuleName,
-                lookup: Directory.AliasMap.RawLookupCursor,
-            },
-            modules_map: struct {
-                directory: DirectoryLease,
-                canonical_target: intern.ModuleName,
-                alias_capacity: usize,
-                cloner: Directory.ModuleMap.CloneCursor,
-            },
-            aliases_map: struct {
-                directory: DirectoryLease,
-                canonical_target: intern.ModuleName,
-                modules: Directory.ModuleMap,
-                cloner: Directory.AliasMap.CloneCursor,
-            },
-            candidate: struct {
-                directory: DirectoryLease,
-                canonical_target: intern.ModuleName,
-                modules: Directory.ModuleMap,
-                aliases: Directory.AliasMap,
-            },
-            insert: struct {
-                directory: DirectoryLease,
-                candidate: *Directory,
-                insertion: Directory.AliasMap.PutCursor,
-            },
-            commit: struct {
-                directory: DirectoryLease,
-                candidate: *Directory,
-            },
-            failed: DirectoryLease,
-            complete,
-        };
-
-        pub fn init(registry: *Registry, short: intern.BindingName, target: intern.ModuleName) AliasCursor {
-            return .{ .registry = registry, .short = short, .target = target };
-        }
-        pub fn deinit(self: *AliasCursor) void {
-            switch (self.state) {
-                .snapshot, .complete => {},
-                .short_module => |*state| state.directory.deinit(),
-                .target_module => |*state| state.directory.deinit(),
-                .target_alias => |*state| state.directory.deinit(),
-                .short_alias => |*state| state.directory.deinit(),
-                .modules_map => |*state| {
-                    state.cloner.deinit();
-                    state.directory.deinit();
-                },
-                .aliases_map => |*state| {
-                    state.cloner.deinit();
-                    state.modules.deinit();
-                    state.directory.deinit();
-                },
-                .candidate => |*state| {
-                    state.modules.deinit();
-                    state.aliases.deinit();
-                    state.directory.deinit();
-                },
-                .insert => |*state| {
-                    self.destroyCandidate(state.candidate);
-                    state.directory.deinit();
-                },
-                .commit => |*state| {
-                    self.destroyCandidate(state.candidate);
-                    state.directory.deinit();
-                },
-                .failed => |*directory| directory.deinit(),
-            }
-            self.* = undefined;
-        }
-        fn destroyCandidate(self: *AliasCursor, candidate: *Directory) void {
-            candidate.modules.deinit();
-            candidate.aliases.deinit();
-            self.registry.allocator().destroy(candidate);
-        }
-        pub fn advance(self: *AliasCursor) AliasError!AliasProgress {
-            return switch (self.state) {
-                .snapshot => result: {
-                    if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.short))))
-                        return error.ReservedName;
-                    const directory = self.registry.acquireDirectory();
-                    const old = directory.directory orelse {
-                        self.state = .{ .failed = directory };
-                        return error.MissingModule;
-                    };
-                    self.state = .{ .short_module = .{
-                        .directory = directory,
-                        .lookup = old.modules.rawLookup(intern.moduleNameFromBinding(self.short)),
-                    } };
-                    break :result .pending;
-                },
-                .short_module => |*short_module| switch (short_module.lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |slot| result: {
-                        if (slot != null) {
-                            const directory = short_module.directory;
-                            self.state = .{ .failed = directory };
-                            return error.NameConflict;
-                        }
-                        const directory = short_module.directory;
-                        self.state = .{ .target_module = .{
-                            .directory = directory,
-                            .lookup = directory.directory.?.modules.rawLookup(self.target),
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .target_module => |*target_module| switch (target_module.lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |slot| result: {
-                        if (slot != null) {
-                            const directory = target_module.directory;
-                            self.state = .{ .short_alias = .{
-                                .directory = directory,
-                                .canonical_target = self.target,
-                                .lookup = directory.directory.?.aliases.rawLookup(self.short),
-                            } };
-                        } else {
-                            if (intern.moduleBindingName(self.target)) |alias_name| {
-                                const directory = target_module.directory;
-                                self.state = .{ .target_alias = .{
-                                    .directory = directory,
-                                    .lookup = directory.directory.?.aliases.rawLookup(alias_name),
-                                } };
-                            } else {
-                                const directory = target_module.directory;
-                                self.state = .{ .failed = directory };
-                                return error.MissingModule;
-                            }
-                        }
-                        break :result .pending;
-                    },
-                },
-                .target_alias => |*target_alias| switch (target_alias.lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |canonical_name| result: {
-                        const canonical_target = canonical_name orelse {
-                            const directory = target_alias.directory;
-                            self.state = .{ .failed = directory };
-                            return error.MissingModule;
-                        };
-                        const directory = target_alias.directory;
-                        self.state = .{ .short_alias = .{
-                            .directory = directory,
-                            .canonical_target = canonical_target,
-                            .lookup = directory.directory.?.aliases.rawLookup(self.short),
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .short_alias => |*short_alias| switch (short_alias.lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |existing| result: {
-                        if (existing != null and existing == short_alias.canonical_target) {
-                            short_alias.directory.deinit();
-                            self.state = .complete;
-                            break :result .complete;
-                        }
-                        const directory = short_alias.directory;
-                        const canonical_target = short_alias.canonical_target;
-                        const alias_capacity: usize = @intFromBool(existing == null);
-                        const cloner = directory.directory.?.modules.cloneCursor(0);
-                        self.state = .{ .modules_map = .{
-                            .directory = directory,
-                            .canonical_target = canonical_target,
-                            .alias_capacity = alias_capacity,
-                            .cloner = cloner,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .modules_map => |*modules_state| switch (try modules_state.cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        const directory = modules_state.directory;
-                        const canonical_target = modules_state.canonical_target;
-                        const alias_capacity = modules_state.alias_capacity;
-                        modules_state.cloner.deinit();
-                        const cloner = directory.directory.?.aliases.cloneCursor(alias_capacity);
-                        self.state = .{ .aliases_map = .{
-                            .directory = directory,
-                            .canonical_target = canonical_target,
-                            .modules = map,
-                            .cloner = cloner,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .aliases_map => |*aliases_state| switch (try aliases_state.cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        const directory = aliases_state.directory;
-                        const canonical_target = aliases_state.canonical_target;
-                        const modules = aliases_state.modules;
-                        aliases_state.cloner.deinit();
-                        self.state = .{ .candidate = .{
-                            .directory = directory,
-                            .canonical_target = canonical_target,
-                            .modules = modules,
-                            .aliases = map,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .candidate => |*candidate_state| result: {
-                    const candidate = try self.registry.allocator().create(Directory);
-                    const directory = candidate_state.directory;
-                    const canonical_target = candidate_state.canonical_target;
-                    const modules = candidate_state.modules;
-                    const aliases = candidate_state.aliases;
-                    candidate.* = .{
-                        .modules = modules,
-                        .aliases = aliases,
-                        .previous = @constCast(directory.directory),
-                    };
-                    const insertion = candidate.aliases.putCursor(
-                        self.short,
-                        canonical_target,
-                    );
-                    self.state = .{ .insert = .{
-                        .directory = directory,
-                        .candidate = candidate,
-                        .insertion = insertion,
-                    } };
-                    break :result .pending;
-                },
-                .insert => |*insert| switch (insert.insertion.advance()) {
-                    .pending => .pending,
-                    .complete => result: {
-                        const directory = insert.directory;
-                        const candidate = insert.candidate;
-                        self.state = .{ .commit = .{
-                            .directory = directory,
-                            .candidate = candidate,
-                        } };
-                        break :result .pending;
-                    },
-                },
-                .commit => |*commit| result: {
-                    self.registry.lockBlocking();
-                    if (!self.registry.privateState().directories.isCurrent(commit.directory.directory)) {
-                        self.registry.unlock();
-                        const candidate = commit.candidate;
-                        var directory = commit.directory;
-                        self.state = .snapshot;
-                        self.destroyCandidate(candidate);
-                        directory.deinit();
-                        break :result .pending;
-                    }
-                    self.registry.privateState().directories.publish(commit.candidate);
-                    self.registry.unlock();
-                    commit.directory.deinit();
-                    self.state = .complete;
-                    break :result .complete;
-                },
-                .failed, .complete => unreachable,
-            };
-        }
-    };
-    pub fn aliasCursor(
-        self: *Registry,
-        short: intern.BindingName,
-        target: intern.ModuleName,
-    ) AliasCursor {
-        return .init(self, short, target);
+    pub fn registrationCursor(self: *Registry, image: SealedImage) RegistrationCursor {
+        return .{ .registry = self, .request = image };
+    }
+    pub fn removalCursor(self: *Registry, requested: intern.ModuleName) RemovalCursor {
+        return .{ .registry = self, .request = requested };
+    }
+    pub fn aliasCursor(self: *Registry, short: intern.BindingName, target: intern.ModuleName) AliasCursor {
+        return .{ .registry = self, .request = .{ .short = short, .target = target } };
     }
 
     pub const AcquireProgress = poll.Progress(?GenerationLease);
+    /// Resolution of a canonical name or an alias to an observation lease on
+    /// its current generation. The directory lease held across the lookup is
+    /// what makes the retain safe: the directory owns the entry until the
+    /// lease is released.
     pub const AcquireCursor = struct {
-        registry: *const Registry,
         directory: DirectoryLease,
         name: intern.ModuleName,
         state: State,
@@ -4087,32 +2550,17 @@ pub const Registry = enum(usize) {
             module: Directory.ModuleMap.RawLookupCursor,
             alias: Directory.AliasMap.RawLookupCursor,
             canonical_module: Directory.ModuleMap.RawLookupCursor,
-            maintenance: struct {
-                lease: ?GenerationLease,
-                cursor: MaintenanceCursor,
-            },
             complete,
         };
 
         pub fn deinit(self: *AcquireCursor) void {
             self.directory.deinit();
-            switch (self.state) {
-                .maintenance => |*maintenance| if (maintenance.lease) |*lease| lease.deinit(),
-                .absent, .module, .alias, .canonical_module, .complete => {},
-            }
             self.* = undefined;
         }
-        fn acceptSlot(self: *AcquireCursor, slot: *ModuleSlot) AcquireProgress {
-            const protected = self.registry.leaseSlot(slot);
-            if (protected.needs_maintenance) {
-                self.state = .{ .maintenance = .{
-                    .lease = protected.lease,
-                    .cursor = @constCast(self.registry).maintenanceCursor(),
-                } };
-                return .pending;
-            }
+        fn found(self: *AcquireCursor, image: *ModuleImage) AcquireProgress {
+            image.retain();
             self.state = .complete;
-            return .{ .complete = protected.lease };
+            return .{ .complete = GenerationLease.initRetained(image) };
         }
         pub fn advance(self: *AcquireCursor) AcquireProgress {
             while (true) switch (self.state) {
@@ -4120,27 +2568,21 @@ pub const Registry = enum(usize) {
                     self.state = .complete;
                     return .{ .complete = null };
                 },
-                .module => |*lookup| {
-                    switch (lookup.advance()) {
-                        .pending => return .pending,
-                        .complete => |slot| if (slot) |found| {
-                            return self.acceptSlot(found);
-                        } else {
-                            if (intern.moduleBindingName(self.name)) |alias_name| {
-                                const alias_lookup = self.directory.directory.?.aliases.rawLookup(alias_name);
-                                self.state = .{ .alias = alias_lookup };
-                            } else {
-                                self.state = .complete;
-                                return .{ .complete = null };
-                            }
-                        },
-                    }
+                .module => |*lookup| switch (lookup.advance()) {
+                    .pending => return .pending,
+                    .complete => |image| if (image) |present| {
+                        return self.found(present);
+                    } else if (intern.moduleBindingName(self.name)) |alias_name| {
+                        self.state = .{ .alias = self.directory.directory.?.aliases.rawLookup(alias_name) };
+                    } else {
+                        self.state = .complete;
+                        return .{ .complete = null };
+                    },
                 },
                 .alias => |*lookup| switch (lookup.advance()) {
                     .pending => return .pending,
-                    .complete => |canonical_name| if (canonical_name) |found| {
-                        const canonical_lookup = self.directory.directory.?.modules.rawLookup(found);
-                        self.state = .{ .canonical_module = canonical_lookup };
+                    .complete => |canonical_name| if (canonical_name) |canonical| {
+                        self.state = .{ .canonical_module = self.directory.directory.?.modules.rawLookup(canonical) };
                     } else {
                         self.state = .complete;
                         return .{ .complete = null };
@@ -4148,17 +2590,7 @@ pub const Registry = enum(usize) {
                 },
                 .canonical_module => |*lookup| switch (lookup.advance()) {
                     .pending => return .pending,
-                    .complete => |slot| {
-                        return self.acceptSlot(slot orelse unreachable);
-                    },
-                },
-                .maintenance => |*maintenance| switch (maintenance.cursor.advance()) {
-                    .pending => return .pending,
-                    .complete => {
-                        const lease = maintenance.lease;
-                        self.state = .complete;
-                        return .{ .complete = lease };
-                    },
+                    .complete => |image| return self.found(image orelse unreachable),
                 },
                 .complete => unreachable,
             };
@@ -4167,31 +2599,12 @@ pub const Registry = enum(usize) {
     pub fn acquireCursor(self: *const Registry, name: intern.ModuleName) AcquireCursor {
         const directory = self.acquireDirectory();
         return .{
-            .registry = self,
             .directory = directory,
             .name = name,
             .state = if (directory.directory) |current|
                 .{ .module = current.modules.rawLookup(name) }
             else
                 .absent,
-        };
-    }
-
-    const LeaseSlotResult = struct {
-        lease: ?GenerationLease,
-        needs_maintenance: bool,
-    };
-    fn leaseSlot(self: *const Registry, slot: *ModuleSlot) LeaseSlotResult {
-        _ = self;
-        var snapshot_lease = slot.publisher.acquire();
-        const generation = snapshot_lease.snapshot;
-        if (generation) |present| {
-            @constCast(present).retain();
-        }
-        const final_reader = snapshot_lease.deinit();
-        return .{
-            .lease = if (generation) |present| GenerationLease.initRetained(@constCast(present)) else null,
-            .needs_maintenance = final_reader,
         };
     }
 
@@ -4360,18 +2773,19 @@ pub const testing = if (builtin.is_test) struct {
         return poll.drive(?GenerationLease, &cursor, .{});
     }
 
-    pub fn register(
-        registry: *Registry,
-        image: ImageRef,
-        name: intern.ModuleName,
-    ) CommitError!u64 {
-        var authority: TurnAuthority = .available;
-        var cursor = registry.registrationCursor(image, name, .ordinary, &authority);
+    pub fn register(registry: *Registry, image: *SealedImage) CommitError!u64 {
+        var cursor = registry.registrationCursor(image.move());
         defer cursor.deinit();
         while (true) switch (try cursor.advance()) {
-            .pending, .blocked => {},
+            .pending => {},
             .complete => |generation| return generation,
         };
+    }
+
+    pub fn remove(registry: *Registry, name: intern.ModuleName) RemovalError!void {
+        var cursor = registry.removalCursor(name);
+        defer cursor.deinit();
+        return poll.driveVoidFallible(&cursor, .{});
     }
 
     pub fn alias(

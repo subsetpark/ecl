@@ -85,7 +85,7 @@ const MapScratch = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "probe.ecl",
-            .data = "[] ((42) 'answer def) @module 'helper register [] ((helper.answer) 'answer def) 'mapprobe @defm",
+            .data = "[] ((42) 'answer def) 'helper @defm [] ((helper.answer) 'answer def) 'mapprobe @defm",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -579,6 +579,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[] (1) @spawn dup pair task.await-any pop pop " ++
             "[] (1) @spawn dup task.await pop 0 task.await-for pop " ++
             "[] (1) @spawn 1000000 task.await-for pop " ++
+            "[] (task.receive) @spawn dup task.address 1 swap task.send task.await pop " ++
             "[] ((1) () while) @spawn dup task.cancel task.await pop " ++
             "[(1) (missing) (2 3)] ([] swap @spawn) each (task.await) each pop " ++
             "[1 2 3] [] (dup *) @each pop",
@@ -609,21 +610,16 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "'allocation-module ('get) import get pop 'short 'allocation-module alias short.get pop " ++
             "[] (2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
             "[] ([] ((dup) 'f def) 'bad @defm) @attempt pop " ++
-            // A non-empty construction stack is captured as durable slot
-            // state, so capture, commit, and re-registration discard each
-            // have an allocation-failure path of their own.
-            "[11 12 13] (1 +) 'oom-stateful @defm " ++
-            "[21 22] (2 +) 'oom-stateful @defm " ++
-            // Transactional updates allocate on the draft, the replacement
-            // snapshot, and the caller window; the failing half must leave
-            // the durable stack and the caller stack untouched.
-            "[0] (((1 + dup without) within) 'bump def " ++
-            "((dup without missing) within) 'boom def " ++
-            "((dup without) within) 'peek def) 'oom-within @defm " ++
-            "oom-within.bump pop [] (oom-within.boom) @attempt pop " ++
-            // The failing half must publish nothing, so the durable stack
-            // still holds exactly what the successful half left.
-            "oom-within.peek 1 match? pop " ++
+            // A seeded construction consumes its seeds; one that leaves a
+            // value behind is refused, and that refusal allocates its error.
+            "[11 12 13] (+ + pop) 'oom-stateful @defm " ++
+            "[21 22] (+ pop) 'oom-stateful @defm " ++
+            "[] ([21] (1 +) 'oom-leftover @defm) @attempt pop " ++
+            // Calls, failures inside calls, and reloads each have their own
+            // allocation-failure paths through registration.
+            "[] ((1) 'bump def (missing) 'boom def (7) 'peek def) 'oom-calls @defm " ++
+            "oom-calls.bump pop [] (oom-calls.boom) @attempt pop " ++
+            "oom-calls.peek 7 match? pop " ++
             // Namespaced registration plus branded qualification and ordinary
             // late-bound execution each have Session-only allocation paths.
             "[] ((33) 'dynamic def) 'oom.namespaced @defm " ++
@@ -631,17 +627,18 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "3 (dup) first execute pop pop " ++
             // Removal closes, quiesces, and retires through the same bounded
             // work, so its allocation-failure paths belong in the sweep too.
-            "[1 2] (((dup without) within) 'peek def) 'oom-removed @defm " ++
-            "oom-removed.peek pop 'oom-removed unmodule",
+            "[] (([1 2]) 'peek def) 'oom-removed @defm " ++
+            "oom-removed.peek pop 'oom-removed undefm",
     );
     try runOk(
         &runtime,
-        "oom-module-value.ecl",
-        // The value wrapper, the registration record, the copied state
-        // template, and the barrier publication each have their own ordinals.
-        // One construction registered twice and one reload reach all four.
-        "[] (1) @module dup 'oom-left register 'oom-right register " ++
-            "[] (2) @module 'oom-left register [] (3) @module pop",
+        "oom-module-registration.ecl",
+        // The registration record and the generation publication each have
+        // their own ordinals. Two definitions and one reload reach both, and a
+        // failed body releases its candidate; its failure propagates, so the
+        // probe observes it as a result.
+        "[] ((1) 'one def) 'oom-left @defm [] ((1) 'one def) 'oom-right @defm " ++
+            "[] ((2) 'one def) 'oom-left @defm [] ([] (\"x\" fail) 'oom-failed @defm) @attempt pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();
@@ -850,9 +847,8 @@ fn stdlibSessionAllocationProbe(
         .random => try runOk(
             &runtime,
             "oom-random.ecl",
-            "'rng ('seed 'deal 'shuffle 'ints 'float) import " ++
-                "42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
-                "[7 0] 2 6 rand.ints nip pop",
+            "[7 0] 2 6 rand.ints nip pop [7 0] rand.float pop pop " ++
+                "[7 0] 2 4 rand.deal pop pop [7 0] [1 2 3] rand.shuffle pop pop",
         ),
         .dict => try runOk(
             &runtime,

@@ -1541,7 +1541,7 @@ const StencilBootstrapDriver = struct {
                 self.fill_index += run;
                 return self.fill_index == control.width;
             },
-            .generic_spine, .dict, .task, .module, .port, .reserved_mask => return null,
+            .generic_spine, .dict, .task, .port, .address, .reserved_mask => return null,
         }
     }
 
@@ -2235,6 +2235,6 @@ fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!boo
             1 => true,
             else => evaluator.typeError("a 0/1 bool"),
         },
-        .float, .char, .symbol, .word, .list, .dict, .task, .module, .port => evaluator.typeError("a 0/1 bool"),
+        .float, .char, .symbol, .word, .list, .dict, .task, .port, .address => evaluator.typeError("a 0/1 bool"),
     };
 }

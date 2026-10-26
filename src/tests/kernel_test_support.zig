@@ -203,3 +203,38 @@ pub inline fn repeated(comptime text: []const u8, comptime count: usize) *const 
         return &final;
     }
 }
+
+/// One public qualified word per embedded standard module, in `stdlib.names()`
+/// registration order, so a loop zipping the two covers every module and a new
+/// module fails to compile until it is listed here.
+pub const stdlib_exports = [_][]const u8{
+    "port.await",
+    "port.core.await",
+    "task.pending",
+    "dict.from-pairs",
+    "error.new",
+    "result.ok",
+    "str.upper",
+    "io.print",
+    "csv.parse",
+    "json.parse",
+    "host.cwd",
+    "source.declarations",
+    "table.valid?",
+    "http.get-bytes",
+    "http.server.route",
+    "http.request.new",
+    "http.response.new",
+    "proc.wait",
+    "proc.core.process",
+    "fs.read-text",
+    "net.listen",
+    "net.core.listener",
+    "path.normalize",
+    "archive.sha256",
+    "clock.now",
+    "time.parse",
+    "agent.start",
+    "rand.float",
+    "test.default.run",
+};

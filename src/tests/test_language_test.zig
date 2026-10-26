@@ -55,7 +55,7 @@ test "testing: declaration is legal only at a module construction root" {
     try expectOk(&runtime, "[] ((1) 'direct test) 'direct.module @defm");
 }
 
-test "testing: test names are absent from application resolution and module invocation" {
+test "testing: test names are absent from application resolution" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -65,12 +65,10 @@ test "testing: test names are absent from application resolution and module invo
 
     try expectOk(
         &runtime,
-        "[] ((1) 'same def (2) 'same test (3) 'hidden test) @module " ++
-            "dup 'visibility register " ++
+        "[] ((1) 'same def (2) 'same test (3) 'hidden test) 'visibility @defm " ++
             "visibility.same 1 = {'kind 'user} assert",
     );
     try expectErr(&runtime, "visibility.hidden");
-    try expectErr(&runtime, "dup 'hidden invoke");
 }
 
 test "testing: test mode discovers canonical registrations without aliases" {
@@ -84,7 +82,7 @@ test "testing: test mode discovers canonical registrations without aliases" {
     try expectOk(
         &runtime,
         "[] ((1) 'z test (2) 'a test) 'suite.two @defm " ++
-            "[] ((3) 'only test) @module dup 'suite.one register 'suite.copy register " ++
+            "[] ((3) 'only test) 'suite.one @defm [] ((3) 'only test) 'suite.copy @defm " ++
             "'short 'suite.one alias " ++
             "tests dup len 4 = {'kind 'user} assert " ++
             "first dup 'module at 'suite.copy match? {'kind 'user} assert " ++
@@ -148,23 +146,6 @@ test "testing: test execution reaches private definitions and reifies its isolat
     );
 }
 
-test "testing: test executions share durable module state" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .language_tests);
-    defer runtime.deinit();
-
-    try expectOk(
-        &runtime,
-        "[] (0 ((1 + dup without) within) 'first test " ++
-            "((dup without) within) 'second test) 'stateful @defm " ++
-            "tests first @test 'ok at first 1 = {'kind 'user} assert " ++
-            "tests 1 at @test 'ok at first 1 = {'kind 'user} assert",
-    );
-}
-
 test "testing: reload and removal replace the discoverable test catalog coherently" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
@@ -181,7 +162,7 @@ test "testing: reload and removal replace the discoverable test catalog coherent
             "tests dup len 1 = {'kind 'user} assert " ++
             "first 'name at 'new match? {'kind 'user} assert " ++
             "stale @test 'err dict.has? {'kind 'user} assert " ++
-            "'changing unmodule tests len 0 = {'kind 'user} assert",
+            "'changing undefm tests len 0 = {'kind 'user} assert",
     );
 }
 

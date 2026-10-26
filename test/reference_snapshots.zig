@@ -109,13 +109,9 @@ const cases = [_]Case{
     .{ .name = "qualify execute", .source = "[] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "'qualify doc" },
-    .{ .name = "within top level", .source = "(1) within" },
-    .{ .name = "without top level", .source = "without" },
-    .{ .name = "see within", .source = "'within see" },
-    .{ .name = "doc without", .source = "'without doc" },
-    .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
-    .{ .name = "unmodule then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone unmodule gone.x" },
-    .{ .name = "doc unmodule", .source = "'unmodule doc" },
+    .{ .name = "undefm unknown", .source = "'nowhere undefm" },
+    .{ .name = "undefm then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone undefm gone.x" },
+    .{ .name = "doc undefm", .source = "'undefm doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
     .{ .name = "result ok", .source = "[1 2] result.ok" },
@@ -155,22 +151,14 @@ const cases = [_]Case{
     .{ .name = "rand.ints", .source = "[7 0] 4 6 rand.ints" },
     .{ .name = "rand.float", .source = "[7 0] rand.float" },
     .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
-    .{ .name = "rng deal", .source = "'rng ('deal) import 3 10 deal" },
+    .{ .name = "rand.deal", .source = "[7 0] 3 10 rand.deal" },
+    .{ .name = "rand.shuffle", .source = "[7 0] [10 20 30 40] rand.shuffle" },
     // The unit-constructor convention: the guided boundary error and the
     // seeding composition that replaced the `-with` family.
     .{ .name = "isolated substack", .source = "3 [1] (+) @attempt" },
     .{ .name = "isolated child", .source = "3 [1 2] [] (+ +) @each" },
     .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
     .{ .name = "seeded module", .source = "[7] ('base set) 'm @defm m.base" },
-    // Anonymous construction, opaque identity, and one image under two names.
-    .{ .name = "anonymous module", .source = "[] () @module type" },
-    .{ .name = "module identity", .source = "[] (1) @module dup match? [] (1) @module [] (1) @module match?" },
-    .{
-        .name = "one image two registrations",
-        .source = "[] (0 ((1 + dup without) within) 'bump def) @module " ++
-            "dup 'l register 'r register l.bump l.bump r.bump",
-    },
-    .{ .name = "module marker is unreadable", .source = "\"<module>\" parse" },
     .{ .name = "old spelling", .source = "(1) attempt" },
     .{ .name = "row annotation", .source = "(a -- ...) (dup) 'f def 'f see" },
     .{ .name = "row after mixing", .source = "(a -- ... b) (dup) 'f def" },
@@ -887,55 +875,25 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\"Construct an executable qualified word without reparsing source text."
         \\stderr:
         \\<empty>
-        \\=== within top level ===
-        \\source: (1) within
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{'kind 'domain 'msg "within is legal only in code homed in a module" 'word 'within 'trace ['within] 'data {'source "<command>" 'line 1 'col 5}}
-        \\=== without top level ===
-        \\source: without
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{'kind 'domain 'msg "without is legal only inside a within application" 'word 'without 'trace ['without] 'data {'source "<command>" 'line 1 'col 1}}
-        \\=== see within ===
-        \\source: 'within see
-        \\exit: 0
-        \\stdout:
-        \\(quotation -- ... :
-        \\ "Run a quotation against a private draft of the home module's durable stack and publish the result.")
-        \\<primitive>
-        \\stderr:
-        \\<empty>
-        \\=== doc without ===
-        \\source: 'without doc
-        \\exit: 0
-        \\stdout:
-        \\"Move the draft's top value onto the pending outputs a within application returns to its caller."
-        \\stderr:
-        \\<empty>
-        \\=== unmodule unknown ===
-        \\source: 'nowhere unmodule
+        \\=== undefm unknown ===
+        \\source: 'nowhere undefm
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
         \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'scope 'qualified 'source "<command>" 'line 1 'col 10}}
-        \\=== unmodule then resolve ===
-        \\source: [] ((1) 'x def) 'gone @defm 'gone unmodule gone.x
+        \\=== undefm then resolve ===
+        \\source: [] ((1) 'x def) 'gone @defm 'gone undefm gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 44}}
-        \\=== doc unmodule ===
-        \\source: 'unmodule doc
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 42}}
+        \\=== doc undefm ===
+        \\source: 'undefm doc
         \\exit: 0
         \\stdout:
-        \\"Close, quiesce, and retire a registered module named by a symbol."
+        \\"Remove the module registered under a canonical name or alias."
         \\stderr:
         \\<empty>
         \\=== result ok ===
@@ -1158,11 +1116,18 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'domain 'msg "rand.int expected a positive bound, not 0" 'word 'rand.int 'trace ['rand.int] 'data {'source "<command>" 'line 1 'col 9}}
-        \\=== rng deal ===
-        \\source: 'rng ('deal) import 3 10 deal
+        \\=== rand.deal ===
+        \\source: [7 0] 3 10 rand.deal
         \\exit: 0
         \\stdout:
-        \\[5 0 7]
+        \\[7 3] [7 0 4]
+        \\stderr:
+        \\<empty>
+        \\=== rand.shuffle ===
+        \\source: [7 0] [10 20 30 40] rand.shuffle
+        \\exit: 0
+        \\stdout:
+        \\[7 4] [40 20 30 10]
         \\stderr:
         \\<empty>
         \\=== isolated substack ===
@@ -1208,34 +1173,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\7
         \\stderr:
         \\<empty>
-        \\=== anonymous module ===
-        \\source: [] () @module type
-        \\exit: 0
-        \\stdout:
-        \\'module
-        \\stderr:
-        \\<empty>
-        \\=== module identity ===
-        \\source: [] (1) @module dup match? [] (1) @module [] (1) @module match?
-        \\exit: 0
-        \\stdout:
-        \\1 0
-        \\stderr:
-        \\<empty>
-        \\=== one image two registrations ===
-        \\source: [] (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register l.bump l.bump r.bump
-        \\exit: 0
-        \\stdout:
-        \\1 2 1
-        \\stderr:
-        \\<empty>
-        \\=== module marker is unreadable ===
-        \\source: "<module>" parse
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{'kind 'parse 'msg "module display markers are runtime-only and cannot be parsed" 'word 'parse 'trace ['parse] 'data {'source "<parse>" 'line 1 'col 1}}
         \\=== old spelling ===
         \\source: (1) attempt
         \\exit: 1

@@ -522,6 +522,28 @@ test "reader bounds long classification and post-growth materialization" {
         };
         if (progress == .complete) return error.TestExpectedError;
     }
+
+    const address_marker = try repeatedSource(allocator, "<address:", "0", 70_000, ">");
+    defer allocator.free(address_marker);
+    var address_diag: lexer.Diag = .{};
+    var address_cursor = reader.ReadCursor.init(
+        allocator,
+        releases,
+        "<address-marker>",
+        address_marker,
+        &address_diag,
+    );
+    defer retireReadCursor(&address_cursor, releases);
+    for (0..address_marker.len * 2) |_|
+        try std.testing.expect((try advanceOne(&address_cursor)) == .pending);
+    while (true) {
+        const progress = advanceOne(&address_cursor) catch |err| {
+            try std.testing.expectEqual(error.Parse, err);
+            try std.testing.expect(std.mem.indexOf(u8, address_diag.text(), "address display markers") != null);
+            break;
+        };
+        if (progress == .complete) return error.TestExpectedError;
+    }
 }
 
 fn readFailureProbe(allocator: std.mem.Allocator) !void {

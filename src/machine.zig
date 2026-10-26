@@ -1150,7 +1150,7 @@ const Eval = struct {
     },
 
     /// Where this body's definitions land, where its references resolve, and
-    /// whose privacy and durable state it runs against. One value rather than
+    /// whose privacy it runs under. One value rather than
     /// three fields, so a construction site cannot set two of them and leave
     /// the third describing different code.
     site: ExecutionSite,
@@ -1214,76 +1214,16 @@ const Eval = struct {
     pub fn resolutionScope(self: Eval) ?*env.Scope {
         return self.site.resolution_scope;
     }
-    /// Whose privacy and durable state this body runs against.
+    /// Whose privacy this body runs under.
     pub fn home(self: Eval) ?*modules.ModuleHome {
         return self.site.home;
     }
 };
-/// One tagged owner of everything a `within` transaction needs: the private
-/// draft of the home slot's durable stack (the unit window above
-/// `draft_base`), the pending outputs `without` moved outward, the slot turn
-/// that serializes it, and the publication transition itself. Only
-/// `beginWithin` constructs one, and it is consumed exactly once — by
-/// publication on success, or by retirement on every failure.
-pub const StateApplication = struct {
-    unit: *Unit,
-    turn: modules.StateTurn,
-    outputs: std.ArrayList(Value) = .empty,
-    draft_base: u32 = 0,
-
-    fn retire(
-        self: *StateApplication,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        if (self.unit.state_application == self) self.unit.state_application = null;
-        for (self.outputs.items) |item| releases.releaseValue(item);
-        self.outputs.deinit(allocator);
-        self.turn.release();
-        allocator.destroy(self);
-    }
-};
-
-/// Unique ownership of one in-flight state application, in the same shape
-/// as `modules.OwnedCandidate`. Every transfer is a move, so the boundary
-/// frame and the driver that built it can never both retire the same
-/// transaction — the failure that a shared raw pointer invites.
-const OwnedApplication = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn init(application: *StateApplication) OwnedApplication {
-        return @fromBackingInt(@intCast(@intFromPtr(application)));
-    }
-    fn borrow(self: OwnedApplication) *StateApplication {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    fn move(self: *OwnedApplication) OwnedApplication {
-        const result = self.*;
-        std.debug.assert(result != .consumed);
-        self.* = .consumed;
-        return result;
-    }
-    pub fn retire(
-        self: *OwnedApplication,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        if (self.* == .consumed) return;
-        const application = self.borrow();
-        self.* = .consumed;
-        application.retire(releases, allocator);
-    }
-};
-
-/// A module construction boundary. The body always produces an anonymous
-/// image; publication is `register`'s alone, which the prelude's `@defm`
-/// composes after it.
+/// A module construction boundary. The body builds the image `@defm` named
+/// before it ran; completion seals and publishes that image.
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
-    provenance: modules.RegistrationProvenance,
-    /// Exact construction body admitted by `@module`. A declaration
+    /// Exact construction body admitted by `@defm`. A declaration
     /// is module-level only while this is the current activation; quotations
     /// called by the body may inherit its home but not its declaration site.
     root_code: *Header,
@@ -1296,7 +1236,6 @@ const ModuleBoundary = struct {
 const BoundaryMode = union(enum) {
     attempt,
     module: ModuleBoundary,
-    state: OwnedApplication,
 };
 const Boundary = struct {
     mode: BoundaryMode,
@@ -1307,18 +1246,10 @@ const Boundary = struct {
     previous_base: u32,
     previous_boundary: ?FrameIndex,
     word: intern.TraceWord,
-    fn deinit(
-        self: Boundary,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
+    fn deinit(self: Boundary) void {
         switch (self.mode) {
             .module => |boundary| boundary.deinit(),
             .attempt => {},
-            .state => |owned| {
-                var application = owned;
-                application.retire(releases, allocator);
-            },
         }
     }
 };
@@ -1460,7 +1391,7 @@ pub const ExecutionSite = struct {
     /// rather than a link in any chain — so `null` means "go straight to
     /// core".
     resolution_scope: ?*env.Scope,
-    /// Whose privacy and durable state this body runs against. Correlated
+    /// Whose privacy this body runs under. Correlated
     /// with the scopes but not derivable from them: a homeless word called
     /// from module code inherits the caller's home while resolving against its
     /// own lexical chain.
@@ -1703,7 +1634,7 @@ pub const Frame = union(enum(u8)) {
                 loading.deinit();
                 releases.releaseValue(frame.path);
             },
-            .boundary => |boundary| boundary.deinit(releases, allocator),
+            .boundary => |boundary| boundary.deinit(),
         }
     }
 };
@@ -1938,6 +1869,10 @@ pub const ParkRequest = union(enum) {
     close_scope: u8,
     external: external.ReadinessSource,
     external_until: struct { source: external.ReadinessSource, deadline: @import("scheduler.zig").Deadline },
+    /// Park on a task mailbox, for a message or for space to queue one. A
+    /// deadline resumes the driver exactly as readiness does, so a timed
+    /// receive hands back a value instead of raising.
+    mailbox: struct { source: external.ReadinessSource, deadline: ?@import("scheduler.zig").Deadline },
 
     /// The one value graph owned by every parking request that carries one.
     /// Scheduler setup, abandonment, and ordinary deinit all use this mapping.
@@ -1945,7 +1880,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .any => |item| item,
             .deadline => |deadline| deadline.task,
-            .close_scope, .external, .external_until, .sleep => null,
+            .close_scope, .external, .external_until, .mailbox, .sleep => null,
         };
     }
 
@@ -1953,7 +1888,7 @@ pub const ParkRequest = union(enum) {
         return switch (self) {
             .task, .deadline => 1,
             .any => |tasks| @intCast(tasks.list.length()),
-            .close_scope, .external, .external_until, .sleep => 0,
+            .close_scope, .external, .external_until, .mailbox, .sleep => 0,
         };
     }
 
@@ -1968,7 +1903,7 @@ pub const ParkRequest = union(enum) {
                 break :single deadline.task;
             },
             .any => |tasks| list.atUnchecked(tasks, index),
-            .close_scope, .external, .external_until, .sleep => unreachable,
+            .close_scope, .external, .external_until, .mailbox, .sleep => unreachable,
         };
     }
 
@@ -1981,6 +1916,10 @@ pub const ParkRequest = union(enum) {
             },
             .external => |source| {
                 var owned = source;
+                owned.deinit();
+            },
+            .mailbox => |waiting| {
+                var owned = waiting.source;
                 owned.deinit();
             },
             else => {},
@@ -2021,6 +1960,10 @@ pub const ExternalResume = union(enum) {
     out_of_memory,
 };
 
+/// How a wait on a task mailbox ended. Readiness and the deadline both
+/// resume the driver, which polls the mailbox and reads the clock itself.
+pub const MailboxResume = enum { ready, cancelled, io, out_of_memory };
+
 /// One family per park request, so a sleep cannot deliver a task outcome, a
 /// task wait cannot report that it slept, and each family's failure wording
 /// describes what the unit was actually doing.
@@ -2028,12 +1971,13 @@ pub const ParkResume = union(enum) {
     task_wait: TaskWaitResume,
     sleep: SleepResume,
     external: ExternalResume,
+    mailbox: MailboxResume,
     scope_closed: u8,
 
     pub fn ownedValue(self: ParkResume) ?Value {
         return switch (self) {
             .task_wait => |wait| wait.ownedValue(),
-            .sleep, .external, .scope_closed => null,
+            .sleep, .external, .mailbox, .scope_closed => null,
         };
     }
 
@@ -2042,6 +1986,7 @@ pub const ParkResume = union(enum) {
         return switch (request) {
             .sleep => .{ .sleep = .io },
             .external, .external_until => .{ .external = .io },
+            .mailbox => .{ .mailbox = .io },
             .task, .any, .deadline => .{ .task_wait = .io },
             .close_scope => unreachable,
         };
@@ -2053,6 +1998,7 @@ pub const ParkResume = union(enum) {
         return switch (request) {
             .sleep => .{ .sleep = .cancelled },
             .external, .external_until => .{ .external = .cancelled },
+            .mailbox => .{ .mailbox = .cancelled },
             .task, .any, .deadline => .{ .task_wait = .cancelled },
             .close_scope => unreachable,
         };
@@ -2427,14 +2373,6 @@ pub const Unit = struct {
     /// module generation. The Unit lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
     native: NativeContinuation = .idle,
-    /// The one state application this unit may own. `within` refuses to
-    /// nest, so a single slot is exhaustive, and every parking, publication,
-    /// and `without` authority question reduces to this field.
-    state_application: ?*StateApplication = null,
-    /// The unit's single right to hold a slot's turn. `within`, reload, and
-    /// removal all spend it, so a second acquisition is not a guard anyone
-    /// has to remember — there is nothing left to spend.
-    turn_authority: modules.TurnAuthority = .available,
     current: ?Eval = null,
     active_index: u32 = 0,
     active_word: intern.TraceWord = no_word,
@@ -2762,6 +2700,20 @@ pub const Unit = struct {
         while (index) |frame_index| {
             const boundary = self.frames.items[@backingInt(frame_index)].boundary;
             if (boundary.mode == .attempt) return true;
+            index = boundary.previous_boundary;
+        }
+        return false;
+    }
+    /// Whether a module construction is open anywhere in this unit's frame
+    /// stack. Unlike the direct-root test `testDeclarationCursor` applies, any
+    /// depth counts: a helper word the body calls and an `@attempt` nested in
+    /// the body are still construction, so a body cannot launder a task launch
+    /// through code it defines first.
+    pub fn inModuleConstruction(self: *const Unit) bool {
+        var index = self.boundary_index;
+        while (index) |frame_index| {
+            const boundary = self.frames.items[@backingInt(frame_index)].boundary;
+            if (boundary.mode == .module) return true;
             index = boundary.previous_boundary;
         }
         return false;
@@ -3294,11 +3246,6 @@ pub const Machine = struct {
                 .cursor = self.unit.inherited.registry.beginArtifactLoadingCursor(location.artifact_id, .of(self.unit)),
             } }),
         });
-    }
-
-    pub fn currentSource(self: *const Machine) ?*const map_state.SourceScope {
-        const current = self.unit.current orelse return null;
-        return current.site.registration_provenance.sourceScope();
     }
 
     /// Standard-library names are reserved, like `core`: only embedded loading
@@ -4016,11 +3963,11 @@ pub const Machine = struct {
             // strand the lease and path this driver had already taken.
             const registry = evaluator.unit.inherited.registry;
             const publication = switch (entry) {
-                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, words),
+                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, self.request.module.name, .standard_library, words),
                 .bindings => |registration| registered: {
                     const binding = try registration.bind(evaluator.allocator(), &evaluator.unit.inherited);
                     defer binding.release();
-                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, binding);
+                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, self.request.module.name, .standard_library, binding);
                 },
                 .source, .native => unreachable,
             };
@@ -4104,36 +4051,27 @@ pub const Machine = struct {
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
         publication: heap.Owned(modules.Registry.BuiltinCandidateCursor),
-        candidate: ?heap.Owned(modules.SealedImage) = null,
         commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
 
         pub fn advance(evaluator: *Machine, self: *BuiltinLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             if (self.commit == null) {
-                if (self.candidate == null) {
-                    switch (self.publication.borrowMut().advance() catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.InvalidName => return evaluator.fail(
-                            .contract,
-                            "builtin module declares an invalid word name",
-                        ),
-                    }) {
-                        .pending => return .stepped,
-                        .complete => |candidate| {
-                            var built = candidate;
-                            errdefer built.deinit();
-                            self.candidate = .init(try built.seal(evaluator.moduleRecognition(.standard_library)));
-                            return .stepped;
-                        },
-                    }
+                switch (self.publication.borrowMut().advance() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidName => return evaluator.fail(
+                        .contract,
+                        "builtin module declares an invalid word name",
+                    ),
+                }) {
+                    .pending => return .stepped,
+                    .complete => |candidate| {
+                        var built = candidate;
+                        errdefer built.deinit();
+                        const sealed = try built.seal(evaluator.moduleRecognition(.standard_library));
+                        self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(sealed));
+                        return .stepped;
+                    },
                 }
-                self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(
-                    self.candidate.?.borrow().ref(),
-                    self.name,
-                    .standard_library,
-                    &evaluator.unit.turn_authority,
-                ));
-                return .stepped;
             }
             switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4144,7 +4082,6 @@ pub const Machine = struct {
                 ),
             }) {
                 .pending => return .stepped,
-                .blocked => return .{ .yielded = .wait },
                 .complete => {},
             }
             self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
@@ -4177,12 +4114,10 @@ pub const Machine = struct {
             },
             commit: struct {
                 instance: heap.Owned(*native_module.ModuleInstance),
-                candidate: heap.Owned(modules.SealedImage),
                 cursor: heap.Owned(modules.Registry.RegistrationCursor),
             },
             published: struct {
                 instance: heap.Owned(*native_module.ModuleInstance),
-                candidate: heap.Owned(modules.SealedImage),
             },
 
             pub fn deinit(
@@ -4199,13 +4134,9 @@ pub const Machine = struct {
                     },
                     .commit => |*commit| {
                         commit.cursor.deinit(releases, storage_allocator);
-                        commit.candidate.deinit(releases, storage_allocator);
                         commit.instance.deinit(releases, storage_allocator);
                     },
-                    .published => |*published| {
-                        published.candidate.deinit(releases, storage_allocator);
-                        published.instance.deinit(releases, storage_allocator);
-                    },
+                    .published => |*published| published.instance.deinit(releases, storage_allocator),
                 }
                 self.* = undefined;
             }
@@ -4232,6 +4163,8 @@ pub const Machine = struct {
                 .loaded => |*instance| {
                     const publication = try modules.Registry.NativeCandidateCursor.init(
                         evaluator.unit.inherited.registry,
+                        self.name,
+                        self.provenance,
                         instance.borrow(),
                     );
                     self.state.borrowMut().* = .{ .definitions = .{
@@ -4247,21 +4180,15 @@ pub const Machine = struct {
                         // the publication stay with this driver's state.
                         var built = candidate;
                         errdefer built.deinit();
-                        var sealed = heap.Owned(modules.SealedImage).init(try built.seal(evaluator.moduleRecognition(self.provenance)));
+                        const sealed = try built.seal(evaluator.moduleRecognition(self.provenance));
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        const cursor = evaluator.unit.inherited.registry.registrationCursor(
-                            sealed.borrow().ref(),
-                            self.name,
-                            self.provenance,
-                            &evaluator.unit.turn_authority,
-                        );
+                        const cursor = evaluator.unit.inherited.registry.registrationCursor(sealed);
                         self.state.borrowMut().* = .{ .commit = .{
                             .instance = .init(instance),
-                            .candidate = .init(sealed.take()),
                             .cursor = .init(cursor),
                         } };
                         return .stepped;
@@ -4276,11 +4203,9 @@ pub const Machine = struct {
                     ),
                 }) {
                     .pending => return .stepped,
-                    .blocked => return .{ .yielded = .wait },
                     .complete => {
                         const next: State = .{ .published = .{
                             .instance = commit.instance,
-                            .candidate = commit.candidate,
                         } };
                         var cursor = commit.cursor;
                         self.state.borrowMut().* = next;
@@ -5024,11 +4949,10 @@ pub const Machine = struct {
                         "pass initial values in the constructor's values operand",
                 },
                 .module => .{
-                    .constructor = "@module",
+                    .constructor = "@defm",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand",
+                        "pass initial values in the constructor's values operand: `values (body) 'name @defm`",
                 },
-                .state => null,
             };
         }
         if (self.unit.is_root_unit) return null;
@@ -5210,10 +5134,6 @@ pub const Machine = struct {
     /// here — before any wait — rather than in each parking word, which is
     /// what makes the prohibition total as new parking words are added.
     pub fn park(self: *Machine, request: ParkRequest) MachineError!void {
-        if (self.unit.state_application != null) {
-            request.deinit(self.releaseDomain());
-            return self.fail(.domain, "a within application cannot park");
-        }
         self.unit.installParkRequest(request);
     }
 
@@ -5680,39 +5600,12 @@ pub const Machine = struct {
     pub fn attemptOwned(self: *Machine, input: OwnedUnitInput) error{OutOfMemory}!void {
         return self.beginAttemptOwned(input);
     }
-    /// Publishes an already-constructed image under a validated name. The
-    /// module value is consumed: the driver retains it for its whole lifetime,
-    /// which is what keeps the borrowed image alive across every resumption,
-    /// and releases it on every exit.
-    pub fn registerModuleOwned(
-        self: *Machine,
-        module: Value,
-        name: intern.ModuleName,
-    ) MachineError!void {
-        const image = modules.imageRef(module) orelse {
-            self.releaseDomain().releaseValue(module);
-            return self.typeError("a module");
-        };
-        const provenance = self.unit.current.?.site.registration_provenance;
-        self.refuseReservedModule(name, provenance) catch |err| {
-            self.releaseDomain().releaseValue(module);
-            return err;
-        };
-        const registry = self.publicationRegistry(name, provenance);
-        return self.startDriver(ModuleRegisterDriver{
-            .module = .init(module),
-            .cursor = .init(registry.registrationCursor(
-                image,
-                name,
-                provenance,
-                &self.unit.turn_authority,
-            )),
-        });
-    }
-    /// Opens a construction boundary. The body evaluates against a fresh
-    /// anonymous image, which the boundary returns as a value.
+    /// Opens a construction boundary for `@defm`. The name has already been
+    /// validated; the body evaluates against a fresh image, and completion
+    /// publishes that image under the name.
     pub fn moduleOwned(
         self: *Machine,
+        name: intern.ModuleName,
         input: OwnedUnitInput,
     ) MachineError!void {
         var owned = input;
@@ -5720,7 +5613,7 @@ pub const Machine = struct {
         const registry = self.unit.inherited.registry;
         const word = self.unit.active_word;
         const provenance = self.unit.current.?.site.registration_provenance;
-        var candidate = try registry.createSourceImage(self.currentSource());
+        var candidate = try registry.createImage(name, provenance);
         errdefer candidate.deinit();
         // Attribution asks one question, of the exact designated body. The
         // archive consumes that body into either an unchanged owner or an
@@ -5740,19 +5633,11 @@ pub const Machine = struct {
                 var runnable = prepared_body;
                 defer runnable.deinit(self.releaseDomain(), self.allocator());
                 if (owned.seedHeader() == null) {
-                    return self.openImageBoundary(
-                        &candidate,
-                        provenance,
-                        word,
-                        runnable.take(),
-                    );
+                    return self.openImageBoundary(&candidate, word, runnable.take());
                 }
                 try self.startDriver(ConstructionDriver{
                     .state = .init(.{ .open = .{
-                        .target = .init(.{ .image = .{
-                            .candidate = candidate.move(),
-                            .provenance = provenance,
-                        } }),
+                        .target = .init(.{ .image = candidate.move() }),
                         .body = .init(runnable.take()),
                     } }),
                     .materializer = .init(.init(owned.takeSeeds().?)),
@@ -5777,10 +5662,7 @@ pub const Machine = struct {
                 defer cursor.deinit(self.releaseDomain(), self.allocator());
                 try self.startDriver(ConstructionDriver{
                     .state = .init(.{ .rescope = .{
-                        .target = .init(.{ .image = .{
-                            .candidate = candidate.move(),
-                            .provenance = provenance,
-                        } }),
+                        .target = .init(.{ .image = candidate.move() }),
                         .cursor = .init(cursor.take()),
                     } }),
                     .materializer = if (owned.takeSeeds()) |seeds|
@@ -5798,13 +5680,11 @@ pub const Machine = struct {
     fn openImageBoundary(
         self: *Machine,
         candidate: *modules.OwnedImage,
-        provenance: modules.RegistrationProvenance,
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
         const home = candidate.executionHome(self.unit.module_access);
-        var site = ExecutionSite.image(home, self.unit.module_access, true);
-        site.registration_provenance = provenance;
+        const site = ExecutionSite.image(home, self.unit.module_access, true);
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(body_header);
             return error.OutOfMemory;
@@ -5816,7 +5696,6 @@ pub const Machine = struct {
         try self.openBoundary(
             .{ .module = .{
                 .image = candidate.move(),
-                .provenance = provenance,
                 .root_code = body_header,
             } },
             @intCast(self.unit.stack.items.len),
@@ -5829,24 +5708,6 @@ pub const Machine = struct {
             .site = site,
             .traced_word = no_word,
         };
-    }
-    /// Invokes one public export of a module value. The module reference is
-    /// consumed: the driver retains it for its whole life — which is also what
-    /// keeps `image` valid, since an `ImageRef` is only a borrow — and
-    /// releases it on every exit. The binding symbol arrives unvalidated and
-    /// the driver validates it before consulting the image, so an
-    /// unqualifiable spelling fails as one rather than as a missing export.
-    pub fn invokeModuleOwned(
-        self: *Machine,
-        module: Value,
-        image: modules.ImageRef,
-        binding: u32,
-    ) MachineError!void {
-        return self.startDriver(HandleDispatchDriver{
-            .module = .init(module),
-            .image = image,
-            .validation = .init(binding),
-        });
     }
     /// The anchor of the image the running activation holds, if it holds one.
     /// A pointer compare against a cell's owner is a complete liveness proof:
@@ -5937,18 +5798,11 @@ pub const Machine = struct {
         return true;
     }
 
-    /// The home a module-local binding in `image` runs under: the running
-    /// home when it is the same image, so `within` keeps targeting the
-    /// registration the call came through, and the image's own
-    /// registration-less home otherwise. The caller has already proven the
-    /// image live, so nothing is acquired here.
+    /// The home a module-local binding in `image` runs under: that image's
+    /// own, or the running home when `image` is not a module root. The caller
+    /// has already proven the image live, so nothing is acquired here.
     fn homeForSlot(self: *Machine, image: *env.Scope) ?*modules.ModuleHome {
-        const current_home = self.unit.current.?.home();
-        const image_home = modules.homeForModuleRootScope(image) orelse return current_home;
-        if (current_home) |running| {
-            if (modules.sameImage(running, image_home, self.unit.module_access)) return running;
-        }
-        return image_home;
+        return modules.homeForModuleRootScope(image) orelse self.unit.current.?.home();
     }
 
     const SlotTarget = struct {
@@ -6181,129 +6035,6 @@ pub const Machine = struct {
             )),
         });
     }
-    /// Opens one state application against the invoking word's home slot.
-    /// Authority comes from the definition-site home, never from a value, so
-    /// extracting the body and redefining it elsewhere loses it. Every
-    /// prohibited shape — no home, an uncommitted registration root, and any
-    /// nesting including a second module's slot — is rejected here, before a
-    /// turn is requested and therefore before any wait.
-    pub fn beginWithin(self: *Machine, quotation: *Header) MachineError!void {
-        // Safety here is the unit's turn authority, which `request` below
-        // spends and cannot spend twice. This branch only chooses the more
-        // specific message for the two shapes a reader will recognize.
-        if (self.unit.state_application) |active| {
-            self.releaseDomain().releaseHeader(quotation);
-            const home = self.currentHome();
-            const same = if (home) |resolved|
-                active.turn.sameSlot(resolved, self.unit.module_access)
-            else
-                false;
-            return self.fail(.domain, if (same)
-                "within cannot nest inside another within application"
-            else
-                "within cannot open a second module's state application");
-        }
-        const home = self.currentHome() orelse {
-            self.releaseDomain().releaseHeader(quotation);
-            return self.fail(.domain, "within is legal only in code homed in a module");
-        };
-        var slot_lifetime = modules.retainHomeSlot(home, self.unit.module_access) orelse {
-            self.releaseDomain().releaseHeader(quotation);
-            return self.fail(.domain, "within is legal only in a published module word");
-        };
-        if (!modules.homeIsCurrent(home, self.unit.module_access)) {
-            slot_lifetime.deinit();
-            self.releaseDomain().releaseHeader(quotation);
-            return self.fail(.domain, "a replaced module generation cannot publish state");
-        }
-        const application = self.unit.allocator.create(StateApplication) catch {
-            slot_lifetime.deinit();
-            self.releaseDomain().releaseHeader(quotation);
-            return error.OutOfMemory;
-        };
-        application.* = .{
-            .unit = self.unit,
-            .turn = .init(slot_lifetime, &self.unit.turn_authority),
-        };
-        application.turn.request() catch |err| {
-            application.turn.release();
-            self.unit.allocator.destroy(application);
-            self.releaseDomain().releaseHeader(quotation);
-            return switch (err) {
-                // The unit's turn authority is already spent — by a nested
-                // application, a draft on another module, or a reload or
-                // removal still holding its barrier.
-                error.StateApplicationActive => self.fail(
-                    .domain,
-                    "within cannot open a second module state application",
-                ),
-                error.ModuleRemoved => self.fail(
-                    .domain,
-                    "a removed module cannot publish state",
-                ),
-            };
-        };
-        // Both owned fields are disposed if installation fails, so neither
-        // the queued turn nor the quotation outlives this call.
-        return self.startDriver(StateAcquireDriver{
-            .application = .init(.init(application)),
-            .quotation = .init(quotation),
-        });
-    }
-
-    /// Moves the draft's top value onto the pending output sequence. Nothing
-    /// reaches the caller until publication, so a failure after this point
-    /// still delivers nothing.
-    pub fn moveWithout(self: *Machine) MachineError!void {
-        const application = self.unit.state_application orelse return self.fail(
-            .domain,
-            "without is legal only inside a within application",
-        );
-        try self.require(1);
-        var item = heap.OwnedValue.init(self.releaseDomain(), self.unit.takeStackOwned().?);
-        errdefer item.deinit();
-        try application.outputs.append(self.unit.allocator, item.borrow());
-        _ = item.take();
-    }
-
-    /// Consumes both `application` and `quotation`: the caller has already
-    /// dropped its own reference, so every exit here retires them exactly
-    /// once — the boundary frame owns the application once it is appended,
-    /// and the earlier failures retire it directly.
-    fn enterStateApplication(
-        self: *Machine,
-        owned_application: OwnedApplication,
-        quotation: *Header,
-    ) MachineError!void {
-        var owned = owned_application;
-        const application = owned.borrow();
-        const word = self.unit.active_word;
-        const site = ExecutionSite.image(self.currentHome().?, self.unit.module_access, false);
-        _ = self.suspendCurrent() catch {
-            self.releaseDomain().releaseHeader(quotation);
-            owned.retire(self.releaseDomain(), self.unit.allocator);
-            return error.OutOfMemory;
-        };
-        if (self.unit.frames.items.len >= max_frame_count) {
-            self.releaseDomain().releaseHeader(quotation);
-            owned.retire(self.releaseDomain(), self.unit.allocator);
-            return error.OutOfMemory;
-        }
-        try self.openBoundary(
-            .{ .state = owned.move() },
-            application.draft_base,
-            word,
-            quotation,
-        );
-        self.unit.state_application = application;
-        self.unit.current = .{
-            .code = quotation,
-            .position = .{ .source = 0 },
-            .site = site,
-            .traced_word = no_word,
-        };
-    }
-
     pub fn raiseOwned(self: *Machine, raised: Value) MachineError {
         self.unit.installPendingFailure(EclErr.init(.user, "raised error"));
         if (self.unit.active_word != no_word) self.unit.pendingFailure().word = self.unit.active_word;
@@ -6896,6 +6627,21 @@ fn resumePark(self: *Machine) MachineError!void {
                 return error.OutOfMemory;
             },
         },
+        .mailbox => |ready| switch (ready) {
+            .ready => {},
+            .cancelled => {
+                clearWorkDriver(self.unit);
+                return self.fail(.cancelled, "unit cancelled while awaiting a message");
+            },
+            .io => {
+                clearWorkDriver(self.unit);
+                return self.fail(.io, "could not start a scheduler wait service");
+            },
+            .out_of_memory => {
+                clearWorkDriver(self.unit);
+                return error.OutOfMemory;
+            },
+        },
         .scope_closed => |status| self.unit.requestExit(status),
     }
 }
@@ -6954,7 +6700,7 @@ fn poll(self: *Machine) MachineError!void {
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |reference| reference,
-        .int, .float, .char, .symbol, .list, .dict, .task, .module, .port => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }
@@ -7094,97 +6840,6 @@ const QualifiedLoadPreparationDriver = struct {
                 return .detached;
             },
         };
-        return .stepped;
-    }
-};
-
-/// Dispatches one export of an image reached as a value.
-///
-/// It is a second *resolution source* feeding the same dispatch path: the
-/// resolved binding goes through the same `executeResolved` tail as a name-
-/// dispatched word, so home, privacy, annotation checks, trace metadata,
-/// builtin/native behavior, and cancellation are the tail's business exactly
-/// as they always were. The one property it cannot carry is state authority,
-/// because a value-reached image has no slot — an intended absence rather than
-/// a loss.
-const HandleDispatchDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    /// Retained for the driver's whole life, which is also what keeps `image`
-    /// usable: an `ImageRef` is a borrow valid at the call that produced it,
-    /// and this value is the retention behind it.
-    module: heap.Owned(Value),
-    image: modules.ImageRef,
-    validation: intern.NamespaceCursor,
-    binding: ?intern.BindingName = null,
-    home: ?*modules.ModuleHome = null,
-    cursor: ?heap.Owned(modules.ModuleResolveCursor) = null,
-
-    pub fn advance(evaluator: *Machine, self: *HandleDispatchDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        while (work.spend()) {
-            if (self.binding == null) {
-                switch (self.validation.advance()) {
-                    .pending => continue,
-                    .complete => |maybe_name| {
-                        const name = maybe_name orelse return evaluator.fail(
-                            .domain,
-                            "invoke requires an unqualified binding name",
-                        );
-                        self.binding = name;
-                        self.home = modules.handleHome(self.image, evaluator.unit.module_access);
-                        self.cursor = .init(modules.handleResolveCursor(
-                            self.image,
-                            intern.bindingId(name),
-                        ));
-                        evaluator.setActiveWord(.plain(intern.bindingId(name)));
-                        continue;
-                    },
-                }
-            }
-            switch (self.cursor.?.borrowMut().advance()) {
-                .pending => continue,
-                .complete => |maybe_lease| {
-                    const home = self.home.?;
-                    const binding = self.binding.?;
-                    const allocator = evaluator.unit.allocator;
-                    // Both retentions this driver holds — the resolve cursor's
-                    // pin and the module value — are released just below, and
-                    // `scheduleWord` does not re-pin until it runs. Without a
-                    // pin across that gap the image's refcount can reach zero
-                    // in between and a concurrent domain drain can retire it
-                    // while `home` and its scope are still in use. The
-                    // registered path is safe for the same reason in different
-                    // clothing: its resolution owns a generation lease. This
-                    // also covers the synchronous `builtin` and `native` arms
-                    // of `executeResolved`, which never reach `scheduleWord`.
-                    var image_pin = home.pin(evaluator.unit.module_access);
-                    defer image_pin.deinit();
-                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.cursor = null;
-                    self.module.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    evaluator.retireDriver(self);
-                    const lease = maybe_lease orelse
-                        return evaluator.undefinedWordIn(intern.bindingId(binding), .@"module-value");
-                    var resolved: Resolution = .{
-                        .lease = lease,
-                        // No generation: there is no registration to be a
-                        // generation of.
-                        .execution_generation = null,
-                        .home = home,
-                        // The image has no canonical name, so the trace spells
-                        // the local name alone. That is what an anonymous
-                        // image honestly is; borrowing the parameter's local
-                        // name would read better and claim more than is true.
-                        .trace_word = homeTraceWord(home, lease.traceWord() orelse binding),
-                        .origin = .module,
-                    };
-                    defer resolved.deinit(allocator);
-                    try executeResolved(evaluator, &resolved);
-                    return .detached;
-                },
-            }
-        }
         return .stepped;
     }
 };
@@ -7449,18 +7104,16 @@ fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
     };
 }
 
-/// How a module-local definition is spelled when reached through `home`. An
-/// anonymous construction root has no name to qualify with, so code running
-/// inside a body under construction traces by its local name alone.
+/// How a module-local definition is spelled when reached through `home`: by
+/// the name the image was built for, during construction as well as after.
 fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) intern.TraceWord {
-    const name = home.name() orelse return .plain(intern.bindingId(local));
-    return .moduleLocal(name, local);
+    return .moduleLocal(home.name(), local);
 }
 
 /// What a qualified resolution leaves behind for its call site: the cell it
 /// found and the registration generation it was found under.
 const CallSiteCacheCandidate = struct {
-    generation: modules.GenerationGuard,
+    generation: modules.GenerationLease,
     cell: env.BindingCellHandle,
 
     fn deinit(self: *CallSiteCacheCandidate) void {
@@ -7608,9 +7261,6 @@ pub const LookupChain = enum {
     core,
     /// A registered module's exports, reached through a dotted name.
     qualified,
-    /// The public exports of a module reached as a value. Not a scope miss at
-    /// all: the name is simply not exported by that image.
-    @"module-value",
 
     fn spelling(self: LookupChain) []const u8 {
         return switch (self) {
@@ -7618,7 +7268,6 @@ pub const LookupChain = enum {
             .module => "module",
             .core => "core",
             .qualified => "qualified",
-            .@"module-value" => "module-value",
         };
     }
 };
@@ -7862,7 +7511,7 @@ pub const BindingCache = struct {
 
 pub const Resolution = struct {
     lease: env.BindingLease,
-    execution_generation: ?modules.ExecutionGeneration,
+    execution_generation: ?modules.GenerationPin,
     home: ?*modules.ModuleHome,
     /// The reference the borrow acquired for this dispatch, moved out of the
     /// cursor. `scheduleWord` consumes it so no second pin is taken.
@@ -8176,26 +7825,17 @@ pub const ResolutionCursor = struct {
     /// Moving scope onto the word falsified that: a quotation that escaped its
     /// module carries its own image's scope, so the hit can come out of an image
     /// this activation is not running — and taking the caller's home there gave
-    /// the caller's `within` slot to someone else's private code.
+    /// the caller's privacy to someone else's private code.
     ///
-    /// So a *foreign* hit executes against its own image's registration-less
-    /// home. No acquire happens here: the borrow in `executeWord` already proved
+    /// So a hit executes against the home of the image it came out of. No
+    /// acquire happens here: the borrow in `executeWord` already proved
     /// that image live, either by holding a fresh pin or by matching the
     /// activation's own. Re-pinning would be a second reference for one
     /// dispatch, and the unconditional `pin`/`retain` must never appear here —
     /// it is a `fetchAdd` that asserts on a zero refcount and resurrects a
     /// destroyed object in ReleaseFast.
     fn homeForLocalHit(self: *ResolutionCursor, searched: *env.Scope) ?*modules.ModuleHome {
-        const image_home = modules.homeForModuleRootScope(searched) orelse
-            return self.current_home;
-        // A double-registered image entered through either name stays
-        // non-foreign, so `within` keeps targeting the registration the call
-        // actually came through.
-        if (self.current_home) |running| {
-            if (modules.sameImage(running, image_home, self.module_access))
-                return running;
-        }
-        return image_home;
+        return modules.homeForModuleRootScope(searched) orelse self.current_home;
     }
 
     fn directResult(
@@ -8235,7 +7875,7 @@ pub const ResolutionCursor = struct {
                 break :cache null;
             }
             break :cache CallSiteCacheCandidate{
-                .generation = generation_lease.guard(),
+                .generation = generation_lease.clone(),
                 .cell = cell.?,
             };
         };
@@ -8779,16 +8419,12 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             self.unit.active_word = boundary.word;
             switch (boundary.mode) {
                 .attempt => {
-                    defer boundary.deinit(self.releaseDomain(), self.unit.allocator);
+                    defer boundary.deinit();
                     try finishAttempt(self, boundary.stack_base);
                     return true;
                 },
                 .module => {
                     try finishModule(self, boundary);
-                    if (self.unit.hasWorkDriver()) return true;
-                },
-                .state => {
-                    try finishStateApplication(self, boundary);
                     if (self.unit.hasWorkDriver()) return true;
                 },
             }
@@ -8874,199 +8510,7 @@ const AttemptResultDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-/// The construction body's final operand stack becomes the module's durable
-/// initial state, so a non-empty residual window is captured rather than
-/// rejected. Ownership moves value by value into the candidate's proposal.
-fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
-    const owned = boundary.mode.module;
-    var image = owned.image;
-    defer image.deinit();
-    const observed = self.unit.stack.items.len - boundary.stack_base;
-    try image.reserveTemplate(observed);
-    const driver = try self.unit.allocator.create(ModuleCompletionDriver);
-    driver.* = .{
-        .state = .init(.{ .capture = .{
-            .image = .init(image.move()),
-            .remaining = observed,
-            .provenance = owned.provenance,
-        } }),
-    };
-    self.adoptDriver(driver);
-}
-/// Waits for the slot's turn as ordinary resumable scheduler work, then
-/// materializes the private draft: a retained copy of the durable stack in
-/// the unit's own operand window behind a fresh stack barrier.
-const StateAcquireDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    application: heap.Owned(OwnedApplication),
-    quotation: heap.Owned(*Header),
-    copied: usize = 0,
-    based: bool = false,
-    checked: bool = false,
-
-    pub fn advance(evaluator: *Machine, self: *StateAcquireDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        const application = self.application.borrow().borrow();
-        if (!application.turn.granted()) return .{ .yielded = .wait };
-        if (!self.checked) {
-            // The turn may have been queued behind a re-registration, so the
-            // currency of the invoking generation is re-established here as
-            // well: old code never publishes over a newer representation.
-            self.checked = true;
-            const home = evaluator.unit.current.?.home().?;
-            if (!modules.homeIsCurrent(home, evaluator.unit.module_access))
-                return evaluator.fail(.domain, "a replaced module generation cannot publish state");
-        }
-        if (!self.based) {
-            application.draft_base = @intCast(evaluator.unit.stack.items.len);
-            self.based = true;
-        }
-        const durable = application.turn.stack();
-        const work = evaluator.workBudget();
-        while (self.copied != durable.len and work.spend()) {
-            try evaluator.pushBorrowed(durable[self.copied]);
-            self.copied += 1;
-        }
-        if (self.copied != durable.len) return .stepped;
-        try evaluator.pollCancellableCompletion();
-        // One move transfers exclusive ownership: `enterStateApplication` owns the
-        // application on every exit path from here.
-        try evaluator.enterStateApplication(
-            self.application.borrowMut().move(),
-            self.quotation.take(),
-        );
-        return .completed;
-    }
-};
-
-/// A durable-stack snapshot under construction or retirement. Entries are
-/// scalars until they are filled, so the slice is releasable at every point
-/// and a cancelled publication leaks nothing.
-const OwnedValueSlice = struct {
-    items: []Value = &.{},
-
-    pub fn retire(
-        self: *OwnedValueSlice,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        for (self.items) |item| releases.releaseValue(item);
-        if (self.items.len != 0) allocator.free(self.items);
-        self.items = &.{};
-    }
-    fn take(self: *OwnedValueSlice) []Value {
-        const result = self.items;
-        self.items = &.{};
-        return result;
-    }
-};
-
-/// Publishes one completed transaction: secure the exact caller window,
-/// move the remaining draft into a replacement snapshot, swap it in under
-/// the turn, retire the previous snapshot, then deliver the pending outputs
-/// in invocation order. Nothing before the swap is observable, and nothing
-/// after it can fail.
-const StatePublishDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    application: heap.Owned(OwnedApplication),
-    replacement: heap.Owned(OwnedValueSlice) = .init(.{}),
-    retired: heap.Owned(OwnedValueSlice) = .init(.{}),
-    window: ?StackReplacement = null,
-    remaining: usize,
-    moved: usize = 0,
-    retired_index: usize = 0,
-    phase: enum { reserve, move, publish, retire, deliver } = .reserve,
-
-    pub fn advance(evaluator: *Machine, self: *StatePublishDriver) MachineError!WorkProgress {
-        // Cancellation is honoured only while the transaction can still be
-        // abandoned. Once the snapshot swap has happened the outputs are
-        // already owed to the caller, so retirement and delivery run to
-        // completion rather than reporting a failure over committed state.
-        switch (self.phase) {
-            .reserve, .move => try evaluator.pollKernel(),
-            .publish, .retire, .deliver => evaluator.unit.polls += 1,
-        }
-        const application = self.application.borrow().borrow();
-        const work = evaluator.workBudget();
-        while (work.spend()) switch (self.phase) {
-            .reserve => {
-                const buffer = try application.turn.allocator().alloc(Value, self.remaining);
-                @memset(buffer, .{ .int = 0 });
-                self.replacement = .init(.{ .items = buffer });
-                // Capacity for every output is secured before the draft is
-                // drained; draining only lowers the length, so the window is
-                // still guaranteed when the reservation is taken below.
-                _ = try evaluator.reserveStack(application.outputs.items.len);
-                self.moved = self.remaining;
-                self.phase = .move;
-            },
-            .move => {
-                if (self.moved == 0) {
-                    self.phase = .publish;
-                    continue;
-                }
-                self.moved -= 1;
-                self.replacement.borrow().items[self.moved] = evaluator.unit.takeStackOwned().?;
-            },
-            .publish => {
-                // Capacity was secured before the draft was drained, and
-                // draining only lowered the length, so this cannot fail.
-                self.window = try evaluator.reserveStackReplacement(
-                    0,
-                    application.outputs.items.len,
-                );
-                self.retired = .init(.{ .items = application.turn.publish(
-                    self.replacement.borrowMut().take(),
-                ) });
-                self.retired_index = self.retired.borrow().items.len;
-                self.phase = .retire;
-            },
-            .retire => {
-                if (self.retired_index == 0) {
-                    application.turn.release();
-                    self.phase = .deliver;
-                    continue;
-                }
-                self.retired_index -= 1;
-                const stale = self.retired.borrow().items[self.retired_index];
-                self.retired.borrow().items[self.retired_index] = .{ .int = 0 };
-                evaluator.releaseDomain().releaseValue(stale);
-            },
-            .deliver => {
-                self.window.?.commitOwned(application.outputs.items);
-                application.outputs.clearRetainingCapacity();
-                self.application.borrowMut().retire(
-                    evaluator.releaseDomain(),
-                    evaluator.unit.allocator,
-                );
-                return .completed;
-            },
-        };
-        return switch (self.phase) {
-            .reserve, .move => .stepped,
-            // Publication has committed: ending this turn must not introduce
-            // the machine's cancellable progress charge before delivery.
-            .publish, .retire, .deliver => .{ .yielded = .settle },
-        };
-    }
-};
-
-/// The residual draft is the new durable stack, and the pending outputs are
-/// the caller's results. Publication is one transition: it happens once, in
-/// full, or not at all.
-fn finishStateApplication(self: *Machine, boundary: Boundary) MachineError!void {
-    var owned = boundary.mode.state;
-    self.unit.state_application = null;
-    const remaining = self.unit.stack.items.len - boundary.stack_base;
-    // Installation failure disposes the owned field, which retires the
-    // application: publication is all-or-nothing on this path too.
-    return self.startDriver(StatePublishDriver{
-        .application = .init(owned.move()),
-        .remaining = remaining,
-    });
-}
-
-/// The registry-mutation half of `register`, the one publication protocol.
+/// Drives one registry publication, mapping its refusals to language errors.
 fn advanceRegistration(
     evaluator: *Machine,
     cursor: *modules.Registry.RegistrationCursor,
@@ -9075,13 +8519,8 @@ fn advanceRegistration(
         error.OutOfMemory => return error.OutOfMemory,
         error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
         error.ReservedName => return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier"),
-        error.StateApplicationActive => return evaluator.fail(
-            .domain,
-            "a module cannot be registered from inside a state application",
-        ),
     }) {
         .pending => .stepped,
-        .blocked => .{ .yielded = .wait },
         .complete => .completed,
     };
 }
@@ -9156,16 +8595,14 @@ const SeedMaterializer = struct {
 const ConstructionTarget = union(enum) {
     /// `@attempt`: a failure boundary in the invoker's scope.
     attempt,
-    /// `@module`: the candidate image and its constructing site's provenance.
-    image: struct {
-        candidate: modules.OwnedImage,
-        provenance: modules.RegistrationProvenance,
-    },
+    /// `@defm`: the candidate image, carrying its validated name and its
+    /// constructing site's provenance.
+    image: modules.OwnedImage,
 
     pub fn deinit(self: *ConstructionTarget) void {
         switch (self.*) {
             .attempt => {},
-            .image => |*owned| owned.candidate.deinit(),
+            .image => |*owned| owned.deinit(),
         }
         self.* = .attempt;
     }
@@ -9258,14 +8695,7 @@ const ConstructionDriver = struct {
                     .attempt => {
                         try evaluator.openAttempt(body);
                     },
-                    .image => |*owned| {
-                        try evaluator.openImageBoundary(
-                            &owned.candidate,
-                            owned.provenance,
-                            self.word,
-                            body,
-                        );
-                    },
+                    .image => |*owned| try evaluator.openImageBoundary(owned, self.word, body),
                 }
                 open.target.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.state.borrowMut().* = .seed;
@@ -9311,77 +8741,43 @@ const ChildSeedDriver = struct {
     }
 };
 
-const ModuleRegisterDriver = struct {
-    pub const address_stable_driver = {};
-    module: heap.Owned(Value),
-    cursor: heap.Owned(modules.Registry.RegistrationCursor),
-    pub fn advance(evaluator: *Machine, self: *ModuleRegisterDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        return advanceRegistration(evaluator, self.cursor.borrowMut());
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
+/// Finishes one construction boundary. A module body defines words and
+/// keeps no state, so a residual operand window is refused before anything
+/// is published; an empty one freezes the image and publishes it under the
+/// name `@defm` validated before the body ran.
+fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
+    var image = boundary.mode.module.image;
+    defer image.deinit();
+    const name = image.moduleName();
+    const provenance = image.provenance();
+    const observed = self.unit.stack.items.len - boundary.stack_base;
+    if (observed != 0) return self.failFmt(
+        .domain,
+        "@defm body left {d} value{s} on its stack; a module body defines words and keeps no state",
+        .{ observed, if (observed == 1) "" else "s" },
+    );
+    var sealed = heap.Owned(modules.SealedImage).init(try image.seal(
+        self.moduleRecognition(provenance),
+    ));
+    errdefer sealed.deinit(self.releaseDomain(), self.allocator());
+    const driver = try self.unit.allocator.create(ModuleCompletionDriver);
+    // The cursor owns the sealed image from here; nothing can fail after.
+    driver.* = .{
+        .cursor = .init(self.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
+    };
+    self.adoptDriver(driver);
+}
 
-/// Finishes one construction boundary: capture the residual stack as the
-/// image's template, freeze the image, and hand it to the program as a value.
+/// Publishes a sealed image through the registry as resumable work.
 const ModuleCompletionDriver = struct {
     pub const address_stable_driver = {};
-    state: heap.Owned(State),
-
-    const State = union(enum) {
-        capture: struct {
-            image: heap.Owned(modules.OwnedImage),
-            /// Construction-stack values still to move into the image
-            /// template, counted from the top of the residual window down.
-            remaining: usize,
-            /// The constructing site's. Embedded source registers its images
-            /// with `register`, so the seal records their recognition while
-            /// they are still values.
-            provenance: modules.RegistrationProvenance,
-        },
-        value: heap.Owned(modules.SealedImage),
-
-        pub fn deinit(
-            self: *State,
-            releases: *heap.ReleaseDomain,
-            storage_allocator: std.mem.Allocator,
-        ) void {
-            switch (self.*) {
-                .capture => |*capture| capture.image.deinit(releases, storage_allocator),
-                .value => |*sealed| sealed.deinit(releases, storage_allocator),
-            }
-            self.* = undefined;
-        }
-    };
+    pub const ownership: heap.DriverOwnership = .fields;
+    cursor: heap.Owned(modules.Registry.RegistrationCursor),
 
     pub fn advance(evaluator: *Machine, self: *ModuleCompletionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        while (work.spend()) switch (self.state.borrowMut().*) {
-            .capture => |*capture| {
-                if (capture.remaining != 0) {
-                    capture.remaining -= 1;
-                    capture.image.borrow().placeTemplate(
-                        capture.remaining,
-                        evaluator.unit.takeStackOwned().?,
-                    );
-                    continue;
-                }
-                var sealed = heap.Owned(modules.SealedImage).init(try capture.image.borrowMut().seal(
-                    evaluator.moduleRecognition(capture.provenance),
-                ));
-                capture.image.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.state.borrowMut().* = .{ .value = .init(sealed.take()) };
-            },
-            .value => |*sealed| {
-                const item = try sealed.borrowMut().intoValue(evaluator.unit.allocator);
-                sealed.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                return .{ .output = item };
-            },
-        };
-        return .stepped;
+        return advanceRegistration(evaluator, self.cursor.borrowMut());
     }
-    pub const ownership: heap.DriverOwnership = .fields;
 };
 pub fn outcomeDict(
     allocator: std.mem.Allocator,

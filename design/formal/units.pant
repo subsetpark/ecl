@@ -21,9 +21,12 @@ context Units.
 > `@attempt` begins a unit, waits synchronously for one terminal transition,
 > and reifies that outcome. `@spawn` begins the same kind of unit and returns a
 > task capability immediately; `task.await` later reifies the attached unit's
-> terminal outcome through the same mapping. Thus `@attempt` is observationally
-> equivalent to `@spawn task.await`, while task lifetime and waiting behavior remain
-> outside this model.
+> terminal outcome through the same mapping. The two therefore agree on entry
+> stack, result envelope, and failure mapping. They differ in ownership:
+> `@spawn` creates a task, which owns the tasks spawned inside it, while
+> `@attempt` is a stack transaction that owns nothing, so tasks spawned inside
+> it belong to the enclosing task or the session root. Task lifetime, ownership,
+> and waiting behavior are governed by the concurrency model.
 >
 > `Begin unit` receives the complete entry-stack list and exact quotation body
 > as separate ECL list values. It selects one never-before-created unit identity, records
