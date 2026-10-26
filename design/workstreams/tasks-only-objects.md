@@ -230,7 +230,9 @@ the gate also repaired two inherited test programs (the M1 ownership pins
 awaited a handle `task.cancel` had consumed, and the M2 module-registration
 OOM probe let a failing body propagate), because `precommit` runs neither
 `concurrency_test` nor `test-oom`. Gates: `precommit`, `test-workers`,
-`test-oom`, and one Docker TSan run (arm64) all passed.
+`test-oom`, and one Docker TSan run (arm64) all passed. Operator actions done
+2026-10-25: the TSan loop ran 20 iterations in one arm64 container with zero
+reports, and issue #13 was closed with a note that mailboxes were chosen.
 
 **Definition of Done**:
 - Every task owns a mailbox: a separately counted object reachable from the
@@ -283,22 +285,33 @@ note that the design chose mailboxes.
 
 ### Milestone 4: agent-module
 
+**Status**: planned (2026-10-25). Gameplan: `gameplans/agent-module.yaml`
+(local; gitignored), two patches: the module with its first-class tests, and
+the STDLIB section. Pure ECL over the Milestone 3 words; no runtime change.
+
 **Definition of Done**:
 - `src/stdlib/agent.ecl`, registered in `src/stdlib.zig`, exports:
-  `agent.serve ( ... -- )`, the loop a task runs over its own stack as state;
-  `agent.start ( state -- address )`, which spawns `serve` with the state
-  list as the entry stack and returns the address;
+  `agent.serve ( ... -- )`, the loop a task runs over its own stack as state
+  (the stack at entry is captured once as the state list);
+  `agent.start ( state -- address )`, which spawns `serve` with `state` as
+  the one value on the entry stack and returns the address;
   `agent.call ( quotation address -- result )`, which applies the quotation
-  to the server's stack and returns its top, re-raising the quotation's
-  error in the caller; and `agent.send ( quotation address -- )`, which
-  applies without a reply. `agent.call` is composed from the Milestone 3
-  words: a helper task receives the reply and `task.await` returns it, so an
-  unbounded call to a dead server hangs until #150 lands; `agent.call-for`
-  bounds it with `task.await-for`.
+  to the server's stack as a unit, pops the top of the result stack as the
+  reply, keeps the rest as the new state, and re-raises the quotation's error
+  in the caller (an empty result stack is `'domain`); and
+  `agent.send ( quotation address -- )`, which applies without a reply and
+  keeps the whole result stack. Call quotations are therefore
+  `( state... -- state... result )`, mirroring `rand`. `agent.call` is
+  composed from the Milestone 3 words: a helper task receives the reply and
+  `task.await` returns it, so an unbounded call to a dead server hangs until
+  #150 lands; `agent.call-for ( quotation address milliseconds -- result )`
+  bounds it with `task.await-for` and raises `'timeout` in the caller after
+  cancelling its helper; the quotation still runs on the server later.
 - Each application runs as a unit, so a failing quotation restores the
   server's stack: state is unchanged on error without any copying by the
-  agent itself. The server survives application errors and dies only by
-  cancellation.
+  agent itself. A failing `send` drops its error. The server survives
+  application errors, including a reply to a helper that has already gone,
+  and dies only by cancellation.
 - `test/stdlib-tests/agent.ecl` covers roundtrip, state advance, error
   preservation, send without reply, and cancellation through the handle
   obtained by spawning `agent.serve` directly.
@@ -388,6 +401,14 @@ replacement for `rng` ships before `rng` is deleted.
   `task.self` are `'domain` at the root; `task.send` works anywhere. A root
   mailbox is a separate, additive feature if ever wanted.
 - **Mailbox words are `task.`-qualified only.** No bare `receive`.
+- **`agent.call` pops the top of the result stack as the reply.** The
+  alternative, keeping the whole result stack, breaks `(100 rand.int)` on the
+  next call because the drawn value would sit above the generator state. So
+  call quotations are `( state... -- state... result )` and an empty result
+  stack is `'domain`; `agent.send` keeps everything.
+- **`agent.call-for` raises `'timeout`.** Chosen over returning a
+  `task.await-for`-style envelope so the call family has one result shape; a
+  bounded call is `agent.call` with a deadline.
 - **`task.receive` returns the sent value, not an envelope.** With the
   one-shot reply moved to #150 the runtime fills no envelope field, so a
   `{'value v}` wrapper would be ceremony on every receive. A composed caller
@@ -648,3 +669,17 @@ echoed final stack or the error dictionary on stderr.
   - **Verify by** `cmd`: `timeout 600 zig build precommit < /dev/null`.
   - **Expected**: exit 0.
   - **Traces to**: Milestone 5.
+
+- **DoD-27 — a bounded agent call times out and the agent survives**
+  - **Assert**: `agent.call-for` past its deadline raises `'timeout` in the
+    caller, and the agent still answers afterwards.
+  - **Verify by** `cmd`: `[7 0] agent.start 'g set [] ((100 clock.sleep 1) g 20 agent.call-for) @attempt 'err at 'kind at (dup) g agent.call pair`.
+  - **Expected**: `('timeout [7 0])` or `('timeout [7 0 1])` depending on whether the late quotation has run.
+  - **Traces to**: Milestone 4 — `agent.call-for`.
+
+- **DoD-28 — a directly spawned server is cancellable through its handle**
+  - **Assert**: `agent.serve` spawned with `@spawn` serves calls through its
+    address and ends with `'cancelled` when its handle is cancelled.
+  - **Verify by** `cmd`: `[[7 0]] (agent.serve) @spawn dup task.address 'g set (dup) g agent.call swap dup task.cancel task.await 'err at 'kind at`.
+  - **Expected**: `[7 0] 'cancelled`.
+  - **Traces to**: Milestone 4 — `agent.serve`.
