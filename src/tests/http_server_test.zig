@@ -324,7 +324,7 @@ const Server = struct {
                 "\"/close-listener\" (pop l net.close 204 http.response.new) " ++
                 "\"/stop\" (pop srv task.cancel 204 http.response.new) " ++
                 "{s}] case) http.server.@serve) @spawn 'srv set " ++
-                "srv task.await 'err at dup 'kind at swap 'data {{}} at-or 'reason 'none at-or",
+                "srv task.await 'err at dup 'kind at swap 'data {{}} dict.get 'reason 'none dict.get",
             .{ prelude, config, rows, default_row },
         );
         errdefer allocator.free(program);

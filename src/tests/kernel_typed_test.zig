@@ -170,6 +170,14 @@ fn buildInts(representation: Representation, numbers: []const i64) !value.Value 
     return buildIntsOn(allocator, representation, numbers);
 }
 
+fn buildBytes(representation: Representation, numbers: []const u8) !value.Value {
+    if (representation == .specialized) return list.fromU8Slice(allocator, numbers);
+    var boxed = try allocator.alloc(value.Value, numbers.len);
+    defer allocator.free(boxed);
+    for (numbers, 0..) |number, index| boxed[index] = .{ .int = number };
+    return list.fromValuesGeneric(allocator, boxed);
+}
+
 fn buildFloats(representation: Representation, numbers: []const f64) !value.Value {
     if (representation == .specialized) return list.fromF64Slice(allocator, numbers);
     var boxed = try allocator.alloc(value.Value, numbers.len);
@@ -196,6 +204,7 @@ fn buildSymbols(representation: Representation, symbols: []const u32) !value.Val
 
 const Inputs = union(enum) {
     ints: []const i64,
+    bytes: []const u8,
     floats: []const f64,
     codepoints: []const u32,
     symbols: []const u32,
@@ -214,6 +223,10 @@ const Inputs = union(enum) {
         switch (self) {
             .ints => |numbers| {
                 buffer[0] = try buildInts(representation, numbers);
+                return buffer[0..1];
+            },
+            .bytes => |numbers| {
+                buffer[0] = try buildBytes(representation, numbers);
                 return buffer[0..1];
             },
             .floats => |numbers| {
@@ -1010,6 +1023,87 @@ test "typed kernels: where reports the first bad count and resumes runs across b
     const rendered = try outcome(&runtime, &.{input}, "where len");
     defer allocator.free(rendered);
     try std.testing.expect(runtime.lastPolls() <= 2 * length / quantum + 8);
+}
+
+// A mask of byte or int counts fills without testing for repetition, a vector
+// group and a short tail at a time, and stops once the result is full, so
+// trailing zeros past a budget boundary are never read. A count above one in
+// the last block leaves the mask fill for the general one.
+test "typed kernels: where fills byte and int masks across budgets" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    const quantum = kernels.support.poll_quantum;
+
+    const length = quantum * 2 + flat.block_size + 5;
+    const ints = try allocator.alloc(i64, length);
+    defer allocator.free(ints);
+    const bytes = try allocator.alloc(u8, length);
+    defer allocator.free(bytes);
+    for ([_]struct { modulus: usize, last_ones: usize }{
+        .{ .modulus = 2, .last_ones = length },
+        .{ .modulus = 3, .last_ones = length },
+        .{ .modulus = 7, .last_ones = quantum + 1 },
+        .{ .modulus = 1, .last_ones = 0 },
+    }) |shape| {
+        for (ints, bytes, 0..) |*int, *byte, index| {
+            const one = shape.modulus != 1 and index < shape.last_ones and index % shape.modulus == 0;
+            int.* = @intFromBool(one);
+            byte.* = @intFromBool(one);
+        }
+        for ([_][]const u8{ "where", "where len", "where reverse 3 take" }) |source| {
+            try expectParity(&runtime, .{ .ints = ints }, source);
+            try expectParity(&runtime, .{ .bytes = bytes }, source);
+        }
+    }
+    ints[length - 1] = 3;
+    bytes[length - 1] = 3;
+    try expectParity(&runtime, .{ .ints = ints }, "where len");
+    try expectParity(&runtime, .{ .bytes = bytes }, "where len");
+    for ([_]usize{ 0, flat.block_size - 1, quantum, length - 1 }) |bad| {
+        @memset(ints, 1);
+        ints[bad] = -2;
+        try expectParity(&runtime, .{ .ints = ints }, "where len");
+    }
+}
+
+// `not`, `and`, and `or` run vector lanes whose fault mask is the scalar
+// `boolean` test, so a count outside 0 and 1 in a full vector, a tail, or a
+// later block reports the scalar route's index, fresh or adopted.
+test "typed kernels: boolean vectors fault where the scalar route does" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    const length = flat.block_size * 2 + 3;
+    const left = try allocator.alloc(i64, length);
+    defer allocator.free(left);
+    const right = try allocator.alloc(i64, length);
+    defer allocator.free(right);
+    const bytes = try allocator.alloc(u8, length);
+    defer allocator.free(bytes);
+    for ([_]?usize{ null, 0, 5, flat.block_size, length - 1 }) |bad| {
+        for (left, right, bytes, 0..) |*a, *b, *byte, index| {
+            a.* = @intCast(index % 2);
+            b.* = @intCast(index / 3 % 2);
+            byte.* = @intCast(index % 3 % 2);
+        }
+        if (bad) |position| {
+            left[position] = if (position % 2 == 0) -1 else 2;
+            bytes[position] = 2;
+        }
+        try expectParity(&runtime, .{ .ints = left }, "not");
+        try expectParity(&runtime, .{ .ints = left }, "not 0 (+) fold");
+        try expectParity(&runtime, .{ .bytes = bytes }, "not");
+        inline for ([_][]const u8{ "and", "or" }) |word| {
+            try expectParity(&runtime, .{ .int_pair = .{ .left = left, .right = right } }, word);
+            try expectParity(&runtime, .{ .int_pair = .{ .left = right, .right = left } }, word);
+            try expectParity(&runtime, .{ .ints = left }, "1 " ++ word);
+            try expectParity(&runtime, .{ .ints = left }, "0 swap " ++ word);
+        }
+    }
 }
 
 // `put` with a flat typed index vector into a typed leaf validates every index

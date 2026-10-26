@@ -115,7 +115,7 @@
    differ, is 'domain with 'data {'status 400}; a value too large for a 64-bit int exceeds every
    body limit and is 'domain with 'data {'status 413}; a non-dict is 'type.")
  (dup type 'dict match? "http.server.content-length expects a header dict" type-error assert
-  "content-length" [] at-or
+  "content-length" [] dict.get
   dup len 0 =
   (pop 0)
   (dup first dup decimal? () (400 "malformed Content-Length" framing-error) if
@@ -459,7 +459,7 @@
   call
   dup first parse-request-line swap rest parse-headers
   over 'version at "HTTP/1.1" match?
-  (dup "host" () at-or dup len 1 = swap (host-value?) all? and not
+  (dup "host" () dict.get dup len 1 = swap (host-value?) all? and not
    (400 "an HTTP/1.1 request needs exactly one well-formed Host header" framing-error)
    when)
   when
@@ -526,7 +526,7 @@
  (dup 'kind at
   ['timeout (pop 408 answer)
    'io (pop pop pop)
-   (dup 'data {} at-or 'status 0 at-or dup 0 =
+   (dup 'data {} dict.get 'status 0 dict.get dup 0 =
     (pop fail-request)
     (nip answer)
     if)]

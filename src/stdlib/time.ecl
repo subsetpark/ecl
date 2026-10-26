@@ -322,12 +322,12 @@
   fields 'year at
   fields 'month at
   fields 'day at
-  fields 'hour 0 at-or
-  fields 'minute 0 at-or
-  fields 'second 0 at-or
-  fields 'millisecond 0 at-or
+  fields 'hour 0 dict.get
+  fields 'minute 0 dict.get
+  fields 'second 0 dict.get
+  fields 'millisecond 0 dict.get
   fields 'weekday dict.has?
-  fields 'weekday 0 at-or
+  fields 'weekday 0 dict.get
   civil-instant) 'from-utc def
 
  ### def format

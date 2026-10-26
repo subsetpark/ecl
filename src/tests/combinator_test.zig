@@ -802,10 +802,10 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "a prelude binder blames the prelude word",
-            .source = "1 at-or",
+            .source = "1 bi2",
             .kind = "underflow",
-            .word = "at-or",
-            .message = "at-or needs 3 stack values, but found 1",
+            .word = "bi2",
+            .message = "bi2 needs 4 stack values, but found 1",
         },
         .{
             .name = "an anonymous binder blames the binding",
@@ -976,8 +976,9 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     defer runtime_inputs9.deinit();
     var executable_form = try session.Session.init(executable_form_heap.allocator(), &.{}, runtime_inputs9.inputs(.{}), .default, .evaluate);
     defer executable_form.deinit();
+    // No single entry matches `(dup *)`; it compiles as a scalar program.
     try expectStack(&executable_form, "[1 2 3] (dup *) each", "[1 4 9]");
-    try std.testing.expectEqual(@as(u64, 0), executable_form.lastIdiomHits());
+    try std.testing.expectEqual(@as(u64, 1), executable_form.lastIdiomHits());
 }
 
 test "idioms: a standard-library definition recognizes through its registration" {

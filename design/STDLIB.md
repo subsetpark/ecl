@@ -321,10 +321,6 @@ key is an error.
 # => [30 10]
 ```
 
-### at-or
-`( collection key default -- value )` — The value at a key or index, or
-the default when lookup would fail. Defined in ecl.
-
 ### at-path
 `( ds l -- x )` — Repeatedly index nested lists/dicts by each key or
 index in the path, left to right; an empty path returns `ds` unchanged.
@@ -1756,6 +1752,10 @@ are whole values; the result has one element per requested key.
 ### at-or
 `( dict keys default -- values )` — Like `dict.at`, using `default` as a whole
 value for each missing key.
+
+### get
+`( dict key default -- value )` — The value of one whole-value key, or
+`default` when the dictionary has no such key. A non-dictionary is `'type`.
 
 ### put
 `( dict key value -- dict )` — Assign one whole key and value. An existing key

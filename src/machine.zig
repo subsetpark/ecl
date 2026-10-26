@@ -1185,18 +1185,23 @@ const Eval = struct {
             .invocation, .redispatch => false,
         };
     }
-    fn advanceInstruction(self: *Eval) u32 {
-        const index = switch (self.position) {
-            .source => |index| index,
-            .replay => |index| index,
-            .invocation, .redispatch => unreachable,
-        };
-        self.position = switch (self.position) {
-            .source => .{ .source = index + 1 },
-            .replay => .{ .redispatch = index + 1 },
-            .invocation, .redispatch => unreachable,
-        };
-        return index;
+    /// The index of the next form to dispatch, moving past it, or null when
+    /// none remains: one test of the position where checking and advancing
+    /// tested it twice.
+    fn takeInstruction(self: *Eval) ?u32 {
+        switch (self.position) {
+            .source => |index| {
+                if (index >= self.code.length()) return null;
+                self.position = .{ .source = index + 1 };
+                return index;
+            },
+            .replay => |index| {
+                if (index >= self.code.length()) return null;
+                self.position = .{ .redispatch = index + 1 };
+                return index;
+            },
+            .invocation, .redispatch => return null,
+        }
     }
     fn rewind(self: *Eval, index: u32) void {
         self.position = switch (self.position) {
@@ -1675,7 +1680,7 @@ comptime {
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
-pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan };
+pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp };
 /// A call of a trusted source word whose body was recognized when its
 /// environment froze. Only whether this call's operands admit the entry is left.
 pub const TrustedCall = struct {
@@ -5105,9 +5110,12 @@ pub const Machine = struct {
     pub fn setActiveWord(self: *Machine, word: intern.TraceWord) void {
         self.unit.active_word = word;
     }
+    /// Places the pending failure at `code[index]`, the position the failing
+    /// path ran in place of, unless an inner position already holds it.
     pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
-        if (self.unit.pendingFailureOptional()) |pending|
+        if (self.unit.pendingFailureOptional()) |pending| if (pending.site == null) {
             pending.site = .{ .token = .{ .code = code, .index = index } };
+        };
     }
     pub fn setWorkDriverSite(self: *Machine, code: *Header, index: u32) void {
         if (self.unit.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
@@ -5174,8 +5182,12 @@ pub const Machine = struct {
         if (self.unit.current.?.nextIndex() >= self.unit.current.?.code.length()) self.unit.current.?.traced_word = no_word;
         return parent;
     }
+    /// Traces the pending failure through `word`, the definition whose frame
+    /// the failing path elided, unless an inner one already holds it.
     pub fn setFailureTraceParent(self: *Machine, word: intern.TraceWord) void {
-        if (self.unit.pendingFailureOptional()) |pending| pending.trace_parent = word;
+        if (self.unit.pendingFailureOptional()) |pending| if (pending.trace_parent == null) {
+            pending.trace_parent = word;
+        };
     }
     pub fn takePrimitiveFailure(self: *Machine) ?EclErr {
         if (!self.unit.hasPendingFailure()) return null;
@@ -5948,6 +5960,13 @@ pub const Machine = struct {
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
         const view = self.bindingView();
         if (cacheable) if (self.unit.binding_cache.find(word.slot, view)) |cached| {
+            // A cached binding has no home, pin, or generation, so a builtin
+            // runs exactly as `executeResolved` would run it.
+            switch (cached.route) {
+                .builtin => return invokeBuiltin(self, cached.trace_word, cached.spec.binding.builtin),
+                .source => return enterCachedWord(self, cached),
+                .resolved => {},
+            }
             var resolved: Resolution = .{
                 .lease = .{ .releases = self.unit.releases, .held = .{ .borrowed = cached.spec } },
                 .execution_generation = null,
@@ -6445,12 +6464,12 @@ fn loop(self: *Machine) MachineError!RunStatus {
                     if (comptime root_execution_metrics_enabled)
                         self.unit.root_execution_metrics.driver_resumes += 1;
                     const progress = driver.advance(self) catch |err| {
+                        // `setFailureSite`'s rule, spelled inline: calling it
+                        // here grew the run loop's frame (fannkuch +0.08%).
                         if (err == error.Ecl and self.unit.pendingFailure().site == null) {
                             if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
                         }
-                        if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
-                            self.unit.pendingFailure().trace_parent = driver.trace_parent;
-                        }
+                        if (err == error.Ecl) if (driver.trace_parent) |word| self.setFailureTraceParent(word);
                         clearWorkDriver(self.unit);
                         switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
@@ -6544,11 +6563,11 @@ fn loop(self: *Machine) MachineError!RunStatus {
         // Eval which resumeFrames may also have restored.
         if (self.unit.hasWorkDriver()) continue;
         const current = &self.unit.current.?;
-        if (!current.hasInstructions()) {
+        const index = current.takeInstruction() orelse {
             self.retireCompletedEval(current.*);
             self.unit.current = null;
             continue;
-        }
+        };
         poll(self) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
@@ -6556,19 +6575,18 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 continue;
             },
         };
-        self.unit.active_index = current.advanceInstruction();
-        const form = list.atUnchecked(.{ .list = current.code }, self.unit.active_index);
+        self.unit.active_index = index;
+        // Code is nearly always a spine of forms; any other list runs too.
+        const form = if (current.code.kind() == .generic_spine)
+            heap.valuesConst(current.code)[index]
+        else
+            list.atUnchecked(.{ .list = current.code }, index);
         if (comptime root_execution_metrics_enabled)
             self.unit.root_execution_metrics.logical_transitions += 1;
         dispatch(self, form) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
-                if (self.unit.pendingFailure().site == null and self.unit.current != null) {
-                    self.unit.pendingFailure().site = .{ .token = .{
-                        .code = self.unit.current.?.code,
-                        .index = self.unit.active_index,
-                    } };
-                }
+                if (self.unit.current) |failed| self.setFailureSite(failed.code, self.unit.active_index);
                 try startFailure(self);
                 continue;
             },
@@ -7455,6 +7473,23 @@ pub const BindingCache = struct {
         trace_word: intern.TraceWord,
         origin: ResolutionOrigin,
         defining_scope: ?*env.Scope,
+        /// How a dispatch runs the binding, decided when it is cached.
+        route: Route = .resolved,
+    };
+    /// A builtin runs directly and a source word without a recognition enters
+    /// its body directly; everything else is resolved in full.
+    pub const Route = enum(u8) {
+        builtin,
+        source,
+        resolved,
+
+        fn of(spec: *const env.BindingSpec) Route {
+            return switch (spec.binding) {
+                .builtin => .builtin,
+                .word => if (spec.direct_idiom == null) .source else .resolved,
+                .native => .resolved,
+            };
+        }
     };
     entries: []?Entry = &.{},
     count: usize = 0,
@@ -7481,7 +7516,9 @@ pub const BindingCache = struct {
     /// Records `entry`, replacing one for the same slot.
     pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) error{OutOfMemory}!void {
         if ((self.count + 1) * 4 > self.entries.len * 3) try self.grow(allocator);
-        self.insert(entry);
+        var routed = entry;
+        routed.route = .of(entry.spec);
+        self.insert(routed);
     }
     fn insert(self: *BindingCache, entry: Entry) void {
         const mask = self.entries.len - 1;
@@ -8214,7 +8251,34 @@ fn scheduleWord(
         var consumed = owned;
         try self.unit.adoptGeneration(&consumed);
     } else if (resolved_home) |generation| try self.unit.pinGeneration(generation);
-    var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    return enterBody(self, body, word, .{
+        .scope = scope,
+        .resolution_scope = resolution_scope,
+        .home = home,
+        .defining = defining,
+        .registration_provenance = registration_provenance,
+    }, check);
+}
+/// `scheduleWord` for a source word from the unit's binding cache, which has
+/// no home, pin, or effect: the body runs at its caller's site, resolving
+/// against its defining scope. A trusted word with a recognition takes the
+/// full path instead.
+fn enterCachedWord(self: *Machine, cached: *const BindingCache.Entry) MachineError!void {
+    self.unit.active_word = cached.trace_word;
+    const caller = self.unit.current.?.site;
+    return enterBody(self, env.quotationHeader(cached.spec.binding.word), cached.trace_word, .{
+        .scope = caller.scope,
+        .resolution_scope = cached.defining_scope,
+        .home = caller.home,
+        .defining = caller.defining,
+        .registration_provenance = caller.registration_provenance,
+    }, null);
+}
+/// Suspends the caller and makes `body` the running evaluation at `site`,
+/// under its effect check if it has one.
+fn enterBody(self: *Machine, body: *Header, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
+    var check = effect;
     var effect_tail = self.replaceTailEffectCandidate(body);
     const application_tail = self.tailApplicationIndex();
     _ = self.suspendCurrent() catch return error.OutOfMemory;
@@ -8231,13 +8295,7 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .position = .{ .source = 0 },
-        .site = .{
-            .scope = scope,
-            .resolution_scope = resolution_scope,
-            .home = home,
-            .defining = defining,
-            .registration_provenance = registration_provenance,
-        },
+        .site = site,
         .traced_word = word,
         .body_owner = word,
         .effect_tail = effect_tail,

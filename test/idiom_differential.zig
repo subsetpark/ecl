@@ -32,6 +32,10 @@ test "every idiom entry hits across values empties spines floats and failures" {
                 else => false,
             })
                 compareTotalFailure(source)
+            else if (entry.operation == .direct and entry.operation.direct == .lex_cmp_with)
+                // Its hits are its comparator's, which the `lex_cmp` entry
+                // counts.
+                compareModesExactly(source)
             else
                 compareExecutions(source);
             comparison catch |err| {
@@ -180,7 +184,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                     @tagName(entry.context),
                 },
             ),
-            .direct => unreachable,
+            .direct, .lex_cmp => unreachable,
         },
         .length => std.fmt.allocPrint(allocator, "{s} ({s}) each", .{ switch (variant) {
             .atom => "[[] [1] [2 3]]",
@@ -194,6 +198,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             "{s} ({s}) each",
             .{ matchInput(variant), phrase },
         ),
+        .cmp => std.fmt.allocPrint(allocator, "{s} ({s}) lex-cmp-with", .{ lexInput(variant), phrase }),
         .direct => unreachable,
     };
 }
@@ -214,7 +219,7 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                 entry.source_word.?,
             },
         ),
-        .match, .length => unreachable,
+        .match, .length, .cmp => unreachable,
         .direct => |operation| direct: {
             var result: std.ArrayList(u8) = .empty;
             errdefer result.deinit(allocator);
@@ -428,6 +433,13 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .failure => "[1 'bad] (+)",
         },
         .sort => sortInput(variant),
+        .lex_cmp_with => switch (variant) {
+            .atom => "[1 2 3] [1 2 4] (cmp)",
+            .empty => "[] [1] (cmp)",
+            .spine => "[[1] [2]] [[1] [2]] (pop pop 0)",
+            .float => "[1 2] [1.0 0.5] (cmp)",
+            .failure => "[1 2] \"ab\" (cmp)",
+        },
         // The shape follows the list; `empty` is the single-row case, which
         // the fold returns unchanged.
         .reshape_sum, .reshape_product => switch (variant) {
@@ -484,6 +496,19 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .float => "[0.1] \"{}\"",
             .failure => "[] \"{\"",
         },
+    };
+}
+
+/// Two lists for `lex-cmp-with`: typed lists, whose search stops at a
+/// difference or a fault.
+fn lexInput(variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom => "[1 2 3] [1 2 4]",
+        .empty => "[] [1 2]",
+        .spine => "\"abc\" \"abd\"",
+        .float => "[1 2 3] [1.0 2.5 1.0]",
+        // Chars and numbers fault at their first pair, as `cmp` does.
+        .failure => "\"ab\" [1 2]",
     };
 }
 
@@ -660,6 +685,171 @@ fn expectHits(source: []const u8, expected: u64) !void {
     if (expected != run.runtime.lastIdiomHits())
         std.log.err("idiom hit count for {s}: expected {d}, got {d}", .{ source, expected, run.runtime.lastIdiomHits() });
     try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
+}
+
+test "idioms: a caller's quotation is recognized inside prelude definitions" {
+    // `all?` and `filter` hand their caller's quotation to `each` from inside
+    // the prelude. The quotation's words resolve through their own slots
+    // there as anywhere, so recognition reads the same bindings dispatch runs.
+    const sources = [_][]const u8{
+        "[1 2 3] (0 >=) all?",
+        "[1 -2 3] (0 >=) all?",
+        "[1 2 3 4 5 6] (3 mod) filter",
+        "[1 2 9223372036854775807] (1 +) all?",
+        "[1 'a] (1 +) filter",
+        // A caller that shadows the word keeps its own definition.
+        "(pop 1) 'neg def [5 6] (neg) all?",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("prelude-hosted differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    // `each` and `all?`'s own `(and)` fold.
+    try expectHits("[1 2 3] (0 >=) all?", 2);
+    // `each`, and the `dip` inside `filter`'s own `over`.
+    try expectHits("[1 2 3 4 5 6] (3 mod) filter", 2);
+    // The shadowed `neg` declines; only the fold is recognized.
+    try expectHits("(pop 1) 'neg def [5 6] (neg) all?", 1);
+    // `lex-cmp`'s own `(cmp)`, offered by `lex-cmp-with`.
+    try expectHits("[1 2 3] [1 2 4] lex-cmp", 1);
+    try expectHits("\"abc\" \"abd\" lex-cmp", 1);
+}
+
+test "idioms: scalar programs preserve generic behavior" {
+    // An `each` or `zip-with` quotation of numeric operations, constants, and
+    // stack words runs as one compiled program per element. Results, their
+    // representations, and failures must match calling the quotation per
+    // element, including which step faults first.
+    const sources = [_][]const u8{
+        "[1 2 3 4 5 6] (3 mod 0 =) each",
+        "[1.5 -2.5 0.0] (2.0 * floor) each",
+        "[0.0 -0.0 1.0] (neg 0.0 +) each",
+        "[1 2 3] (10 swap - neg) each",
+        "[1 2 3] (dup *) each",
+        "[1 2 3] (dup 2 * swap 3 * +) each",
+        "[1 2 3] (10 over -) each",
+        "[1 2] (5 pop 2 *) each",
+        "[200 100 50] (2 * 300 min) each",
+        "[1 2 3] [4 5 6] (+ 2 *) zip-with",
+        "[1 2 3] [4 5 6] (over * +) zip-with",
+        "[1 2 3] 10 (- neg) zip-with",
+        "10 [1 2 3] (- neg) zip-with",
+        "[12 13 11] 10 (- 2 *) each-prior",
+        "[1 2 3 4 5 6] (3 mod 0 =) filter",
+        // Faults: the first in element order, by the word that meets it.
+        "[1 9223372036854775807] (2 * 1 +) each",
+        "[1 9223372036854775807] (1 + 2 *) each",
+        "[4 -1 9] (sqrt neg) each",
+        "[2 0 4] (10 swap div 1 +) each",
+        "[1 9223372036854775807] (dup * pop 1) each",
+        "[1 9223372036854775807] [1 1] (+ 2 *) zip-with",
+        // Shapes a program declines still agree with the generic path.
+        "[1 2] ('a + 1 +) each",
+        "[1 2] ([1 2] + 1 +) each",
+        "(1 2 3) (1 + 2 *) each",
+        "\"abc\" (1 + 2 *) each",
+        "[[1 2] [3]] (1 + 2 *) each",
+        "[1 2 3] [4 5] (+ 2 *) zip-with",
+        "[1 2] (dup) each",
+        "(pop 9) 'dup def [1 2] (dup *) each",
+        "(pop 9) 'over def [1 2] (10 over -) each",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("scalar-program differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    // A prelude-defined operation faults inside its own body on the generic
+    // path, naming the builtin it reached there (`div` for `mod`); a lifted
+    // step names the operation, as every recognized prelude operation does.
+    // Kind and message agree.
+    try compareModes("[1 2] (0 mod 1 +) each", false);
+    try expectHits("[1 2 3] (3 mod 0 =) each", 1);
+    try expectHits("[1 2 3] (dup *) each", 1);
+    try expectHits("[1 2 3] [4 5 6] (+ 2 *) zip-with", 1);
+    // A shadowed stack word declines.
+    try expectHits("(pop 9) 'dup def [1 2] (dup *) each", 0);
+}
+
+test "idioms: reductions run two-input programs in order" {
+    // `fold`, `fold1`, and `scan` feed the accumulator as the program's first
+    // input and the element as its second, one element at a time.
+    const sources = [_][]const u8{
+        "[1 2 3 4] 0 (-) fold",
+        "[1 2 3 4] 0 (-) scan",
+        "[1 2 3 4] (-) fold1",
+        "[1 2 3 4] 0 (swap 2 * +) scan",
+        "[1 2 3 4] 1 (over + *) scan",
+        "[1 2 3] 0.5 (+ 2 *) fold",
+        "[1.5 2.5] 1 (* 1 +) scan",
+        "[1 2 3] 0 (swap pop) scan",
+        "[255 1] 0 (+ 1 +) scan",
+        "[1 2.5 3] 0 (max) scan",
+        "[5] (-) fold1",
+        "[] 0 (2 * +) fold",
+        "[] 0 (2 * +) scan",
+        // A builtin's fault traces through the definition that offered the
+        // quotation.
+        "[1 2 0 4] 100 (swap div) scan",
+        "[1 2 0 4] (div) fold1",
+        "[1 2 0 4] (1 + div) fold1",
+        "[9223372036854775807 1] 0 (+ 1 +) fold",
+        // Shapes a program declines.
+        "[1 2 3] 'a (2 * +) fold",
+        "[1 'b 3] 0 (2 * +) fold",
+        "[1 2 3] [0] (2 * +) fold",
+        "\"abc\" 0 (2 * +) fold",
+        "(pop 1) 'neg def [1 2 3] 0 (neg +) scan",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("reduction-program differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    // A prelude operation names itself, as it does under `each`.
+    try compareModes("[1 2 0 4] (mod) fold1", false);
+    try expectHits("[1 2 3] 0 (dup * +) fold", 1);
+    try expectHits("[1 2 3] 0 (2 * -) scan", 1);
+    try expectHits("[1 2 3] (-) fold1", 1);
+    try expectHits("(pop 1) 'neg def [1 2 3] 0 (neg +) scan", 0);
+}
+
+test "idioms: scalar programs run a block at a time and fault as per element" {
+    // Over numeric leaves a program runs each instruction across a block of
+    // elements through the typed kernels. A block that faults is replayed
+    // element by element, so when an earlier element faults at a later step
+    // and a later element at an earlier one, the earlier element's fault wins.
+    const sources = [_][]const u8{
+        "1000 range (3 mod 0 =) each",
+        "1000 range 100 mod (2 * 1 +) each",
+        "1000 range 300 mod (1 +) each",
+        "1000 range 0.5 * (2.0 * floor) each",
+        "1000 range 0.5 * (floor 3 mod) each",
+        "1000 range (sqrt floor) each",
+        "1000 range dup (+ 2 *) zip-with",
+        "1000 range 0.5 * 1000 range (* 1 +) zip-with",
+        "7 1000 range (- neg) zip-with",
+        "1000 range (2 3 + *) each",
+        "1000 range 2 mod (not) each",
+        "1000 range 0.5 * 1000 range (max) zip-with",
+        "1000 range (3 mod 0 =) filter",
+        // Faults, in later blocks and in both orders within one block.
+        "1000 range 600 9223372036854775807 put (1 + 2 *) each",
+        "1000 range 600 4611686018427387904 put 601 9223372036854775807 put (2 * 1 +) each",
+        "1000 range 601 4611686018427387904 put 600 9223372036854775807 put (2 * 1 +) each",
+        "1000 range 300 0 put (10 swap div 1 +) each",
+        "1000 range 1.0 * 500 -1.0 put (sqrt 1 +) each",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("block-program differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
 }
 
 test "idioms: length each preserves errors dictionaries shadowing and generated quotations" {

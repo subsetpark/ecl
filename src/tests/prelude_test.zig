@@ -52,11 +52,6 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "[] product [7] product [1.5 -0.0] product [[1 2] [3 4]] product",
             .expected = "1 7 -0.0 [3 8]",
         },
-        .{
-            .name = "at-or",
-            .source = "{'a 1} 'a 9 at-or {'a 1} 'b 9 at-or {'a foo} 'a 9 at-or {} 'a (bar) first at-or",
-            .expected = "1 9 foo bar",
-        },
         .{ .name = "find", .source = "[2 3 2] 3 find [2 3 2] 9 find (foo) dup first find", .expected = "1 3 0" },
         .{
             .name = "at-path",
@@ -180,19 +175,18 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose nonempty documentation" {
     const names = [_][]const u8{
-        "compose",      "first",     "wrap",       "literal",  "dip",          "over",
-        "rollup",       "rolldown",  "partial",    "with",     "mod",          "neg",
-        "abs",          "<>",        "<=",         ">=",       "and",          "or",
-        "nip",          "keep",      "bi",         "tri",      "bi2",          "tri2",
-        "both",         "when",      "unless",     "case",     "signum",       "clamp",
-        "last",         "pair",      "pack",       "append",   "rest",         "reverse",
-        "uncons",       "unappend",  "empty?",     "zip",      "lex-cmp-with", "lex-cmp",
-        "min-of",       "max-of",    "sort",       "distinct", "at-path",      "at-or",
-        "filter",       "partition", "any?",       "all?",     "sum",          "product",
-        "mean",         "fail",      "find",       "set",      "setp",         "assert",
-        "rotate",       "windows",   "each-prior", "fold1",    "scan1",        "iterations",
-        "while-values", "converges", "converge",   "chunk",    "from-digits",  "to-digits",
-        "collect",
+        "compose",   "first",      "wrap",    "literal",     "dip",          "over",
+        "rollup",    "rolldown",   "partial", "with",        "mod",          "neg",
+        "abs",       "<>",         "<=",      ">=",          "and",          "or",
+        "nip",       "keep",       "bi",      "tri",         "bi2",          "tri2",
+        "both",      "when",       "unless",  "case",        "signum",       "clamp",
+        "last",      "pair",       "pack",    "append",      "rest",         "reverse",
+        "uncons",    "unappend",   "empty?",  "zip",         "lex-cmp-with", "lex-cmp",
+        "min-of",    "max-of",     "sort",    "distinct",    "at-path",      "filter",
+        "partition", "any?",       "all?",    "sum",         "product",      "mean",
+        "fail",      "find",       "set",     "setp",        "assert",       "rotate",
+        "windows",   "each-prior", "fold1",   "scan1",       "iterations",   "while-values",
+        "converges", "converge",   "chunk",   "from-digits", "to-digits",    "collect",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -274,7 +268,6 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         },
         .{ .name = "case shape", .source = "1 [] case", .kind = "shape" },
         .{ .name = "case type", .source = "1 2 case", .kind = "type" },
-        .{ .name = "at-or propagates type", .source = "1 0 9 at-or", .kind = "type", .word = "dict.has?" },
         .{ .name = "at-path propagates lookup failure", .source = "{'a [1]} ['a 4] at-path", .kind = "domain", .word = "at" },
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },

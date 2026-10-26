@@ -33,6 +33,12 @@
   {"ab" 9 [1 2] 8} ["ab" [1 2] "ab"] dict.at [9 8 9] equal
   {"ab" 9 [1 2] 8} ["ab" [3] [1 2] [3]] [0] dict.at-or [9 [0] 8 [0]] equal
   {} [] 0 dict.at-or [] equal
+  {'a 1 'b 2} 'b 9 dict.get 2 equal
+  {'a 1} 'missing 9 dict.get 9 equal
+  {'a foo} 'a 9 dict.get (foo) first equal
+  {[1 2] 8} [1 2] 0 dict.get 8 equal
+  {} 'a (bar) first dict.get (bar) first equal
+  ([1 2] 0 9 dict.get) 'type 'dict.get raises-word
   {'a 1} [] dict.at () equal
   {[1 2] 9} [1 2] at 9 equal
   ({'a 1} [['a 'missing]] dict.at)
@@ -123,7 +129,7 @@
 
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
- (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at 'dict.at-or 'dict.put
+ (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at 'dict.at-or 'dict.get 'dict.put
    'dict.merge 'dict.associate 'dict.from-flat 'dict.from-lists 'dict.from-pairs
    'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
    'dict.map 'dict.filter 'dict.reject 'dict.take

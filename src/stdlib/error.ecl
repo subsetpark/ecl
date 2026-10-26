@@ -14,7 +14,7 @@
  (value -- bool : "Return 1 when a value satisfies the error dictionary schema.")
  (dup type 'dict match?
   (dup 'kind dict.has?
-   over 'kind 'missing at-or type 'symbol match?
+   over 'kind 'missing dict.get type 'symbol match?
    and
    over 'msg dict.has? (over 'msg at text?) (1) if
    and

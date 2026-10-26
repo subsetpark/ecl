@@ -103,7 +103,7 @@
   (type 'symbol match?
    'type error.new "result.recover-kinds expects a list of kind symbols" error.with-message assert)
   for
-  result 'err {} at-or
+  result 'err {} dict.get
   dup error.valid?
   kinds (error.kind-in?) partial
   (pop 0)

@@ -1002,7 +1002,7 @@ test "loader: a mapped file cannot privately register a stdlib name" {
         "{'path \"foo.ecl\" 'kind 'ecl 'exports [\"root.foo\"]}]}}}";
     try writeInput(&fixture, "ecl.modules", map);
     try writeInput(&fixture, "foo.ecl", "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm\n" ++
-        "[] (({'a 1} 'a 7 at-or) 'lookup def) 'root.foo @defm\n");
+        "[] (({'a 1} 'a 7 dict.get) 'lookup def) 'root.foo @defm\n");
 
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
@@ -1021,7 +1021,7 @@ test "loader: a mapped file cannot privately register a stdlib name" {
     defer runtime.deinit();
 
     try expectErrorContains(&runtime, "root.foo.lookup", &.{"module name `dict` is reserved for the standard library"});
-    try expectOk(&runtime, "{'a 1} 'a 7 at-or 1 = {'kind 'user 'msg \"at-or lost dict\"} assert");
+    try expectOk(&runtime, "{'a 1} 'a 7 dict.get 1 = {'kind 'user 'msg \"dict.get lost dict\"} assert");
 }
 
 test "module source: unit constructors are refused during construction" {
