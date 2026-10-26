@@ -633,12 +633,12 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-module-registration.ecl",
-        // The registration record, the copied state template, and the barrier
-        // publication each have their own ordinals. Two definitions and one
-        // reload reach all three, and a failed body releases its candidate;
-        // its failure propagates, so the probe observes it as a result.
-        "[] (1) 'oom-left @defm [] (1) 'oom-right @defm " ++
-            "[] (2) 'oom-left @defm [] ([] (\"x\" fail) 'oom-failed @defm) @attempt pop",
+        // The registration record and the generation publication each have
+        // their own ordinals. Two definitions and one reload reach both, and a
+        // failed body releases its candidate; its failure propagates, so the
+        // probe observes it as a result.
+        "[] ((1) 'one def) 'oom-left @defm [] ((1) 'one def) 'oom-right @defm " ++
+            "[] ((2) 'one def) 'oom-left @defm [] ([] (\"x\" fail) 'oom-failed @defm) @attempt pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();

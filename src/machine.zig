@@ -8840,12 +8840,14 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         self.moduleRecognition(owned.provenance),
     ));
     errdefer sealed.deinit(self.releaseDomain(), self.allocator());
+    // The cursor retains the image from its construction, so it is built
+    // only once the driver that will own it exists: nothing can fail after.
+    const driver = try self.unit.allocator.create(ModuleCompletionDriver);
     const registration = self.publicationRegistry(owned.registration, owned.provenance).registrationCursor(
         sealed.borrow().ref(),
         owned.registration,
         owned.provenance,
     );
-    const driver = try self.unit.allocator.create(ModuleCompletionDriver);
     driver.* = .{
         .sealed = .init(sealed.take()),
         .cursor = .init(registration),
