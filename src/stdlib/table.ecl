@@ -38,13 +38,12 @@
 
  ### def valid?
  (candidate -- bool :
-  "Return 1 when a candidate is a table and 0 when it is not.
-
-   Cancellation, allocation failure, and other runtime errors propagate.")
+  "Return 1 when a candidate satisfies the table convention and 0 for a convention mismatch.
+   Cancellation, allocation failure, and other runtime errors still propagate.")
  (wrap (checked pop) @attempt dup result.ok? (pop 1) (convention-miss?) if) 'valid? def
 
  ### def names
- (table -- names : "Return the column names in column order.")
+ (table -- names : "Return the column names in schema order.")
  (checked dict.keys) 'names def
 
  ### def height
@@ -52,14 +51,15 @@
  (checked dict.vals first len) 'height def
 
  ### def from-columns
- (columns -- table : "Validate a column dictionary and return it as a table.")
+ (columns -- table :
+  "Validate a column dictionary and return it as a table, raising when it does not satisfy the
+   convention.")
  (checked) 'from-columns def
 
  ### def from-rows
  (names rows -- table :
-  "Build a table from column names and rows of the same width.
-
-   An empty row list produces a zero-row table with the given columns.")
+  "Build a table from explicit column names and rows of exactly that width. An empty row list
+   preserves the named zero-row schema.")
  (|names rows|
   names type 'list match?
   'type error.new "table.from-rows expects a list of column names" error.with-message assert
@@ -80,7 +80,9 @@
   names rows names len transpose dict.from-lists) 'from-rows def
 
  ### def from-header-rows
- (rows -- table : "Build a table using the first row as column names and the rest as data rows.")
+ (rows -- table :
+  "Build a table from rows whose first row contains the column names and whose remaining rows are
+   data.")
  (dup type 'list match?
   'type error.new "table.from-header-rows expects a list of rows" error.with-message assert
   dup len 0 >
@@ -93,9 +95,8 @@
 
  ### def from-records
  (records -- table :
-  "Build a table from a nonempty list of records with the same keys.
-
-   The first record sets column order. Later records may use a different key order.")
+  "Build a table from a nonempty list of dicts sharing one key set. The first record fixes the
+   schema order; later records may use a different key order.")
  (|records|
   records type 'list match?
   'type error.new "table.from-records expects a list of records" error.with-message assert
@@ -120,17 +121,19 @@
  (checked dict.vals column-rows) 'rows def
 
  ### def header-rows
- (table -- rows : "Return the column-name row followed by the data rows.")
+ (table -- rows :
+  "Return the column-name row followed by the data rows, the schema-preserving row form.")
  (checked dup dict.keys swap dict.vals column-rows cons) 'header-rows def
 
  ### def records
  (table -- records :
-  "Return one record per row, with keys in column order. A zero-row table returns an empty list.")
+  "Return one dict per row, with keys in schema order. A zero-row table returns an empty list, which
+   necessarily loses its schema.")
  (checked dup dict.keys swap dict.vals column-rows swap (swap dict.from-lists) partial each)
  'records def
 
  ### def column
- (table name -- column : "Return a column by name.")
+ (table name -- column : "Return one existing column by name.")
  (|table name|
   table checked pop
   table name dict.has?
@@ -139,10 +142,9 @@
 
  ### def cast
  (table spec -- table :
-  "Apply each specification's ( cell -- value ) quotation to its named column.
-
-   The specification must be a dictionary from existing column names to quotations. All entries are
-   validated before a quotation runs.")
+  "Coerce named columns with isolated `( cell -- value )` quotations. The specification must be a
+   dictionary from existing column names to quotations. Validate the complete specification before
+   running any quotation, and replace the table only after every cast succeeds.")
  (|table spec|
   table checked pop
   spec type 'dict match?
@@ -161,7 +163,7 @@
   put) 'cast-column defp
 
  ### def select
- (table names -- table : "Return the named columns in the requested order.")
+ (table names -- table : "Return the named columns in the order given.")
  (|table names|
   table checked pop
   names type 'list match?
@@ -177,7 +179,9 @@
   dict.from-lists) 'select def
 
  ### def rename
- (table mapping -- table : "Rename columns without changing column order.")
+ (table mapping -- table :
+  "Rename columns through an ordered old-to-new mapping without changing column order; collisions
+   are `'domain`.")
  (|table mapping|
   table checked pop
   mapping type 'dict match?
@@ -195,7 +199,7 @@
 
  ### def with-column
  (table name column -- table :
-  "Replace a named column or append a new column. The column length must equal the row count.")
+  "Replace an existing column or append a new one. The column length must equal the row count.")
  (|table name column|
   table checked pop
   name string?
@@ -230,8 +234,7 @@
   names excluded name-set (swap dict.has? not) partial filter) 'exclude defp
 
  ### def where
- (table mask -- table :
-  "Return rows selected by a 0/1 mask. The mask length must equal the row count.")
+ (table mask -- table : "Return the rows selected by a 0/1 mask whose length equals the row count.")
  (|table mask|
   table checked pop
   mask type 'list match?
@@ -261,10 +264,8 @@
 
  ### def group-by
  (table names -- groups :
-  "Group row indices by the named columns.
-
-   Groups follow first occurrence order and indices within each group are ascending. An empty name
-   list returns one group keyed by the empty list.")
+  "Group row indices by the named columns. Groups follow first-occurrence order and indices within
+   each group are ascending; an empty name list yields one global group keyed by the empty list.")
  (|table names|
   table checked pop
   names type 'list match?
@@ -336,10 +337,12 @@
 
  ### def aggregate
  (table names specs -- table :
-  "Group rows and apply [output-name input-name reducer] aggregate specifications.
-
-   All names and specifications are validated before a quotation runs. The result contains key
-   columns first, followed by aggregate columns in specification order, with one row per group.")
+  "Group by `names` and aggregate each group with `[output-name input-name reducer]` specifications.
+   A reducer is a quotation or one of `'sum`, `'count`, `'min`, and `'max`. Symbols use
+   `reduce-groups`; quotations receive gathered slices and retain ordinary resolution and shadowing.
+   All names and specifications are validated before a quotation runs. The result contains the key
+   columns first, followed by the aggregate columns in specification order, with one row per
+   group.")
  (|table names specs|
   table checked pop
   names type 'list match?
@@ -437,10 +440,9 @@
 
  ### def inner-join
  (left right pairs -- table :
-  "Return the inner equijoin for [left-name right-name] key pairs.
-
-   Duplicate keys produce every matching pair in left-row then right-row order. The result contains
-   all left columns followed by right non-key columns. Colliding non-key names raise 'domain.")
+  "Return the stable inner equijoin for `[left-name right-name]` key pairs. Duplicate keys expand to
+   the full many-to-many product in left-row then right-row order. The result contains every left
+   column followed by the right non-key columns; colliding non-key names are `'domain`.")
  (|left right pairs|
   left checked pop
   right checked pop
@@ -466,9 +468,8 @@
 
  ### def left-join-with
  (left right pairs fill -- table :
-  "Return a left equijoin using fill values for unmatched rows.
-
-   The fill dictionary must contain exactly the appended right-column names.")
+  "Return the stable left equijoin, using fill values for unmatched rows. `fill` must name exactly
+   every appended right column.")
  (|left right pairs fill|
   left checked pop
   right checked pop

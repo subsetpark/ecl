@@ -105,7 +105,8 @@ test "every primitive exposes meaningful reflective documentation" {
     var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer expected.deinit();
     try source.writer.writeAll(
-        "'over doc \"Copy the value beneath the top of the stack onto the top.\" match? ",
+        "'over doc \"Copy the value beneath the top of the stack onto the top. Equivalent to " ++
+            "`swap dup (swap) dip`.\" match? ",
     );
     try expected.writer.writeByte('1');
     for (names) |name| {
@@ -125,7 +126,9 @@ test "every primitive exposes meaningful reflective documentation" {
     try std.testing.expectEqualStrings(expected.written(), display.bytes());
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
-        "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
+        "(x y -- x y x :\n" ++
+            " \"Copy the value beneath the top of the stack onto the top. Equivalent to `swap dup (swap) dip`.\")\n" ++
+            "(swap dup (swap) dip)\n" ++
             "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive>\n",
         output.written(),
     );

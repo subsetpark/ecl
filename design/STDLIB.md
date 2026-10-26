@@ -11,8 +11,10 @@ open the section and each later layer builds only on earlier ones. Mutually
 recursive definitions share a layer. Within a layer, words are ordered by
 codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
 words precede letter-spelled ones. An entry gives the word's successful stack
-effect followed by its semantics. Declared effects are reflected by `which`
-and `see`; words without a declaration state their shape in documentation.
+effect followed by its semantics. For a word defined in ecl, the entry is the
+definition's own annotation, the same effect and documentation that `which`,
+`see`, and `doc` reflect; words without a declared effect state their shape in
+documentation.
 At module boundaries, declared output contracts are checked when the invocation
 completes, including any deferred work. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of
@@ -117,12 +119,10 @@ number over zero is an infinity signed by both operands, and `0 0 /` is
 masks.
 
 ### <=
-`( x y -- bool )` — **Pervasive.** Less-than-or-equal. Equivalent to
-`> not`.
+`( x y -- bool )` — **Pervasive.** Compare conforming values for less-than-or-equal order, producing boolean masks. Equivalent to `> not`.
 
 ### <>
-`( x y -- bool )` — **Pervasive.** Inequality. Equivalent to `= not`. (On
-0/1 masks this is xor; there is no separate word.)
+`( x y -- bool )` — **Pervasive.** Compare conforming values for inequality, producing boolean masks. Equivalent to `= not`. On 0/1 masks this is xor; there is no separate word.
 
 ### =
 `( x y -- bool )` — **Pervasive.** Equality; numbers compare numerically
@@ -133,8 +133,7 @@ across int and float. Whole-value equality is `match?`.
 masks.
 
 ### >=
-`( x y -- bool )` — **Pervasive.** Greater-than-or-equal. Equivalent to
-`< not`.
+`( x y -- bool )` — **Pervasive.** Compare conforming values for greater-than-or-equal order, producing boolean masks. Equivalent to `< not`.
 
 ### @attempt
 `( values quotation -- result )` — *Unit constructor.* Initialize an isolated
@@ -236,8 +235,7 @@ Aliases and module names may not collide in either direction.
 source, as a list of strings.
 
 ### assert
-`( bool error -- )` — Raise an error dict unless the condition is the boolean
-1, discarding the dict when it holds. Defined in ecl.
+`( bool error -- )` — Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds. Defined in ecl.
 
 ### at
 `( collection key -- value )` — Index a list or look up a dict key.
@@ -254,9 +252,7 @@ key is an error.
 ```
 
 ### at-path
-`( ds l -- x )` — Repeatedly index nested lists/dicts by each key or
-index in the path, left to right; an empty path returns `ds` unchanged.
-Equivalent to `swap (at) fold`.
+`( ds l -- x )` — Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty path returns `ds` unchanged. Equivalent to `swap (at) fold`.
 
 ### atan2
 `( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
@@ -266,9 +262,7 @@ Equivalent to `swap (at) fold`.
 patterns of ints. Non-int leaves are `'type`.
 
 ### bi2
-`( x y p q -- ... )` — *Inline.* Binary cleave: apply each of two
-quotations to the same pair of inputs. Equivalent to
-`(|x y p q| x y p call x y q call)`.
+`( x y p q -- ... )` — *Inline.* Binary cleave: apply each of two quotations to the same pair of input values. Equivalent to `(|x y p q| x y p call x y q call)`.
 
 ### bnot
 `( x -- y )` — **Pervasive.** Invert every bit. `bnot bnot` is identity;
@@ -278,8 +272,7 @@ quotations to the same pair of inputs. Equivalent to
 `( x y -- z )` — **Pervasive.** Bitwise or. See `band`.
 
 ### both
-`( x y q -- ... )` — *Inline.* Apply one quotation independently to two
-values, `x` first. Equivalent to `(|x y q| x q call y q call)`.
+`( x y q -- ... )` — *Inline.* Apply one quotation independently to each of two input values, `x` first. Equivalent to `(|x y q| x q call y q call)`.
 
 ### bsl
 `( x count -- y )` — **Pervasive.** Shift the bit pattern left by `count`
@@ -368,9 +361,7 @@ for ordering: `-` errors on int64 overflow where an ordering must be total.
 ```
 
 ### collect
-`( quotation -- list )` — Run the quotation on an empty isolated stack and
-return what it leaves as a list, preserving order. Equivalent to
-`[] swap infra`; the quotation cannot see values beneath it.
+`( quotation -- list )` — Run a quotation on an empty isolated stack and return what it leaves as a list, preserving order. The quotation cannot see values beneath it. Equivalent to `[] swap infra`.
 
 #### Examples
 
@@ -486,15 +477,10 @@ flat-map is `each raze`. Derived verbs come free from homoiconicity:
 ```
 
 ### each-prior
-`( list seed quotation -- list )` — *Isolated*, contract
-`( current prior -- result )`. Apply left-to-right, using the explicit seed
-as the predecessor of the first element. Thus
-`[12 13 11] 10 (-) each-prior` is `[2 1 -2]`. Defined in ecl over
-`zip-with`.
+`( list seed quotation -- list )` — *Isolated*, contract `( current prior -- result )`. Apply the quotation to each element and its predecessor, left to right, using the explicit seed as the predecessor of the first element. Thus `[12 13 11] 10 (-) each-prior` is `[2 1 -2]`. Defined in ecl over `zip-with`.
 
 ### empty?
-`( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
-to `len 0 =`.
+`( sequence -- bool )` — Return 1 when a sequence has no elements and 0 otherwise. Equivalent to `len 0 =`.
 
 ### execute
 `( word -- ... )` — Resolve and apply a word value late through the ordinary
@@ -512,7 +498,7 @@ given status.
 `( x -- y )` — **Pervasive.** Natural exponential; float transcendental.
 
 ### first
-`( list -- value )` — First element of a nonempty list.
+`( list -- value )` — Return the first element of a nonempty list.
 
 ### flip
 `( list -- list )` — Exchange the first two axes of a list of equally
@@ -677,8 +663,7 @@ to unbounded external input; `symbol` is the lookup-only form. See
 separator string.
 
 ### last
-`( sequence -- value )` — Final element of a nonempty sequence.
-Equivalent to `dup len 1 - at`.
+`( sequence -- value )` — Return the final element of a nonempty sequence. Equivalent to `dup len 1 - at`.
 
 ### len
 `( list -- count )` — Top-level list element count. Lists may be ragged.
@@ -724,19 +709,16 @@ pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
 `( x y -- z )` — **Pervasive.** The lesser of two comparable atoms.
 
 ### neg
-`( x -- y )` — **Pervasive.** Negation. Equivalent to `-1 *`.
+`( x -- y )` — **Pervasive.** Negate numeric values with checked integer overflow. Equivalent to `-1 *`.
 
 ### nip
-`( x y -- y )` — Discard the value beneath the top. Equivalent to
-`swap pop`.
+`( x y -- y )` — Discard the value immediately beneath the top of the stack. Equivalent to `swap pop`.
 
 ### not
 `( bool -- bool )` — **Pervasive.** Invert 0/1 values.
 
 ### pack
-`( x₁ … xₙ n -- list )` — Collect the top `n` values into a list,
-preserving their order; `n` must be a nonnegative int. Equivalent to
-`() swap (cons) times`. Deliberately state-dependent stack surgery.
+Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a list, preserving their order; `n` must be a nonnegative int. Equivalent to `() swap (cons) times`. Deliberately state-dependent stack surgery.
 
 #### Examples
 
@@ -746,8 +728,7 @@ preserving their order; `n` must be a nonnegative int. Equivalent to
 ```
 
 ### pair
-`( first second -- list )` — Two-element list in stack order. Equivalent
-to `() cons cons`.
+`( first second -- list )` — Collect two stack values into a two-element list in stack order. Equivalent to `() cons cons`.
 
 ### parse
 `( string -- quotation )` — The reader, reified: parse source text into
@@ -831,8 +812,7 @@ shape; a zero axis must be final.
 ```
 
 ### reverse
-`( list -- list )` — Reverse top-level element order. Defined in ecl as
-an index permutation.
+`( list -- list )` — Return a list with its top-level element order reversed. Defined in ecl as an index permutation.
 
 ### rotate
 `( list count -- list )` — Rotate top-level element order left by a
@@ -881,15 +861,13 @@ displayed in native body descriptors.
 on ragged data (`len` is the word that works on anything).
 
 ### signum
-`( number -- sign )` — **Pervasive** by composition. −1, 0, or 1 as an
-int, by sign. Equivalent to `dup 0 > swap 0 < -`.
+`( number -- sign )` — **Pervasive** by composition. Return the int −1, 0, or 1 according to the sign of a number. Equivalent to `dup 0 > swap 0 < -`.
 
 ### sin
 `( x -- y )` — **Pervasive.** Sine; float transcendental.
 
 ### sort
-`( sequence -- sorted )` — Stable ascending sort by `cmp`. Equivalent to
-`dup grade at`.
+`( sequence -- sorted )` — Return a stable ascending sort of a sequence by `cmp`. Equivalent to `dup grade at`.
 
 #### Examples
 
@@ -999,9 +977,7 @@ not duplicate entries. Ordinary Sessions receive `'domain`.
 nonnegative int. Tail-call optimized.
 
 ### tri2
-`( x y p q r -- ... )` — *Inline.* Binary cleave: apply each of three
-quotations to the same pair of inputs in left-to-right order. Equivalent to
-`(|x y p q r| x y p call x y q call x y r call)`.
+`( x y p q r -- ... )` — *Inline.* Binary cleave: apply each of three quotations to the same pair of input values in left-to-right order. Equivalent to `(|x y p q r| x y p call x y q call x y r call)`.
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
@@ -1044,13 +1020,10 @@ state and `()`.
 ```
 
 ### unless
-`( bool else -- ... )` — *Inline.* Run the quotation when the condition
-is 0. Equivalent to `() swap if`.
+`( bool else -- ... )` — *Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing. Equivalent to `() swap if`.
 
 ### unset
-`( name -- )` — Remove a direct binding from the current scope, or do nothing
-when that scope does not bind the name. An exact alias of `undef`; removing a
-local shadow may reveal a parent or core binding. Defined in ecl.
+`( name -- )` — Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `undef`; removing a local shadow may reveal a parent or core binding. Defined in ecl.
 
 ### update
 `( collection selector quotation -- collection )` — Apply an isolated
@@ -1069,8 +1042,7 @@ it.
 ```
 
 ### when
-`( bool then -- ... )` — *Inline.* Run the quotation when the condition
-is 1. Equivalent to `() if`.
+`( bool then -- ... )` — *Inline.* Call the quotation when the condition is the boolean 1; otherwise do nothing. Equivalent to `() if`.
 
 ### where
 `( counts -- indices )` — Expand a list of nonnegative ints into each
@@ -1100,8 +1072,7 @@ and exit. Environment and IO effects from the condition survive. Tail-call
 optimized.
 
 ### windows
-`( list width -- windows )` — Return every overlapping window of a positive
-width. Equivalent to `() stencil`.
+`( list width -- windows )` — Return every overlapping window of a positive width. Equivalent to `() stencil`.
 
 #### Examples
 
@@ -1125,7 +1096,7 @@ non-symbol operand is `'type`.
 `( -- )` — Print the visible dictionary in sorted order.
 
 ### wrap
-`( value -- list )` — One-element list. Equivalent to `() cons`.
+`( value -- list )` — Wrap one value in a one-element list. Equivalent to `() cons`.
 
 ### zip-with
 `( left right quotation -- list )` — *Isolated*, contract `( a b -- c )`.
@@ -1140,54 +1111,39 @@ extends). Each-left/each-right are `partial` compositions.
 ```
 
 ### abs
-`( x -- y )` — **Pervasive.** Absolute value. Defined in ecl; `'abs see`
-renders the definition.
+`( x -- y )` — **Pervasive.** Return absolute numeric values with checked integer overflow. Defined in ecl; `'abs see` renders the definition.
 
 ### append
-`( sequence value -- sequence )` — Append one value to the end.
-Equivalent to `wrap cat`.
+`( sequence value -- sequence )` — Append one value to the end of a sequence. Equivalent to `wrap cat`.
 
 ### compose
-`( left right -- quotation )` — Concatenate two quotations in execution
-order.
+`( left right -- quotation )` — Concatenate two quotations in execution order.
 
 ### literal
-`( value -- quotation )` — Return a plain quotation that pushes the exact
-captured value as inert data when called, without executing or resolving it.
-A value other than a word already pushes itself, so the result is `(x)`; a word
-would execute, so it is quoted as `((x) first)`. Equivalent to
-`dup type 'word match? (wrap (first) cons) (wrap) if`.
+`( value -- quotation )` — Return a plain quotation that pushes the exact captured value as inert data when called, without executing or resolving it.
+
+Every value but a word already pushes itself when run, so the result is `(x)`. A word would execute, so it is quoted as `((x) first)`. Equivalent to `dup type 'word match? (wrap (first) cons) (wrap) if`.
 
 ### max-of
-`( sequence -- value )` — Greatest element of a nonempty sequence.
-Equivalent to `dup first (max) fold`.
+`( sequence -- value )` — Return the greatest element of a nonempty sequence. Equivalent to `dup first (max) fold`.
 
 ### min-of
-`( sequence -- value )` — Least element of a nonempty sequence.
-Equivalent to `dup first (min) fold`.
+`( sequence -- value )` — Return the least element of a nonempty sequence. Equivalent to `dup first (min) fold`.
 
 ### rest
-`( list -- list )` — All but the first element of a nonempty list.
+`( list -- list )` — Return all but the first element of a nonempty list.
 
 ### zip
-`( left right -- pairs )` — Pair corresponding elements of two conforming
-sequences. Equivalent to `(pair) zip-with`.
+`( left right -- pairs )` — Pair corresponding elements of two conforming sequences. Equivalent to `(pair) zip-with`.
 
 ### dip
-`( x q -- … x )` — *Inline.* Run a quotation beneath a protected top
-value: `q` runs with `x` removed, then `x` returns. Equivalent to
-`swap literal compose call`.
+`( x q -- ... )` — *Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` returns on top of its results. Equivalent to `swap literal compose call`.
 
 ### fail
-`( msg -- )` — Raise `{'kind 'user 'msg msg}`. Defined in ecl.
+`( msg -- )` — Raise a user-kind error whose message is the supplied value: `{'kind 'user 'msg msg}`. Defined in ecl.
 
 ### from-digits
-`( digits base -- value )` — Combine digits, most significant first, into
-a value. The base is one integer for every position, or a list of radices
-with one per digit, as in mixed-radix time; the first radix has no effect.
-Digits pervade: a list of equal-length digit lists, one per position, gives
-one value per column. A radix list of the wrong length fails with `'shape`.
-Inverse of `to-digits` for values in range.
+`( digits base -- value )` — Combine digits, most significant first, into a value. The base is one integer for every position, or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect. Digits pervade: a list of equal-length digit lists, one per position, gives one value per column. A radix list of the wrong length fails with `'shape`. Inverse of `to-digits` for values in range.
 
 #### Examples
 
@@ -1201,10 +1157,7 @@ Inverse of `to-digits` for values in range.
 ```
 
 ### iterations
-`( value count quotation -- list )` — *Isolated*, unary contract
-`( a -- a )`. Return the initial value followed by `count` successive
-applications. `count` must be a nonnegative int, and a zero count returns a
-singleton list. Defined in ecl over `scan`.
+`( value count quotation -- list )` — *Isolated*, unary contract `( a -- a )`. Return the initial value followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list. Defined in ecl over `scan`.
 
 #### Examples
 
@@ -1214,11 +1167,7 @@ singleton list. Defined in ecl over `scan`.
 ```
 
 ### partial
-`( value quotation -- quotation )` — Safe partial application: the result
-pushes the captured value inertly, then runs the quotation. Even a
-captured word remains data. Equivalent to `swap literal swap compose`;
-`3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as
-`((w) first)`.
+`( value quotation -- quotation )` — Safe partial application: return a quotation that pushes an inert captured value before running another quotation. Even a captured word remains data. Equivalent to `swap literal swap compose`; `3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as `((w) first)`.
 
 #### Examples
 
@@ -1228,33 +1177,19 @@ captured word remains data. Equivalent to `swap literal swap compose`;
 ```
 
 ### scan1
-`( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`.
-Return a nonempty list's first element followed by the intermediate
-accumulators from reducing its remainder. Defined in ecl over `scan`.
+`( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.
 
 ### set
-`( annotation? value 'name -- )` — Bind a value as a constant word in the current
-environment. Reference applies the constant's body and pushes the exact
-captured value, quotations included. Defined in ecl as
-`swap literal swap def`, so `v 'name set` is observationally
-`v literal 'name def`: the stored body is `((v) first)`. An optional
-annotation beneath `v` is published as the constant's metadata; marker words
-inside `v` are nested by `literal` and remain captured data.
+Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v 'name set` is observationally `v literal 'name def`: the stored body is `((v) first)`. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested by `literal` and remain captured data.
 
 ### setp
-`( annotation? value 'name -- )` — Bind a private module constant. Defined in ecl as
-`swap literal swap defp`. A top-level `setp` is an error, raised by the
-`defp` it calls.
+Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a private module constant word; an optional annotation may precede the value. Defined in ecl as `swap literal swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.
 
 ### uncons
-`( list -- first rest )` — Split a nonempty list into first element and
-remainder. Equivalent to `dup first swap rest`.
+`( list -- first rest )` — Split a nonempty list into its first element and remaining elements. Equivalent to `dup first swap rest`.
 
 ### while-values
-`( value predicate step -- list )` — *Isolated*, contracts
-`( state -- bool )` and `( state -- state )`. Return the initial value and
-successive states through the first state for which the predicate is false.
-Defined in ecl over `unfold`.
+`( value predicate step -- list )` — *Isolated*, contracts `( state -- bool )` and `( state -- state )`. Return the initial value and successive states through the first state for which the predicate is false. Defined in ecl over `unfold`.
 
 #### Examples
 
@@ -1264,50 +1199,33 @@ Defined in ecl over `unfold`.
 ```
 
 ### and
-`( x y -- bool )` — **Pervasive.** Boolean conjunction on 0/1 values.
-Both operands are already evaluated — there is no short-circuiting.
-Defined in ecl.
+`( x y -- bool )` — **Pervasive.** Compute boolean conjunction over 0 and 1 values. Both operands are already evaluated; there is no short-circuiting. Defined in ecl.
 
 ### clamp
-`( value lower upper -- bounded )` — **Pervasive** by composition.
-Constrain to the inclusive interval. Equivalent to `(max) dip min`.
+`( value lower upper -- bounded )` — **Pervasive** by composition. Constrain a value to the inclusive interval between lower and upper. Equivalent to `(max) dip min`.
 
 ### find
-`( sequence needle -- index )` — Index of the first element that
-returns 1 from `match?` against the needle, or the sequence length on a
-miss. Defined in ecl.
+`( sequence needle -- index )` — Return the index of the first element that returns 1 from `match?` against the needle, or the sequence length when no element matches. Defined in ecl.
 
 ### or
-`( x y -- bool )` — **Pervasive.** Boolean disjunction on 0/1 values.
-Both operands are already evaluated — there is no short-circuiting.
-Defined in ecl.
+`( x y -- bool )` — **Pervasive.** Compute boolean disjunction over 0 and 1 values. Both operands are already evaluated; there is no short-circuiting. Defined in ecl.
 
 ### over
-`( x y -- x y x )` — Copy the value beneath the top onto the top.
-Equivalent to `swap dup (swap) dip`.
+`( x y -- x y x )` — Copy the value beneath the top of the stack onto the top. Equivalent to `swap dup (swap) dip`.
 
 ### rolldown
-`( x y z -- y z x )` — Rotate the top three stack values downward.
-Equivalent to `(swap) dip swap`.
+`( x y z -- y z x )` — Rotate the top three stack values downward, from x y z to y z x. Equivalent to `(swap) dip swap`.
 
 ### rollup
-`( x y z -- z x y )` — Rotate the top three stack values upward.
-Equivalent to `swap (swap) dip`.
+`( x y z -- z x y )` — Rotate the top three stack values upward, from x y z to z x y. Equivalent to `swap (swap) dip`.
 
 ### unappend
-`( list -- initial last )` — Split a nonempty list into its initial
-elements and last element. Equivalent to `reverse uncons reverse swap`.
+`( list -- initial last )` — Split a nonempty list into its initial elements and last element. Equivalent to `reverse uncons reverse swap`.
 
 ### with
-`( values quotation -- quotation )` — Capture every element of a list as
-an inert input to a quotation, preserving order. Calling the result starts
-with the list's elements as separate stack values. Defined in ecl as
-`((literal) each) dip append raze`.
+`( values quotation -- quotation )` — Return a quotation that pushes every value from a list, in order and inertly, before running another quotation. Calling the result starts with the list's elements as separate stack values. Defined in ecl as `((literal) each) dip append raze`.
 
-This is ordinary quotation composition and constructs nothing. It is not a
-unit's seed operand: the flattened quotation it returns is a runtime-built
-body, so `@defm` gives it no reader attribution. Pass initial
-values as the constructor's separate list operand.
+This is ordinary quotation composition and constructs nothing. It is not a unit's seed operand: the flattened quotation it returns is a runtime-built body, so `@defm` gives it no reader attribution. Unit constructors instead take their initial values and body as two separate operands, preserving the exact body for attribution.
 
 #### Examples
 
@@ -1317,19 +1235,10 @@ values as the constructor's separate list operand.
 ```
 
 ### @each
-`( sequence values quotation -- results )` — *Unit constructor*, one fresh unit
-per element, contract `( a -- b )` enforced per element. Concurrent
-`each`: ordered results, leftmost failure re-raised after cancelling and
-quiescing the remainder. Each child's stack starts with its element deepest;
-`list values (q) @each` adds the shared values above it. Defined in ecl over
-`@spawn`, `task.await`, and `task.cancel`. Inside a module construction body,
-at any depth, this constructor is `'domain`: a module body defines words and
-starts no tasks (see Modules). See Concurrency.
+`( sequence values quotation -- results )` — *Unit constructor*, one fresh unit per element, contract `( a -- b )` enforced per element. Concurrent `each`: apply a quotation in one fresh unit per element and return one result per element in input order. Each child's stack starts with its element deepest; `list values (q) @each` adds the shared values above it. Results are joined in order; the leftmost failure cancels every later task, waits for them to quiesce, and is re-raised. Defined in ecl over `@spawn`, `task.await`, and `task.cancel`. Inside a module construction body, at any depth, this constructor is `'domain`: a module body defines words and starts no tasks (see Modules). See Concurrency.
 
 ### all?
-`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`.
-1 when the predicate returns 1 for every element. Equivalent to
-`(|l q| l q each 1 (and) fold)`.
+`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for every element; otherwise return 0. Equivalent to `(|l q| l q each 1 (and) fold)`.
 
 #### Examples
 
@@ -1339,22 +1248,13 @@ starts no tasks (see Modules). See Concurrency.
 ```
 
 ### any?
-`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`.
-1 when the predicate returns 1 for at least one element; the predicate
-runs on every element (no early exit). Equivalent to
-`(|l q| l q each 0 (or) fold)`.
+`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for at least one element; otherwise return 0. The predicate runs on every element; there is no early exit. Equivalent to `(|l q| l q each 0 (or) fold)`.
 
 ### converges
-`( value quotation -- list )` — *Isolated*, unary contract `( a -- a )`.
-Return the initial value and successive applications until the next value
-is structurally equal to either the initial or immediately preceding value;
-the repeated boundary value is not appended. Defined in ecl over `unfold`.
+`( value quotation -- list )` — *Isolated*, unary contract `( a -- a )`. Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended. Defined in ecl over `unfold`.
 
 ### filter
-`( sequence predicate -- matches )` — *Isolated*, contract
-`( a -- count )`. Apply the predicate to every element; retain each
-element as many times as its returned nonnegative int. A 0/1 predicate is
-ordinary filtering. Equivalent to `over swap each where at`.
+`( sequence predicate -- matches )` — *Isolated*, contract `( a -- count )`. Apply the predicate to every element, retaining each element as many times as its returned nonnegative int. A 0/1 predicate is ordinary filtering. Equivalent to `over swap each where at`.
 
 #### Examples
 
@@ -1364,29 +1264,19 @@ ordinary filtering. Equivalent to `over swap each where at`.
 ```
 
 ### fold1
-`( list quotation -- value )` — *Isolated*, contract `( acc a -- acc )`.
-Reduce a nonempty list left-to-right from its first element. The explicit
-accumulator form `fold` is required for an empty list. Defined in ecl.
+`( list quotation -- value )` — *Isolated*, contract `( acc a -- acc )`. Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`. Defined in ecl.
 
 ### keep
-`( x q -- … x )` — *Inline.* Apply a quotation to a value, then restore
-the value on top of the quotation's results. Equivalent to
-`over (call) dip`.
+`( x q -- ... )` — *Inline.* Apply a quotation to a value, then restore the value on top of the quotation's results. Equivalent to `over (call) dip`.
 
 ### lex-cmp-with
-`( left right comparator -- order )` — Lexicographically compare two
-sequences with an inline `( left-element right-element -- order )` comparator
-that returns −1, 0, or 1. Stop at the first nonzero result; when the shared
-prefix is equal, compare sequence lengths. Defined in ecl.
+`( left right comparator -- order )` — Compare two sequences lexicographically with an inline `( left-element right-element -- order )` comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the sequences are ordered by length. Defined in ecl.
 
 ### mod
-`( x y -- z )` — **Pervasive.** Checked integer remainder. Equivalent to
-`over over div * -`.
+`( x y -- z )` — **Pervasive.** Compute checked integer remainders. Equivalent to `over over div * -`.
 
 ### partition
-`( sequence predicate -- matches rejects )` — *Isolated*, contract
-`( a -- bool )`. Split into elements whose predicate returned 1 and those
-returning 0. Defined in ecl.
+`( sequence predicate -- matches rejects )` — *Isolated*, contract `( a -- bool )`. Split a sequence into the elements whose predicate returned 1 and those that returned 0. Defined in ecl.
 
 #### Examples
 
@@ -1396,16 +1286,10 @@ returning 0. Defined in ecl.
 ```
 
 ### bi
-`( x p q -- ... )` — *Inline.* Apply two quotations to the same input,
-first `p`, then `q`. Equivalent to `(keep) dip call`.
+`( x p q -- ... )` — *Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s. Equivalent to `(keep) dip call`.
 
 ### case
-`( x clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
-odd: `[key action … else]`. Keys are inert data — any value, never
-executed, duplicates legal with the first `match?` result of 1 winning;
-every action and the else must be a quotation, validated before any
-comparison. The first key for which `match?` returns 1 selects its action.
-Defined in ecl; `'case see` renders the definition.
+`( x clauses -- ... )` — *Inline.* Select and call the first action whose key matches the subject. The clause list is flat, nonempty, and odd: `[key action … else]`. Keys are inert data: any value, never executed, with duplicates legal and the first `match?` result of 1 winning. Every action and the else must be a quotation, and all of them are validated before any comparison or user quotation runs. When no key matches, the else runs. Defined in ecl; `'case see` renders the definition.
 
 #### Examples
 
@@ -1415,9 +1299,7 @@ Defined in ecl; `'case see` renders the definition.
 ```
 
 ### chunk
-`( list size -- pieces )` — Split a list into consecutive pieces of a
-positive size; the last piece is shorter when the size does not divide the
-length. Equivalent to cutting at every multiple of the size.
+`( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length. Equivalent to cutting at every multiple of the size.
 
 #### Examples
 
@@ -1427,20 +1309,13 @@ length. Equivalent to cutting at every multiple of the size.
 ```
 
 ### converge
-`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`.
-Return the last value before repeated application reaches a fixed point or
-returns to the initial value. Equivalent to `converges last`.
+`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches a fixed point or returns to the initial value. Equivalent to `converges last`.
 
 ### product
-`( sequence -- product )` — Product of a numeric sequence; 1 when empty.
-Equivalent to `(*) fold1` for a nonempty sequence, so the product starts from
-the first element and a list of rows multiplies to a row.
+`( sequence -- product )` — Multiply every element of a numeric sequence; 1 when the sequence is empty. Equivalent to `(*) fold1` for a nonempty sequence, so the product starts from the first element and a list of rows multiplies to a row.
 
 ### sum
-`( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
-Equivalent to `(+) fold1` for a nonempty sequence, so the total starts from
-the first element: a list of rows sums to a row, and a sum of negative
-zeros is `-0.0`.
+`( sequence -- total )` — Add every element of a numeric sequence; 0 when the sequence is empty. Equivalent to `(+) fold1` for a nonempty sequence, so the total starts from the first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
 
 #### Examples
 
@@ -1454,12 +1329,7 @@ zeros is `-0.0`.
 ```
 
 ### to-digits
-`( value radices -- digits )` — Split a value into one digit per radix,
-most significant first, by floor division, so every digit lies from zero
-below its radix even for negative values. A value beyond the radices'
-capacity keeps only its low digits. Values pervade: a list of values gives
-one digit list per radix. Radices must be positive integers, or the word
-fails with `'domain`; `[2] 8 take` builds eight binary radices.
+`( value radices -- digits )` — Split a value into one digit per radix, most significant first, by floor division, so every digit lies from zero below its radix even for negative values. A value beyond the radices' capacity keeps only its low digits. Values pervade: a list of values gives one digit list per radix. Radices must be positive integers, or the word fails with `'domain`; `[2] 8 take` builds eight binary radices.
 
 #### Examples
 
@@ -1473,12 +1343,10 @@ fails with `'domain`; `[2] 8 take` builds eight binary radices.
 ```
 
 ### tri
-`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input
-in order. Equivalent to `((keep) dip keep) dip call`.
+`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input in left-to-right order. Equivalent to `((keep) dip keep) dip call`.
 
 ### mean
-`( sequence -- mean )` — Arithmetic mean of a nonempty numeric sequence.
-Equivalent to `dup sum swap len /`.
+`( sequence -- mean )` — Return the arithmetic mean of a nonempty numeric sequence. Equivalent to `dup sum swap len /`.
 
 ## agent
 
@@ -1501,17 +1369,10 @@ accepted waits forever if the agent ends before replying, unless it bounds the
 call with `call-for`.
 
 ### send
-`( quotation address -- )` — Apply the quotation to the agent's stack without
-waiting. The whole result stack becomes the new state; a failing quotation
-changes nothing and reports nothing.
+`( quotation address -- )` — Apply a quotation to the agent's stack without waiting for a reply. The whole result stack becomes the new state; a failing quotation changes nothing and reports nothing.
 
 ### call
-`( quotation address -- result )` — Apply the quotation to the agent's stack
-and return the top of the result stack; the agent keeps the rest. The
-quotation's own error is re-raised here with the agent unchanged. A result
-stack with nothing on it is `'domain`. Replies travel through a helper task.
-A call to an agent that has ended raises `'io`; a call whose request was
-accepted never returns if the agent ends before replying.
+`( quotation address -- result )` — Apply a quotation to the agent's stack and return the top of the result stack; the agent keeps the rest. The quotation's own error is re-raised here and leaves the agent unchanged. A result stack with nothing on it is `'domain`. Replies travel through a helper task. A call to an agent that has ended raises `'io`; a call whose request was accepted never returns if the agent ends before replying.
 
 #### Examples
 
@@ -1525,23 +1386,13 @@ accepted never returns if the agent ends before replying.
 ```
 
 ### call-for
-`( quotation address milliseconds -- result )` — `agent.call` with a
-nonnegative int deadline, checked before anything is sent: a negative duration
-is `'domain` and a non-int is `'type`. When no reply arrives in time the call
-raises `'timeout`, whether the deadline passed while waiting for room in a full
-mailbox or for the reply; the quotation, if it was sent, still runs on the
-agent when its turn comes, and its reply is discarded.
+`( quotation address milliseconds -- result )` — `agent.call` with a nonnegative int deadline in milliseconds, checked before anything is sent: a negative duration is `'domain` and a non-int is `'type`. When no reply arrives in time the call raises `'timeout`, whether the deadline passed while waiting for room in a full mailbox or for the reply; the quotation, if it was sent, still runs on the agent when its turn comes, and its reply is discarded.
 
 ### serve
-Stack-polymorphic. Turn the current task into an agent whose state is the
-stack it has now, and serve until cancelled. Spawn it directly to keep the
-handle: `[[7 0]] (agent.serve) @spawn` serves `[7 0]` and `task.cancel` on the
-handle ends it with `'cancelled`.
+Stack-polymorphic. Turn the current task into an agent whose state is the stack it has now, then serve until cancelled: receive a message, apply its quotation to the state as a unit, and reply when the message asks. Spawn it directly to keep the handle: `[[7 0]] (agent.serve) @spawn` serves `[7 0]`, and `task.cancel` on the handle ends it with `'cancelled`.
 
 ### start
-`( state -- address )` — Spawn a server whose stack holds the one value
-`state` and return its address. The server is owned by the spawning task
-scope, as any `@spawn` is.
+`( state -- address )` — Spawn a server whose stack holds the one value `state` and return its address. The server is owned by the spawning task scope, as any `@spawn` is.
 
 ## archive
 
@@ -1864,28 +1715,22 @@ unless an operation's own input violates its contract; control effects remain
 core words.
 
 ### new
-`( kind -- error )` — Build `{'kind kind}` from a symbol.
+`( kind -- error )` — Build the error dictionary `{'kind kind}` from a kind symbol.
 
 ### valid?
-`( value -- bool )` — Return 1 when a value has a required symbol `'kind` and
-well-typed optional `'msg`, `'word`, `'trace`, and `'data` fields. Extra fields
-are allowed.
+`( value -- bool )` — Return 1 when a value satisfies the error dictionary schema: a required symbol `'kind` and well-typed optional `'msg`, `'word`, `'trace`, and `'data` fields. Extra fields are allowed.
 
 ### kind-in?
-`( error kinds -- bool )` — Validate an error and a list of kind symbols, then
-return 1 when the error's kind occurs in the list.
+`( error kinds -- bool )` — Validate an error and a list of kind symbols, then return 1 when the error's kind occurs in the list.
 
 ### kind?
-`( error kind -- bool )` — Validate both inputs and return 1 when the error has
-the supplied kind.
+`( error kind -- bool )` — Validate both inputs and return 1 when the error has the given kind symbol.
 
 ### with-data
-`( error data -- error )` — Validate both dictionaries and return the error
-with `'data` set to `data`.
+`( error data -- error )` — Validate both dictionaries and return the error with `'data` set to `data`.
 
 ### with-message
-`( error message -- error )` — Validate the error and string message and return
-the error with `'msg` set to `message`.
+`( error message -- error )` — Validate the error and string message and return the error with `'msg` set to `message`.
 
 #### Examples
 
@@ -2222,34 +2067,19 @@ updated copies; the original is never changed. A word given a malformed
 request dictionary, or a name that is not a string, is `'type`.
 
 ### new
-`( method target -- request )` — Return a request with the method and target,
-`'path` and `'query` split from the target at its first `?` (`'query` `""`
-when absent), `{}` headers, `[]` body, and `""` peer. A non-string method or
-target is `'type`.
+`( method target -- request )` — Return a request with the method and target, `'path` and `'query` split from the target at its first `?` (`'query` `""` when absent), `{}` headers, `[]` body, and `""` peer. A non-string method or target is `'type`.
 
 ### valid?
-`( value -- bool )` — Return 1 for a partial or complete request dictionary
-containing only recognized fields: string method, target, path, query, and
-peer; a headers dictionary from ASCII-lowercased string names to lists of
-strings; a byte-list body; and a params dictionary from string names to string
-values. Every field is optional. Never raises.
+`( value -- bool )` — Return 1 for a partial or complete request dictionary containing only recognized fields: string `'method`, `'target`, `'path`, `'query`, and `'peer`; a `'headers` dictionary from ASCII-lowercased string names to lists of strings; a byte-list `'body`; and a `'params` dictionary from string names to string values. Every field is optional. Never raises.
 
 ### header
-`( request name -- values )` — Return the list of values of a header, matching
-the name regardless of letter case, or `()` when it is absent.
+`( request name -- values )` — Return the list of values of a header, matching the name regardless of letter case, or `()` when it is absent. A non-request or non-string name is `'type`.
 
 ### param
-`( request name -- value )` — Return the route parameter bound under the name.
-A request without that parameter is `'domain`.
+`( request name -- value )` — Return the route parameter bound under the name by `http.server.route`. A request without that parameter is `'domain`; a non-request or non-string name is `'type`.
 
 ### query
-`( request -- dict )` — Return the request's `'query` string as a dictionary
-from string keys to string values: `&`-separated pairs, each split at its
-first `=`, a pair without `=` mapping its key to `""`, empty pieces ignored,
-and a later duplicate key replacing an earlier one. `%XX` escapes are decoded
-in keys and values and the decoded text must be valid UTF-8; `+` is left as
-it is. An empty query is `{}`. A `%` not followed by two hexadecimal digits,
-or a decoded key or value that is not valid UTF-8, is `'domain`.
+`( request -- params )` — Parse the request's `'query` string, such as `"a=1&b=%2Fx&c"`, into a dictionary from string keys to string values, such as `{"a" "1" "b" "/x" "c" ""}`: `&`-separated pairs, each split at its first `=`, a pair without `=` mapping its key to `""`, empty pieces ignored, and a later duplicate key replacing an earlier one. `%XX` escapes are decoded in keys and values and the decoded text must be valid UTF-8; `+` is left as it is. An empty query is `{}`. A `%` not followed by two hexadecimal digits, or a decoded key or value that is not valid UTF-8, is `'domain`; a non-request is `'type`.
 
 #### Examples
 
@@ -2259,30 +2089,22 @@ or a decoded key or value that is not valid UTF-8, is `'domain`.
 ```
 
 ### text
-`( request -- string )` — Return the body decoded as UTF-8 text; a body that
-is not valid UTF-8 is `'domain`, as for `chars`.
+`( request -- string )` — Return the body decoded as UTF-8 text. A body that is not valid UTF-8 is 'domain, as for chars.
 
 ### with-body
-`( request body -- request )` — Return the request with a new body: a byte
-list as given, or a string encoded as UTF-8. Another kind is `'type`.
+`( request body -- request )` — Return the request with a new body: a byte list as given, or a string encoded as UTF-8. Another kind is 'type.
 
 ### with-header
-`( request name value -- request )` — Return the request with a value added
-under the ASCII-lowercased name: a string or a list of strings, appended to
-the values already there. A bad value is `'type`.
+`( request name value -- request )` — Return the request with a value added under the ASCII-lowercased header name: a string or a list of strings, appended to the values already there. A non-string name or a bad value is `'type`.
 
 ### with-param
-`( request name value -- request )` — Return the request with a route
-parameter bound under the name, as `route` does. A non-string value is
-`'type`.
+`( request name value -- request )` — Return the request with a route parameter bound under the name, as `http.server.route` does. A non-string name or value is `'type`.
 
 ### header?
-`( request name -- bool )` — Return 1 when the request carries the header under
-any letter case.
+`( request name -- bool )` — Return 1 when the request carries the header under any letter case.
 
 ### json
-`( request -- value )` — Return the body parsed as JSON: `chars` then
-`json.parse`, failing as they do.
+`( request -- value )` — Return the body parsed as JSON: `chars` then `json.parse`, so a body that is not UTF-8 or not JSON fails as they do.
 
 ## http.response
 
@@ -2296,67 +2118,46 @@ given a value that is not a response dictionary, a status outside `100...599`,
 or a name that is not a string is `'type`.
 
 ### redirect
-`( location -- response )` — Return a 302 response with
-`{"location" (location)}` as its headers and an empty body. A non-string
-location is `'type`.
+`( location -- response )` — Return a 302 response with `{"location" (location)}` as its headers and an empty body. A non-string location is `'type`.
 
 ### json
-`( status value -- response )` — Return a response whose body is the value
-rendered with `json.emit` and whose headers are
-`{"content-type" ("application/json")}`. A value `json.emit` rejects fails as
-`json.emit` does.
+`( status value -- response )` — Return a response whose body is the value rendered with `json.emit` and whose headers are `{"content-type" ("application/json")}`. A bad status is `'type`; a value `json.emit` rejects fails as `json.emit` does.
 
 ### new
-`( status -- response )` — Return `{'status status 'headers {} 'body ""}`.
+`( status -- response )` — Return `{'status status 'headers {} 'body ""}`. A status outside `100...599` is `'type`.
 
 ### text
-`( status string -- response )` — Return a response with the string as its
-body and `{"content-type" ("text/plain; charset=utf-8")}` as its headers. A
-non-string body is `'type`.
+`( status string -- response )` — Return a response with the string as its body and `{"content-type" ("text/plain; charset=utf-8")}` as its headers. A bad status or a non-string body is `'type`.
 
 ### not-found
-`( -- response )` — Return `404 "not found" text`.
+`( -- response )` — Return 404 "not found" text.
 
 ### valid?
-`( value -- bool )` — Return 1 for a response dictionary: exactly `'status`,
-`'headers`, and `'body`, with an integer status in `100...599`, a headers
-dictionary from string names to a string or a list of strings, and a string
-or byte-list body. Never raises.
+`( value -- bool )` — Return 1 for a response dictionary: exactly `'status`, `'headers`, and `'body`, with an integer status in `100...599`, a headers dictionary from string names to a string or a list of strings, and a string or byte-list body. Never raises.
 
 ### class
-`( response -- int )` — Return the status class: 2 for `200...299`, 4 for
-`400...499`, and so on.
+`( response -- class )` — Return the status class: 2 for 200...299, 4 for 400...499, and so on.
 
 ### header
-`( response name -- values )` — Return every value of a header as a list,
-matching the name regardless of letter case and in dictionary order; a string
-value counts as one. `()` when the header is absent.
+`( response name -- values )` — Return every value of a header as a list, matching the name regardless of letter case and in dictionary order; a string value counts as one. `()` when the header is absent. A non-response or non-string name is `'type`.
 
 ### with-body
-`( response body -- response )` — Return the response with a new string or
-byte-list body; another kind is `'type`.
+`( response body -- response )` — Return the response with a new string or byte-list body; another kind is 'type.
 
 ### with-header
-`( response name value -- response )` — Return the response with a value
-added under the header name exactly as given: a string or a list of strings,
-appended to any values already under that name; an existing string value,
-even the empty string, counts as one.
+`( response name value -- response )` — Return the response with a value added under the header name exactly as given: a string or a list of strings, appended to any values already under that name; an existing string value, even the empty string, counts as one. A non-string name or a bad value is `'type`.
 
 ### with-headers
-`( response headers -- response )` — Return the response with a headers
-dictionary merged over its own; a right-hand name replaces a left-hand one
-exactly. A value that is not a dictionary of string names to header values is
-`'type`.
+`( response headers -- response )` — Return the response with a headers dictionary merged over its own; a right-hand name replaces a left-hand one exactly. A value that is not a dictionary of string names to header values is `'type`.
 
 ### with-status
-`( response status -- response )` — Return the response with a new status.
+`( response status -- response )` — Return the response with a new status. A bad status is `'type`.
 
 ### header?
-`( response name -- bool )` — Return 1 when the response carries the header
-under any letter case.
+`( response name -- bool )` — Return 1 when the response carries the header under any letter case.
 
 ### ok?
-`( response -- bool )` — Return 1 for a status in `200...299`.
+`( response -- bool )` — Return 1 for a status in 200...299.
 
 ## http.server
 
@@ -2483,29 +2284,13 @@ l {'read-timeout-ms 5000} (handler) http.server.@serve
 ```
 
 ### content-length
-`( headers -- int )` — Return the request body length named by a parsed
-headers dictionary: `0` when `content-length` is absent, otherwise the
-integer every occurrence spells, leading zeros allowed. A value that is not a
-nonempty digit string, or repeated values that differ, is `'domain` with
-`'data {'status 400}`; a value too large for a 64-bit integer exceeds every
-body limit and is `'domain` with `'data {'status 413}`. A non-dictionary is
-`'type`.
+`( headers -- length )` — Return the request body length named by a headers dictionary as `parse-headers` builds it: `0` when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros allowed, so `{"content-length" ("5")}` is 5. A value that is not a nonempty string of decimal digits, or repeated values that differ, is `'domain` with `'data {'status 400}`; a value too large for a 64-bit integer exceeds every body limit and is `'domain` with `'data {'status 413}`. A non-dictionary is `'type`.
 
 ### parse-headers
-`( lines -- dict )` — Parse a list of header-line strings into a dictionary
-from ASCII-lowercased name to the list of trimmed values in arrival order,
-so `("Host: a" "host: b")` yields `{"host" ("a" "b")}`. The name is the text
-before the first `:`, the value the rest with surrounding whitespace removed.
-A line without `:`, or one beginning with space or tab, is `'domain` with
-`'data {'status 400}`. A non-list or a non-string line is `'type`.
+`( lines -- headers )` — Fold a list of header-line strings into a dictionary from ASCII-lowercased name to the list of its values in arrival order, so `("Host: a" "host: b")` yields `{"host" ("a" "b")}`. The name is the text before the first `:`, and the value is the rest with surrounding ASCII whitespace removed. `()` is `{}`. A line that has no `:`, has an empty name or a name containing whitespace, or begins with a space or tab (obsolete line folding) is `'domain` with `'data {'status 400}`. A non-list or a non-string line is `'type`.
 
 ### parse-request-line
-`( line -- dict )` — Parse a request line into
-`{'method 'target 'path 'query 'version}`: three space-separated tokens,
-`'path` and `'query` the target split at the first `?` undecoded, `'query`
-`""` when there is no `?`. Any other token count is `'domain` with
-`'data {'status 400}`; a version other than `HTTP/1.1` or `HTTP/1.0` is
-`'domain` with `'data {'status 505}`. A non-string is `'type`.
+`( line -- request-line )` — Parse a request line such as `"GET /users?id=42 HTTP/1.1"` into `{'method 'target 'path 'query 'version}`: three space-separated tokens, with `'path` and `'query` the target split at its first `?`, undecoded, and `'query` `""` when there is no `?`. Any other token count is `'domain` with `'data {'status 400}`; a version other than `HTTP/1.1` or `HTTP/1.0` is `'domain` with `'data {'status 505}`. A non-string is `'type`.
 
 #### Examples
 
@@ -2515,39 +2300,14 @@ A line without `:`, or one beginning with space or tab, is `'domain` with
 ```
 
 ### route
-`( request routes -- response )` — *Inline.* Dispatch a request over a list
-of `[method pattern handler]` rows. A pattern is a slash path whose segments
-must equal the request's `'path` segments one for one, except that a segment
-beginning with `:` binds any nonempty path segment under its name in a
-string dictionary. The first row whose pattern and method both match has the
-request, with `'params` set to that dictionary, passed to its handler, which
-is applied inline with the contract `( request -- response )`; middleware is
-`compose`. When some pattern matches but no matching row's method does, the
-result is `405 "method not allowed" text` with an `allow` header joining the
-matching rows' methods with `,`; when no pattern matches, the result is
-`not-found`. Every row is checked before any comparison: a row that is not a
-list of three elements is `'shape`, and a non-string method, non-string
-pattern, or non-quotation handler is `'type`.
+`( request routes -- response )` — *Inline.* Dispatch a request over a list of `[method pattern handler]` rows. The method is a string compared exactly against the request's `'method`. A pattern is a slash path such as `"/users/:id"` whose segments must equal the request's `'path` segments one for one, except that a segment beginning with `:` binds any nonempty path segment under its name in a string dictionary. The first row whose pattern and method both match has the request, with `'params` set to that dictionary, passed to its handler, which is applied inline with the contract `( request -- response )`. Middleware is composition: wrap the handler quotation with `compose`.
+
+When some pattern matches but no matching row's method does, the result is `405 "method not allowed" text` with an `allow` header joining the matching rows' methods with `,`; when no pattern matches, the result is `http.response.not-found`. Every row is checked before any comparison: a non-list routes value is `'type`, a row that is not a list of three elements is `'shape`, and a non-string method, non-string pattern, or non-quotation handler is `'type`.
 
 ### render-response
-`( response -- bytes )` — Validate a response dictionary and return the exact
-bytes the server writes for it: `HTTP/1.1 <status> <reason>` CRLF, one
-`name: value` line per header value in the given order with the name as
-given, `Content-Length: <n>` CRLF (omitted for 204 and 304, whose length is
-not the empty body's), `Connection: close` CRLF,
-CRLF, then the body bytes. The reason phrase comes from a fixed table covering 200, 201,
-204, 301, 302, 304, 400, 401, 403, 404, 405, 408, 411, 413, 431, 500, 503,
-and 505 and is empty for any other status, with the space before it always
-written. A non-dictionary is `'type`. Keys other than exactly `'status`,
-`'headers`, and `'body`; a status that is not an integer in `200...599`; a
-nonempty body with status 204, 205, or 304; a
-headers value that is not a dictionary, a header name that is not a nonempty
-string of HTTP token characters, a header value that is neither a string nor
-a list of strings or that contains CR, LF, NUL, or a control character other
-than tab, a header whose lowercased name is `content-length`, `connection`,
-or `transfer-encoding`;
-or a body that is neither a string nor a list of integers in `0...255` is
-`'domain`.
+`( response -- bytes )` — Validate a response dictionary in full and return the exact bytes the server writes for it: `HTTP/1.1 <status> <reason>` CRLF, one `name: value` line per header value in the given order with the name as given, so `{"set-cookie" ("a=1" "b=2")}` writes two lines, `Content-Length: <n>` CRLF (omitted for 204 and 304, whose length is not the empty body's), `Connection: close` CRLF, CRLF, then the body bytes, a string written as UTF-8. The reason phrase comes from a fixed table covering 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 408, 411, 413, 431, 500, 503, and 505 and is empty for any other status, with the space before it always written. Every byte the server writes has passed this word.
+
+A non-dictionary is `'type`. The following are `'domain`: keys other than exactly `'status`, `'headers`, and `'body`; a status that is not an integer in `200...599`, since interim 1xx responses are not served; a nonempty body with status 204, 205, or 304; a headers value that is not a dictionary; a header name that is not a nonempty string of HTTP token characters; a header value that is neither a string nor a list of strings, or that contains CR, LF, NUL, or a control character other than tab; a header whose lowercased name is `content-length`, `connection`, or `transfer-encoding`; and a body that is neither a string nor a list of integers in `0...255`.
 
 #### Examples
 
@@ -2558,16 +2318,20 @@ http.server.render-response chars
 ```
 
 ### @serve
-`( listener config handler -- )` — *Unit constructor*, contract
-`( request -- response )` enforced per request. Validate the arguments,
-fill the configuration defaults, and serve the listener until the unit ends.
-A non-port listener, a non-dictionary
-configuration, or a non-quotation handler is `'type`; an unknown
-configuration key or a limit that is not greater than zero is `'domain`; a
-limit that is not an integer or an `'on-failure` that is not a quotation is
-`'type`. Validation completes before any request is accepted. The word fails
-`'cancelled` when the serving unit is cancelled and re-raises an acceptor's
-`'io` failure of `net.accept`; it never closes the listener.
+`( listener config handler -- )` — *Unit constructor*, contract `( request -- response )` enforced per request. Serve HTTP/1.1 requests from a `net` listener until the unit ends: accept in a loop and give each connection to a child unit that owns it. The child frames one request under the read deadline, applies the handler as `[request] handler @attempt` in a fresh unit, writes its single response with `Content-Length` and `Connection: close`, and closes the connection.
+
+The request is the dictionary `{'method 'target 'path 'query 'headers 'body 'peer}`: `'method` and `'target` are the request-line tokens; `'path` and `'query` are the target split at the first `?`, undecoded, with `'query` `""` when absent; `'headers` maps each ASCII-lowercased header name to the list of its trimmed values in arrival order; `'body` is the exact `Content-Length` byte list, `[]` when there is none; `'peer` is the peer's `address:port`, an IPv6 address in brackets. The response is the dictionary `{'status 'headers 'body}` that `render-response` accepts; every byte written to a connection has passed `render-response`.
+
+The configuration is a dictionary whose keys are all optional, so `{}` is valid. Each limit is an int greater than zero.
+- `'max-header-bytes` (32768): most head bytes accepted before the CRLFCRLF terminator; more is 431.
+- `'max-body-bytes` (1048576): largest `Content-Length` accepted; more is 413 before any body byte is read.
+- `'max-in-flight` (128): most connections served at once; accepting waits for a free slot.
+- `'read-timeout-ms` (10000): deadline for reading one whole request; expiry is 408.
+- `'on-failure` (`(str io.eprint)`): a `( error -- )` quotation applied to the error of every request answered 500; a failure of the quotation itself is discarded.
+
+A HEAD request is answered with the handler's status and headers and no body. Requests the server cannot serve are answered with a minimal `text/plain` response and closed: 400 for a malformed request line or header, an HTTP/1.1 request without exactly one well-formed Host header, non-UTF-8 head bytes, a bad `Content-Length`, or end of stream after some bytes; 411 for any `Transfer-Encoding`; 505 for a version other than HTTP/1.1 or HTTP/1.0; 431 and 413 for the size limits; 408 for the deadline; 500 when the handler fails, leaves other than one value, or leaves a response `render-response` rejects, in which case `'on-failure` receives the error. A peer that sends nothing before closing, or resets during the exchange, is closed silently.
+
+Validation of the arguments completes before any request is accepted. A non-port listener, a non-dictionary configuration, a non-quotation handler, a non-int limit, or a non-quotation `'on-failure` is `'type`; an unknown configuration key or a limit not greater than zero is `'domain`. The word fails `'cancelled` when the serving unit is cancelled and re-raises an acceptor's `'io` failure of `net.accept`. Closing the listener ends an admitted accept with `'io` or `'cancelled`; admission after closure fails `'io`. Every child is quiesced by scope rules, and every connection a child owns is closed with it. It never closes the listener, which stays the caller's to close.
 
 ## io
 
@@ -2676,37 +2440,25 @@ encoding, and protocol limits belong to libraries. Deadlines compose tasks
 with `task.await-for`, cancellation, and joining.
 
 ### accept
-`( listener -- connection )` — Wait for a peer and claim the accepted resource
-into the calling scope. A non-listener is `'type`. Abortive listener closure
-cancels admitted accepts; graceful shutdown may instead report backend closure
-as `'io`. A new call after closure is `'io`. Socket or buffer exhaustion
-and host failures are `'io`. Cancelling an accept closes any connection still
-provisionally owned by that exchange. Completed exchanges retain their own
-result and cleanup lifetime independently of the listener.
+`( listener -- connection )` — Wait for a peer and claim the accepted connection port into the calling task scope. Accepted connections remain usable after their listener closes. At host connection capacity, wait until a slot is free; competing accepts receive distinct connections. A non-listener is `'type`. Abortive listener closure cancels admitted accepts; graceful shutdown may instead report backend closure as `'io`. A new call after closure is `'io`. Socket or buffer exhaustion and host failures are `'io`. Cancelling an accept closes any connection still provisionally owned by that exchange, so none is lost before delivery. Completed exchanges retain their own result and cleanup lifetime independently of the listener.
 
 ### close
-`( resource -- )` — Compose `port.shutdown`: perform registered graceful
-shutdown and join cleanup. A listener closes its socket and ends admitted
-accepts with `'io` or `'cancelled`. A connection delivers accepted writes to the kernel before closing
-its socket; this does not establish peer receipt or an external acknowledgement.
-Cancelling shutdown may discard remaining queued bytes. Repeated graceful
-shutdown observes the same outcome. Graceful shutdown after abortive closure
-raises `'io`; `port.close` supplies idempotent abortive cleanup. This composition
-also accepts other resources with registered graceful shutdown.
+`( resource -- )` — Gracefully shut down a resource and join cleanup through `port.shutdown`. A listener closes its socket and stops accepting; its admitted accepts end with `'io` or `'cancelled`. A connection delivers accepted writes to the kernel before closing its socket; this does not establish peer receipt or an external acknowledgement. Cancelling shutdown may discard remaining queued bytes. Repeated graceful shutdown observes the same outcome; graceful shutdown after abortive closure raises `'io`. Use `port.close` for idempotent abortive cleanup. This composition also accepts other resources with registered graceful shutdown.
 
 ### listen
-`( config -- listener )` — Open `net.core.listener` with exactly these two
-symbol-keyed fields; neither has a default:
+`( config -- listener )` — Bind a TCP listener by opening `net.core.listener` with a configuration of exactly these two symbol-keyed fields; neither has a default:
+- `'address`: an IPv4 or IPv6 literal string without IPv6 brackets, such as `"127.0.0.1"`, `"::1"`, `"0.0.0.0"`, or `"::"`.
+- `'port`: an integer in `0...65535`, such as `8080`; `0` requests an ephemeral port.
 
-| Field | Value | Examples |
-| --- | --- | --- |
-| `'address` | IPv4 or IPv6 literal string, without IPv6 brackets | `"127.0.0.1"`, `"::1"`, `"0.0.0.0"`, `"::"` |
-| `'port` | Integer in `0...65535`; `0` requests an ephemeral port | `8080`, `0` |
+Loopback addresses accept local connections; wildcard addresses `"0.0.0.0"` and `"::"` bind available interfaces of their address family, subject to operating-system restrictions. Hostnames are not resolved: do not use a hostname such as `"localhost"`, a URL, or an address with an embedded port. Backlog and buffer capacities are runtime limits, not configuration fields. Inspect the assigned port with `net.local-address` after a port-zero bind.
 
-Loopback addresses accept local connections; wildcard addresses `"0.0.0.0"`
-and `"::"` bind available interfaces of their address family, subject to operating-system restrictions. Do not use a hostname such as `"localhost"`, a URL, or an address with
-an embedded port. Backlog and buffer capacities are runtime limits, not listener config
-fields. Inspect the assigned port with `net.local-address` after a port-zero bind.
+The returned listener port is already listening and belongs to the calling task scope. Use `net.accept` for connections and `net.close` for graceful shutdown. CLI sessions grant listening; embeddings deny it by default. A non-dictionary or wrongly typed field is `'type`; missing or unknown fields, invalid literals or ports, denied host authority, or exhausted listener capacity is `'domain`. Common structured-value limits also apply. Host bind and listen failures are `'io`. Configuration failures include the requested address, port, and reason where available; controller and lifecycle failures report the common error kind and message.
+
+This module provides listeners and accepted TCP connections, with no outbound-connect word. TCP is a byte stream: a read can return less than requested or combine data from multiple peer writes. Supply framing in the application, and assemble complete UTF-8 sequences before calling `chars`. For a write-side half-close that keeps the connection readable, use `dup net.core.output port.endpoint port.finish`.
+
+#### Examples
+
+Bind an ephemeral port and read back the assigned address:
 
 ```ecl
 {'address "127.0.0.1" 'port 0} net.listen
@@ -2715,15 +2467,8 @@ swap net.close
 # Leaves {'address "127.0.0.1" 'port n}, where n is the assigned port.
 ```
 
-The returned socket is already listening. A non-dict or wrongly typed field
-is `'type`; missing or unknown fields, invalid literals or ports,
-exhausted listener capacity is
-`'domain`. Common structured-value limits also apply. Host bind and listen
-failures are `'io`. Configuration failures include the requested
-address, port, and reason where available; controller and lifecycle failures
-report the common error kind and message.
-
-A one-connection greeting server (blocks until a peer connects):
+A one-connection greeting server, which blocks until a peer connects. The
+first close drains and closes the connection; the second closes the listener.
 
 ```ecl
 {'address "127.0.0.1" 'port 8080} net.listen
@@ -2733,40 +2478,17 @@ net.close
 net.close
 ```
 
-The first close drains and closes the connection; the second closes the
-listener. This module provides listeners and accepted TCP connections, with
-no outbound-connect word. TCP is a byte stream: a read can return less than
-requested or combine data from multiple peer writes. Supply framing in the
-application, and assemble complete UTF-8 sequences before calling `chars`.
-For a write-side half-close that keeps the connection readable, use
-`dup net.core.output port.endpoint port.finish`.
-
 ### local-address
-`( resource -- address )` — Return `{'address string 'port int}` for an open
-listener or connection. IPv4 uses dotted-quad text; IPv6 uses RFC 5952 text
-without brackets. An ephemeral listener reports its assigned port; a connection
-accepted through a wildcard listener reports the actual local endpoint.
-A wrong resource kind is `'type`; closure or backend failure is `'io`.
+`( resource -- address )` — Return `{'address string 'port int}` for an open listener or connection. IPv4 uses dotted-quad text; IPv6 uses RFC 5952 text without brackets. A listener bound to port 0 reports its assigned port; a connection accepted through a wildcard listener reports its actual local endpoint. A wrong resource kind is `'type`; closure or backend failure is `'io`.
 
 ### peer-address
-`( connection -- address )` — Return the peer endpoint in the same dictionary
-shape and canonical text. A non-connection is `'type`; closure or backend
-failure is `'io`.
+`( connection -- address )` — Return the remote endpoint of an open connection in the same `{'address string 'port int}` shape and canonical text as `net.local-address`; a listener has no peer. A non-connection is `'type`; closure or backend failure is `'io`.
 
 ### read
-`( connection max -- bytes )` — Read at most positive `max` bytes, bounded by
-the host receive capacity. Park when no data is ready. Return `[]` only at
-stable EOF; later reads also return `[]`. A wrong capability or non-integer
-maximum is `'type`; a nonpositive maximum is `'domain`; an overlapping read
-is `'contract`. Buffered bytes precede a transport failure, which raises `'io`.
-Abortive closure may discard buffered bytes.
+`( connection max -- bytes )` — Read at most positive integer `max` bytes, also bounded by the host receive capacity. Park when no data is ready; short reads are normal and do not mark message boundaries. Return exact integer bytes in `0...255`, or `[]` only at stable EOF; later reads also return `[]`. A wrong capability or non-integer maximum is `'type`; a nonpositive maximum is `'domain`; an overlapping read is `'contract`. Buffered bytes precede a transport failure, which raises `'io`. Abortive closure may discard buffered bytes. No text decoding is performed; use `chars` only on complete UTF-8 sequences.
 
 ### write
-`( connection bytes -- )` — Accept a complete byte list under bounded FIFO
-pressure. A non-list is `'type`; an element outside `0...255` is `'domain`.
-Convert strings explicitly with `bytes`. Finished output, closure, peer reset,
-and other transport failures raise `'io`. Acceptance is distinct from delivery,
-output EOF, and resource cleanup.
+`( connection bytes -- )` — Accept a complete list of integer bytes in `0...255` in FIFO order, parking under bounded pressure. Each call stays contiguous, but TCP does not preserve message boundaries. Convert strings explicitly with `bytes`. A non-list is `'type`; an element outside `0...255` is `'domain`; finished output, closure, peer reset, or other transport failure is `'io`. Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not establish peer receipt. To send EOF while retaining input, use `net.core.output port.endpoint port.finish`.
 
 ## path
 
@@ -2782,45 +2504,28 @@ containment at its directory handles.
 `( path -- bool )` — Return 1 exactly when the path begins with `/`.
 
 ### extension
-`( path -- extension )` — Return the suffix from the final dot of the last
-element, including the dot (`.gz` for `x/y.tar.gz`, `.bashrc` for `.bashrc`,
-`.` for `a.`), or the empty string when that element has no dot.
+`( path -- extension )` — Return the suffix beginning at the final dot of the last element, including the dot, or the empty string when that element has no dot: `.gz` for `x/y.tar.gz`, `.bashrc` for `.bashrc`, and `.` for `a.`.
 
 ### relative?
-`( path -- bool )` — The complement of `absolute?`.
+`( path -- bool )` — Return 1 when the path does not begin with `/`: the complement of `absolute?`.
 
 ### valid-relative?
-`( path -- bool )` — Return 1 when the string is a canonical relative path in
-the `fs` grammar: `.` alone, or nonempty components separated by single
-slashes with no `.`, `..`, or NUL component and no leading or trailing slash.
-This predicate never normalizes; normalize first when accepting untrusted
-text.
+`( path -- bool )` — Return 1 when the string is a canonical relative path accepted by `fs`: `.` alone, or nonempty components separated by single slashes with no `.`, `..`, or NUL component and no leading or trailing slash. This predicate never normalizes; normalize first when accepting untrusted text.
 
 ### basename
-`( path -- name )` — Return the last element after trailing slashes are
-removed: `/` for a path of only slashes and `.` for an empty path.
+`( path -- name )` — Return the last element after trailing slashes are removed: `/` for a path of only slashes and `.` for an empty path.
 
 ### normalize
-`( path -- path )` — Lexically clean a path: collapse repeated separators and
-`.` components, resolve each `..` against a preceding component, keep leading
-`..` components in a relative path, clamp an absolute path at `/`, and return
-`.` for an empty result. Absolute paths remain absolute and relative paths
-remain relative.
+`( path -- path )` — Lexically clean a slash path: collapse repeated separators and `.` components, resolve each `..` against a preceding component, keep leading `..` components in a relative path, clamp an absolute path at `/`, and return `.` for an empty result. Absolute paths remain absolute and relative paths remain relative.
 
 ### components
-`( path -- components )` — Normalize the path and return its non-separator
-components as a list of strings. `.` and `/` yield an empty list; retained
-leading `..` components remain; absoluteness is observable only through
-`absolute?`.
+`( path -- components )` — Normalize the path and return its non-separator components as a list of strings. `.` and `/` yield an empty list; retained leading `..` components remain; absoluteness is observable only through `absolute?`.
 
 ### dirname
-`( path -- path )` — Return the normalized portion before the last slash, or
-`.` when the path has no slash. `dirname` of `/a` is `/`.
+`( path -- path )` — Return the normalized directory portion before the last slash, or `.` when the path has no slash. `dirname` of `/a` is `/`.
 
 ### join
-`( segments -- path )` — Join a list of strings with `/` and normalize the
-result. Empty segments are ignored; an empty or all-empty list yields `.`. A
-non-list or a non-string member is `'type`.
+`( segments -- path )` — Join a list of string segments with `/` and normalize the result. Empty segments are ignored; an empty or all-empty list yields `.`. A non-list or a non-string member is `'type`.
 
 ## port
 
@@ -2917,6 +2622,48 @@ Abortive close discards queued messages and unclaimed results; a discarded
 successful result raises `'io` if claimed later. Completion observation remains
 repeatable. Existing capabilities in messages share use and retain their owner.
 
+### await
+`( exchange -- )` — Observe completion without consuming the result or draining output.
+
+### begin
+`( resource operation request -- exchange )` — Admit an operation with bounded structured parameters.
+
+### cancel
+`( exchange -- )` — Request cancellation. Completion remains observable.
+
+### close
+`( resource-or-exchange -- )` — Abort and join cleanup. Idempotent.
+
+### endpoint
+`( source selector -- endpoint )` — Borrow an attenuated endpoint supported by its source.
+
+### finish
+`( writable -- )` — Finish input after admitted writes. Idempotent.
+
+### open
+`( factory config -- resource )` — Initialize a registered resource in the calling scope.
+
+### read
+`( readable max -- bytes )` — Read a positive byte chunk, or [] at stable EOF.
+
+### receive
+`( receiver -- event )` — Receive {'kind 'message 'value value} or {'kind 'eof}; one receiver may wait.
+
+### result
+`( exchange -- value )` — Wait and claim a result once; a later claim raises 'contract.
+
+### send
+`( sender message -- )` — Atomically enqueue one bounded structured message, including an empty value.
+
+### shutdown
+`( resource -- )` — Perform registered graceful shutdown and join cleanup. Unsupported resources raise 'domain.
+
+### write
+`( writable bytes -- )` — Accept a complete byte list in FIFO order under bounded pressure.
+
+### call
+`( resource operation request -- value )` — Begin an operation, claim its result, and close the exchange. Use only when no additional streaming input or output is required. Close the exchange before returning or re-raising its error.
+
 ## proc
 
 Subprocess ports with bounded live counts, queues, and capture sizes.
@@ -3010,84 +2757,53 @@ prints `<port:N>` and has type `'port`; it exposes no PID and cannot be passed
 through JSON. Native words can view and forward its opaque identity.
 
 ### close-input
-`( port -- )` — Close the process's stdin after queued bytes have been written.
-Idempotent. A concurrent or later `write` is `'io`.
+`( resource -- )` — Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A concurrent or later write, including an empty write, is `'io`. Output remains readable; this does not wait for process exit or close the process resource.
 
 ### kill
-`( port -- )` — Force termination of the port's process group and arrange for
-direct-child reap. Idempotent and safe after natural exit.
+`( resource -- )` — Request force termination of the process group and arrange direct-child reap. Idempotent and safe after natural exit while the resource remains open. This does not wait for exit; use `proc.wait` to observe termination and `port.close` to join cleanup.
 
 ### read-stderr
-`( port max -- bytes )` — Read at most positive `max` exact bytes from stderr,
-parking when no data is ready. Return `[]` only at stable EOF; later reads also
-return `[]`. At most one stderr read may be pending; overlap is `'contract`.
+`( resource max -- bytes )` — Read at most positive integer `max` bytes from stderr, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `'type`; a nonpositive maximum is `'domain`; at most one stderr read may be pending, so overlap is `'contract`; pipe failure is `'io`. Drain stdout concurrently when it can fill, or use `proc.run` to capture both streams.
 
 ### read-stdout
-`( port max -- bytes )` — Read at most positive `max` exact bytes from stdout
-with the same readiness, EOF, and single-reader contract as `read-stderr`.
+`( resource max -- bytes )` — Read at most positive integer `max` bytes from stdout, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `'type`; a nonpositive maximum is `'domain`; at most one stdout read may be pending, so overlap is `'contract`; pipe failure is `'io`. Use `chars` to decode UTF-8. Drain stderr concurrently when it can fill, or use `proc.run` to capture both streams.
 
 ### spawn
-`( spec -- port )` — Start the directly named executable with stdin, stdout,
-and stderr pipes. The child and its process group, pipe tasks, and spawning
-task-scope membership commit before the port becomes visible. The scope owns
-the live child: scope closure cancels the process group and waits for reap even
-if a port value remains stored elsewhere. Returning or storing the port does
-not detach it; `@give` is the one way to change owner, and the unit it is
-given to kills the group when it ends.
+`( spec -- resource )` — Start the directly named, authorized executable with stdin, stdout, and stderr pipes. `spec` is a symbol-keyed dictionary:
+- `'executable`, required: an absolute path string.
+- `'args`: a list of argument strings, default `[]`; it excludes the executable name.
+- `'cwd`: an absolute path string without `.` or `..` components, default the host-configured starting directory.
+- `'env`: a string-to-string dictionary overlaid on the host's environment base, default `{}`.
+
+Strings must not contain NUL, and environment names must be nonempty and contain no `=`. There is no shell expansion or `PATH` search. Unknown fields, invalid values, or denied authority are `'domain`; wrong field types are `'type`; launch failures are `'io`.
+
+The child and its process group, pipe tasks, and spawning task-scope membership commit before the port becomes visible. The calling task scope owns the live child: scope closure cancels the process group and waits for reap even if a port value remains stored elsewhere. Returning or storing the port does not detach it; `@give` is the one way to change owner, and the unit it is given to kills the group when it ends. Use `proc.run` for bounded capture, or drain both output streams concurrently.
 
 ### terminate
-`( port -- )` — Request ordinary termination of the process group, escalating
-to force termination during cleanup when needed. Idempotent and safe after
-natural exit.
+`( resource -- )` — Request ordinary termination of the process group without waiting for exit, escalating to force termination during cleanup when needed. Idempotent and safe after natural exit while the resource remains open. Use `proc.wait` to observe termination and `port.close` to join cleanup.
 
 ### wait
-`( port -- termination )` — Park until the immutable terminal result is
-available. Any number of waiters and later calls receive the same dictionary:
-
+`( resource -- termination )` — Park until direct-child termination without draining stdout or stderr, and return the immutable terminal result:
 - `{'kind 'exited 'code n}`;
 - `{'kind 'signaled 'signal n}`;
 - `{'kind 'stopped 'signal n}`; or
 - `{'kind 'unknown 'status n}`.
 
-A nonzero exit code is ordinary termination data, not an ECL error.
-A pipe failure raises `'io`. Waiting requires an open resource; after closure,
-observe a previously completed exchange instead of admitting another wait.
+Any number of waiters and later calls receive the same dictionary. A nonzero exit code is ordinary termination data, not an ECL error. A pipe failure raises `'io`. Output pipes can fill and prevent exit, so drain both concurrently or use `proc.run`. Waiting requires an open resource; after closure, observe a previously completed exchange instead of admitting another wait. This leaves the resource open; use `port.close` to join cleanup.
 
 ### write
-`( port bytes -- )` — Queue exact stdin bytes, parking under bounded pressure.
-Calls are serialized in scheduler-arrival order and each call's bytes remain
-contiguous. A closed or broken stdin is `'io`.
+`( resource bytes -- )` — Queue exact stdin bytes, a list of integers in `0...255`, parking under bounded pressure. Convert text with `bytes`. Calls are serialized in scheduler-arrival order and each call's bytes remain contiguous. A non-list is `'type`; invalid byte elements are `'domain`; finished, closed, or broken stdin is `'io`. Acceptance does not mean all bytes have reached the child. Drain stdout and stderr concurrently to avoid pipe deadlock.
 
 ### run
-`( spec -- result )` — Spawn through the ordinary port controller, supply all
-stdin while draining stdout and stderr concurrently, wait for direct-child
-reap, and return
-`{'term termination 'stdout stdout-bytes 'stderr stderr-bytes}`. In addition to
-the spawn fields, `spec` accepts:
+`( spec -- result )` — Spawn through the ordinary port controller, supply all stdin while draining stdout and stderr concurrently, wait for direct-child reap, join cleanup, and return `{'term termination 'stdout stdout-bytes 'stderr stderr-bytes}`. `spec` takes the `proc.spawn` fields under the same path, string, and host-authority rules, plus these optional run-only fields, which `proc.spawn` rejects:
+- `'stdin`: a list of integer bytes in `0...255`, default `[]`; strings require explicit `bytes` conversion.
+- `'stdout-limit`: a nonnegative integer maximum of total captured stdout bytes, default the host stdout capture maximum.
+- `'stderr-limit`: a nonnegative integer maximum of total captured stderr bytes, default the host stderr capture maximum.
+- `'timeout-ms`: a nonnegative integer deadline in milliseconds covering spawn and execution; omitted means no process deadline, while scheduler cancellation remains effective.
 
-| Field | Value | Default |
-| --- | --- | --- |
-| `'stdin` | List of integer bytes in `0...255`; strings require explicit `bytes` conversion | `[]` |
-| `'stdout-limit` | Nonnegative integer maximum total captured stdout bytes | Host stdout capture maximum |
-| `'stderr-limit` | Nonnegative integer maximum total captured stderr bytes | Host stderr capture maximum |
-| `'timeout-ms` | Nonnegative integer deadline in milliseconds, including spawn and execution | No process deadline; scheduler cancellation remains effective |
+Each capture limit must be no larger than its host maximum, and zero permits only empty output on that stream. Stdin is finished after feeding, including when omitted. The result always contains all three keys: `'term` has the `proc.wait` shape, and `'stdout` and `'stderr` are byte lists, empty when nothing was captured. Nonzero exit codes are returned as data; inspect `'term` to decide whether the command succeeded, and decode output explicitly with `chars`.
 
-Each capture limit must be no larger than its corresponding host maximum.
-Zero permits only empty output on that stream. Stdin is finished after feeding,
-including when omitted. The result always contains all three symbol keys:
-`'term` is a termination dictionary described by `proc.wait`, and `'stdout`
-and `'stderr` are byte lists, empty when nothing was captured. Nonzero exit codes are returned
-as data; inspect `'term` to decide whether the command succeeded.
-
-Capture overflow kills and cleans the process before raising `'overflow`.
-Deadline expiry does the same before raising `'timeout`; task cancellation is
-`'cancelled`. Spawn, pipe, broken-input, and reap failures are `'io`. These
-run-only fields are rejected by `spawn`.
-The deadline covers the child task that opens and runs the process. Output
-collectors enforce their limits independently; a failed collector cancels the
-remaining work and joins resource cleanup. Successful input acceptance is
-distinct from backend pipe completion, and a later broken pipe still fails
-the run.
+Capture overflow kills and cleans the process before raising `'overflow`. Deadline expiry does the same before raising `'timeout`; task cancellation raises `'cancelled`, also after joined cleanup. Wrong field types are `'type`; invalid values or denied authority are `'domain`; spawn, pipe, broken-input, and reap failures are `'io`. The deadline covers the child task that opens and runs the process. Output collectors enforce their limits independently; a failed collector cancels the remaining work and joins resource cleanup. Successful input acceptance is distinct from backend pipe completion, and a later broken pipe still fails the run.
 
 ## rand
 
@@ -3161,13 +2877,10 @@ A success payload is always a list representing a stack.
 `( error -- result )` — Tag an error dict as a failed result.
 
 ### ok
-`( values -- result )` — Tag a list of success values, representing the stack
-a successful computation left.
+`( values -- result )` — Build an ok result from a list of successful stack values, representing the stack a successful computation left.
 
 ### and-then
-`( result quotation -- result )` — Use a success payload as the explicit values
-list for `@attempt`; return an existing
-failure unchanged.
+`( result quotation -- result )` — For a success, use its payload as the explicit values list for `@attempt`, running the quotation on an isolated stack seeded with the success values. Return a failure unchanged.
 
 #### Examples
 
@@ -3177,9 +2890,7 @@ failure unchanged.
 ```
 
 ### either
-`( result on-ok on-err -- ... )` — Eliminate a result exhaustively: call the
-first quotation with the success list or the second with the error dict.
-Neither branch is isolated.
+`( result on-ok on-err -- ... )` — Eliminate a result exhaustively: call `on-ok` with the success list or `on-err` with the error dict. Neither branch is isolated; each runs inline and may leave any number of values.
 
 #### Examples
 
@@ -3192,35 +2903,28 @@ Neither branch is isolated.
 `( result -- bool )` — Return 1 when a well-formed result is a failure.
 
 ### map-err
-`( result quotation -- result )` — Replace a failure's error dict with the one
-its `( error -- error )` quotation returns; leave a success unchanged.
+`( result quotation -- result )` — Replace a failure's error dict with the one its isolated `( error -- error )` quotation returns. Return a success unchanged.
 
 ### ok?
 `( result -- bool )` — Return 1 when a well-formed result is a success.
 
 ### or-else
-`( result fallback -- value )` — Return a success payload, or the fallback
-value for a failure.
+`( result fallback -- value )` — Return a success list, or the fallback value for a failure.
 
 ### or-raise
-`( result -- values )` — Return a success payload, or re-raise the captured
-error dict unchanged.
+`( result -- values )` — Return a success list, or re-raise the stored error dict unchanged.
 
 ### recover
-`( result quotation -- result )` — Seed a failure's error dict onto an
-isolated stack and run the recovery quotation; leave a success unchanged.
+`( result quotation -- result )` — For a failure, run the recovery quotation under `@attempt` on an isolated stack seeded with the stored error dict. Return a success unchanged.
 
 ### all
-`( results -- result )` — Return the leftmost failure unchanged, or one
-success whose value is the list of success stacks in input order.
+`( results -- result )` — Return the leftmost failure unchanged, or one success whose value is the list of success stacks in input order.
 
 ### partition
-`( results -- successes errors )` — Split results into success lists and error
-dicts, both in input order, without re-raising.
+`( results -- successes errors )` — Split results into success lists and error dicts, both in input order, without re-raising.
 
 ### recover-kinds
-`( result kinds quotation -- result )` — Recover only when a failure's kind is
-one of the listed symbols; leave every other result unchanged.
+`( result kinds quotation -- result )` — Recover a failure only when its kind is one of the listed symbols. Return every other result unchanged.
 
 #### Examples
 
@@ -3253,13 +2957,10 @@ All case and whitespace operations use the ASCII character classes; every
 non-ASCII scalar passes through unchanged.
 
 ### str?
-`( value -- bool )` — Return 1 when a value is a string: a list whose every
-element is a char. The empty string answers 1, and so does the empty list —
-they are one value. Never raises.
+`( value -- bool )` — Return 1 when a value is a string, a list whose every element is a char, and 0 for every other value. The empty string answers 1, and so does the empty list: they are one value. Never raises.
 
 ### contains?
-`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a
-string. The empty needle is present at index zero.
+`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.
 
 #### Examples
 
@@ -3269,33 +2970,25 @@ string. The empty needle is present at index zero.
 ```
 
 ### ends?
-`( string suffix -- bool )` — Return 1 when a string ends with a suffix.
+`( string suffix -- bool )` — Return 1 when the string ends with the suffix.
 
 ### index-of
-`( string needle -- index )` — Return the zero-based index of a needle's first
-occurrence; return 0 for the empty needle and raise `'domain` when a nonempty
-needle is absent.
+`( string needle -- index )` — Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and raise `'domain` when a nonempty needle is absent.
 
 ### lower
-`( string -- string )` — Lowercase ASCII letters, leaving every other scalar
-unchanged.
+`( string -- string )` — Lowercase ASCII letters, leaving every other scalar unchanged.
 
 ### pad-left
-`( string width -- string )` — Pad with leading spaces up to a width; return a
-longer string unchanged.
+`( string width -- string )` — Add leading spaces until the string reaches the requested width; return a longer string unchanged.
 
 ### pad-right
-`( string width -- string )` — Pad with trailing spaces up to a width; return a
-longer string unchanged.
+`( string width -- string )` — Add trailing spaces until the string reaches the requested width; return a longer string unchanged.
 
 ### repeat
-`( string count -- string )` — Concatenate a nonnegative number of copies of a
-string.
+`( string count -- string )` — Concatenate `count` copies of a string; `count` must be nonnegative.
 
 ### replace
-`( string needle replacement -- string )` — Replace every occurrence of a
-needle. An empty needle inserts the replacement between adjacent scalars only,
-with no boundary insertion.
+`( string needle replacement -- string )` — Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent scalars only, with no boundary insertion.
 
 #### Examples
 
@@ -3305,10 +2998,10 @@ with no boundary insertion.
 ```
 
 ### starts?
-`( string prefix -- bool )` — Return 1 when a string begins with a prefix.
+`( string prefix -- bool )` — Return 1 when the string starts with the prefix.
 
 ### trim
-`( string -- string )` — Remove ASCII whitespace from both ends.
+`( string -- string )` — Remove ASCII whitespace from both ends of a string.
 
 #### Examples
 
@@ -3324,8 +3017,7 @@ with no boundary insertion.
 `( string -- string )` — Remove trailing ASCII whitespace.
 
 ### upper
-`( string -- string )` — Uppercase ASCII letters, leaving every other scalar
-unchanged.
+`( string -- string )` — Uppercase ASCII letters, leaving every other scalar unchanged.
 
 #### Examples
 
@@ -3335,9 +3027,7 @@ unchanged.
 ```
 
 ### format
-`( values template -- string )` — Interpolate `{}` placeholders. Strings
-contribute their contents; other values contribute canonical `str`. `{{` and
-`}}` emit literal braces.
+`( values template -- string )` — Interpolate positional `{}` placeholders. Strings contribute their contents; other values contribute canonical `str`. `{{` and `}}` emit literal braces.
 
 #### Examples
 
@@ -3353,8 +3043,7 @@ table. See the environment's [table contract](ENVIRONMENT.md#tables) for the
 table convention and frozen error kinds.
 
 ### from-records
-`( records -- table )` — Build a table from a nonempty list of dicts sharing
-one key set; the first record fixes schema order.
+`( records -- table )` — Build a table from a nonempty list of dicts sharing one key set. The first record fixes the schema order; later records may use a different key order.
 
 #### Examples
 
@@ -3364,8 +3053,7 @@ one key set; the first record fixes schema order.
 ```
 
 ### from-rows
-`( names rows -- table )` — Build a table from explicit names and exact-width
-rows. An empty row list preserves the named zero-row schema.
+`( names rows -- table )` — Build a table from explicit column names and rows of exactly that width. An empty row list preserves the named zero-row schema.
 
 #### Examples
 
@@ -3375,34 +3063,28 @@ rows. An empty row list preserves the named zero-row schema.
 ```
 
 ### cast
-`( table spec -- table )` — Coerce named columns with isolated
-`( cell -- value )` quotations. Validate the complete specification before
-running any quotation and replace the table only after all casts succeed.
+`( table spec -- table )` — Coerce named columns with isolated `( cell -- value )` quotations. The specification must be a dictionary from existing column names to quotations. Validate the complete specification before running any quotation, and replace the table only after every cast succeeds.
 
 ### column
-`( table name -- column )` — Return one existing named column.
+`( table name -- column )` — Return one existing column by name.
 
 ### from-columns
-`( columns -- table )` — Return a column dict as a table, raising when it does
-not satisfy the convention.
+`( columns -- table )` — Validate a column dictionary and return it as a table, raising when it does not satisfy the convention.
 
 ### from-header-rows
-`( rows -- table )` — Build a table from rows whose first row contains column
-names.
+`( rows -- table )` — Build a table from rows whose first row contains the column names and whose remaining rows are data.
 
 ### header-rows
-`( table -- rows )` — Return data rows prefixed by the column-name row, the
-schema-preserving row form.
+`( table -- rows )` — Return the column-name row followed by the data rows, the schema-preserving row form.
 
 ### height
-`( table -- count )` — Return the row count.
+`( table -- count )` — Return the number of rows.
 
 ### names
-`( table -- names )` — Return column names in schema order.
+`( table -- names )` — Return the column names in schema order.
 
 ### records
-`( table -- records )` — Return rows as dicts in schema order. An empty result
-necessarily loses its schema.
+`( table -- records )` — Return one dict per row, with keys in schema order. A zero-row table returns an empty list, which necessarily loses its schema.
 
 #### Examples
 
@@ -3412,14 +3094,13 @@ necessarily loses its schema.
 ```
 
 ### rename
-`( table mapping -- table )` — Rename columns through an ordered old-to-new
-mapping while preserving column order; collisions are `'domain`.
+`( table mapping -- table )` — Rename columns through an ordered old-to-new mapping without changing column order; collisions are `'domain`.
 
 ### rows
-`( table -- rows )` — Return data rows in order.
+`( table -- rows )` — Return the data rows in row and column order.
 
 ### select
-`( table names -- table )` — Keep named columns in the order given.
+`( table names -- table )` — Return the named columns in the order given.
 
 #### Examples
 
@@ -3429,12 +3110,10 @@ mapping while preserving column order; collisions are `'domain`.
 ```
 
 ### valid?
-`( candidate -- bool )` — Return 1 when a candidate satisfies the convention
-and 0 for a convention mismatch. Cancellation and allocation failure still
-propagate.
+`( candidate -- bool )` — Return 1 when a candidate satisfies the table convention and 0 for a convention mismatch. Cancellation, allocation failure, and other runtime errors still propagate.
 
 ### where
-`( table mask -- table )` — Keep rows selected by an exact-length 0/1 mask.
+`( table mask -- table )` — Return the rows selected by a 0/1 mask whose length equals the row count.
 
 #### Examples
 
@@ -3444,30 +3123,19 @@ propagate.
 ```
 
 ### with-column
-`( table name column -- table )` — Replace an existing column or append a new
-one, keeping the row count exact.
+`( table name column -- table )` — Replace an existing column or append a new one. The column length must equal the row count.
 
 ### inner-join
-`( left right pairs -- table )` — Stable inner equijoin on
-`[left-name right-name]` pairs. Duplicate keys expand to the full
-many-to-many product in left-row then right-row order.
+`( left right pairs -- table )` — Return the stable inner equijoin for `[left-name right-name]` key pairs. Duplicate keys expand to the full many-to-many product in left-row then right-row order. The result contains every left column followed by the right non-key columns; colliding non-key names are `'domain`.
 
 ### left-join-with
-`( left right pairs fill -- table )` — Stable left equijoin. `fill` must name
-exactly every appended right column used for unmatched rows.
+`( left right pairs fill -- table )` — Return the stable left equijoin, using fill values for unmatched rows. `fill` must name exactly every appended right column.
 
 ### group-by
-`( table names -- groups )` — Group row indices by named columns. Keys use
-first-occurrence order and indices stay ascending; zero names yields one global
-group keyed by the empty list.
+`( table names -- groups )` — Group row indices by the named columns. Groups follow first-occurrence order and indices within each group are ascending; an empty name list yields one global group keyed by the empty list.
 
 ### aggregate
-`( table names specs -- table )` — Group by `names` and aggregate each group
-with `[output input reducer]` triples. A reducer is a quotation or one of
-`'sum`, `'count`, `'min`, and `'max`. Symbols use `reduce-groups`;
-quotations receive gathered slices and retain ordinary resolution and shadowing.
-Validate the complete specification before running a quotation; key columns
-precede aggregate columns.
+`( table names specs -- table )` — Group by `names` and aggregate each group with `[output-name input-name reducer]` specifications. A reducer is a quotation or one of `'sum`, `'count`, `'min`, and `'max`. Symbols use `reduce-groups`; quotations receive gathered slices and retain ordinary resolution and shadowing. All names and specifications are validated before a quotation runs. The result contains the key columns first, followed by the aggregate columns in specification order, with one row per group.
 
 ## task
 
@@ -3559,9 +3227,7 @@ The bundled runner is ordinary ECL policy over the closed `tests` / `@test`
 substrate. Projects may replace it with any public qualified runner word.
 
 ### run
-`( -- )` — Discover canonical tests, invoke them sequentially in deterministic
-module/name order, print one `ok` or `FAIL` line for every result, continue
-after ordinary test failures, and request process status 1 if any failed.
+`( -- )` — Discover canonical tests and invoke them sequentially in deterministic module and name order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures and request process status 1 if any failed.
 
 ## time
 
@@ -3576,25 +3242,19 @@ range runs from `-292275055-05-16T16:47:04.192` through
 `292278994-08-17T07:12:55.807`. Nothing in this module reads a clock.
 
 ### add
-`( timestamp milliseconds -- timestamp )` — Shift a timestamp by a signed int
-duration.
+`( timestamp milliseconds -- timestamp )` — Shift a timestamp by a signed integer millisecond duration.
 
 ### cmp
-`( left right -- ordering )` — Three-way order two timestamps as −1, 0, or 1.
-Whole-value `match?` also compares timestamps; `<` and `=` do not.
+`( left right -- ordering )` — Three-way compare two timestamps as −1, 0, or 1. Whole-value `match?` also compares timestamps; `<` and `=` do not.
 
 ### days
-`( n -- milliseconds )` — `n` days of 86,400 seconds as milliseconds.
+`( n -- milliseconds )` — Convert `n` whole days of 86,400 seconds to milliseconds.
 
 ### diff
-`( later earlier -- milliseconds )` — `later` minus `earlier`, signed.
+`( later earlier -- milliseconds )` — Return `later` minus `earlier` in signed milliseconds.
 
 ### format
-`( timestamp -- string )` — Render as `YYYY-MM-DDTHH:MM:SS.mmmZ`: always UTC,
-always three fractional digits, so `format` then `parse` returns the same
-timestamp and `parse` then `format` returns the same text for every string in
-that shape. A year outside 0000 through 9999 cannot be written in four digits
-and is `'domain`.
+`( timestamp -- string )` — Render a timestamp as `YYYY-MM-DDTHH:MM:SS.mmmZ`: always UTC, always three fractional digits, so `format` then `parse` returns the same timestamp and `parse` then `format` returns the same text for every string in that shape. A year outside 0000 through 9999 cannot be written in four digits and is `'domain`.
 
 #### Examples
 
@@ -3604,35 +3264,25 @@ and is `'domain`.
 ```
 
 ### from-unix
-`( milliseconds -- timestamp )` — Tag an int as `{'unix ms}`. Negative counts
-name instants before 1970.
+`( milliseconds -- timestamp )` — Tag an integer Unix millisecond count as `{'unix milliseconds}`. Negative counts name instants before 1970.
 
 ### from-utc
-`( fields -- timestamp )` — Build a timestamp from a dictionary of int fields.
-`'year`, `'month`, and `'day` are required; `'hour`, `'minute`, `'second`, and
-`'millisecond` default to 0; `'weekday` is optional and must agree with the
-date. Any other key is `'domain`; a non-symbol key or non-int value is `'type`.
-Month is 1 through 12, day is 1 through the month's length in that year, hour
-0 through 23, minute and second 0 through 59, millisecond 0 through 999;
-anything else is `'domain`. `to-utc` output round-trips exactly.
+`( fields -- timestamp )` — Build a timestamp from a dictionary of int UTC calendar fields. `'year`, `'month`, and `'day` are required; `'hour`, `'minute`, `'second`, and `'millisecond` default to 0; `'weekday` is optional and must agree with the date. Any other key is `'domain`; a non-symbol key or non-int value is `'type`. Month is 1 through 12, day is 1 through the month's length in that year, hour 0 through 23, minute and second 0 through 59, and millisecond 0 through 999; anything else is `'domain`. `to-utc` output round-trips exactly.
 
 ### hours
-`( n -- milliseconds )` — `n` hours as milliseconds.
+`( n -- milliseconds )` — Convert `n` whole hours to milliseconds.
 
 ### minutes
-`( n -- milliseconds )` — `n` minutes as milliseconds.
+`( n -- milliseconds )` — Convert `n` whole minutes to milliseconds.
 
 ### seconds
-`( n -- milliseconds )` — `n` seconds as milliseconds.
+`( n -- milliseconds )` — Convert `n` whole seconds to milliseconds.
 
 ### to-unix
-`( timestamp -- milliseconds )` — The int inside a timestamp.
+`( timestamp -- milliseconds )` — Return the integer Unix millisecond count inside a timestamp.
 
 ### to-utc
-`( timestamp -- fields )` — Decompose into
-`{'year 'month 'day 'hour 'minute 'second 'millisecond 'weekday}`, all ints.
-`'weekday` counts from Monday as 0 through Sunday as 6. Years before 1 are
-negative in astronomical numbering (year 0 is 1 BC and is a leap year).
+`( timestamp -- fields )` — Decompose a timestamp into the UTC calendar fields `{'year 'month 'day 'hour 'minute 'second 'millisecond 'weekday}`, all ints. `'weekday` counts from Monday as 0 through Sunday as 6. Years before 1 are negative in astronomical numbering: year 0 is 1 BC and is a leap year.
 
 #### Examples
 
@@ -3642,14 +3292,7 @@ negative in astronomical numbering (year 0 is 1 BC and is a leap year).
 ```
 
 ### parse
-`( string -- timestamp )` — Parse an RFC 3339 `date-time`:
-`YYYY-MM-DDTHH:MM:SS`, an optional fraction of one or more digits, then `Z` or
-a numeric `±HH:MM` offset that is subtracted to reach UTC. `T` and `Z` may be
-lower case. The first three fractional digits are kept and the rest are
-discarded, so `"…​:00.1239Z"` and `"…​:00.123Z"` parse alike. Text outside the
-grammar — a space separator, a missing designator, trailing characters, a
-non-ASCII scalar, an empty fraction — is `'parse`; a well-formed field outside
-its range, including second `60`, is `'domain`.
+`( text -- timestamp )` — Parse an RFC 3339 `date-time`, converting any offset to UTC: `YYYY-MM-DDTHH:MM:SS`, an optional fraction of one or more digits, then `Z` or a numeric `±HH:MM` offset that is subtracted to reach UTC. `T` and `Z` may be lower case. The first three fractional digits are kept and the rest are discarded, so `"…:00.1239Z"` and `"…:00.123Z"` parse alike. Text outside the grammar, such as a space separator, a missing designator, trailing characters, a non-ASCII scalar, or an empty fraction, is `'parse`; a well-formed field outside its range, including second `60`, is `'domain`.
 
 #### Examples
 

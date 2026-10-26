@@ -48,10 +48,10 @@
 
  ### def valid?
  (value -- bool :
-  "Return 1 when a value is a partial or complete request dict. Recognized optional fields are
-   'method, 'target, 'path, 'query, and 'peer strings; 'headers from ASCII-lowercased string names
-   to lists of strings; a byte-list 'body; and 'params from string names to string values. Never
-   raises.")
+  "Return 1 for a partial or complete request dictionary containing only recognized fields: string
+   `'method`, `'target`, `'path`, `'query`, and `'peer`; a `'headers` dictionary from
+   ASCII-lowercased string names to lists of strings; a byte-list `'body`; and a `'params`
+   dictionary from string names to string values. Every field is optional. Never raises.")
  (dup type 'dict match?
   (dup dict.keys ['method 'target 'path 'query 'headers 'body 'peer 'params] in? (1 match?) all?
    (dup ['method 'target 'path 'query 'peer] swap (string-field?) partial all?
@@ -83,8 +83,9 @@
 
  ### def new
  (method target -- request :
-  "Return a request with the method and target, 'path and 'query split from the target at its first
-   ?, {} headers, [] body, and \"\" peer. A non-string method or target is 'type.")
+  "Return a request with the method and target, `'path` and `'query` split from the target at its
+   first `?` (`'query` `\"\"` when absent), `{}` headers, `[]` body, and `\"\"` peer. A non-string
+   method or target is `'type`.")
  ("http.request.new expects a string target" checked-string
   swap "http.request.new expects a string method" checked-string swap
   dup split-target
@@ -95,8 +96,8 @@
 
  ### def header
  (request name -- values :
-  "Return the list of values of a header, matching the name regardless of letter case, or () when it
-   is absent. A non-request or non-string name is 'type.")
+  "Return the list of values of a header, matching the name regardless of letter case, or `()` when
+   it is absent. A non-request or non-string name is `'type`.")
  ("http.request.header expects a string header name" checked-string str.lower
   swap checked 'headers {} dict.get swap () dict.get) 'header def
 
@@ -129,18 +130,19 @@
 
  ### def query
  (request -- params :
-  "Parse the request's 'query string (\"a=1&b=%2Fx&c\") into a dict from string keys to string
-   values ({\"a\" \"1\" \"b\" \"/x\" \"c\" \"\"}): & separates pairs, the first = separates key from
-   value, a key without = maps to the empty string, %XX escapes are decoded in keys and values and
-   the result must be UTF-8, + is left as is, and a later duplicate key replaces an earlier one. An
-   empty query is {}. A % not followed by two hex digits, or an escape sequence that is not UTF-8,
-   is 'domain; a non-request is 'type.")
+  "Parse the request's `'query` string, such as `\"a=1&b=%2Fx&c\"`, into a dictionary from string
+   keys to string values, such as `{\"a\" \"1\" \"b\" \"/x\" \"c\" \"\"}`: `&`-separated pairs, each
+   split at its first `=`, a pair without `=` mapping its key to `\"\"`, empty pieces ignored, and a
+   later duplicate key replacing an earlier one. `%XX` escapes are decoded in keys and values and
+   the decoded text must be valid UTF-8; `+` is left as it is. An empty query is `{}`. A `%` not
+   followed by two hexadecimal digits, or a decoded key or value that is not valid UTF-8, is
+   `'domain`; a non-request is `'type`.")
  (checked 'query "" dict.get "&" split ("" match? not) filter {} (query-pair) fold) 'query def
 
  ### def param
  (request name -- value :
-  "Return the route parameter bound under the name by http.server.route. A request without that
-   parameter is 'domain; a non-request or non-string name is 'type.")
+  "Return the route parameter bound under the name by `http.server.route`. A request without that
+   parameter is `'domain`; a non-request or non-string name is `'type`.")
  ("http.request.param expects a string parameter name" checked-string
   (|request name|
    request checked 'params {} dict.get
@@ -155,14 +157,14 @@
 
  ### def json
  (request -- value :
-  "Return the body parsed as JSON. A body that is not UTF-8 or not JSON fails as chars or json.parse
-   does.")
+  "Return the body parsed as JSON: `chars` then `json.parse`, so a body that is not UTF-8 or not
+   JSON fails as they do.")
  (text json.parse) 'json def
 
  ### def with-header
  (request name value -- request :
   "Return the request with a value added under the ASCII-lowercased header name: a string or a list
-   of strings, appended to the values already there. A non-string name or a bad value is 'type.")
+   of strings, appended to the values already there. A non-string name or a bad value is `'type`.")
  (dup str.str? (wrap) () if
   dup string-list? "http.request.with-header expects a string or a list of strings" type-error
   assert
@@ -183,8 +185,8 @@
 
  ### def with-param
  (request name value -- request :
-  "Return the request with a route parameter bound under the name, as http.server.route does. A
-   non-string name or value is 'type.")
+  "Return the request with a route parameter bound under the name, as `http.server.route` does. A
+   non-string name or value is `'type`.")
  ("http.request.with-param expects a string value" checked-string
   swap "http.request.with-param expects a string parameter name" checked-string swap
   (|request name value| request checked 'params {} dict.get name value put request 'params rolldown

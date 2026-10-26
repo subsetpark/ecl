@@ -38,12 +38,16 @@
   if) 'apply-message defp
 
  ### def serve
- (: "Serve forever with the current stack as state: receive a message, apply its quotation as a
-     unit, and reply when asked. Ends only by cancellation.")
+ (: "Stack-polymorphic. Turn the current task into an agent whose state is the stack it has now,
+     then serve until cancelled: receive a message, apply its quotation to the state as a unit, and
+     reply when the message asks. Spawn it directly to keep the handle: `[[7 0]] (agent.serve)
+     @spawn` serves `[7 0]`, and `task.cancel` on the handle ends it with `'cancelled`.")
  (stack dup len (swap pop) times (1) (task.receive apply-message) while) 'serve def
 
  ### def start
- (state -- address : "Spawn a server whose stack holds the one state value and return its address.")
+ (state -- address :
+  "Spawn a server whose stack holds the one value `state` and return its address. The server is
+   owned by the spawning task scope, as any `@spawn` is.")
  (wrap (serve) @spawn task.address) 'start def
 
  ### defp exchange
@@ -58,8 +62,11 @@
 
  ### def call
  (quotation address -- result :
-  "Apply a quotation to an agent's stack and return the top of the result; the quotation's own error
-   is re-raised here and leaves the agent unchanged.")
+  "Apply a quotation to the agent's stack and return the top of the result stack; the agent keeps
+   the rest. The quotation's own error is re-raised here and leaves the agent unchanged. A result
+   stack with nothing on it is `'domain`. Replies travel through a helper task. A call to an agent
+   that has ended raises `'io`; a call whose request was accepted never returns if the agent ends
+   before replying.")
  (exchange dup result.ok? ('ok at first) ('err at raise) if) 'call def
 
  ### defp check-deadline
@@ -74,8 +81,11 @@
 
  ### def call-for
  (quotation address milliseconds -- result :
-  "agent.call with a nonnegative int deadline in milliseconds; 'timeout when the reply does not
-   arrive in time, after which the quotation may still run on the agent.")
+  "`agent.call` with a nonnegative int deadline in milliseconds, checked before anything is sent: a
+   negative duration is `'domain` and a non-int is `'type`. When no reply arrives in time the call
+   raises `'timeout`, whether the deadline passed while waiting for room in a full mailbox or for
+   the reply; the quotation, if it was sent, still runs on the agent when its turn comes, and its
+   reply is discarded.")
  (|quotation address milliseconds|
   milliseconds check-deadline pop
   quotation address pair (exchange) @spawn
@@ -84,6 +94,8 @@
   dup result.ok? ('ok at first) ('err at raise) if) 'call-for def
 
  ### def send
- (quotation address -- : "Apply a quotation to an agent's stack without waiting for a reply.")
+ (quotation address -- :
+  "Apply a quotation to the agent's stack without waiting for a reply. The whole result stack
+   becomes the new state; a failing quotation changes nothing and reports nothing.")
  (|quotation address| {} 'quot quotation put address task.send) 'send def
 ) 'agent @defm

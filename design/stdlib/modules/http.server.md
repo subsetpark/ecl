@@ -123,41 +123,12 @@ l {'read-timeout-ms 5000} (handler) http.server.@serve
 ```
 
 ### @serve
-`( listener config handler -- )` — *Unit constructor*, contract
-`( request -- response )` enforced per request. Validate the arguments,
-fill the configuration defaults, and serve the listener until the unit ends.
-A non-port listener, a non-dictionary
-configuration, or a non-quotation handler is `'type`; an unknown
-configuration key or a limit that is not greater than zero is `'domain`; a
-limit that is not an integer or an `'on-failure` that is not a quotation is
-`'type`. Validation completes before any request is accepted. The word fails
-`'cancelled` when the serving unit is cancelled and re-raises an acceptor's
-`'io` failure of `net.accept`; it never closes the listener.
 
 ### content-length
-`( headers -- int )` — Return the request body length named by a parsed
-headers dictionary: `0` when `content-length` is absent, otherwise the
-integer every occurrence spells, leading zeros allowed. A value that is not a
-nonempty digit string, or repeated values that differ, is `'domain` with
-`'data {'status 400}`; a value too large for a 64-bit integer exceeds every
-body limit and is `'domain` with `'data {'status 413}`. A non-dictionary is
-`'type`.
 
 ### parse-headers
-`( lines -- dict )` — Parse a list of header-line strings into a dictionary
-from ASCII-lowercased name to the list of trimmed values in arrival order,
-so `("Host: a" "host: b")` yields `{"host" ("a" "b")}`. The name is the text
-before the first `:`, the value the rest with surrounding whitespace removed.
-A line without `:`, or one beginning with space or tab, is `'domain` with
-`'data {'status 400}`. A non-list or a non-string line is `'type`.
 
 ### parse-request-line
-`( line -- dict )` — Parse a request line into
-`{'method 'target 'path 'query 'version}`: three space-separated tokens,
-`'path` and `'query` the target split at the first `?` undecoded, `'query`
-`""` when there is no `?`. Any other token count is `'domain` with
-`'data {'status 400}`; a version other than `HTTP/1.1` or `HTTP/1.0` is
-`'domain` with `'data {'status 505}`. A non-string is `'type`.
 
 #### Examples
 
@@ -167,24 +138,6 @@ A line without `:`, or one beginning with space or tab, is `'domain` with
 ```
 
 ### render-response
-`( response -- bytes )` — Validate a response dictionary and return the exact
-bytes the server writes for it: `HTTP/1.1 <status> <reason>` CRLF, one
-`name: value` line per header value in the given order with the name as
-given, `Content-Length: <n>` CRLF (omitted for 204 and 304, whose length is
-not the empty body's), `Connection: close` CRLF,
-CRLF, then the body bytes. The reason phrase comes from a fixed table covering 200, 201,
-204, 301, 302, 304, 400, 401, 403, 404, 405, 408, 411, 413, 431, 500, 503,
-and 505 and is empty for any other status, with the space before it always
-written. A non-dictionary is `'type`. Keys other than exactly `'status`,
-`'headers`, and `'body`; a status that is not an integer in `200...599`; a
-nonempty body with status 204, 205, or 304; a
-headers value that is not a dictionary, a header name that is not a nonempty
-string of HTTP token characters, a header value that is neither a string nor
-a list of strings or that contains CR, LF, NUL, or a control character other
-than tab, a header whose lowercased name is `content-length`, `connection`,
-or `transfer-encoding`;
-or a body that is neither a string nor a list of integers in `0...255` is
-`'domain`.
 
 #### Examples
 
@@ -195,16 +148,3 @@ http.server.render-response chars
 ```
 
 ### route
-`( request routes -- response )` — *Inline.* Dispatch a request over a list
-of `[method pattern handler]` rows. A pattern is a slash path whose segments
-must equal the request's `'path` segments one for one, except that a segment
-beginning with `:` binds any nonempty path segment under its name in a
-string dictionary. The first row whose pattern and method both match has the
-request, with `'params` set to that dictionary, passed to its handler, which
-is applied inline with the contract `( request -- response )`; middleware is
-`compose`. When some pattern matches but no matching row's method does, the
-result is `405 "method not allowed" text` with an `allow` header joining the
-matching rows' methods with `,`; when no pattern matches, the result is
-`not-found`. Every row is checked before any comparison: a row that is not a
-list of three elements is `'shape`, and a non-string method, non-string
-pattern, or non-quotation handler is `'type`.

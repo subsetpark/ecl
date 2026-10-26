@@ -267,51 +267,65 @@
   offset - tag) 'parsed-instant defp
 
  ### def from-unix
- (milliseconds -- timestamp : "Tag an integer Unix millisecond count as {'unix milliseconds}.")
+ (milliseconds -- timestamp :
+  "Tag an integer Unix millisecond count as `{'unix milliseconds}`. Negative counts name instants
+   before 1970.")
  ('time.from-unix "an integer Unix millisecond count" int-arg tag) 'from-unix def
 
  ### def to-unix
- (timestamp -- milliseconds : "Return the Unix millisecond count inside a timestamp.")
+ (timestamp -- milliseconds : "Return the integer Unix millisecond count inside a timestamp.")
  ('time.to-unix millis) 'to-unix def
 
  ### def add
- (timestamp milliseconds -- timestamp : "Shift a timestamp by a signed millisecond duration.")
+ (timestamp milliseconds -- timestamp :
+  "Shift a timestamp by a signed integer millisecond duration.")
  (|timestamp duration|
   duration 'time.add "a timestamp followed by integer milliseconds" int-arg
   timestamp 'time.add millis swap pair (+) 'time.add checked tag) 'add def
 
  ### def diff
- (later earlier -- milliseconds : "Return later minus earlier in milliseconds.")
+ (later earlier -- milliseconds : "Return `later` minus `earlier` in signed milliseconds.")
  (|later earlier|
   earlier 'time.diff millis
   later 'time.diff millis swap pair (-) 'time.diff checked) 'diff def
 
  ### def cmp
- (left right -- ordering : "Three-way compare two timestamps as -1, 0, or 1.")
+ (left right -- ordering :
+  "Three-way compare two timestamps as −1, 0, or 1. Whole-value `match?` also compares timestamps;
+   `<` and `=` do not.")
  (|left right| right 'time.cmp millis left 'time.cmp millis swap core.cmp) 'cmp def
 
  ### def seconds
- (n -- milliseconds : "Convert whole seconds to milliseconds.")
+ (n -- milliseconds : "Convert `n` whole seconds to milliseconds.")
  ('time.seconds "an integer count" int-arg 1000 pair (*) 'time.seconds checked) 'seconds def
 
  ### def minutes
- (n -- milliseconds : "Convert whole minutes to milliseconds.")
+ (n -- milliseconds : "Convert `n` whole minutes to milliseconds.")
  ('time.minutes "an integer count" int-arg 60000 pair (*) 'time.minutes checked) 'minutes def
 
  ### def hours
- (n -- milliseconds : "Convert whole hours to milliseconds.")
+ (n -- milliseconds : "Convert `n` whole hours to milliseconds.")
  ('time.hours "an integer count" int-arg 3600000 pair (*) 'time.hours checked) 'hours def
 
  ### def days
- (n -- milliseconds : "Convert whole days of 86,400 seconds to milliseconds.")
+ (n -- milliseconds : "Convert `n` whole days of 86,400 seconds to milliseconds.")
  ('time.days "an integer count" int-arg 86400000 pair (*) 'time.days checked) 'days def
 
  ### def to-utc
- (timestamp -- fields : "Decompose a timestamp into UTC calendar fields.")
+ (timestamp -- fields :
+  "Decompose a timestamp into the UTC calendar fields `{'year 'month 'day 'hour 'minute 'second
+   'millisecond 'weekday}`, all ints. `'weekday` counts from Monday as 0 through Sunday as 6. Years
+   before 1 are negative in astronomical numbering: year 0 is 1 BC and is a leap year.")
  ('time.to-utc millis civil utc-fields) 'to-utc def
 
  ### def from-utc
- (fields -- timestamp : "Build a timestamp from UTC calendar fields.")
+ (fields -- timestamp :
+  "Build a timestamp from a dictionary of int UTC calendar fields. `'year`, `'month`, and `'day` are
+   required; `'hour`, `'minute`, `'second`, and `'millisecond` default to 0; `'weekday` is optional
+   and must agree with the date. Any other key is `'domain`; a non-symbol key or non-int value is
+   `'type`. Month is 1 through 12, day is 1 through the month's length in that year, hour 0 through
+   23, minute and second 0 through 59, and millisecond 0 through 999; anything else is `'domain`.
+   `to-utc` output round-trips exactly.")
  (|fields|
   fields type 'dict match? not ('time.from-utc "a dictionary of UTC calendar fields" type-error)
   when
@@ -331,11 +345,22 @@
   civil-instant) 'from-utc def
 
  ### def format
- (timestamp -- string : "Render a timestamp as YYYY-MM-DDTHH:MM:SS.mmmZ.")
+ (timestamp -- string :
+  "Render a timestamp as `YYYY-MM-DDTHH:MM:SS.mmmZ`: always UTC, always three fractional digits, so
+   `format` then `parse` returns the same timestamp and `parse` then `format` returns the same text
+   for every string in that shape. A year outside 0000 through 9999 cannot be written in four digits
+   and is `'domain`.")
  ('time.format millis civil pop render) 'format def
 
  ### def parse
- (text -- timestamp : "Parse an RFC 3339 date-time, converting any offset to UTC.")
+ (text -- timestamp :
+  "Parse an RFC 3339 `date-time`, converting any offset to UTC: `YYYY-MM-DDTHH:MM:SS`, an optional
+   fraction of one or more digits, then `Z` or a numeric `±HH:MM` offset that is subtracted to reach
+   UTC. `T` and `Z` may be lower case. The first three fractional digits are kept and the rest are
+   discarded, so `\"…:00.1239Z\"` and `\"…:00.123Z\"` parse alike. Text outside the grammar, such as
+   a space separator, a missing designator, trailing characters, a non-ASCII scalar, or an empty
+   fraction, is `'parse`; a well-formed field outside its range, including second `60`, is
+   `'domain`.")
  (|text|
   text text? not ('time.parse "a string" type-error) when
   text len 35 > (malformed) when

@@ -91,81 +91,19 @@ prints `<port:N>` and has type `'port`; it exposes no PID and cannot be passed
 through JSON. Native words can view and forward its opaque identity.
 
 ### close-input
-`( port -- )` — Close the process's stdin after queued bytes have been written.
-Idempotent. A concurrent or later `write` is `'io`.
 
 ### kill
-`( port -- )` — Force termination of the port's process group and arrange for
-direct-child reap. Idempotent and safe after natural exit.
 
 ### read-stderr
-`( port max -- bytes )` — Read at most positive `max` exact bytes from stderr,
-parking when no data is ready. Return `[]` only at stable EOF; later reads also
-return `[]`. At most one stderr read may be pending; overlap is `'contract`.
 
 ### read-stdout
-`( port max -- bytes )` — Read at most positive `max` exact bytes from stdout
-with the same readiness, EOF, and single-reader contract as `read-stderr`.
 
 ### run
-`( spec -- result )` — Spawn through the ordinary port controller, supply all
-stdin while draining stdout and stderr concurrently, wait for direct-child
-reap, and return
-`{'term termination 'stdout stdout-bytes 'stderr stderr-bytes}`. In addition to
-the spawn fields, `spec` accepts:
-
-| Field | Value | Default |
-| --- | --- | --- |
-| `'stdin` | List of integer bytes in `0...255`; strings require explicit `bytes` conversion | `[]` |
-| `'stdout-limit` | Nonnegative integer maximum total captured stdout bytes | Host stdout capture maximum |
-| `'stderr-limit` | Nonnegative integer maximum total captured stderr bytes | Host stderr capture maximum |
-| `'timeout-ms` | Nonnegative integer deadline in milliseconds, including spawn and execution | No process deadline; scheduler cancellation remains effective |
-
-Each capture limit must be no larger than its corresponding host maximum.
-Zero permits only empty output on that stream. Stdin is finished after feeding,
-including when omitted. The result always contains all three symbol keys:
-`'term` is a termination dictionary described by `proc.wait`, and `'stdout`
-and `'stderr` are byte lists, empty when nothing was captured. Nonzero exit codes are returned
-as data; inspect `'term` to decide whether the command succeeded.
-
-Capture overflow kills and cleans the process before raising `'overflow`.
-Deadline expiry does the same before raising `'timeout`; task cancellation is
-`'cancelled`. Spawn, pipe, broken-input, and reap failures are `'io`. These
-run-only fields are rejected by `spawn`.
-The deadline covers the child task that opens and runs the process. Output
-collectors enforce their limits independently; a failed collector cancels the
-remaining work and joins resource cleanup. Successful input acceptance is
-distinct from backend pipe completion, and a later broken pipe still fails
-the run.
 
 ### spawn
-`( spec -- port )` — Start the directly named executable with stdin, stdout,
-and stderr pipes. The child and its process group, pipe tasks, and spawning
-task-scope membership commit before the port becomes visible. The scope owns
-the live child: scope closure cancels the process group and waits for reap even
-if a port value remains stored elsewhere. Returning or storing the port does
-not detach it; `@give` is the one way to change owner, and the unit it is
-given to kills the group when it ends.
 
 ### terminate
-`( port -- )` — Request ordinary termination of the process group, escalating
-to force termination during cleanup when needed. Idempotent and safe after
-natural exit.
 
 ### wait
-`( port -- termination )` — Park until the immutable terminal result is
-available. Any number of waiters and later calls receive the same dictionary:
-
-- `{'kind 'exited 'code n}`;
-- `{'kind 'signaled 'signal n}`;
-- `{'kind 'stopped 'signal n}`; or
-- `{'kind 'unknown 'status n}`.
-
-A nonzero exit code is ordinary termination data, not an ECL error.
-A pipe failure raises `'io`. Waiting requires an open resource; after closure,
-observe a previously completed exchange instead of admitting another wait.
 
 ### write
-`( port bytes -- )` — Queue exact stdin bytes, parking under bounded pressure.
-Calls are serialized in scheduler-arrival order and each call's bytes remain
-contiguous. A closed or broken stdin is `'io`.

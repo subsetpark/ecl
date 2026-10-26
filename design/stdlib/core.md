@@ -4,6 +4,7 @@
 `( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
 `'overflow`.
 
+
 ### *%
 `( x y -- z )` — **Pervasive.** Multiply integers modulo 2^64 in two's
 complement, wrapping where `*` raises `'overflow`. Int-only: a float or a char
@@ -18,11 +19,13 @@ is `'type`. With `band`, arithmetic modulo any power of two.
 # => 1325825702
 ```
 
+
 ### \*file\*
 `( -- string )` — Return the source name attached to the currently executing
 reader-authored occurrence. A definition reports the file that authored its
 body even when another file calls it. `'domain` in runtime-assembled code with
 no source provenance; there is no fallback to the caller's file.
+
 
 ### \*module\*
 `( -- 'module-name )` — Return the canonical registration name selected by
@@ -30,6 +33,7 @@ the current module activation. The same image registered under different names
 reports the name through which it was called; an alias reports its target's
 canonical name. `'domain` at top level, during module construction, or through
 an escaped quotation whose image has no invoking registration.
+
 
 ### +
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
@@ -43,6 +47,7 @@ overflow is `'overflow`.
 # => 3
 ```
 
+
 ### +%
 `( x y -- z )` — **Pervasive.** Add integers modulo 2^64 in two's complement,
 wrapping where `+` raises `'overflow`. Int-only: a float or a char is `'type`.
@@ -54,44 +59,45 @@ wrapping where `+` raises `'overflow`. Int-only: a float or a char is `'type`.
 # => -9223372036854775808
 ```
 
+
 ### -
 `( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
 `char char -` is an int, `char int -` is a char, `int char -` is `'type`.
 Integer overflow is `'overflow`.
+
 
 ### -%
 `( x y -- z )` — **Pervasive.** Subtract integers modulo 2^64 in two's
 complement, wrapping where `-` raises `'overflow`. Int-only: a float or a char
 is `'type`.
 
+
 ### /
 `( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero
 number over zero is an infinity signed by both operands, and `0 0 /` is
 `'domain` (NaN).
 
+
 ### <
 `( x y -- bool )` — **Pervasive.** Ascending comparison, producing 0/1
 masks.
 
+
 ### <=
-`( x y -- bool )` — **Pervasive.** Less-than-or-equal. Equivalent to
-`> not`.
 
 ### <>
-`( x y -- bool )` — **Pervasive.** Inequality. Equivalent to `= not`. (On
-0/1 masks this is xor; there is no separate word.)
 
 ### =
 `( x y -- bool )` — **Pervasive.** Equality; numbers compare numerically
 across int and float. Whole-value equality is `match?`.
 
+
 ### >
 `( x y -- bool )` — **Pervasive.** Descending comparison, producing 0/1
 masks.
 
+
 ### >=
-`( x y -- bool )` — **Pervasive.** Greater-than-or-equal. Equivalent to
-`< not`.
 
 ### @attempt
 `( values quotation -- result )` — *Unit constructor.* Initialize an isolated
@@ -113,6 +119,7 @@ Errors.
 # => {'ok [1 5]}
 ```
 
+
 ### @defm
 `( values body 'module-name -- )` — *Unit constructor.* The one module
 constructor. Validate the name first: a non-symbol is `'type`; an invalid
@@ -125,6 +132,7 @@ after the body has run.
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore `values (body) 'name @defm`. See
 Modules.
+
 
 ### @give
 `( ports values quotation -- task )` — *Unit constructor.* Like `@spawn`, and
@@ -159,6 +167,7 @@ wrap [] (net.local-address 'port at 0 >) @give task.await
 # => {'ok [1]}
 ```
 
+
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack
 from the explicit values list and run the quotation concurrently. Use `[]` for
@@ -174,6 +183,7 @@ body defines words and starts no tasks (see Modules). See
 # => {'ok [42]}
 ```
 
+
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate
 a pure descriptor returned by `tests`, late-bind its module/name and optional
@@ -183,18 +193,19 @@ registration's private home and durable state. Return exactly
 `{'ok (values)}` or `{'err error}`; a missing current test is a reified error.
 Ordinary Sessions receive `'domain`.
 
+
 ### alias
 `( 'short 'module-name -- )` — Register an unqualified short registry name
 for a canonical, possibly dotted module name.
 Aliases and module names may not collide in either direction.
 
+
 ### args
 `( -- arguments )` — The process arguments following the script or
 source, as a list of strings.
 
+
 ### assert
-`( bool error -- )` — Raise an error dict unless the condition is the boolean
-1, discarding the dict when it holds. Defined in ecl.
 
 ### at
 `( collection key -- value )` — Index a list or look up a dict key.
@@ -210,33 +221,30 @@ key is an error.
 # => [30 10]
 ```
 
+
 ### at-path
-`( ds l -- x )` — Repeatedly index nested lists/dicts by each key or
-index in the path, left to right; an empty path returns `ds` unchanged.
-Equivalent to `swap (at) fold`.
 
 ### atan2
 `( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
+
 
 ### band
 `( x y -- z )` — **Pervasive.** Bitwise and over the two's-complement bit
 patterns of ints. Non-int leaves are `'type`.
 
+
 ### bi2
-`( x y p q -- ... )` — *Inline.* Binary cleave: apply each of two
-quotations to the same pair of inputs. Equivalent to
-`(|x y p q| x y p call x y q call)`.
 
 ### bnot
 `( x -- y )` — **Pervasive.** Invert every bit. `bnot bnot` is identity;
 `0 bnot` is `-1`.
 
+
 ### bor
 `( x y -- z )` — **Pervasive.** Bitwise or. See `band`.
 
+
 ### both
-`( x y q -- ... )` — *Inline.* Apply one quotation independently to two
-values, `x` first. Equivalent to `(|x y q| x q call y q call)`.
 
 ### bsl
 `( x count -- y )` — **Pervasive.** Shift the bit pattern left by `count`
@@ -244,15 +252,18 @@ places, truncating bits shifted off the top rather than raising
 `'overflow`: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is
 `'domain`.
 
+
 ### bsr
 `( x count -- y )` — **Pervasive.** Shift the bit pattern right by
 `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr`
 produce `maxint`. A `count` outside `0..63`
 is `'domain`.
 
+
 ### bxor
 `( x y -- z )` — **Pervasive.** Bitwise exclusive or. On 0/1 masks `<>`
 does the same job on any leaf type; `bxor` is for whole patterns.
+
 
 ### bytes
 `( value -- bytes )` — Encode a string as UTF-8 into a byte list: an integer
@@ -267,16 +278,20 @@ the word is idempotent. Any other value is `'type`. Inverse of `chars`; see
 # => [104 195 169]
 ```
 
+
 ### call
 `( q -- ... )` — *Inline.* Run a quotation on the current stack. A data
 list pushes its elements.
 
+
 ### cat
 `( left right -- list )` — Concatenate two lists.
+
 
 ### ceil
 `( x -- integer )` — **Pervasive.** Round up; the result is int64,
 `'overflow` outside its range.
+
 
 ### char
 `( value -- char )` — Return a char unchanged, the char with an int's codepoint,
@@ -289,6 +304,7 @@ range or a string of any other length is `'domain`; any other value is `'type`.
 955 char
 # => \λ
 ```
+
 
 ### chars
 `( value -- string )` — Return a value's text content as a string: a string
@@ -305,6 +321,7 @@ representation: `'foo chars` is `"foo"`, not `"'foo"`. See
 'foo chars [104 195 169] chars
 # => "foo" "hé"
 ```
+
 
 ### cmp
 `( left right -- ordering )` — Three-way whole-value ordering, −1/0/1;
@@ -324,10 +341,8 @@ for ordering: `-` errors on int64 overflow where an ordering must be total.
 # => -1 1 -1
 ```
 
+
 ### collect
-`( quotation -- list )` — Run the quotation on an empty isolated stack and
-return what it leaves as a list, preserving order. Equivalent to
-`[] swap infra`; the quotation cannot see values beneath it.
 
 #### Examples
 
@@ -355,14 +370,17 @@ effects performed by tests.
 # => 111
 ```
 
+
 ### cons
 `( value list -- list )` — Raw structural prepend. On data,
 `1 [2 3] cons` is `[1 2 3]`. On code it inserts a form: a prepended word
 executes when the result is called, so `cons` is not safe partial
 application — that is `partial`.
 
+
 ### cos
 `( x -- y )` — **Pervasive.** Cosine; float transcendental.
+
 
 ### cut
 `( list starts -- pieces )` — Split a list into one piece per start index.
@@ -382,6 +400,7 @@ strings.
 # => ["world"]
 ```
 
+
 ### def
 `( annotation? body 'name -- )` — Bind a quotation to a public word, with
 optional effect and documentation metadata. See
@@ -389,10 +408,12 @@ optional effect and documentation metadata. See
 forms and validation; see [Modules](SPEC.md#modules) for module-context
 requirements.
 
+
 ### defp
 `( annotation? body 'name -- )` — Bind a private module word, with
 optional effect and documentation metadata. A top-level `defp` is an
 error.
+
 
 ### del
 `( collection selector -- collection )` — Functionally remove list positions
@@ -403,24 +424,30 @@ is unchanged. An empty selector returns the list unchanged. A missing
 dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a
 list of whole dictionary keys.
 
+
 ### distinct
 `( list -- list )` — First occurrence of each distinct value, in input
 order. Equivalent to `group dict.keys`.
+
 
 ### div
 `( x y -- z )` — **Pervasive.** Checked integer division. Division by
 zero is `'domain`.
 
+
 ### doc
 `( 'name -- string )` — Return the canonical documentation string of a
 resolved binding. Missing documentation is `'domain`.
+
 
 ### drop
 `( list count -- list )` — Remove `count` elements from the front, or
 from the end when negative. (The stack word is `pop`.)
 
+
 ### dup
 `( x -- x x )` — Duplicate the top stack value.
+
 
 ### each
 `( collection quotation -- collection )` — *Isolated*, contract `( a -- b )`.
@@ -442,16 +469,10 @@ flat-map is `each raze`. Derived verbs come free from homoiconicity:
 # => {'a 2 'b 3}
 ```
 
+
 ### each-prior
-`( list seed quotation -- list )` — *Isolated*, contract
-`( current prior -- result )`. Apply left-to-right, using the explicit seed
-as the predecessor of the first element. Thus
-`[12 13 11] 10 (-) each-prior` is `[2 1 -2]`. Defined in ecl over
-`zip-with`.
 
 ### empty?
-`( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
-to `len 0 =`.
 
 ### execute
 `( word -- ... )` — Resolve and apply a word value late through the ordinary
@@ -460,16 +481,18 @@ Non-words are `'type`; missing words are `'undefined-word`. Module homes,
 private resolution, annotations, tracing, builtins, native calls, and
 cancellation are preserved.
 
+
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`'domain` otherwise):
 cancel and quiesce all descendants, then terminate the process with the
 given status.
 
+
 ### exp
 `( x -- y )` — **Pervasive.** Natural exponential; float transcendental.
 
+
 ### first
-`( list -- value )` — First element of a nonempty list.
 
 ### flip
 `( list -- list )` — Exchange the first two axes of a list of equally
@@ -489,6 +512,7 @@ after transposition. A non-list argument raises `'type`.
 # => ("ac" "bd")
 ```
 
+
 ### float
 `( value -- float )` — Return a float unchanged, an int as a float, or the
 value of a string in the numeric-literal grammar. A string outside that grammar
@@ -501,9 +525,11 @@ is `'parse`; any other value is `'type`.
 # => 25.0 3.0
 ```
 
+
 ### floor
 `( x -- integer )` — **Pervasive.** Round down; the result is int64,
 `'overflow` outside its range.
+
 
 ### fold
 `( list accumulator quotation -- accumulator )` — *Isolated*, contract
@@ -516,16 +542,19 @@ is `'parse`; any other value is `'type`.
 # => 10
 ```
 
+
 ### for
 `( collection quotation -- )` — *Isolated*, contract `( a -- )`. Apply to list
 elements or dictionary values in insertion order, left-to-right, collecting
 nothing.
+
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an
 immutable snapshot taken once at session start. An unset variable is an
 error, never a blank: absence is absence, and `@attempt`/`or-else` is the
 defaulting idiom. Absent host IO is `'io`.
+
 
 ### grade
 `( list -- indices )` — The stable ascending sort permutation. Orders by
@@ -539,6 +568,7 @@ names the later element of a pair that is not.
 # => [1 2 0]
 ```
 
+
 ### group
 `( list -- dict )` — Dict from each distinct value to the list of its
 0-based indices, keyed in first-occurrence order.
@@ -550,15 +580,18 @@ names the later element of a pair that is not.
 # => {'a [0 2] 'b [1]}
 ```
 
+
 ### group-columns
 `( columns -- groups )` — Group rows from a nonempty list of equal-length
 columns. Keys are whole composite lists, in first-occurrence order; row indices
 within each group are ascending. Zero rows produces an empty dictionary.
 An empty column list or ragged columns raises `'shape`; non-list columns raise `'type`.
 
+
 ### if
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1,
 `else` when it is 0; any other condition value is `'type`.
+
 
 ### import
 `( module-name q -- )` — Import the public attributes named by the symbol list
@@ -570,6 +603,7 @@ non-symbol item is `'type`; an invalid module or attribute name is `'domain`.
 Each imported binding dispatches through the module, preserves the original's
 effect and documentation, and may replace an existing local binding. `see`
 renders its one-word forwarding quotation.
+
 
 ### in?
 `( value list -- bool )` — Membership. Pervades over the sought value —
@@ -589,6 +623,7 @@ that.
 # => [1 0]
 ```
 
+
 ### infra
 `( list quotation -- list )` — *Isolated*, contract unconstrained. Run
 the quotation with the list's elements as the entire substack; the
@@ -600,6 +635,7 @@ substack that remains is the result list.
 [1 2 3] (dup) infra
 # => [1 2 3 3]
 ```
+
 
 ### int
 `( value -- int )` — Return an int unchanged, a char's codepoint, or the value
@@ -613,6 +649,7 @@ other value is also `'type`.
 "42" int "a" first int
 # => 42 97
 ```
+
 
 ### intern
 `( value -- symbol )` — Return a symbol or word as a symbol, or create the
@@ -629,17 +666,18 @@ to unbounded external input; `symbol` is the lookup-only form. See
 # => 'fresh-name
 ```
 
+
 ### join
 `( strings separator -- string )` — Join a list of strings with a
 separator string.
 
+
 ### last
-`( sequence -- value )` — Final element of a nonempty sequence.
-Equivalent to `dup len 1 - at`.
 
 ### len
 `( list -- count )` — Top-level list element count. Lists may be ragged.
 Dictionary entry count is provided by `dict.size`.
+
 
 ### linrec
 `( predicate base pre post -- ... )` — *Inline.* Explicit linear recursion.
@@ -654,14 +692,17 @@ explicit continuation per descent rather than using the host stack; its live
 storage is proportional to recursion depth.
 An empty `post` quotation does not eliminate the retained recursion level.
 
+
 ### load
 `( path -- )` — Read and evaluate a source file as one transactional unit
 in the calling session.
+
 
 ### log
 `( x -- y )` — **Pervasive.** Natural logarithm; float transcendental.
 Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `'domain`
 (NaN).
+
 
 ### match?
 `( left right -- bool )` — Whole-value structural equality; **not**
@@ -674,26 +715,24 @@ pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
 # => 1
 ```
 
+
 ### max
 `( x y -- z )` — **Pervasive.** The greater of two comparable atoms.
+
 
 ### min
 `( x y -- z )` — **Pervasive.** The lesser of two comparable atoms.
 
+
 ### neg
-`( x -- y )` — **Pervasive.** Negation. Equivalent to `-1 *`.
 
 ### nip
-`( x y -- y )` — Discard the value beneath the top. Equivalent to
-`swap pop`.
 
 ### not
 `( bool -- bool )` — **Pervasive.** Invert 0/1 values.
 
+
 ### pack
-`( x₁ … xₙ n -- list )` — Collect the top `n` values into a list,
-preserving their order; `n` must be a nonnegative int. Equivalent to
-`() swap (cons) times`. Deliberately state-dependent stack surgery.
 
 #### Examples
 
@@ -703,8 +742,6 @@ preserving their order; `n` must be a nonnegative int. Equivalent to
 ```
 
 ### pair
-`( first second -- list )` — Two-element list in stack order. Equivalent
-to `() cons cons`.
 
 ### parse
 `( string -- quotation )` — The reader, reified: parse source text into
@@ -719,11 +756,14 @@ so this is a load-class word for trusted source, not a conversion: use `int`,
 # => [1 2]
 ```
 
+
 ### pop
 `( x -- )` — Discard the top stack value. (`drop` is the sequence word.)
 
+
 ### pow
 `( x y -- z )` — **Pervasive.** Exponentiation; returns float.
+
 
 ### put
 `( collection selector value -- collection )` — Functional replacement.
@@ -740,6 +780,7 @@ the selector is always one whole-value key, including a list key.
 # => [99 20 99]
 ```
 
+
 ### qualify
 `( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
 module path, or the reserved qualifier `'core`, and one unqualified,
@@ -749,8 +790,10 @@ anything new, or grant lifecycle authority; use `execute` to
 invoke the result dynamically. `'core 'dup qualify` reaches the primitive even
 where `dup` is shadowed.
 
+
 ### raise
 `( error -- )` — Raise a language error from an error dict.
+
 
 ### range
 `( bound -- list )` — The ints `[0 1 … bound-1]`; the bound must be a
@@ -763,8 +806,10 @@ nonnegative int.
 # => [0 1 2 3 4]
 ```
 
+
 ### raze
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
+
 
 ### reduce-groups
 `( values groups reducer -- results )` — Reduce each top-level index list,
@@ -775,6 +820,7 @@ use whole-value comparison and preserve the first value on ties. Empty groups
 yield zero for sum/count and raise `'domain` for min/max. Noninteger selectors
 raise `'type`; negative or out-of-range indices and unknown symbols raise
 `'domain`. Built-in reducer meanings do not depend on word bindings.
+
 
 ### reshape
 `( list shape -- list )` — Cycle the data into the exact nested-list
@@ -787,9 +833,8 @@ shape; a zero axis must be final.
 # => [[1 2 3] [4 1 2]]
 ```
 
+
 ### reverse
-`( list -- list )` — Reverse top-level element order. Defined in ecl as
-an index permutation.
 
 ### rotate
 `( list count -- list )` — Rotate top-level element order left by a
@@ -805,9 +850,11 @@ composes it from an index permutation). The count must be an int.
 # => [3 4 5 1 2]
 ```
 
+
 ### round
 `( x -- integer )` — **Pervasive.** Round to nearest; the result is
 int64, `'overflow` outside its range.
+
 
 ### scan
 `( list accumulator quotation -- list )` — *Isolated*, contract
@@ -821,6 +868,7 @@ accumulator; same length as the input.
 # => [1 3 6 10]
 ```
 
+
 ### see
 `( 'name -- )` — Print the binding's combined annotation, when present,
 followed by its body through the standard source formatter, with its
@@ -833,20 +881,19 @@ print with their authored local names even though execution uses the lowered
 provenance fall back to their canonical value form. Native origins are
 displayed in native body descriptors.
 
+
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `'shape` error
 on ragged data (`len` is the word that works on anything).
 
+
 ### signum
-`( number -- sign )` — **Pervasive** by composition. −1, 0, or 1 as an
-int, by sign. Equivalent to `dup 0 > swap 0 < -`.
 
 ### sin
 `( x -- y )` — **Pervasive.** Sine; float transcendental.
 
+
 ### sort
-`( sequence -- sorted )` — Stable ascending sort by `cmp`. Equivalent to
-`dup grade at`.
 
 #### Examples
 
@@ -868,9 +915,11 @@ parts; splitting an empty string this way returns an empty list.
 # => ("a" "b" "c")
 ```
 
+
 ### sqrt
 `( x -- y )` — **Pervasive.** Square root. `'domain` on negative inputs
 (the result would be NaN).
+
 
 ### stencil
 `( list width quotation -- list )` — *Isolated*, contract
@@ -886,6 +935,7 @@ has `max(len-width+1, 0)` elements.
 # => [6 9]
 ```
 
+
 ### str
 `( value -- string )` — The canonical printed representation; carries the
 round-trip guarantee (see
@@ -900,8 +950,10 @@ readable value.
 # => "\"abc\""
 ```
 
+
 ### swap
 `( x y -- y x )` — Exchange the top two stack values.
+
 
 ### symbol
 `( value -- symbol )` — Return a symbol unchanged, a word as a symbol, or the
@@ -919,6 +971,7 @@ interned name space; use `intern` to create one. See
 # => 1
 ```
 
+
 ### take
 `( list count -- list )` — The first `count` elements; a negative count
 takes from the end. When the magnitude exceeds the length, the data
@@ -931,6 +984,7 @@ cycles.
 # => [1 2 3 1 2]
 ```
 
+
 ### test
 `( annotation? body 'name -- )` — Declare a first-class test in the separate
 catalog of the exact direct module construction body. Accepts the same optional
@@ -940,6 +994,7 @@ and module invocation. Top-level, nested-quotation, and child-Unit use is
 `'domain`. Application Sessions validate and discard declarations without
 retaining bodies or checking duplicate test names; Test Sessions retain them
 and reject duplicate names.
+
 
 ### tests
 `( -- descriptors )` — Test-Session-only discovery of current canonical
@@ -951,14 +1006,13 @@ local to the test Session, distinguishing equal names in different files.
 Descriptors never contain executable bodies or authority handles. Aliases do
 not duplicate entries. Ordinary Sessions receive `'domain`.
 
+
 ### times
 `( n q -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a
 nonnegative int. Tail-call optimized.
 
+
 ### tri2
-`( x y p q r -- ... )` — *Inline.* Binary cleave: apply each of three
-quotations to the same pair of inputs in left-to-right order. Equivalent to
-`(|x y p q r| x y p call x y q call x y r call)`.
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
@@ -971,10 +1025,12 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 # => 'list
 ```
 
+
 ### undef
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `unset`; removing a
 local shadow may reveal a parent or core binding.
+
 
 ### undefm
 `( 'module-name -- )` — Remove the module currently registered under a
@@ -983,6 +1039,7 @@ lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
 every alias targeting the module in the same publish; an already-dispatched
 call finishes under the generation it resolved. See
 [Modules](SPEC.md#modules).
+
 
 ### unfold
 `( state predicate step -- state list )` — *Isolated*. Before every step,
@@ -1000,14 +1057,10 @@ state and `()`.
 # => (5 [0 1 2 3 4])
 ```
 
+
 ### unless
-`( bool else -- ... )` — *Inline.* Run the quotation when the condition
-is 0. Equivalent to `() swap if`.
 
 ### unset
-`( name -- )` — Remove a direct binding from the current scope, or do nothing
-when that scope does not bind the name. An exact alias of `undef`; removing a
-local shadow may reveal a parent or core binding. Defined in ecl.
 
 ### update
 `( collection selector quotation -- collection )` — Apply an isolated
@@ -1025,9 +1078,8 @@ it.
 # => [10 2 30]
 ```
 
+
 ### when
-`( bool then -- ... )` — *Inline.* Run the quotation when the condition
-is 1. Equivalent to `() if`.
 
 ### where
 `( counts -- indices )` — Expand a list of nonnegative ints into each
@@ -1041,11 +1093,13 @@ the positions of 1s: `[0 1 1 0] where` is `[1 2]`.
 # => [1 1 2]
 ```
 
+
 ### which
 `( 'name -- )` — Print where a name resolves (module home, shadowing),
 its kind (`def`, `primitive`, or `native`), visibility, and declared
 effect when one was supplied. Constants report `def` with no effect, like
 every other unannotated ecl definition.
+
 
 ### while
 `( cond body -- ... )` — *Inline.* At the start of each iteration, retain an
@@ -1056,9 +1110,8 @@ body's result as the next iteration's checkpoint. On 0, restore the checkpoint
 and exit. Environment and IO effects from the condition survive. Tail-call
 optimized.
 
+
 ### windows
-`( list width -- windows )` — Return every overlapping window of a positive
-width. Equivalent to `() stencil`.
 
 #### Examples
 
@@ -1078,11 +1131,12 @@ non-symbol operand is `'type`.
 # => 5
 ```
 
+
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
 
+
 ### wrap
-`( value -- list )` — One-element list. Equivalent to `() cons`.
 
 ### zip-with
 `( left right quotation -- list )` — *Isolated*, contract `( a b -- c )`.
@@ -1096,55 +1150,28 @@ extends). Each-left/each-right are `partial` compositions.
 # => [11 22 33]
 ```
 
+
 ### abs
-`( x -- y )` — **Pervasive.** Absolute value. Defined in ecl; `'abs see`
-renders the definition.
 
 ### append
-`( sequence value -- sequence )` — Append one value to the end.
-Equivalent to `wrap cat`.
 
 ### compose
-`( left right -- quotation )` — Concatenate two quotations in execution
-order.
 
 ### literal
-`( value -- quotation )` — Return a plain quotation that pushes the exact
-captured value as inert data when called, without executing or resolving it.
-A value other than a word already pushes itself, so the result is `(x)`; a word
-would execute, so it is quoted as `((x) first)`. Equivalent to
-`dup type 'word match? (wrap (first) cons) (wrap) if`.
 
 ### max-of
-`( sequence -- value )` — Greatest element of a nonempty sequence.
-Equivalent to `dup first (max) fold`.
 
 ### min-of
-`( sequence -- value )` — Least element of a nonempty sequence.
-Equivalent to `dup first (min) fold`.
 
 ### rest
-`( list -- list )` — All but the first element of a nonempty list.
 
 ### zip
-`( left right -- pairs )` — Pair corresponding elements of two conforming
-sequences. Equivalent to `(pair) zip-with`.
 
 ### dip
-`( x q -- … x )` — *Inline.* Run a quotation beneath a protected top
-value: `q` runs with `x` removed, then `x` returns. Equivalent to
-`swap literal compose call`.
 
 ### fail
-`( msg -- )` — Raise `{'kind 'user 'msg msg}`. Defined in ecl.
 
 ### from-digits
-`( digits base -- value )` — Combine digits, most significant first, into
-a value. The base is one integer for every position, or a list of radices
-with one per digit, as in mixed-radix time; the first radix has no effect.
-Digits pervade: a list of equal-length digit lists, one per position, gives
-one value per column. A radix list of the wrong length fails with `'shape`.
-Inverse of `to-digits` for values in range.
 
 #### Examples
 
@@ -1158,10 +1185,6 @@ Inverse of `to-digits` for values in range.
 ```
 
 ### iterations
-`( value count quotation -- list )` — *Isolated*, unary contract
-`( a -- a )`. Return the initial value followed by `count` successive
-applications. `count` must be a nonnegative int, and a zero count returns a
-singleton list. Defined in ecl over `scan`.
 
 #### Examples
 
@@ -1171,11 +1194,6 @@ singleton list. Defined in ecl over `scan`.
 ```
 
 ### partial
-`( value quotation -- quotation )` — Safe partial application: the result
-pushes the captured value inertly, then runs the quotation. Even a
-captured word remains data. Equivalent to `swap literal swap compose`;
-`3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as
-`((w) first)`.
 
 #### Examples
 
@@ -1185,33 +1203,14 @@ captured word remains data. Equivalent to `swap literal swap compose`;
 ```
 
 ### scan1
-`( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`.
-Return a nonempty list's first element followed by the intermediate
-accumulators from reducing its remainder. Defined in ecl over `scan`.
 
 ### set
-`( annotation? value 'name -- )` — Bind a value as a constant word in the current
-environment. Reference applies the constant's body and pushes the exact
-captured value, quotations included. Defined in ecl as
-`swap literal swap def`, so `v 'name set` is observationally
-`v literal 'name def`: the stored body is `((v) first)`. An optional
-annotation beneath `v` is published as the constant's metadata; marker words
-inside `v` are nested by `literal` and remain captured data.
 
 ### setp
-`( annotation? value 'name -- )` — Bind a private module constant. Defined in ecl as
-`swap literal swap defp`. A top-level `setp` is an error, raised by the
-`defp` it calls.
 
 ### uncons
-`( list -- first rest )` — Split a nonempty list into first element and
-remainder. Equivalent to `dup first swap rest`.
 
 ### while-values
-`( value predicate step -- list )` — *Isolated*, contracts
-`( state -- bool )` and `( state -- state )`. Return the initial value and
-successive states through the first state for which the predicate is false.
-Defined in ecl over `unfold`.
 
 #### Examples
 
@@ -1221,50 +1220,22 @@ Defined in ecl over `unfold`.
 ```
 
 ### and
-`( x y -- bool )` — **Pervasive.** Boolean conjunction on 0/1 values.
-Both operands are already evaluated — there is no short-circuiting.
-Defined in ecl.
 
 ### clamp
-`( value lower upper -- bounded )` — **Pervasive** by composition.
-Constrain to the inclusive interval. Equivalent to `(max) dip min`.
 
 ### find
-`( sequence needle -- index )` — Index of the first element that
-returns 1 from `match?` against the needle, or the sequence length on a
-miss. Defined in ecl.
 
 ### or
-`( x y -- bool )` — **Pervasive.** Boolean disjunction on 0/1 values.
-Both operands are already evaluated — there is no short-circuiting.
-Defined in ecl.
 
 ### over
-`( x y -- x y x )` — Copy the value beneath the top onto the top.
-Equivalent to `swap dup (swap) dip`.
 
 ### rolldown
-`( x y z -- y z x )` — Rotate the top three stack values downward.
-Equivalent to `(swap) dip swap`.
 
 ### rollup
-`( x y z -- z x y )` — Rotate the top three stack values upward.
-Equivalent to `swap (swap) dip`.
 
 ### unappend
-`( list -- initial last )` — Split a nonempty list into its initial
-elements and last element. Equivalent to `reverse uncons reverse swap`.
 
 ### with
-`( values quotation -- quotation )` — Capture every element of a list as
-an inert input to a quotation, preserving order. Calling the result starts
-with the list's elements as separate stack values. Defined in ecl as
-`((literal) each) dip append raze`.
-
-This is ordinary quotation composition and constructs nothing. It is not a
-unit's seed operand: the flattened quotation it returns is a runtime-built
-body, so `@defm` gives it no reader attribution. Pass initial
-values as the constructor's separate list operand.
 
 #### Examples
 
@@ -1274,19 +1245,8 @@ values as the constructor's separate list operand.
 ```
 
 ### @each
-`( sequence values quotation -- results )` — *Unit constructor*, one fresh unit
-per element, contract `( a -- b )` enforced per element. Concurrent
-`each`: ordered results, leftmost failure re-raised after cancelling and
-quiescing the remainder. Each child's stack starts with its element deepest;
-`list values (q) @each` adds the shared values above it. Defined in ecl over
-`@spawn`, `task.await`, and `task.cancel`. Inside a module construction body,
-at any depth, this constructor is `'domain`: a module body defines words and
-starts no tasks (see Modules). See Concurrency.
 
 ### all?
-`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`.
-1 when the predicate returns 1 for every element. Equivalent to
-`(|l q| l q each 1 (and) fold)`.
 
 #### Examples
 
@@ -1296,22 +1256,10 @@ starts no tasks (see Modules). See Concurrency.
 ```
 
 ### any?
-`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`.
-1 when the predicate returns 1 for at least one element; the predicate
-runs on every element (no early exit). Equivalent to
-`(|l q| l q each 0 (or) fold)`.
 
 ### converges
-`( value quotation -- list )` — *Isolated*, unary contract `( a -- a )`.
-Return the initial value and successive applications until the next value
-is structurally equal to either the initial or immediately preceding value;
-the repeated boundary value is not appended. Defined in ecl over `unfold`.
 
 ### filter
-`( sequence predicate -- matches )` — *Isolated*, contract
-`( a -- count )`. Apply the predicate to every element; retain each
-element as many times as its returned nonnegative int. A 0/1 predicate is
-ordinary filtering. Equivalent to `over swap each where at`.
 
 #### Examples
 
@@ -1321,29 +1269,14 @@ ordinary filtering. Equivalent to `over swap each where at`.
 ```
 
 ### fold1
-`( list quotation -- value )` — *Isolated*, contract `( acc a -- acc )`.
-Reduce a nonempty list left-to-right from its first element. The explicit
-accumulator form `fold` is required for an empty list. Defined in ecl.
 
 ### keep
-`( x q -- … x )` — *Inline.* Apply a quotation to a value, then restore
-the value on top of the quotation's results. Equivalent to
-`over (call) dip`.
 
 ### lex-cmp-with
-`( left right comparator -- order )` — Lexicographically compare two
-sequences with an inline `( left-element right-element -- order )` comparator
-that returns −1, 0, or 1. Stop at the first nonzero result; when the shared
-prefix is equal, compare sequence lengths. Defined in ecl.
 
 ### mod
-`( x y -- z )` — **Pervasive.** Checked integer remainder. Equivalent to
-`over over div * -`.
 
 ### partition
-`( sequence predicate -- matches rejects )` — *Isolated*, contract
-`( a -- bool )`. Split into elements whose predicate returned 1 and those
-returning 0. Defined in ecl.
 
 #### Examples
 
@@ -1353,16 +1286,8 @@ returning 0. Defined in ecl.
 ```
 
 ### bi
-`( x p q -- ... )` — *Inline.* Apply two quotations to the same input,
-first `p`, then `q`. Equivalent to `(keep) dip call`.
 
 ### case
-`( x clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
-odd: `[key action … else]`. Keys are inert data — any value, never
-executed, duplicates legal with the first `match?` result of 1 winning;
-every action and the else must be a quotation, validated before any
-comparison. The first key for which `match?` returns 1 selects its action.
-Defined in ecl; `'case see` renders the definition.
 
 #### Examples
 
@@ -1372,9 +1297,6 @@ Defined in ecl; `'case see` renders the definition.
 ```
 
 ### chunk
-`( list size -- pieces )` — Split a list into consecutive pieces of a
-positive size; the last piece is shorter when the size does not divide the
-length. Equivalent to cutting at every multiple of the size.
 
 #### Examples
 
@@ -1384,20 +1306,10 @@ length. Equivalent to cutting at every multiple of the size.
 ```
 
 ### converge
-`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`.
-Return the last value before repeated application reaches a fixed point or
-returns to the initial value. Equivalent to `converges last`.
 
 ### product
-`( sequence -- product )` — Product of a numeric sequence; 1 when empty.
-Equivalent to `(*) fold1` for a nonempty sequence, so the product starts from
-the first element and a list of rows multiplies to a row.
 
 ### sum
-`( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
-Equivalent to `(+) fold1` for a nonempty sequence, so the total starts from
-the first element: a list of rows sums to a row, and a sum of negative
-zeros is `-0.0`.
 
 #### Examples
 
@@ -1411,12 +1323,6 @@ zeros is `-0.0`.
 ```
 
 ### to-digits
-`( value radices -- digits )` — Split a value into one digit per radix,
-most significant first, by floor division, so every digit lies from zero
-below its radix even for negative values. A value beyond the radices'
-capacity keeps only its low digits. Values pervade: a list of values gives
-one digit list per radix. Radices must be positive integers, or the word
-fails with `'domain`; `[2] 8 take` builds eight binary radices.
 
 #### Examples
 
@@ -1430,9 +1336,5 @@ fails with `'domain`; `[2] 8 take` builds eight binary radices.
 ```
 
 ### tri
-`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input
-in order. Equivalent to `((keep) dip keep) dip call`.
 
 ### mean
-`( sequence -- mean )` — Arithmetic mean of a nonempty numeric sequence.
-Equivalent to `dup sum swap len /`.

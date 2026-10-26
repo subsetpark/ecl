@@ -13,9 +13,9 @@
 
  ### def str?
  (value -- bool :
-  "Return 1 for a list containing only characters and 0 for every other value.
-
-   The empty string and empty list are the same value and return 1.")
+  "Return 1 when a value is a string, a list whose every element is a char, and 0 for every other
+   value. The empty string answers 1, and so does the empty list: they are one value. Never
+   raises.")
  (dup type 'list match? ((type 'char match?) all?) (pop 0) if) 'str? def
 
  ### defp checked-error
@@ -52,12 +52,12 @@
   call) 'checked-string-int defp
 
  ### def upper
- (string -- string : "Convert ASCII lowercase letters to uppercase.")
+ (string -- string : "Uppercase ASCII letters, leaving every other scalar unchanged.")
  ("str.upper expects a string" checked
   dup dup \a >= swap \z <= and 32 * -) 'upper def
 
  ### def lower
- (string -- string : "Convert ASCII uppercase letters to lowercase.")
+ (string -- string : "Lowercase ASCII letters, leaving every other scalar unchanged.")
  ("str.lower expects a string" checked
   dup dup \A >= swap \Z <= and 32 * +) 'lower def
 
@@ -106,13 +106,15 @@
   (|s p| s len p len >= s p pair (closes-with?) with (0) if) call) 'ends? def
 
  ### def contains?
- (string needle -- bool : "Return 1 when the needle occurs in the string. An empty needle matches.")
+ (string needle -- bool :
+  "Return 1 when a needle occurs anywhere in a string. The empty needle is present at index zero.")
  ("str.contains? expects a string and a string needle" checked-pair
   (|s n| n len 0 = s n split len 1 > or) call) 'contains? def
 
  ### def index-of
  (string needle -- index :
-  "Return the index of the first occurrence of the needle. Raise 'domain when it is absent.")
+  "Return the zero-based index of a needle's first occurrence. Return 0 for the empty needle and
+   raise `'domain` when a nonempty needle is absent.")
  ("str.index-of expects a string and a string needle" checked-pair
   (|s n| n len 0 =
    (0)
@@ -125,12 +127,14 @@
   call) 'index-of def
 
  ### def replace
- (string needle replacement -- string : "Replace every occurrence of the needle.")
+ (string needle replacement -- string :
+  "Replace every occurrence of a needle. An empty needle inserts the replacement between adjacent
+   scalars only, with no boundary insertion.")
  ("str.replace expects string, needle, and replacement strings" checked-triple
   (|s n r| s n split r join) call) 'replace def
 
  ### def repeat
- (string count -- string : "Concatenate count copies of the string. Count must be nonnegative.")
+ (string count -- string : "Concatenate `count` copies of a string; `count` must be nonnegative.")
  ("str.repeat expects a string and an integer count" checked-string-int
   (|s n| n 0 >=
    'domain error.new "str.repeat requires a nonnegative count" error.with-message assert
@@ -141,12 +145,16 @@
   call) 'repeat def
 
  ### def pad-left
- (string width -- string : "Add leading spaces until the string reaches the requested width.")
+ (string width -- string :
+  "Add leading spaces until the string reaches the requested width; return a longer string
+   unchanged.")
  ("str.pad-left expects a string and an integer width" checked-string-int
   (|s w| " " w s len - 0 max take s pair raze) call) 'pad-left def
 
  ### def pad-right
- (string width -- string : "Add trailing spaces until the string reaches the requested width.")
+ (string width -- string :
+  "Add trailing spaces until the string reaches the requested width; return a longer string
+   unchanged.")
  ("str.pad-right expects a string and an integer width" checked-string-int
   (|s w| s " " w s len - 0 max take pair raze) call) 'pad-right def
 
@@ -242,7 +250,8 @@
 
  ### def format
  (values template -- string :
-  "Interpolate positional braces, preserving strings and canonically rendering other values.")
+  "Interpolate positional `{}` placeholders. Strings contribute their contents; other values
+   contribute canonical `str`. `{{` and `}}` emit literal braces.")
  (format-valid) 'format def
 
 ) 'str @defm

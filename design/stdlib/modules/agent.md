@@ -19,12 +19,6 @@ accepted waits forever if the agent ends before replying, unless it bounds the
 call with `call-for`.
 
 ### call
-`( quotation address -- result )` — Apply the quotation to the agent's stack
-and return the top of the result stack; the agent keeps the rest. The
-quotation's own error is re-raised here with the agent unchanged. A result
-stack with nothing on it is `'domain`. Replies travel through a helper task.
-A call to an agent that has ended raises `'io`; a call whose request was
-accepted never returns if the agent ends before replying.
 
 #### Examples
 
@@ -38,25 +32,9 @@ accepted never returns if the agent ends before replying.
 ```
 
 ### call-for
-`( quotation address milliseconds -- result )` — `agent.call` with a
-nonnegative int deadline, checked before anything is sent: a negative duration
-is `'domain` and a non-int is `'type`. When no reply arrives in time the call
-raises `'timeout`, whether the deadline passed while waiting for room in a full
-mailbox or for the reply; the quotation, if it was sent, still runs on the
-agent when its turn comes, and its reply is discarded.
 
 ### send
-`( quotation address -- )` — Apply the quotation to the agent's stack without
-waiting. The whole result stack becomes the new state; a failing quotation
-changes nothing and reports nothing.
 
 ### serve
-Stack-polymorphic. Turn the current task into an agent whose state is the
-stack it has now, and serve until cancelled. Spawn it directly to keep the
-handle: `[[7 0]] (agent.serve) @spawn` serves `[7 0]` and `task.cancel` on the
-handle ends it with `'cancelled`.
 
 ### start
-`( state -- address )` — Spawn a server whose stack holds the one value
-`state` and return its address. The server is owned by the spawning task
-scope, as any `@spawn` is.

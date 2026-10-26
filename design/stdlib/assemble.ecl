@@ -100,20 +100,70 @@
   if)
  partial each raze) 'ecl-files def
 
-### def module-ranks
-(path -- name ranks : "Return the module name a source registers and the ranks of its definitions.")
+### def word-spelling
+(form -- text : "Return a word's spelling, or the empty string for any other form.")
+(dup type 'word match? (chars) (pop "") if) 'word-spelling def
+
+### def annotation?
+(form -- bool : "Return 1 for a list holding a top-level `--` or `:` word.")
+(dup type 'list match?
+ ((word-spelling dup "--" match? swap ":" match? or) any?)
+ (pop 0)
+ if) 'annotation? def
+
+### def effect-text
+(annotation -- text :
+ "Render an annotation's declared effect as an entry's leading code span and dash, or return the
+  empty string for a documentation-only annotation.")
+((word-spelling) each dup ":" find take
+ dup "--" find over len <
+ ((|words| "`( " words " " join cat " )` — " cat) call)
+ (pop "")
+ if) 'effect-text def
+
+### def public-entry
+(forms index qualifier -- pair :
+ "Render the effect and documentation of the public definition whose `def` word sits at an index, as
+  a [name text] pair. The documentation is the binding's canonical docstring.")
+(|forms index qualifier|
+ forms index 1 - at chars
+ forms index 3 - 0 max at
+ index 3 >= over annotation? and (effect-text) (pop "") if
+ qualifier forms index 1 - at chars cat intern doc cat
+ pair) 'public-entry def
+
+### def public-docs
+(forms qualifier -- docs :
+ "Map each public definition in a definition list to its rendered effect and documentation.")
+(over (word-spelling "def" match?) each where
+ rollup pair
+ (|index context| context first index context 1 at public-entry)
+ partial each dict.from-pairs) 'public-docs def
+
+### def module-info
+(path -- name info :
+ "Return the module name a source registers with the ranks and rendered documentation of its
+  definitions.")
 (source-forms
  dup dup len 2 - at chars
- swap dup len 3 - at definitions ranks) 'module-ranks def
+ swap dup len 3 - at
+ (|name body|
+  name
+  body definitions ranks
+  body name "." cat public-docs
+  pair)
+ call) 'module-info def
 
-### def prelude-ranks
-(-- ranks : "Rank the prelude's definitions after checking that the file is already in rank order.")
-("src/prelude.ecl" source-forms definitions over swap ranks over over rank-order
- (|names ranks order|
+### def prelude-info
+(-- info :
+ "Rank and document the prelude's definitions after checking that the file is already in rank
+  order.")
+("src/prelude.ecl" source-forms dup definitions over swap ranks over over rank-order
+ (|forms names ranks order|
   names order at names match?
   "src/prelude.ecl is not in dependency-rank, codepoint order" check
-  ranks)
- call) 'prelude-ranks def
+  ranks forms "" public-docs pair)
+ call) 'prelude-info def
 
 ### def starts?
 (line prefix -- bool : "Return 1 when a line begins with a prefix.")
@@ -136,38 +186,77 @@
  over ("### " starts?) each and where 0 swap cons
  cut (trim-trailing "\n" join) each uncons) 'blocks def
 
+### def examples-of
+(block -- text :
+ "Return what an ECL-defined word's fragment entry holds beneath its heading, which may only be an
+  examples section.")
+(dup entry-name swap "\n" split rest
+ dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" join) if
+ dup empty? over "#### Examples" starts? or
+ rolldown ": an ECL-defined word's fragment entry may hold only examples" cat check)
+'examples-of def
+
+### def ecl-entry
+(name names entries docs -- block :
+ "Render an ECL-defined word's entry from its documentation and its fragment entry's examples.")
+(|name names entries docs|
+ entries names name find
+ over len over >
+ (at examples-of)
+ (pop pop "")
+ if
+ "### " name cat "\n" cat docs name at cat
+ swap dup empty? (pop) ("\n\n" swap cat cat) if) 'ecl-entry def
+
+### def merge-entries
+(entries docs -- entries :
+ "Keep each builtin entry as written and render every ECL-defined word's entry from its source,
+  including words the fragment omits.")
+(|entries docs|
+ entries (entry-name) each
+ entries docs pair
+ (|names entries docs|
+  names docs (swap dict.has? not) partial each where entries swap at
+  docs dict.keys names entries docs 3 pack
+  (|name context| name context first context 1 at context 2 at ecl-entry)
+  partial each
+  cat)
+ with call) 'merge-entries def
+
 ### def section
-(path name ranks -- text :
- "Read one section fragment and return it with its entries in rank order.")
-(|path name ranks|
+(path name info -- text :
+ "Read one section fragment and return it with ECL-defined entries rendered from source and every
+  entry in rank order.")
+(|path name info|
  'cwd path fs.read-text blocks
- ranks name pair
- (|header entries ranks name|
+ info name pair
+ (|header entries info name|
   header "\n" split first "## " name cat match?
   "a section fragment's heading does not match its name" check
-  entries dup (entry-name) each ranks rank-order at header swap cons "\n\n" join)
+  entries info 1 at merge-entries
+  dup (entry-name) each info first rank-order at header swap cons "\n\n" join)
  with call) 'section def
 
 ### def module-sections
-(module-ranks -- texts : "Assemble every module fragment, ordered by section name.")
+(module-info -- texts : "Assemble every module fragment, ordered by section name.")
 ('cwd "design/stdlib/modules" fs.list ('name at) each
  dup (".md" str.ends?) each where at
  dup (-3 drop) each dup grade
- (|ranked files names order|
+ (|known files names order|
   files order at names order at
-  ranked
-  (|file name ranked|
+  known
+  (|file name known|
    "design/stdlib/modules/" file cat name
-   ranked name over over dict.has? (at) (pop pop {}) if
+   known name over over dict.has? (at) (pop pop [{} {}]) if
    section)
   partial zip-with)
  call) 'module-sections def
 
 ### def document
 (-- text : "Assemble the complete reference.")
-("src/stdlib" ecl-files (module-ranks pair) each dict.from-pairs
+("src/stdlib" ecl-files (module-info pair) each dict.from-pairs
  module-sections
- "design/stdlib/core.md" "Prelude and core" prelude-ranks section swap cons
+ "design/stdlib/core.md" "Prelude and core" prelude-info section swap cons
  'cwd "design/stdlib/preamble.md" fs.read-text "\n" split trim-trailing "\n" join swap cons
  "<!-- Generated from design/stdlib by design/stdlib/assemble.ecl; edit the fragments. -->" swap
  cons

@@ -9,8 +9,10 @@ open the section and each later layer builds only on earlier ones. Mutually
 recursive definitions share a layer. Within a layer, words are ordered by
 codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
 words precede letter-spelled ones. An entry gives the word's successful stack
-effect followed by its semantics. Declared effects are reflected by `which`
-and `see`; words without a declaration state their shape in documentation.
+effect followed by its semantics. For a word defined in ecl, the entry is the
+definition's own annotation, the same effect and documentation that `which`,
+`see`, and `doc` reflect; words without a declared effect state their shape in
+documentation.
 At module boundaries, declared output contracts are checked when the invocation
 completes, including any deferred work. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of

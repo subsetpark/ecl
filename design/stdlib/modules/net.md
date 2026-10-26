@@ -40,37 +40,14 @@ encoding, and protocol limits belong to libraries. Deadlines compose tasks
 with `task.await-for`, cancellation, and joining.
 
 ### accept
-`( listener -- connection )` — Wait for a peer and claim the accepted resource
-into the calling scope. A non-listener is `'type`. Abortive listener closure
-cancels admitted accepts; graceful shutdown may instead report backend closure
-as `'io`. A new call after closure is `'io`. Socket or buffer exhaustion
-and host failures are `'io`. Cancelling an accept closes any connection still
-provisionally owned by that exchange. Completed exchanges retain their own
-result and cleanup lifetime independently of the listener.
 
 ### close
-`( resource -- )` — Compose `port.shutdown`: perform registered graceful
-shutdown and join cleanup. A listener closes its socket and ends admitted
-accepts with `'io` or `'cancelled`. A connection delivers accepted writes to the kernel before closing
-its socket; this does not establish peer receipt or an external acknowledgement.
-Cancelling shutdown may discard remaining queued bytes. Repeated graceful
-shutdown observes the same outcome. Graceful shutdown after abortive closure
-raises `'io`; `port.close` supplies idempotent abortive cleanup. This composition
-also accepts other resources with registered graceful shutdown.
 
 ### listen
-`( config -- listener )` — Open `net.core.listener` with exactly these two
-symbol-keyed fields; neither has a default:
 
-| Field | Value | Examples |
-| --- | --- | --- |
-| `'address` | IPv4 or IPv6 literal string, without IPv6 brackets | `"127.0.0.1"`, `"::1"`, `"0.0.0.0"`, `"::"` |
-| `'port` | Integer in `0...65535`; `0` requests an ephemeral port | `8080`, `0` |
+#### Examples
 
-Loopback addresses accept local connections; wildcard addresses `"0.0.0.0"`
-and `"::"` bind available interfaces of their address family, subject to operating-system restrictions. Do not use a hostname such as `"localhost"`, a URL, or an address with
-an embedded port. Backlog and buffer capacities are runtime limits, not listener config
-fields. Inspect the assigned port with `net.local-address` after a port-zero bind.
+Bind an ephemeral port and read back the assigned address:
 
 ```ecl
 {'address "127.0.0.1" 'port 0} net.listen
@@ -79,15 +56,8 @@ swap net.close
 # Leaves {'address "127.0.0.1" 'port n}, where n is the assigned port.
 ```
 
-The returned socket is already listening. A non-dict or wrongly typed field
-is `'type`; missing or unknown fields, invalid literals or ports,
-exhausted listener capacity is
-`'domain`. Common structured-value limits also apply. Host bind and listen
-failures are `'io`. Configuration failures include the requested
-address, port, and reason where available; controller and lifecycle failures
-report the common error kind and message.
-
-A one-connection greeting server (blocks until a peer connects):
+A one-connection greeting server, which blocks until a peer connects. The
+first close drains and closes the connection; the second closes the listener.
 
 ```ecl
 {'address "127.0.0.1" 'port 8080} net.listen
@@ -97,37 +67,10 @@ net.close
 net.close
 ```
 
-The first close drains and closes the connection; the second closes the
-listener. This module provides listeners and accepted TCP connections, with
-no outbound-connect word. TCP is a byte stream: a read can return less than
-requested or combine data from multiple peer writes. Supply framing in the
-application, and assemble complete UTF-8 sequences before calling `chars`.
-For a write-side half-close that keeps the connection readable, use
-`dup net.core.output port.endpoint port.finish`.
-
 ### local-address
-`( resource -- address )` — Return `{'address string 'port int}` for an open
-listener or connection. IPv4 uses dotted-quad text; IPv6 uses RFC 5952 text
-without brackets. An ephemeral listener reports its assigned port; a connection
-accepted through a wildcard listener reports the actual local endpoint.
-A wrong resource kind is `'type`; closure or backend failure is `'io`.
 
 ### peer-address
-`( connection -- address )` — Return the peer endpoint in the same dictionary
-shape and canonical text. A non-connection is `'type`; closure or backend
-failure is `'io`.
 
 ### read
-`( connection max -- bytes )` — Read at most positive `max` bytes, bounded by
-the host receive capacity. Park when no data is ready. Return `[]` only at
-stable EOF; later reads also return `[]`. A wrong capability or non-integer
-maximum is `'type`; a nonpositive maximum is `'domain`; an overlapping read
-is `'contract`. Buffered bytes precede a transport failure, which raises `'io`.
-Abortive closure may discard buffered bytes.
 
 ### write
-`( connection bytes -- )` — Accept a complete byte list under bounded FIFO
-pressure. A non-list is `'type`; an element outside `0...255` is `'domain`.
-Convert strings explicitly with `bytes`. Finished output, closure, peer reset,
-and other transport failures raise `'io`. Acceptance is distinct from delivery,
-output EOF, and resource cleanup.
