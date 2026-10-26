@@ -440,14 +440,17 @@ const NameCompareCursor = struct {
 const NameComparator = struct {
     pub const Context = void;
     pub const Cursor = NameCompareCursor;
+    pub const Error = error{};
 
     pub fn init(_: Context, left: u32, right: u32) Cursor {
         return .init(left, right);
     }
 
-    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) Error!poll.Progress(std.math.Order) {
         return cursor.advance(work);
     }
+
+    pub fn deinit(_: *Cursor) void {}
 };
 
 const InternNameMergeSort = poll.MergeSortCursor(u32, NameComparator);
@@ -463,7 +466,7 @@ const NameSortCursor = struct {
         self.* = undefined;
     }
     pub fn advance(self: *NameSortCursor, work: *poll.WorkBudget) NameSortProgress {
-        return self.sort.advance(work);
+        return self.sort.advance(work) catch |err| switch (err) {};
     }
 };
 

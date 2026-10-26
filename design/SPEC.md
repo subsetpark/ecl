@@ -622,9 +622,11 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
 `[1 2] [1 2] =` is `[1 1]`, while `[1 2] [1 2] match?` is `1`.
 
 - `cmp` is a three-way total ordering (−1/0/1) on numbers, chars (by
-  codepoint), and strings (codepoint-lexicographic). Anything else,
-  including cross-kind pairs, is a `'type` error. `grade` orders by
-  exactly this ordering.
+  codepoint), and lists, which order lexicographically by their elements'
+  `cmp` and then by length; strings are lists of chars. Anything else,
+  including cross-kind pairs, is a `'type` error, but two lists compare only
+  through their first unequal element pair. `grade` orders by exactly this
+  ordering.
 - Words that require a boolean reject every value outside the formally defined
   Boolean role, including other ints.
 

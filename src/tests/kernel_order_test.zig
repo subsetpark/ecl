@@ -27,8 +27,9 @@ test "order: grouped reducers preserve selector order and validate errors" {
             "[\"a\" [1]] [[1 0 1] []] 'count reduce-groups " ++
             "[4 2.5 9] [[0 1] [2]] 'min reduce-groups " ++
             "[\"a\" \"λ\" \"😀\"] [[2 0 1]] 'max reduce-groups " ++
-            "[1e16 -1e16 1.0] [[0 1 2] [0 2 1]] 'sum reduce-groups",
-        "[70 0] [3 0] (2.5 9) (\"😀\") [1.0 0.0]",
+            "[1e16 -1e16 1.0] [[0 1 2] [0 2 1]] 'sum reduce-groups " ++
+            "[[1 2] [3] [1]] [[0 1 2]] 'max reduce-groups [[1 2] [3] [1]] [[0 1 2]] 'min reduce-groups",
+        "[70 0] [3 0] (2.5 9) (\"😀\") [1.0 0.0] ([3]) ([1])",
     );
     try helper.expectErrors(&.{
         .{ .name = "negative index", .source = "[1] [[-1]] 'count reduce-groups", .kind = "domain", .word = "reduce-groups" },
@@ -61,7 +62,60 @@ test "order: cmp and grade share exact whole-value ordering" {
     try helper.expectErrors(&.{
         .{ .name = "symbols are unordered", .source = "'a 'b cmp", .kind = "type", .word = "cmp" },
         .{ .name = "cross-domain values are unordered", .source = "1 \"x\" cmp", .kind = "type", .word = "cmp" },
-        .{ .name = "nested lists are unordered", .source = "[1] [2] cmp", .kind = "type", .word = "cmp" },
+        .{ .name = "dicts are unordered", .source = "{} {} cmp", .kind = "type", .word = "cmp" },
+    });
+}
+
+test "order: cmp orders lists lexicographically at any depth" {
+    try helper.expectStack(
+        "[1 2] [1 3] cmp [1 3] [1 2] cmp [1] [1 0] cmp [1 0] [1] cmp [] [] cmp " ++
+            "[] \"a\" cmp [1.5] [1] cmp " ++
+            "[[1] [2]] [[1] [3]] cmp [[[[]]]] [[[[1]]]] cmp [\"b\" 1] [\"a\" 2] cmp " ++
+            "[[1 [2 3]]] [[1 [2 3]]] cmp",
+        "-1 1 -1 1 0 -1 1 -1 -1 1 0",
+    );
+    try helper.expectErrors(&.{
+        .{ .name = "list against a number", .source = "[1] 1 cmp", .kind = "type", .word = "cmp" },
+        .{ .name = "string against numbers", .source = "\"abc\" [97 98] cmp", .kind = "type", .word = "cmp" },
+        .{ .name = "unordered elements in the shared prefix", .source = "[1 'a] [1 'a] cmp", .kind = "type", .word = "cmp" },
+        .{ .name = "unordered nested elements", .source = "[[1 'a]] [[1 'b]] cmp", .kind = "type", .word = "cmp" },
+    });
+}
+
+test "order: cmp leaves elements after the first difference unvisited" {
+    try helper.expectStack("[1 'a] [2 'b] cmp [[0 'a]] [[1 {}]] cmp", "-1 -1");
+}
+
+test "order: grade and sort order lists by cmp" {
+    try helper.expectStack(
+        "[[1 2] [1 1] [0 9 9] [1]] grade " ++
+            "[[\"b\" 1] [\"a\" 2] [\"a\" 1]] sort " ++
+            "[[2 1] [1 2] [2 1]] grade " ++
+            "[[1 'x]] grade",
+        "[2 3 1 0] ((\"a\" 1) (\"a\" 2) (\"b\" 1)) [1 0 2] [0]",
+    );
+    try helper.expectErrors(&.{
+        .{
+            .name = "a list among numbers",
+            .source = "[[1 2] 3] grade",
+            .kind = "type",
+            .word = "grade",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "an unordered pair found only by the sort",
+            .source = "[[1] [1 \"a\"] [1 2]] grade",
+            .kind = "type",
+            .word = "grade",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 2 } }},
+        },
+        .{
+            .name = "an unordered value",
+            .source = "[{}] grade",
+            .kind = "type",
+            .word = "grade",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 0 } }},
+        },
     });
 }
 

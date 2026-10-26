@@ -455,10 +455,20 @@ Constrain to the inclusive interval. Equivalent to `(max) dip min`.
 ### cmp
 `( left right -- ordering )` — Three-way whole-value ordering, −1/0/1;
 **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain:
-numbers (exact across int/float), chars by codepoint, strings
-codepoint-lexicographic; anything else, including cross-kind pairs, is
-`'type`. `cmp` exists because the subtraction idiom is unsafe for
-ordering: `-` errors on int64 overflow where an ordering must be total.
+numbers (exact across int/float), chars by codepoint, and lists, which
+compare lexicographically: corresponding elements by `cmp` until the first
+nonzero result, then by length. Strings are char lists, so they order by
+codepoint. Anything else, including cross-kind pairs, is `'type`; elements
+after the first difference are never compared. Equivalent on two lists to
+`(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe
+for ordering: `-` errors on int64 overflow where an ordering must be total.
+
+#### Examples
+
+```ecl
+[1 2] [1 3] cmp [["b" 1]] [["a" 2]] cmp [1] [1 0] cmp
+# => -1 1 -1
+```
 
 ### collect
 `( quotation -- list )` — Run the quotation on an empty isolated stack and
@@ -730,7 +740,8 @@ defaulting idiom. Absent host IO is `'io`.
 
 ### grade
 `( list -- indices )` — The stable ascending sort permutation. Orders by
-`cmp`, so every element pair must be mutually comparable.
+`cmp`, so every element pair must be mutually comparable; the error's index
+names the later element of a pair that is not.
 
 #### Examples
 
@@ -868,11 +879,6 @@ Equivalent to `dup len 1 - at`.
 ### len
 `( list -- count )` — Top-level list element count. Lists may be ragged.
 Dictionary entry count is provided by `dict.size`.
-
-### lex-cmp
-`( left right -- order )` — Lexicographically compare two sequences using
-`cmp` on corresponding elements. Stop at the first nonzero result; when the
-shared prefix is equal, compare sequence lengths. Defined in ecl.
 
 ### lex-cmp-with
 `( left right comparator -- order )` — Lexicographically compare two

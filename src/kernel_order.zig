@@ -26,7 +26,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
-        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Return -1, 0, or 1 for the whole-value order of two comparable values." },
+        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Return -1, 0, or 1 for the whole-value order of two comparable values; lists order lexicographically." },
         .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "Return the stable ascending sort permutation of a comparable list." },
         .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return the first occurrence of each distinct list value in input order." },
         .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group equal-length columns by composite row keys in first-occurrence order." },
@@ -56,15 +56,16 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     defer left.deinit();
     const left_item = left.borrow();
     const right_item = right.borrow();
-    // Two strings order as their chars do, which is `lex-cmp`'s order.
-    if (left_item.isString() and right_item.isString() and lexCompareCandidate(left_item, right_item))
+    // Two typed number or char lists, strings among them, have no nesting to
+    // descend, so the flat kernel searches their shared prefix.
+    if (lexCompareCandidate(left_item, right_item))
         return startLexCompare(evaluator, &left, &right);
-    // Only two strings have anything to walk. Every other pair is one call to
+    // Only two lists have anything to walk. Every other pair is one call to
     // `compareScalars` -- the cursor's own answer for them -- which a driver and
     // a scheduler turn were being allocated to reach.
-    if (!left_item.isString() and !right_item.isString()) {
+    if (left_item != .list or right_item != .list) {
         const ordering = equal.compareScalars(left_item, right_item) catch
-            return evaluator.typeError("two comparable numbers, chars, or strings");
+            return evaluator.typeError(incomparable_pair);
         return evaluator.pushOwned(.{ .int = switch (ordering) {
             .lt => -1,
             .eq => 0,
@@ -74,8 +75,24 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(CompareDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
-        .cursor = .init(left_item, right_item),
+        .cursor = .init(.init(evaluator.allocator(), left_item, right_item)),
     });
+}
+
+const incomparable_pair = "two comparable numbers, chars, or lists";
+const incomparable_grade = "grade expected mutually comparable numbers, chars, or lists";
+
+/// The kinds `cmp` orders within. Values of two classes never order, and a
+/// value with no class orders with nothing.
+const OrderClass = enum { number, char, list };
+
+fn orderClass(item: Value) ?OrderClass {
+    return switch (item) {
+        .int, .float => .number,
+        .char => .char,
+        .list => .list,
+        .symbol, .word, .dict, .task, .port, .address => null,
+    };
 }
 
 const order_leaf_kinds = [_]value.HeapKind{
@@ -142,7 +159,7 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
         }
 
         fn incomparable(context: support.Context) MachineError {
-            return context.evaluator.typeError("two comparable numbers, chars, or strings");
+            return context.evaluator.typeError(incomparable_pair);
         }
 
         fn widen(element: anytype) if (lexClass(left_kind) == .char) u32 else i64 {
@@ -179,8 +196,8 @@ fn lexKind(kind: value.HeapKind) bool {
     return std.mem.findScalar(value.HeapKind, &lex_leaf_kinds, kind) != null;
 }
 
-/// `( left right -- ordering )`: `(cmp) lex-cmp-with` over two lists that
-/// `lexCompareCandidate` admits.
+/// `( left right -- ordering )`: `cmp`, which is `(cmp) lex-cmp-with`, over
+/// two lists that `lexCompareCandidate` admits.
 pub fn lexCompare(evaluator: *Machine) MachineError!void {
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -416,11 +433,7 @@ fn startTypedGrade(evaluator: *Machine, collection: *heap.OwnedValue, sorted_val
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0 or collection.borrow().list.kind() == .generic_spine) return false;
     const kind = collection.borrow().list.kind();
-    if (kind == .leaf_symbol) return evaluator.failAtIndex(
-        .type,
-        "grade expected mutually comparable numbers, chars, or strings",
-        0,
-    );
+    if (kind == .leaf_symbol) return evaluator.failAtIndex(.type, incomparable_grade, 0);
     inline for (order_leaf_kinds) |candidate| {
         if (kind == candidate) {
             try support.Kernel(GradeKernel(candidate)).run(evaluator, .{collection}, sorted_values, count);
@@ -435,55 +448,116 @@ pub fn sortForIdiom(evaluator: *Machine) MachineError!void {
 }
 
 const CompareProgress = union(enum) { pending, complete: std.math.Order, not_comparable };
-pub const CompareCursor = struct {
-    left: Value,
-    right: Value,
-    index: usize = 0,
 
-    pub fn init(left: Value, right: Value) CompareCursor {
-        return .{ .left = left, .right = right };
+/// `cmp`'s whole-value order: numbers with numbers, chars with chars, and two
+/// lists by their first unequal element pair, then by length. Nesting is
+/// walked through an explicit stack holding one frame per list pair entered,
+/// so depth costs heap frames rather than host stack, and each element pair
+/// draws one unit from the lent budget. A pair is compared only until the
+/// first difference decides it: elements after it are never visited, so they
+/// need not be comparable.
+pub const CompareCursor = struct {
+    frames: poll.ChunkStack(Frame),
+    depth: usize = 0,
+    /// The pair named at `init`, until the first `advance` classifies it.
+    root: ?Pair,
+
+    const Pair = struct { left: Value, right: Value };
+    const Frame = struct { left: Value, right: Value, index: usize = 0 };
+
+    pub fn init(allocator: std.mem.Allocator, left: Value, right: Value) CompareCursor {
+        return .{ .frames = .init(allocator), .root = .{ .left = left, .right = right } };
     }
 
-    pub fn advance(self: *CompareCursor, work: *poll.WorkBudget) CompareProgress {
-        if (self.left.isString() and self.right.isString()) {
-            const left_count: usize = @intCast(self.left.list.length());
-            const right_count: usize = @intCast(self.right.list.length());
-            const shared = @min(left_count, right_count);
-            const end = self.index + work.take(shared - self.index);
-            while (self.index != end) : (self.index += 1) {
-                const left_char = list.atUnchecked(self.left, self.index).char;
-                const right_char = list.atUnchecked(self.right, self.index).char;
-                if (left_char < right_char) return .{ .complete = .lt };
-                if (left_char > right_char) return .{ .complete = .gt };
-            }
-            if (self.index != shared) return .pending;
-            return .{ .complete = if (left_count < right_count)
-                .lt
-            else if (left_count > right_count)
-                .gt
-            else
-                .eq };
+    pub fn deinit(self: *CompareCursor) void {
+        self.frames.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *CompareCursor, work: *poll.WorkBudget) error{OutOfMemory}!CompareProgress {
+        if (self.root) |root| {
+            self.root = null;
+            if (root.left != .list or root.right != .list) return complete(root.left, root.right);
+            try self.enter(root.left, root.right);
         }
-        if (self.left.isString() or self.right.isString()) return .not_comparable;
-        return .{ .complete = equal.compareScalars(self.left, self.right) catch
-            return .not_comparable };
+        descend: while (true) {
+            const frame = self.frames.topPtr().?;
+            const shared: usize = @intCast(@min(frame.left.list.length(), frame.right.list.length()));
+            // Typed number or char lists hold no lists, so their prefix is
+            // searched in one granted run.
+            if (lexCompareCandidate(frame.left, frame.right)) {
+                const end = frame.index + work.take(shared - frame.index);
+                while (frame.index != end) : (frame.index += 1) {
+                    const left = list.atUnchecked(frame.left, frame.index);
+                    const right = list.atUnchecked(frame.right, frame.index);
+                    const ordering = if (left == .char and right == .char)
+                        std.math.order(left.char, right.char)
+                    else
+                        equal.compareScalars(left, right) catch return .not_comparable;
+                    if (ordering != .eq) return .{ .complete = ordering };
+                }
+                if (frame.index != shared) return .pending;
+            }
+            while (frame.index != shared) {
+                if (!work.spend()) return .pending;
+                const left = list.atUnchecked(frame.left, frame.index);
+                const right = list.atUnchecked(frame.right, frame.index);
+                frame.index += 1;
+                if (left == .list and right == .list) {
+                    try self.enter(left, right);
+                    continue :descend;
+                }
+                switch (complete(left, right)) {
+                    .complete => |ordering| if (ordering != .eq) return .{ .complete = ordering },
+                    else => |progress| return progress,
+                }
+            }
+            const ordering = std.math.order(frame.left.list.length(), frame.right.list.length());
+            _ = self.frames.pop();
+            self.depth -= 1;
+            if (ordering != .eq or self.depth == 0) return .{ .complete = ordering };
+        }
+    }
+
+    fn enter(self: *CompareCursor, left: Value, right: Value) error{OutOfMemory}!void {
+        try self.frames.push(.{ .left = left, .right = right });
+        self.depth += 1;
+    }
+
+    /// A pair that is not two lists: one scalar comparison decides it.
+    fn complete(left: Value, right: Value) CompareProgress {
+        return .{ .complete = equal.compareScalars(left, right) catch return .not_comparable };
     }
 };
 
+/// Orders two positions of the collection under `cmp`. A pair `cmp` cannot
+/// order ends the sort, naming the later of the two positions.
 const GradeComparator = struct {
-    pub const Context = Value;
-    pub const Cursor = CompareCursor;
+    pub const Context = struct { collection: Value, allocator: std.mem.Allocator };
+    pub const Error = error{ OutOfMemory, NotComparable };
+    pub const Cursor = struct { compare: CompareCursor, position: usize };
 
-    pub fn init(collection: Context, left: usize, right: usize) Cursor {
-        return .init(list.atUnchecked(collection, left), list.atUnchecked(collection, right));
+    pub fn init(context: Context, left: usize, right: usize) Cursor {
+        return .{
+            .compare = .init(
+                context.allocator,
+                list.atUnchecked(context.collection, left),
+                list.atUnchecked(context.collection, right),
+            ),
+            .position = @max(left, right),
+        };
     }
 
-    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) poll.Progress(std.math.Order) {
-        return switch (cursor.advance(work)) {
+    pub fn advance(cursor: *Cursor, work: *poll.WorkBudget) Error!poll.Progress(std.math.Order) {
+        return switch (try cursor.compare.advance(work)) {
             .pending => .pending,
-            .not_comparable => unreachable,
+            .not_comparable => error.NotComparable,
             .complete => |ordering| .{ .complete = ordering },
         };
+    }
+
+    pub fn deinit(cursor: *Cursor) void {
+        cursor.compare.deinit();
     }
 };
 
@@ -493,12 +567,12 @@ const CompareDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     left: heap.Owned(Value),
     right: heap.Owned(Value),
-    cursor: CompareCursor,
+    cursor: heap.Owned(CompareCursor),
     pub fn advance(evaluator: *Machine, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.cursor.advance(evaluator.workBudget())) {
+        return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
-            .not_comparable => evaluator.typeError("two comparable numbers, chars, or strings"),
+            .not_comparable => evaluator.typeError(incomparable_pair),
             .complete => |ordering| .{ .output = .{ .int = switch (ordering) {
                 .lt => -1,
                 .eq => 0,
@@ -515,9 +589,11 @@ const GradeDriver = struct {
     indices: heap.Owned([]usize),
     state: heap.Owned(State),
 
+    /// `validate` checks every element against the first one's order class,
+    /// which settles every scalar pair; a pair of lists can still fail inside
+    /// the sort, where `cmp` reaches an incomparable element pair.
     const State = union(enum) {
         validate: usize,
-        compare: struct { index: usize, cursor: CompareCursor },
         initialize: usize,
         sort: heap.Owned(GradeSortCursor),
         prepare,
@@ -547,7 +623,7 @@ const GradeDriver = struct {
                 },
                 .prepare_indices => |*prepare| prepare.writer.deinit(releases, allocator),
                 .complete_values => |*values| values.deinit(releases, allocator),
-                .validate, .compare, .initialize, .prepare, .complete => {},
+                .validate, .initialize, .prepare, .complete => {},
             }
         }
     };
@@ -556,32 +632,18 @@ const GradeDriver = struct {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
-            .validate => |index| {
-                if (self.indices.borrow().len == 0 or index == self.indices.borrow().len) {
-                    self.state.borrowMut().* = .{ .initialize = 0 };
-                    continue;
+            .validate => |*index| {
+                const collection = self.collection.borrow();
+                const count = self.indices.borrow().len;
+                if (count != 0) {
+                    const class = orderClass(list.atUnchecked(collection, 0));
+                    const end = index.* + work.take(count - index.*);
+                    while (index.* != end) : (index.* += 1) {
+                        if (class == null or orderClass(list.atUnchecked(collection, index.*)) != class)
+                            return evaluator.failAtIndex(.type, incomparable_grade, index.*);
+                    }
                 }
-                self.state.borrowMut().* = .{ .compare = .{
-                    .index = index,
-                    .cursor = .init(
-                        list.atUnchecked(self.collection.borrow(), 0),
-                        list.atUnchecked(self.collection.borrow(), index),
-                    ),
-                } };
-            },
-            .compare => |*compare| {
-                switch (compare.cursor.advance(work)) {
-                    .pending => return .stepped,
-                    .not_comparable => return evaluator.failAtIndex(
-                        .type,
-                        "grade expected mutually comparable numbers, chars, or strings",
-                        compare.index,
-                    ),
-                    .complete => {
-                        self.state.borrowMut().* = .{ .validate = compare.index + 1 };
-                        _ = work.spend();
-                    },
-                }
+                if (index.* == count) self.state.borrowMut().* = .{ .initialize = 0 };
             },
             .initialize => |*index| {
                 const indices = self.indices.borrow();
@@ -591,12 +653,19 @@ const GradeDriver = struct {
                     const sort = try GradeSortCursor.init(
                         evaluator.allocator(),
                         indices,
-                        self.collection.borrow(),
+                        .{ .collection = self.collection.borrow(), .allocator = evaluator.allocator() },
                     );
                     self.state.borrowMut().* = .{ .sort = .init(sort) };
                 }
             },
-            .sort => |*sort| switch (sort.borrowMut().advance(work)) {
+            .sort => |*sort| switch (sort.borrowMut().advance(work) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NotComparable => return evaluator.failAtIndex(
+                    .type,
+                    incomparable_grade,
+                    sort.borrowMut().comparing().?.position,
+                ),
+            }) {
                 .pending => return .stepped,
                 .complete => {
                     sort.deinit(evaluator.releaseDomain(), evaluator.allocator());
