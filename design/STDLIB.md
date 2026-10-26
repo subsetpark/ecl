@@ -188,9 +188,9 @@ Errors.
 constructor. Validate the name first: a non-symbol is `'type`; an invalid
 module path, the reserved name `core`, or a standard-library module name is
 `'domain`, and the body never runs. Then run the body on a fresh environment
-and publish the resulting image under the name, keeping any durable state the
-registration already owns. A body failure publishes nothing; a registry change
-during construction may still refuse publication after the body has run.
+and publish the resulting image under the name. A body failure publishes
+nothing; a registry change during construction may still refuse publication
+after the body has run.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore `values (body) 'name @defm`. See
@@ -1328,7 +1328,7 @@ quotations to the same pair of inputs in left-to-right order. Equivalent to
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`, or `'port`.
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`, `'port`, or `'address`.
 
 #### Examples
 
@@ -1521,15 +1521,17 @@ a word, for example an ambient random generator:
 # => 0
 ```
 
-A caller of an agent that has ended waits forever unless it bounds the call
-with `call-for`.
+A call to an agent that has ended raises `'io`. A call whose request was
+accepted waits forever if the agent ends before replying, unless it bounds the
+call with `call-for`.
 
 ### call
 `( quotation address -- result )` — Apply the quotation to the agent's stack
 and return the top of the result stack; the agent keeps the rest. The
 quotation's own error is re-raised here with the agent unchanged. A result
-stack with nothing on it is `'domain`. Replies travel through a helper task,
-so a call to an agent that has ended never returns.
+stack with nothing on it is `'domain`. Replies travel through a helper task.
+A call to an agent that has ended raises `'io`; a call whose request was
+accepted never returns if the agent ends before replying.
 
 #### Examples
 
@@ -1546,8 +1548,9 @@ so a call to an agent that has ended never returns.
 `( quotation address milliseconds -- result )` — `agent.call` with a
 nonnegative int deadline, checked before anything is sent: a negative duration
 is `'domain` and a non-int is `'type`. When no reply arrives in time the call
-raises `'timeout`; the quotation still runs on the agent when its turn comes,
-and its reply is discarded.
+raises `'timeout`, whether the deadline passed while waiting for room in a full
+mailbox or for the reply; the quotation, if it was sent, still runs on the
+agent when its turn comes, and its reply is discarded.
 
 ### send
 `( quotation address -- )` — Apply the quotation to the agent's stack without

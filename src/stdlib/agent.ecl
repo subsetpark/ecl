@@ -46,15 +46,21 @@
  (state -- address : "Spawn a server whose stack holds the one state value and return its address.")
  (wrap (serve) @spawn task.address) 'start def
 
+ ### defp exchange
+ (quotation address -- reply :
+  "Send a request carrying a fresh reply helper's address and return the helper's reply; a refused
+   send cancels the helper and re-raises its error.")
+ (|quotation address|
+  [] (task.receive) @spawn dup task.address
+  {} 'quot quotation put 'from rolldown put
+  address pair (task.send) @attempt
+  dup result.ok? (pop task.await 'ok at first) (swap task.cancel 'err at raise) if) 'exchange defp
+
  ### def call
  (quotation address -- result :
   "Apply a quotation to an agent's stack and return the top of the result; the quotation's own error
    is re-raised here and leaves the agent unchanged.")
- (|quotation address|
-  [] (task.receive) @spawn dup task.address
-  {} 'quot quotation put 'from rolldown put address task.send
-  task.await 'ok at first
-  dup result.ok? ('ok at first) ('err at raise) if) 'call def
+ (exchange dup result.ok? ('ok at first) ('err at raise) if) 'call def
 
  ### defp check-deadline
  (milliseconds -- milliseconds :
@@ -72,8 +78,7 @@
    arrive in time, after which the quotation may still run on the agent.")
  (|quotation address milliseconds|
   milliseconds check-deadline pop
-  [] (task.receive) @spawn dup task.address
-  {} 'quot quotation put 'from rolldown put address task.send
+  quotation address pair (exchange) @spawn
   dup milliseconds task.await-for swap task.cancel
   dup result.ok? ('ok at first) ('err at raise) if
   dup result.ok? ('ok at first) ('err at raise) if) 'call-for def

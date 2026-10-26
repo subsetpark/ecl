@@ -46,6 +46,26 @@
    (dup) g agent.call [7 0] equal) call)
  'call-for test
 
+ ### test dead-agent
+ (-- : "Refuse a call to an ended agent as 'io rather than waiting.")
+ ([[7 0]] (agent.serve) @spawn
+  (|server|
+   server task.cancel server task.await pop
+   server task.address
+   (|g|
+    g ((dup) swap agent.call) partial 'io raises
+    g ((dup) swap 100 agent.call-for) partial 'io raises) call) call)
+ 'dead-agent test
+
+ ### test call-for-full-mailbox
+ (-- : "Bound the send phase too: a call to a slow agent with a full mailbox is 'timeout.")
+ ([7 0] agent.start
+  (|g|
+   (200 clock.sleep) g agent.send
+   g 16 (dup (dup pop) swap agent.send) times pop
+   g ((1 +) swap 20 agent.call-for) partial 'timeout raises) call)
+ 'call-for-full-mailbox test
+
  ### test direct-serve
  (-- : "Spawn agent.serve directly to keep a handle; any entry stack is the state.")
  ([[7 0]] (agent.serve) @spawn

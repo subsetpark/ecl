@@ -34,7 +34,8 @@ const programs = [_][]const u8{
         "[] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 ask",
     // Three senders race into one mailbox; cross-sender order is unspecified.
     "[] (3 (task.receive) times 3 pack sort) @spawn dup task.address 'box set " ++
-        "[] (1 box task.send) @spawn [] (2 box task.send) @spawn [] (3 box task.send) @spawn task.await",
+        "[] (1 box task.send) @spawn [] (2 box task.send) @spawn [] (3 box task.send) @spawn " ++
+        "pop pop pop task.await",
     // A send races a receiver that exits: queued-then-discarded or refused as
     // closed, so only completion is compared.
     "[] (1) @spawn dup task.address 5 swap pair (task.send) @attempt pop task.await pop 'done",

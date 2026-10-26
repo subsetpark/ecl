@@ -315,6 +315,8 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 **dict-value-at-index** *value*: `Value`, *index*: `Nat`, **value-type** *value* = **dict-type**, *index* ≤ **dict-length** *value* ⇒ `Value`.
 
+**address-mailbox** *value*: `Value`, **value-type** *value* = **address-type** ⇒ `Value`.
+
 **dict-has-key?** *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type** ⇒ `Bool`.
 
 **dict-value-for-key** *dictionary*: `Value`, *key*: `Value`, **value-type** *dictionary* = **dict-type**, **dict-has-key?** *dictionary* *key* ⇒ `Value`.
@@ -435,9 +437,13 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **port-type**, **value-type** *right* = **port-type** · **matches?** *left* *right* ↔ *left* = *right*.
 
-> Address values match only by the mailbox they name.
+> An address names the mailbox of exactly one task capability.
 
-∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **address-type**, **value-type** *right* = **address-type** · **matches?** *left* *right* ↔ *left* = *right*.
+∀ *value*: `Value`, **value-type** *value* = **address-type** · **value-type** (**address-mailbox** *value*) = **task-type**.
+
+> Address values match only by the mailbox they name: each address resolves to the task capability whose mailbox it names, and two addresses match exactly when they resolve to the same one.
+
+∀ *left*: `Value`, *right*: `Value`, **value-type** *left* = **address-type**, **value-type** *right* = **address-type** · **matches?** *left* *right* ↔ **address-mailbox** *left* = **address-mailbox** *right*.
 
 > Scalar source kinds have readable representations.
 

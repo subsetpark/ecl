@@ -207,7 +207,8 @@ const Displacements = struct {
     fn init(allocator: std.mem.Allocator, count: usize) error{OutOfMemory}!Displacements {
         // Each dealt position displaces at most one index, and a quarter-full
         // table keeps probes short.
-        const capacity = std.math.ceilPowerOfTwo(usize, @max(count * 4, 8)) catch return error.OutOfMemory;
+        const wanted = std.math.mul(usize, count, 4) catch return error.OutOfMemory;
+        const capacity = std.math.ceilPowerOfTwo(usize, @max(wanted, 8)) catch return error.OutOfMemory;
         const keys = try allocator.alloc(u64, capacity);
         errdefer allocator.free(keys);
         const values = try allocator.alloc(u64, capacity);
