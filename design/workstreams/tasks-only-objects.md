@@ -333,24 +333,41 @@ primitives. `rng` still exists, so nothing is lost yet.
 
 ### Milestone 5: remove-module-stacks
 
+**Status**: planned (2026-10-26). Gameplan: `gameplans/remove-module-stacks.yaml`
+(local; gitignored), three patches: the runtime removal with every test and
+fixture that named the vocabulary, the `rng` deletion with the two `rand`
+kernels, and the documents with the formal model.
+
 **Definition of Done**:
 - `within` and `without` are gone from `src/module_prims.zig`. `ModuleSlot`
-  loses `arbiter`, `state`, and every lease and recycling path that existed
-  for them; the Unit loses its turn authority; `beginWithin`,
-  `StateAcquireDriver`, and the publication drivers are deleted from
-  `src/machine.zig`. Issues #24 and #105 are closed by removal.
+  loses `arbiter` and `state`, the registration and removal cursors lose
+  their barrier turns, the image loses its initial-state template, and the
+  Unit loses its turn authority; `beginWithin`, `StateAcquireDriver`, and the
+  publication drivers are deleted from `src/machine.zig`. Slot recycling
+  stays: it serves resolution cursors reading a replaced directory snapshot,
+  not state. Issues #24 and #105 are closed by removal: the arbiter and the
+  recycled-slot race test are gone, and slot reusability reduces to directory
+  quiescence plus the lease count.
 - `@defm` with a nonempty final body stack is `'domain`. Registration is
   name → current generation; replacement publishes a new generation and
   keeps nothing else. `unmodule` closes admission and retires.
 - `src/stdlib/rng.ecl` is deleted and removed from the manifest.
-  `src/stdlib/rand.zig` gains `shuffle ( state values -- state values )`
-  and `deal ( state count pool -- state results )` as kernels with the
-  documented `'domain` conditions. `test/stdlib-tests/random.ecl`,
-  `test/e2e.zig`, and `apps/pkg/test/contracts/version.ecl` use `rand`
-  or `agent`.
-- `src/tests/stateful_module_test.zig`, `test/acceptance/stateful-module-
-  reload.ecl`, and `stateful-module-instances.ecl` are deleted. Test Sessions
-  no longer document durable registration state between `@test` runs.
+  `src/kernel_random.zig` gains `shuffle ( state values -- state values )`
+  and `deal ( state count pool -- state results )` as counter-based kernels
+  exposed through `src/stdlib/rand.zig`, with the documented `'domain`
+  conditions; `deal` is a virtual Fisher-Yates whose cost follows the count,
+  never the pool, and advances the state by the count; `shuffle` advances it
+  by the list's length. `test/stdlib-tests/random.ecl`, `test/e2e.zig`, and
+  `apps/pkg/test/contracts/version.ecl` use `rand` or `agent`.
+- `src/tests/stateful_module_test.zig` is renamed
+  `src/tests/module_lifecycle_test.zig` and loses only the tests whose
+  subject was `within`, reload keeping state, or the recycled-slot race; its
+  auto-load, annotation, `*module*`, seed, name, `core` qualifier, `execute`,
+  removal, churn, and resolver-race tests stay with plain-word bodies.
+  `test/acceptance/stateful-module-reload.ecl`,
+  `stateful-module-instances.ecl`, and `escaped-quotation-authority.ecl` are
+  deleted. Test Sessions no longer document durable registration state
+  between `@test` runs.
 - `SPEC.src.md` Modules keeps construction, registration, generations,
   visibility, imports, qualified resolution, and tests; the `within`,
   `without`, durable-state, reload-keeps-state, and transaction bullets are
