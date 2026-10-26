@@ -333,10 +333,24 @@ primitives. `rng` still exists, so nothing is lost yet.
 
 ### Milestone 5: remove-module-stacks
 
-**Status**: planned (2026-10-26). Gameplan: `gameplans/remove-module-stacks.yaml`
-(local; gitignored), three patches: the runtime removal with every test and
-fixture that named the vocabulary, the `rng` deletion with the two `rand`
-kernels, and the documents with the formal model.
+**Status**: executed (2026-10-26) on branch `zax--tasks-only-objects`, four
+commits. Landed with these deviations from the gameplan: the `rng` deletion
+moved from the second patch into the first, because `rng.ecl` seeded a
+durable stack in its construction body and could not load once a nonempty
+body stack became `'domain`; `rand.shuffle` and `rand.deal` are phased
+`support.Kernel` kernels (the audit forbids `pushOwned` and hash maps in
+kernel files, so `deal` keeps its displacements in an open-addressed table);
+the registration cursor re-validates that the found slot is still live under
+the registry lock and restarts from a fresh snapshot otherwise. One repair
+outside the plan: the e2e visibility fixtures had been exporting their
+helpers since the Milestone 2 rewrite (a literal symbol before `@defm` is a
+discoverable declaration), so they now construct helpers inside a quotation.
+The OOM sweep found one leak the plan did not anticipate: the registration
+cursor retains the sealed image from construction, so it must be built only
+after its completion driver is allocated. Gates: `precommit`,
+`test-precommit` (both retention soaks), `test-workers`, `test-ecl`,
+`test-e2e`, `test-snapshots`, `test-pkg-contracts`, `test-oom`, `spec`,
+`check-spec`, `check-formal`, and the Docker arm64 TSan run all passed.
 
 **Definition of Done**:
 - `within` and `without` are gone from `src/module_prims.zig`. `ModuleSlot`
