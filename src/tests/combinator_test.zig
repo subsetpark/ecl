@@ -802,10 +802,10 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "a prelude binder blames the prelude word",
-            .source = "1 at-or",
+            .source = "1 bi2",
             .kind = "underflow",
-            .word = "at-or",
-            .message = "at-or needs 3 stack values, but found 1",
+            .word = "bi2",
+            .message = "bi2 needs 4 stack values, but found 1",
         },
         .{
             .name = "an anonymous binder blames the binding",
