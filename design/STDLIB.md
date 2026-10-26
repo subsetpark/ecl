@@ -119,10 +119,10 @@ number over zero is an infinity signed by both operands, and `0 0 /` is
 masks.
 
 ### <=
-`( x y -- bool )` — **Pervasive.** Compare conforming values for less-than-or-equal order, producing boolean masks. Equivalent to `> not`.
+`( x y -- bool )` — **Pervasive.** Compare conforming values for less-than-or-equal order, producing boolean masks.
 
 ### <>
-`( x y -- bool )` — **Pervasive.** Compare conforming values for inequality, producing boolean masks. Equivalent to `= not`. On 0/1 masks this is xor; there is no separate word.
+`( x y -- bool )` — **Pervasive.** Compare conforming values for inequality, producing boolean masks. On 0/1 masks this is xor; there is no separate word.
 
 ### =
 `( x y -- bool )` — **Pervasive.** Equality; numbers compare numerically
@@ -133,7 +133,7 @@ across int and float. Whole-value equality is `match?`.
 masks.
 
 ### >=
-`( x y -- bool )` — **Pervasive.** Compare conforming values for greater-than-or-equal order, producing boolean masks. Equivalent to `< not`.
+`( x y -- bool )` — **Pervasive.** Compare conforming values for greater-than-or-equal order, producing boolean masks.
 
 ### @attempt
 `( values quotation -- result )` — *Unit constructor.* Initialize an isolated
@@ -252,7 +252,7 @@ key is an error.
 ```
 
 ### at-path
-`( ds l -- x )` — Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty path returns `ds` unchanged. Equivalent to `swap (at) fold`.
+`( ds l -- x )` — Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty path returns `ds` unchanged.
 
 ### atan2
 `( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
@@ -262,7 +262,7 @@ key is an error.
 patterns of ints. Non-int leaves are `'type`.
 
 ### bi2
-`( x y p q -- ... )` — *Inline.* Binary cleave: apply each of two quotations to the same pair of input values. Equivalent to `(|x y p q| x y p call x y q call)`.
+`( x y p q -- ... )` — *Inline.* Binary cleave: apply each of two quotations to the same pair of input values.
 
 ### bnot
 `( x -- y )` — **Pervasive.** Invert every bit. `bnot bnot` is identity;
@@ -272,7 +272,7 @@ patterns of ints. Non-int leaves are `'type`.
 `( x y -- z )` — **Pervasive.** Bitwise or. See `band`.
 
 ### both
-`( x y q -- ... )` — *Inline.* Apply one quotation independently to each of two input values, `x` first. Equivalent to `(|x y q| x q call y q call)`.
+`( x y q -- ... )` — *Inline.* Apply one quotation independently to each of two input values, `x` first.
 
 ### bsl
 `( x count -- y )` — **Pervasive.** Shift the bit pattern left by `count`
@@ -361,7 +361,7 @@ for ordering: `-` errors on int64 overflow where an ordering must be total.
 ```
 
 ### collect
-`( quotation -- list )` — Run a quotation on an empty isolated stack and return what it leaves as a list, preserving order. The quotation cannot see values beneath it. Equivalent to `[] swap infra`.
+`( quotation -- list )` — Run a quotation on an empty isolated stack and return what it leaves as a list, preserving order. The quotation cannot see values beneath it.
 
 #### Examples
 
@@ -480,7 +480,7 @@ flat-map is `each raze`. Derived verbs come free from homoiconicity:
 `( list seed quotation -- list )` — *Isolated*, contract `( current prior -- result )`. Apply the quotation to each element and its predecessor, left to right, using the explicit seed as the predecessor of the first element. Thus `[12 13 11] 10 (-) each-prior` is `[2 1 -2]`. Defined in ecl over `zip-with`.
 
 ### empty?
-`( sequence -- bool )` — Return 1 when a sequence has no elements and 0 otherwise. Equivalent to `len 0 =`.
+`( sequence -- bool )` — Return 1 when a sequence has no elements and 0 otherwise.
 
 ### execute
 `( word -- ... )` — Resolve and apply a word value late through the ordinary
@@ -663,7 +663,7 @@ to unbounded external input; `symbol` is the lookup-only form. See
 separator string.
 
 ### last
-`( sequence -- value )` — Return the final element of a nonempty sequence. Equivalent to `dup len 1 - at`.
+`( sequence -- value )` — Return the final element of a nonempty sequence.
 
 ### len
 `( list -- count )` — Top-level list element count. Lists may be ragged.
@@ -709,16 +709,16 @@ pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
 `( x y -- z )` — **Pervasive.** The lesser of two comparable atoms.
 
 ### neg
-`( x -- y )` — **Pervasive.** Negate numeric values with checked integer overflow. Equivalent to `-1 *`.
+`( x -- y )` — **Pervasive.** Negate numeric values with checked integer overflow.
 
 ### nip
-`( x y -- y )` — Discard the value immediately beneath the top of the stack. Equivalent to `swap pop`.
+`( x y -- y )` — Discard the value immediately beneath the top of the stack.
 
 ### not
 `( bool -- bool )` — **Pervasive.** Invert 0/1 values.
 
 ### pack
-Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a list, preserving their order; `n` must be a nonnegative int. Equivalent to `() swap (cons) times`. Deliberately state-dependent stack surgery.
+Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a list, preserving their order; `n` must be a nonnegative int. Deliberately state-dependent stack surgery.
 
 #### Examples
 
@@ -728,7 +728,7 @@ Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a lis
 ```
 
 ### pair
-`( first second -- list )` — Collect two stack values into a two-element list in stack order. Equivalent to `() cons cons`.
+`( first second -- list )` — Collect two stack values into a two-element list in stack order.
 
 ### parse
 `( string -- quotation )` — The reader, reified: parse source text into
@@ -861,13 +861,13 @@ displayed in native body descriptors.
 on ragged data (`len` is the word that works on anything).
 
 ### signum
-`( number -- sign )` — **Pervasive** by composition. Return the int −1, 0, or 1 according to the sign of a number. Equivalent to `dup 0 > swap 0 < -`.
+`( number -- sign )` — **Pervasive** by composition. Return the int −1, 0, or 1 according to the sign of a number.
 
 ### sin
 `( x -- y )` — **Pervasive.** Sine; float transcendental.
 
 ### sort
-`( sequence -- sorted )` — Return a stable ascending sort of a sequence by `cmp`. Equivalent to `dup grade at`.
+`( sequence -- sorted )` — Return a stable ascending sort of a sequence by `cmp`.
 
 #### Examples
 
@@ -977,7 +977,7 @@ not duplicate entries. Ordinary Sessions receive `'domain`.
 nonnegative int. Tail-call optimized.
 
 ### tri2
-`( x y p q r -- ... )` — *Inline.* Binary cleave: apply each of three quotations to the same pair of input values in left-to-right order. Equivalent to `(|x y p q r| x y p call x y q call x y r call)`.
+`( x y p q r -- ... )` — *Inline.* Binary cleave: apply each of three quotations to the same pair of input values in left-to-right order.
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
@@ -1020,7 +1020,7 @@ state and `()`.
 ```
 
 ### unless
-`( bool else -- ... )` — *Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing. Equivalent to `() swap if`.
+`( bool else -- ... )` — *Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing.
 
 ### unset
 `( name -- )` — Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `undef`; removing a local shadow may reveal a parent or core binding. Defined in ecl.
@@ -1042,7 +1042,7 @@ it.
 ```
 
 ### when
-`( bool then -- ... )` — *Inline.* Call the quotation when the condition is the boolean 1; otherwise do nothing. Equivalent to `() if`.
+`( bool then -- ... )` — *Inline.* Call the quotation when the condition is the boolean 1; otherwise do nothing.
 
 ### where
 `( counts -- indices )` — Expand a list of nonnegative ints into each
@@ -1072,7 +1072,7 @@ and exit. Environment and IO effects from the condition survive. Tail-call
 optimized.
 
 ### windows
-`( list width -- windows )` — Return every overlapping window of a positive width. Equivalent to `() stencil`.
+`( list width -- windows )` — Return every overlapping window of a positive width.
 
 #### Examples
 
@@ -1096,7 +1096,7 @@ non-symbol operand is `'type`.
 `( -- )` — Print the visible dictionary in sorted order.
 
 ### wrap
-`( value -- list )` — Wrap one value in a one-element list. Equivalent to `() cons`.
+`( value -- list )` — Wrap one value in a one-element list.
 
 ### zip-with
 `( left right quotation -- list )` — *Isolated*, contract `( a b -- c )`.
@@ -1114,7 +1114,7 @@ extends). Each-left/each-right are `partial` compositions.
 `( x -- y )` — **Pervasive.** Return absolute numeric values with checked integer overflow. Defined in ecl; `'abs see` renders the definition.
 
 ### append
-`( sequence value -- sequence )` — Append one value to the end of a sequence. Equivalent to `wrap cat`.
+`( sequence value -- sequence )` — Append one value to the end of a sequence.
 
 ### compose
 `( left right -- quotation )` — Concatenate two quotations in execution order.
@@ -1122,22 +1122,22 @@ extends). Each-left/each-right are `partial` compositions.
 ### literal
 `( value -- quotation )` — Return a plain quotation that pushes the exact captured value as inert data when called, without executing or resolving it.
 
-Every value but a word already pushes itself when run, so the result is `(x)`. A word would execute, so it is quoted as `((x) first)`. Equivalent to `dup type 'word match? (wrap (first) cons) (wrap) if`.
+Every value but a word already pushes itself when run, so the result is `(x)`. A word would execute, so it is quoted as `((x) first)`.
 
 ### max-of
-`( sequence -- value )` — Return the greatest element of a nonempty sequence. Equivalent to `dup first (max) fold`.
+`( sequence -- value )` — Return the greatest element of a nonempty sequence.
 
 ### min-of
-`( sequence -- value )` — Return the least element of a nonempty sequence. Equivalent to `dup first (min) fold`.
+`( sequence -- value )` — Return the least element of a nonempty sequence.
 
 ### rest
 `( list -- list )` — Return all but the first element of a nonempty list.
 
 ### zip
-`( left right -- pairs )` — Pair corresponding elements of two conforming sequences. Equivalent to `(pair) zip-with`.
+`( left right -- pairs )` — Pair corresponding elements of two conforming sequences.
 
 ### dip
-`( x q -- ... )` — *Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` returns on top of its results. Equivalent to `swap literal compose call`.
+`( x q -- ... )` — *Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` returns on top of its results.
 
 ### fail
 `( msg -- )` — Raise a user-kind error whose message is the supplied value: `{'kind 'user 'msg msg}`. Defined in ecl.
@@ -1167,7 +1167,7 @@ Every value but a word already pushes itself when run, so the result is `(x)`. A
 ```
 
 ### partial
-`( value quotation -- quotation )` — Safe partial application: return a quotation that pushes an inert captured value before running another quotation. Even a captured word remains data. Equivalent to `swap literal swap compose`; `3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as `((w) first)`.
+`( value quotation -- quotation )` — Safe partial application: return a quotation that pushes an inert captured value before running another quotation. Even a captured word remains data. `3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as `((w) first)`.
 
 #### Examples
 
@@ -1186,7 +1186,7 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a private module constant word; an optional annotation may precede the value. Defined in ecl as `swap literal swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.
 
 ### uncons
-`( list -- first rest )` — Split a nonempty list into its first element and remaining elements. Equivalent to `dup first swap rest`.
+`( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
 
 ### while-values
 `( value predicate step -- list )` — *Isolated*, contracts `( state -- bool )` and `( state -- state )`. Return the initial value and successive states through the first state for which the predicate is false. Defined in ecl over `unfold`.
@@ -1202,7 +1202,7 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 `( x y -- bool )` — **Pervasive.** Compute boolean conjunction over 0 and 1 values. Both operands are already evaluated; there is no short-circuiting. Defined in ecl.
 
 ### clamp
-`( value lower upper -- bounded )` — **Pervasive** by composition. Constrain a value to the inclusive interval between lower and upper. Equivalent to `(max) dip min`.
+`( value lower upper -- bounded )` — **Pervasive** by composition. Constrain a value to the inclusive interval between lower and upper.
 
 ### find
 `( sequence needle -- index )` — Return the index of the first element that returns 1 from `match?` against the needle, or the sequence length when no element matches. Defined in ecl.
@@ -1211,16 +1211,16 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 `( x y -- bool )` — **Pervasive.** Compute boolean disjunction over 0 and 1 values. Both operands are already evaluated; there is no short-circuiting. Defined in ecl.
 
 ### over
-`( x y -- x y x )` — Copy the value beneath the top of the stack onto the top. Equivalent to `swap dup (swap) dip`.
+`( x y -- x y x )` — Copy the value beneath the top of the stack onto the top.
 
 ### rolldown
-`( x y z -- y z x )` — Rotate the top three stack values downward, from x y z to y z x. Equivalent to `(swap) dip swap`.
+`( x y z -- y z x )` — Rotate the top three stack values downward, from x y z to y z x.
 
 ### rollup
-`( x y z -- z x y )` — Rotate the top three stack values upward, from x y z to z x y. Equivalent to `swap (swap) dip`.
+`( x y z -- z x y )` — Rotate the top three stack values upward, from x y z to z x y.
 
 ### unappend
-`( list -- initial last )` — Split a nonempty list into its initial elements and last element. Equivalent to `reverse uncons reverse swap`.
+`( list -- initial last )` — Split a nonempty list into its initial elements and last element.
 
 ### with
 `( values quotation -- quotation )` — Return a quotation that pushes every value from a list, in order and inertly, before running another quotation. Calling the result starts with the list's elements as separate stack values. Defined in ecl as `((literal) each) dip append raze`.
@@ -1238,7 +1238,7 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 `( sequence values quotation -- results )` — *Unit constructor*, one fresh unit per element, contract `( a -- b )` enforced per element. Concurrent `each`: apply a quotation in one fresh unit per element and return one result per element in input order. Each child's stack starts with its element deepest; `list values (q) @each` adds the shared values above it. Results are joined in order; the leftmost failure cancels every later task, waits for them to quiesce, and is re-raised. Defined in ecl over `@spawn`, `task.await`, and `task.cancel`. Inside a module construction body, at any depth, this constructor is `'domain`: a module body defines words and starts no tasks (see Modules). See Concurrency.
 
 ### all?
-`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for every element; otherwise return 0. Equivalent to `(|l q| l q each 1 (and) fold)`.
+`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for every element; otherwise return 0.
 
 #### Examples
 
@@ -1248,13 +1248,13 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ```
 
 ### any?
-`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for at least one element; otherwise return 0. The predicate runs on every element; there is no early exit. Equivalent to `(|l q| l q each 0 (or) fold)`.
+`( sequence predicate -- bool )` — *Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for at least one element; otherwise return 0. The predicate runs on every element; there is no early exit.
 
 ### converges
 `( value quotation -- list )` — *Isolated*, unary contract `( a -- a )`. Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended. Defined in ecl over `unfold`.
 
 ### filter
-`( sequence predicate -- matches )` — *Isolated*, contract `( a -- count )`. Apply the predicate to every element, retaining each element as many times as its returned nonnegative int. A 0/1 predicate is ordinary filtering. Equivalent to `over swap each where at`.
+`( sequence predicate -- matches )` — *Isolated*, contract `( a -- count )`. Apply the predicate to every element, retaining each element as many times as its returned nonnegative int. A 0/1 predicate is ordinary filtering.
 
 #### Examples
 
@@ -1267,13 +1267,13 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 `( list quotation -- value )` — *Isolated*, contract `( acc a -- acc )`. Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`. Defined in ecl.
 
 ### keep
-`( x q -- ... )` — *Inline.* Apply a quotation to a value, then restore the value on top of the quotation's results. Equivalent to `over (call) dip`.
+`( x q -- ... )` — *Inline.* Apply a quotation to a value, then restore the value on top of the quotation's results.
 
 ### lex-cmp-with
 `( left right comparator -- order )` — Compare two sequences lexicographically with an inline `( left-element right-element -- order )` comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the sequences are ordered by length. Defined in ecl.
 
 ### mod
-`( x y -- z )` — **Pervasive.** Compute checked integer remainders. Equivalent to `over over div * -`.
+`( x y -- z )` — **Pervasive.** Compute checked integer remainders.
 
 ### partition
 `( sequence predicate -- matches rejects )` — *Isolated*, contract `( a -- bool )`. Split a sequence into the elements whose predicate returned 1 and those that returned 0. Defined in ecl.
@@ -1286,7 +1286,7 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ```
 
 ### bi
-`( x p q -- ... )` — *Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s. Equivalent to `(keep) dip call`.
+`( x p q -- ... )` — *Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
 
 ### case
 `( x clauses -- ... )` — *Inline.* Select and call the first action whose key matches the subject. The clause list is flat, nonempty, and odd: `[key action … else]`. Keys are inert data: any value, never executed, with duplicates legal and the first `match?` result of 1 winning. Every action and the else must be a quotation, and all of them are validated before any comparison or user quotation runs. When no key matches, the else runs. Defined in ecl; `'case see` renders the definition.
@@ -1299,7 +1299,7 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ```
 
 ### chunk
-`( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length. Equivalent to cutting at every multiple of the size.
+`( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
 
 #### Examples
 
@@ -1309,13 +1309,13 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ```
 
 ### converge
-`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches a fixed point or returns to the initial value. Equivalent to `converges last`.
+`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches a fixed point or returns to the initial value.
 
 ### product
-`( sequence -- product )` — Multiply every element of a numeric sequence; 1 when the sequence is empty. Equivalent to `(*) fold1` for a nonempty sequence, so the product starts from the first element and a list of rows multiplies to a row.
+`( sequence -- product )` — Multiply every element of a numeric sequence; 1 when the sequence is empty. A nonempty sequence's product starts from its first element, so a list of rows multiplies to a row.
 
 ### sum
-`( sequence -- total )` — Add every element of a numeric sequence; 0 when the sequence is empty. Equivalent to `(+) fold1` for a nonempty sequence, so the total starts from the first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
+`( sequence -- total )` — Add every element of a numeric sequence; 0 when the sequence is empty. A nonempty sequence's total starts from its first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
 
 #### Examples
 
@@ -1343,10 +1343,10 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ```
 
 ### tri
-`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input in left-to-right order. Equivalent to `((keep) dip keep) dip call`.
+`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input in left-to-right order.
 
 ### mean
-`( sequence -- mean )` — Return the arithmetic mean of a nonempty numeric sequence. Equivalent to `dup sum swap len /`.
+`( sequence -- mean )` — Return the arithmetic mean of a nonempty numeric sequence.
 
 ## agent
 

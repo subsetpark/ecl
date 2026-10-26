@@ -1,19 +1,18 @@
 ### def <=
 (x y -- bool :
- "**Pervasive.** Compare conforming values for less-than-or-equal order, producing boolean masks.
-  Equivalent to `> not`.")
+ "**Pervasive.** Compare conforming values for less-than-or-equal order, producing boolean masks.")
 (> not) '<= def
 
 ### def <>
 (x y -- bool :
- "**Pervasive.** Compare conforming values for inequality, producing boolean masks. Equivalent to `=
-  not`. On 0/1 masks this is xor; there is no separate word.")
+ "**Pervasive.** Compare conforming values for inequality, producing boolean masks. On 0/1 masks
+  this is xor; there is no separate word.")
 (= not) '<> def
 
 ### def >=
 (x y -- bool :
- "**Pervasive.** Compare conforming values for greater-than-or-equal order, producing boolean masks.
-  Equivalent to `< not`.")
+ "**Pervasive.** Compare conforming values for greater-than-or-equal order, producing boolean
+  masks.")
 (< not) '>= def
 
 ### def assert
@@ -25,25 +24,23 @@
 ### def at-path
 (ds l -- x :
  "Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty
-  path returns `ds` unchanged. Equivalent to `swap (at) fold`.")
+  path returns `ds` unchanged.")
 (swap (at) fold) 'at-path def
 
 ### def bi2
 (x y p q -- ... :
- "*Inline.* Binary cleave: apply each of two quotations to the same pair of input values. Equivalent
-  to `(|x y p q| x y p call x y q call)`.")
+ "*Inline.* Binary cleave: apply each of two quotations to the same pair of input values.")
 (|x y p q| x y p call x y q call) 'bi2 def
 
 ### def both
 (x y q -- ... :
- "*Inline.* Apply one quotation independently to each of two input values, `x` first. Equivalent to
-  `(|x y q| x q call y q call)`.")
+ "*Inline.* Apply one quotation independently to each of two input values, `x` first.")
 (|x y q| x q call y q call) 'both def
 
 ### def collect
 (quotation -- list :
  "Run a quotation on an empty isolated stack and return what it leaves as a list, preserving order.
-  The quotation cannot see values beneath it. Equivalent to `[] swap infra`.")
+  The quotation cannot see values beneath it.")
 ([] swap infra) 'collect def
 
 ### def each-prior
@@ -54,8 +51,7 @@
 (|xs seed quotation| xs seed xs cons -1 drop quotation zip-with) 'each-prior def
 
 ### def empty?
-(sequence -- bool :
- "Return 1 when a sequence has no elements and 0 otherwise. Equivalent to `len 0 =`.")
+(sequence -- bool : "Return 1 when a sequence has no elements and 0 otherwise.")
 (len 0 =) 'empty? def
 
 ### def first
@@ -63,28 +59,24 @@
 (dup len pop 0 at) 'first def
 
 ### def last
-(sequence -- value :
- "Return the final element of a nonempty sequence. Equivalent to `dup len 1 - at`.")
+(sequence -- value : "Return the final element of a nonempty sequence.")
 (dup len 1 - at) 'last def
 
 ### def neg
-(x -- y :
- "**Pervasive.** Negate numeric values with checked integer overflow. Equivalent to `-1 *`.")
+(x -- y : "**Pervasive.** Negate numeric values with checked integer overflow.")
 (-1 *) 'neg def
 
 ### def nip
-(x y -- y : "Discard the value immediately beneath the top of the stack. Equivalent to `swap pop`.")
+(x y -- y : "Discard the value immediately beneath the top of the stack.")
 (swap pop) 'nip def
 
 ### def pack
 (: "Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a list, preserving their
-    order; `n` must be a nonnegative int. Equivalent to `() swap (cons) times`. Deliberately
-    state-dependent stack surgery.")
+    order; `n` must be a nonnegative int. Deliberately state-dependent stack surgery.")
 (() swap (cons) times) 'pack def
 
 ### def pair
-(first second -- list :
- "Collect two stack values into a two-element list in stack order. Equivalent to `() cons cons`.")
+(first second -- list : "Collect two stack values into a two-element list in stack order.")
 (() cons cons) 'pair def
 
 ### def reverse
@@ -97,25 +89,22 @@
 
 ### def signum
 (number -- sign :
- "**Pervasive** by composition. Return the int −1, 0, or 1 according to the sign of a number.
-  Equivalent to `dup 0 > swap 0 < -`.")
+ "**Pervasive** by composition. Return the int −1, 0, or 1 according to the sign of a number.")
 (dup 0 > swap 0 < -) 'signum def
 
 ### def sort
-(sequence -- sorted :
- "Return a stable ascending sort of a sequence by `cmp`. Equivalent to `dup grade at`.")
+(sequence -- sorted : "Return a stable ascending sort of a sequence by `cmp`.")
 (dup grade at) 'sort def
 
 ### def tri2
 (x y p q r -- ... :
  "*Inline.* Binary cleave: apply each of three quotations to the same pair of input values in
-  left-to-right order. Equivalent to `(|x y p q r| x y p call x y q call x y r call)`.")
+  left-to-right order.")
 (|x y p q r| x y p call x y q call x y r call) 'tri2 def
 
 ### def unless
 (bool else -- ... :
- "*Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing. Equivalent
-  to `() swap if`.")
+ "*Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing.")
 (() swap if) 'unless def
 
 ### def unset
@@ -127,17 +116,15 @@
 
 ### def when
 (bool then -- ... :
- "*Inline.* Call the quotation when the condition is the boolean 1; otherwise do nothing. Equivalent
-  to `() if`.")
+ "*Inline.* Call the quotation when the condition is the boolean 1; otherwise do nothing.")
 (() if) 'when def
 
 ### def windows
-(list width -- windows :
- "Return every overlapping window of a positive width. Equivalent to `() stencil`.")
+(list width -- windows : "Return every overlapping window of a positive width.")
 (() stencil) 'windows def
 
 ### def wrap
-(value -- list : "Wrap one value in a one-element list. Equivalent to `() cons`.")
+(value -- list : "Wrap one value in a one-element list.")
 (() cons) 'wrap def
 
 ### def abs
@@ -147,8 +134,7 @@
 (dup neg 0 + swap max) 'abs def
 
 ### def append
-(sequence value -- sequence :
- "Append one value to the end of a sequence. Equivalent to `wrap cat`.")
+(sequence value -- sequence : "Append one value to the end of a sequence.")
 (wrap cat) 'append def
 
 ### def compose
@@ -161,18 +147,15 @@
   executing or resolving it.
 
   Every value but a word already pushes itself when run, so the result is `(x)`. A word would
-  execute, so it is quoted as `((x) first)`. Equivalent to `dup type 'word match? (wrap (first)
-  cons) (wrap) if`.")
+  execute, so it is quoted as `((x) first)`.")
 (dup type 'word match? (wrap (first) cons) (wrap) if) 'literal def
 
 ### def max-of
-(sequence -- value :
- "Return the greatest element of a nonempty sequence. Equivalent to `dup first (max) fold`.")
+(sequence -- value : "Return the greatest element of a nonempty sequence.")
 (dup first (max) fold) 'max-of def
 
 ### def min-of
-(sequence -- value :
- "Return the least element of a nonempty sequence. Equivalent to `dup first (min) fold`.")
+(sequence -- value : "Return the least element of a nonempty sequence.")
 (dup first (min) fold) 'min-of def
 
 ### def rest
@@ -180,14 +163,13 @@
 (dup first pop 1 drop) 'rest def
 
 ### def zip
-(left right -- pairs :
- "Pair corresponding elements of two conforming sequences. Equivalent to `(pair) zip-with`.")
+(left right -- pairs : "Pair corresponding elements of two conforming sequences.")
 ((pair) zip-with) 'zip def
 
 ### def dip
 (x q -- ... :
  "*Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x`
-  returns on top of its results. Equivalent to `swap literal compose call`.")
+  returns on top of its results.")
 (swap literal compose call) 'dip def
 
 ### def fail
@@ -221,8 +203,8 @@
 ### def partial
 (value quotation -- quotation :
  "Safe partial application: return a quotation that pushes an inert captured value before running
-  another quotation. Even a captured word remains data. Equivalent to `swap literal swap compose`;
-  `3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as `((w) first)`.")
+  another quotation. Even a captured word remains data. `3 (+) partial` is `(3 +)`, and a captured
+  word `w` is prefixed as `((w) first)`.")
 (swap literal swap compose) 'partial def
 
 ### def scan1
@@ -247,9 +229,7 @@
 (swap literal swap defp) 'setp def
 
 ### def uncons
-(list -- first rest :
- "Split a nonempty list into its first element and remaining elements. Equivalent to `dup first swap
-  rest`.")
+(list -- first rest : "Split a nonempty list into its first element and remaining elements.")
 (dup first swap rest) 'uncons def
 
 ### def while-values
@@ -268,8 +248,8 @@
 
 ### def clamp
 (value lower upper -- bounded :
- "**Pervasive** by composition. Constrain a value to the inclusive interval between lower and upper.
-  Equivalent to `(max) dip min`.")
+ "**Pervasive** by composition. Constrain a value to the inclusive interval between lower and
+  upper.")
 ((max) dip min) 'clamp def
 
 ### def find
@@ -285,25 +265,19 @@
 ((not not) dip not not max) 'or def
 
 ### def over
-(x y -- x y x :
- "Copy the value beneath the top of the stack onto the top. Equivalent to `swap dup (swap) dip`.")
+(x y -- x y x : "Copy the value beneath the top of the stack onto the top.")
 (swap dup (swap) dip) 'over def
 
 ### def rolldown
-(x y z -- y z x :
- "Rotate the top three stack values downward, from x y z to y z x. Equivalent to `(swap) dip
-  swap`.")
+(x y z -- y z x : "Rotate the top three stack values downward, from x y z to y z x.")
 ((swap) dip swap) 'rolldown def
 
 ### def rollup
-(x y z -- z x y :
- "Rotate the top three stack values upward, from x y z to z x y. Equivalent to `swap (swap) dip`.")
+(x y z -- z x y : "Rotate the top three stack values upward, from x y z to z x y.")
 (swap (swap) dip) 'rollup def
 
 ### def unappend
-(list -- initial last :
- "Split a nonempty list into its initial elements and last element. Equivalent to `reverse uncons
-  reverse swap`.")
+(list -- initial last : "Split a nonempty list into its initial elements and last element.")
 (reverse uncons reverse swap) 'unappend def
 
 ### def with
@@ -365,14 +339,13 @@
 ### def all?
 (sequence predicate -- bool :
  "*Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for every element;
-  otherwise return 0. Equivalent to `(|l q| l q each 1 (and) fold)`.")
+  otherwise return 0.")
 (|l q| l q each 1 (and) fold) 'all? def
 
 ### def any?
 (sequence predicate -- bool :
  "*Isolated*, contract `( a -- bool )`. Return 1 when the predicate returns 1 for at least one
-  element; otherwise return 0. The predicate runs on every element; there is no early exit.
-  Equivalent to `(|l q| l q each 0 (or) fold)`.")
+  element; otherwise return 0. The predicate runs on every element; there is no early exit.")
 (|l q| l q each 0 (or) fold) 'any? def
 
 ### def converges
@@ -399,8 +372,7 @@
 ### def filter
 (sequence predicate -- matches :
  "*Isolated*, contract `( a -- count )`. Apply the predicate to every element, retaining each
-  element as many times as its returned nonnegative int. A 0/1 predicate is ordinary filtering.
-  Equivalent to `over swap each where at`.")
+  element as many times as its returned nonnegative int. A 0/1 predicate is ordinary filtering.")
 (over swap each where at) 'filter def
 
 ### def fold1
@@ -411,8 +383,8 @@
 
 ### def keep
 (x q -- ... :
- "*Inline.* Apply a quotation to a value, then restore the value on top of the quotation's results.
-  Equivalent to `over (call) dip`.")
+ "*Inline.* Apply a quotation to a value, then restore the value on top of the quotation's
+  results.")
 (over (call) dip) 'keep def
 
 ### def lex-cmp-with
@@ -433,7 +405,7 @@
  call) 'lex-cmp-with def
 
 ### def mod
-(x y -- z : "**Pervasive.** Compute checked integer remainders. Equivalent to `over over div * -`.")
+(x y -- z : "**Pervasive.** Compute checked integer remainders.")
 (over over div * -) 'mod def
 
 ### def partition
@@ -445,7 +417,7 @@
 ### def bi
 (x p q -- ... :
  "*Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results
-  beneath `q`'s. Equivalent to `(keep) dip call`.")
+  beneath `q`'s.")
 ((keep) dip call) 'bi def
 
 ### def case
@@ -481,7 +453,7 @@
 ### def chunk
 (list size -- pieces :
  "Split a list into consecutive pieces of a positive size; the last piece is shorter when the size
-  does not divide the length. Equivalent to cutting at every multiple of the size.")
+  does not divide the length.")
 (|xs k|
  k 0 > {'kind 'domain 'msg "chunk size must be positive"} assert
  xs xs len k div xs len k mod 0 > + range k * cut) 'chunk def
@@ -489,25 +461,24 @@
 ### def converge
 (value quotation -- value :
  "*Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches
-  a fixed point or returns to the initial value. Equivalent to `converges last`.")
+  a fixed point or returns to the initial value.")
 (converges last) 'converge def
 
 ### def product
 # A nonempty sequence starts from its first element, as `(*) fold1` does, so
 # no one seed multiplies a copy of a first row.
 (sequence -- product :
- "Multiply every element of a numeric sequence; 1 when the sequence is empty. Equivalent to `(*)
-  fold1` for a nonempty sequence, so the product starts from the first element and a list of rows
-  multiplies to a row.")
+ "Multiply every element of a numeric sequence; 1 when the sequence is empty. A nonempty sequence's
+  product starts from its first element, so a list of rows multiplies to a row.")
 (dup empty? (pop 1) ((*) fold1) if) 'product def
 
 ### def sum
 # A nonempty sequence starts from its first element, as `(+) fold1` does, so
 # no zero seed copies a first row or turns a -0.0 total into 0.0.
 (sequence -- total :
- "Add every element of a numeric sequence; 0 when the sequence is empty. Equivalent to `(+) fold1`
-  for a nonempty sequence, so the total starts from the first element: a list of rows sums to a row,
-  and a sum of negative zeros is `-0.0`.")
+ "Add every element of a numeric sequence; 0 when the sequence is empty. A nonempty sequence's total
+  starts from its first element: a list of rows sums to a row, and a sum of negative zeros is
+  `-0.0`.")
 (dup empty? (pop 0) ((+) fold1) if) 'sum def
 
 ### def to-digits
@@ -527,12 +498,9 @@
  fold 1 at) 'to-digits def
 
 ### def tri
-(x p q r -- ... :
- "*Inline.* Apply three quotations to the same input in left-to-right order. Equivalent to `((keep)
-  dip keep) dip call`.")
+(x p q r -- ... : "*Inline.* Apply three quotations to the same input in left-to-right order.")
 (((keep) dip keep) dip call) 'tri def
 
 ### def mean
-(sequence -- mean :
- "Return the arithmetic mean of a nonempty numeric sequence. Equivalent to `dup sum swap len /`.")
+(sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")
 (dup sum swap len /) 'mean def
