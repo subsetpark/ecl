@@ -5,26 +5,25 @@ import ECL_VALUES.
 context Calls.
 context Construction.
 context Registry.
-context Transactions.
-context WithinCommit.
 
 RegistryName.
 BindingName.
 > This model is normative for registry names, slots, aliases, generations,
-> and publication, including the construction of the images they publish; abstract definitions and
-> visibility; call contexts and generation pins; the ordered durable, draft,
-> pending-output, and ambient stacks; and atomic completion or abortion of
-> `within` transactions.
+> and publication, including the construction of the images they publish;
+> abstract definitions and visibility; and call contexts and generation pins.
+> Modules are pure code: a registration carries no operand stack and no
+> state of its own.
 >
 > It deliberately abstracts over source spelling and name validation,
-> construction-body evaluation, concrete and nested values, error construction
-> and propagation, task and unit ownership, scheduling and fairness, and
-> storage reclamation. The surrounding language specification governs those
-> subjects. Begin and complete actions expose semantic concurrency boundaries;
-> they are not ECL words. Contexts, including `WithinCommit`, grant formal
-> write authority and do not denote runtime values or additional language
-> state. An `InvocationContext` is either the top-level evaluator or identifies
-> the exact active call performing a registry mutation.
+> construction-body evaluation (including the refusal of a body that leaves
+> values on its stack), concrete and nested values, error construction and
+> propagation, task and unit ownership, scheduling and fairness, and storage
+> reclamation. The surrounding language specification governs those subjects.
+> Begin and complete actions expose semantic concurrency boundaries; they are
+> not ECL words. Contexts grant formal write authority and do not denote
+> runtime values or additional language state. An `InvocationContext` is
+> either the top-level evaluator or identifies the exact active call
+> performing a registry mutation.
 >
 > A qualified call resolves a registry name and public binding and pins the
 > slot's current generation in one atomic action. Resolution before replacement
@@ -64,39 +63,29 @@ some call: Call,
     call-image' other = call-image other and
     call-definition' other = call-definition other).
 
-all call: Call |
-  ambient-depth' call = ambient-depth call.
-
-all call: Call, position: Nat |
-  ambient-value' call position = ambient-value call position.
-
 where
 
-> The model distinguishes immutable module images, durable registration slots,
-> and publication generations. One image may be published into several slots;
+> The model distinguishes immutable module images, registration slots, and
+> publication generations. One image may be published into several slots;
 > every successful publication creates a distinct generation. A live slot has
-> exactly one canonical name, zero or more direct aliases, one current
-> non-retired generation, and one durable stack. The image supplies only the
-> initial stack template used when a fresh slot is created.
+> exactly one canonical name, zero or more direct aliases, and one current
+> non-retired generation.
 >
-> Definitions and initial templates are immutable background relations. Each
-> definition belongs to one image and binding name, binding names are unique
-> within an image, and visibility controls which call actions may select it.
-> The model begins with no constructed images, created or live
-> slots, occupied names, published generations, calls, or transactions. Domain
-> atoms are possibilities rather than initially existing language values.
+> Definitions are immutable background relations. Each definition belongs to
+> one image and binding name, binding names are unique within an image, and
+> visibility controls which call actions may select it. The model begins with
+> no constructed images, created or live slots, occupied names, published
+> generations, or calls. Domain atoms are possibilities rather than initially
+> existing language values.
 >
 > Retirement is monotonic: replacement or removal retires the former current
 > generation and no retired generation becomes current again. Active calls
 > retain their selected images and, for registered calls, their generations.
-> An active transaction belongs to one active registered call and its still
-> current live slot. At most one transaction may belong to a call or slot.
 Call.
 Slot.
 Generation.
 Image.
 Definition.
-Transaction.
 WordOccurrence.
 InvocationContext.
 
@@ -107,8 +96,6 @@ InvocationContext.
 {Calls} call-slot call: Call => Slot.
 {Calls} call-image call: Call => Image.
 {Calls} call-definition call: Call => Definition.
-{Calls, WithinCommit} ambient-depth call: Call => Nat0.
-{Calls, WithinCommit} ambient-value call: Call, position: Nat => Value.
 
 occurrence-name occurrence: WordOccurrence => BindingName.
 occurrence-image occurrence: WordOccurrence => Image.
@@ -128,26 +115,12 @@ invocation-call invoker: InvocationContext => Call.
 {Registry} generation-retired? generation: Generation => Bool.
 {Registry} generation-slot generation: Generation => Slot.
 {Registry} generation-image generation: Generation => Image.
-{Registry, WithinCommit} durable-depth slot: Slot => Nat0.
-{Registry, WithinCommit} durable-value slot: Slot, position: Nat => Value.
-
-{Transactions, WithinCommit} transaction-active? transaction: Transaction => Bool.
-{Transactions} transaction-created? transaction: Transaction => Bool.
-{Transactions} transaction-call transaction: Transaction => Call.
-{Transactions} transaction-slot transaction: Transaction => Slot.
-{Transactions} transaction-generation transaction: Transaction => Generation.
-{Transactions, WithinCommit} draft-depth transaction: Transaction => Nat0.
-{Transactions} draft-value transaction: Transaction, position: Nat => Value.
-{Transactions, WithinCommit} pending-depth transaction: Transaction => Nat0.
-{Transactions} pending-value transaction: Transaction, position: Nat => Value.
 
 binding-present? image: Image, name: BindingName => Bool.
 definition-at image: Image, name: BindingName => Definition.
 definition-image definition: Definition => Image.
 definition-name definition: Definition => BindingName.
 public? definition: Definition => Bool.
-initial-depth image: Image => Nat0.
-initial-value image: Image, position: Nat => Value.
 ---
 all image: Image, name: BindingName, binding-present? image name |
   definition-image (definition-at image name) = image and
@@ -217,29 +190,6 @@ all call: Call, call-active? call, registered-call? call |
   generation-slot (call-generation call) = call-slot call and
   generation-image (call-generation call) = call-image call.
 
-all transaction: Transaction, transaction-active? transaction |
-  transaction-created? transaction.
-
-all transaction: Transaction, transaction-active? transaction |
-  call-active? (transaction-call transaction) and
-  registered-call? (transaction-call transaction) and
-  transaction-slot transaction = call-slot (transaction-call transaction) and
-  transaction-generation transaction = call-generation (transaction-call transaction) and
-  slot-live? (transaction-slot transaction) and
-  current-generation (transaction-slot transaction) = transaction-generation transaction.
-
-all left: Transaction, right: Transaction,
-    transaction-active? left,
-    transaction-active? right,
-    transaction-call left = transaction-call right |
-  left = right.
-
-all left: Transaction, right: Transaction,
-    transaction-active? left,
-    transaction-active? right,
-    transaction-slot left = transaction-slot right |
-  left = right.
-
 initially all image: Image |
   ~constructed? image.
 
@@ -255,9 +205,6 @@ initially all generation: Generation |
 initially all call: Call |
   ~call-created? call and ~call-active? call.
 
-initially all transaction: Transaction |
-  ~transaction-created? transaction and ~transaction-active? transaction.
-
 some invoker: InvocationContext | ~call-invocation? invoker.
 
 initially some invoker: InvocationContext | ~call-invocation? invoker.
@@ -267,32 +214,20 @@ where
 > `Register` is `@defm`'s publication: it constructs a fresh image and
 > publishes it in one step, because no program can observe an image between
 > the two. It is an ordered upsert. Publishing under a missing canonical name
-> creates a fresh slot initialized from the image's initial template.
-> Publishing under an existing canonical name preserves that slot and its
-> complete durable stack. Every successful registration publishes a fresh
-> generation and retires the previous current generation. It cannot interleave with an active
-> transaction on the selected slot or be performed by a call that owns an
-> active transaction. The supplied invocation context is the top-level
-> evaluator or the exact call performing the mutation.
+> creates a fresh slot; publishing under an existing canonical name keeps that
+> slot. Every successful registration publishes a fresh generation and retires
+> the previous current generation, and nothing else carries over. The
+> supplied invocation context is the top-level evaluator or the exact call
+> performing the mutation.
 Registry, Construction ~> Register @ invoker: InvocationContext,
                                      image: Image,
                                      module-name: RegistryName,
                                      ~constructed? image,
                                      ~alias? module-name.
 ---
-(~call-invocation? invoker or
-  (call-active? (invocation-call invoker) and
-   #(each transaction: Transaction,
-          transaction-active? transaction and
-          transaction-call transaction = invocation-call invoker |
-       transaction) = 0)) and
 (some slot: Slot,
      (canonical? module-name and slot = slot-of module-name) or
        (~canonical? module-name and ~slot-created? slot),
-     #(each transaction: Transaction,
-            transaction-active? transaction and
-            transaction-slot transaction = slot |
-         transaction) = 0,
      generation: Generation,
      ~generation-published? generation |
   canonical?' module-name and
@@ -326,32 +261,16 @@ Registry, Construction ~> Register @ invoker: InvocationContext,
        (canonical? module-name and
         other-generation = current-generation slot)) and
     generation-slot' other-generation = generation-slot other-generation and
-    generation-image' other-generation = generation-image other-generation) and
-
-  (canonical? module-name ->
-    durable-depth' slot = durable-depth slot) and
-  (~canonical? module-name ->
-    durable-depth' slot = initial-depth image) and
-  (all position: Nat |
-    (canonical? module-name ->
-      durable-value' slot position = durable-value slot position) and
-    (~canonical? module-name ->
-      durable-value' slot position = initial-value image position)) and
-  (all other-slot: Slot, other-slot != slot |
-    durable-depth' other-slot = durable-depth other-slot and
-    (all position: Nat |
-      durable-value' other-slot position =
-        durable-value other-slot position))).
+    generation-image' other-generation = generation-image other-generation)).
 
 where
 
 > `Add alias` resolves either kind of occupied target name and stores a direct
 > reference to its live slot; semantic alias chains do not exist. The alias
-> shares the slot's current generation, durable stack, serialization, and
-> lifetime. Canonical and alias names form one disjoint namespace, and an
-> occupied name cannot be repointed. Registry mutation is unavailable to a
-> call that owns an active transaction. The supplied invocation context is the
-> top-level evaluator or the exact call performing the mutation.
+> shares the slot's current generation and lifetime. Canonical and alias names
+> form one disjoint namespace, and an occupied name cannot be repointed. The
+> supplied invocation context is the top-level evaluator or the exact call
+> performing the mutation.
 Registry ~> Add alias @ invoker: InvocationContext,
                         alias-name: RegistryName,
                         target-name: RegistryName,
@@ -359,12 +278,6 @@ Registry ~> Add alias @ invoker: InvocationContext,
                         ~alias? alias-name,
                         canonical? target-name or alias? target-name.
 ---
-(~call-invocation? invoker or
-  (call-active? (invocation-call invoker) and
-   #(each transaction: Transaction,
-          transaction-active? transaction and
-          transaction-call transaction = invocation-call invoker |
-       transaction) = 0)) and
   ~canonical?' alias-name and
   alias?' alias-name and
   slot-of' alias-name = slot-of target-name and
@@ -376,10 +289,7 @@ Registry ~> Add alias @ invoker: InvocationContext,
   (all slot: Slot |
     slot-created?' slot = slot-created? slot and
     slot-live?' slot = slot-live? slot and
-    current-generation' slot = current-generation slot and
-    durable-depth' slot = durable-depth slot and
-    (all position: Nat |
-      durable-value' slot position = durable-value slot position)) and
+    current-generation' slot = current-generation slot) and
 
   (all generation: Generation |
     generation-published?' generation = generation-published? generation and
@@ -390,30 +300,17 @@ Registry ~> Add alias @ invoker: InvocationContext,
 where
 
 > `Remove` resolves a canonical name or alias to its slot, then atomically
-> closes that slot, removes its canonical name and every alias, retires its
-> current generation, and discards its durable stack. Removal does not end
-> already active calls, whose pins remain valid, but those calls cannot start a
-> new transaction after closure. A later registration of the same spelling
-> must allocate a fresh slot. Removal cannot interleave with a transaction on
-> the slot or be performed by a call that owns an active transaction. The
-> supplied invocation context is the top-level evaluator or the exact call
-> performing the mutation.
+> closes that slot, removes its canonical name and every alias, and retires
+> its current generation. Removal does not end already active calls, whose
+> pins remain valid. A later registration of the same spelling must allocate
+> a fresh slot. The supplied invocation context is the top-level evaluator or
+> the exact call performing the mutation.
 Registry ~> Remove @ invoker: InvocationContext,
                      module-name: RegistryName,
                      canonical? module-name or alias? module-name.
 ---
-(~call-invocation? invoker or
-  (call-active? (invocation-call invoker) and
-   #(each transaction: Transaction,
-          transaction-active? transaction and
-          transaction-call transaction = invocation-call invoker |
-       transaction) = 0)) and
 (some slot: Slot,
-     slot = slot-of module-name,
-     #(each transaction: Transaction,
-            transaction-active? transaction and
-            transaction-slot transaction = slot |
-         transaction) = 0 |
+     slot = slot-of module-name |
   (all registry-name: RegistryName |
     canonical?' registry-name =
       (canonical? registry-name and slot-of registry-name != slot) and
@@ -424,17 +321,10 @@ Registry ~> Remove @ invoker: InvocationContext,
   slot-created?' slot = slot-created? slot and
   ~slot-live?' slot and
   current-generation' slot = current-generation slot and
-  durable-depth' slot = 0 and
-  (all position: Nat |
-    durable-value' slot position = durable-value slot position) and
   (all other-slot: Slot, other-slot != slot |
     slot-created?' other-slot = slot-created? other-slot and
     slot-live?' other-slot = slot-live? other-slot and
-    current-generation' other-slot = current-generation other-slot and
-    durable-depth' other-slot = durable-depth other-slot and
-    (all position: Nat |
-      durable-value' other-slot position =
-        durable-value other-slot position)) and
+    current-generation' other-slot = current-generation other-slot) and
 
   (all generation: Generation |
     generation-published?' generation = generation-published? generation and
@@ -494,25 +384,16 @@ some image: Image,
     call-generation' other = call-generation other and
     call-slot' other = call-slot other and
     call-image' other = call-image other and
-    call-definition' other = call-definition other) and
-
-  (all call: Call |
-    ambient-depth' call = ambient-depth call and
-    (all position: Nat |
-      ambient-value' call position = ambient-value call position)).
+    call-definition' other = call-definition other).
 
 where
 
 > `Complete call` releases the call's image and generation pins after its
-> invocation has completed and no transaction belongs to it. Calls are split
+> invocation has completed. Calls are split
 > into begin and complete actions only to express publication concurrency; the
 > prose-level invocation remains one language operation.
 Calls ~> Complete call @ completed: Call,
-                       call-active? completed,
-                       #(each transaction: Transaction,
-                              transaction-active? transaction and
-                              transaction-call transaction = completed |
-                           transaction) = 0.
+                       call-active? completed.
 ---
 call-created?' completed = call-created? completed and
   ~call-active?' completed and
@@ -521,9 +402,6 @@ call-created?' completed = call-created? completed and
   call-slot' completed = call-slot completed and
   call-image' completed = call-image completed and
   call-definition' completed = call-definition completed and
-  ambient-depth' completed = 0 and
-  (all position: Nat |
-    ambient-value' completed position = ambient-value completed position) and
 
   (all other: Call, other != completed |
     call-created?' other = call-created? other and
@@ -532,180 +410,4 @@ call-created?' completed = call-created? completed and
     call-generation' other = call-generation other and
     call-slot' other = call-slot other and
     call-image' other = call-image other and
-    call-definition' other = call-definition other and
-    ambient-depth' other = ambient-depth other and
-    (all position: Nat |
-      ambient-value' other position = ambient-value other position)).
-
-where
-
-> `Begin within` requires an active registered call whose pinned generation is
-> still current in a live slot. It allocates one transaction, copies the slot's
-> durable stack into a private ordered draft, and begins with no pending
-> outputs. It is unavailable for anonymous or homeless calls, for a retired or
-> closed registration, while the caller already owns a transaction, or while
-> another transaction owns the slot. Thus transactions never nest and are
-> serialized per slot.
-Transactions ~> Begin within @ caller: Call,
-                             call-active? caller,
-                             registered-call? caller,
-                             slot-live? (call-slot caller),
-                             current-generation (call-slot caller) =
-                               call-generation caller,
-                             #(each active: Transaction,
-                                    transaction-active? active and
-                                    transaction-call active = caller |
-                                 active) = 0,
-                             #(each active: Transaction,
-                                    transaction-active? active and
-                                    transaction-slot active = call-slot caller |
-                                 active) = 0.
----
-some slot: Slot,
-     slot = call-slot caller,
-     generation: Generation,
-     generation = call-generation caller,
-     transaction: Transaction,
-     ~transaction-created? transaction |
-  transaction-created?' transaction and
-  transaction-active?' transaction and
-  transaction-call' transaction = caller and
-  transaction-slot' transaction = slot and
-  transaction-generation' transaction = generation and
-  draft-depth' transaction = durable-depth slot and
-  (all position: Nat |
-    draft-value' transaction position = durable-value slot position) and
-  pending-depth' transaction = 0 and
-  (all position: Nat |
-    pending-value' transaction position = pending-value transaction position) and
-
-  (all other: Transaction, other != transaction |
-    transaction-created?' other = transaction-created? other and
-    transaction-active?' other = transaction-active? other and
-    transaction-call' other = transaction-call other and
-    transaction-slot' other = transaction-slot other and
-    transaction-generation' other = transaction-generation other and
-    draft-depth' other = draft-depth other and
-    pending-depth' other = pending-depth other and
-    (all position: Nat |
-      draft-value' other position = draft-value other position and
-      pending-value' other position = pending-value other position)).
-
-where
-
-> `Without` removes the top value from a nonempty draft and appends it to the
-> transaction's pending-output sequence. The sequence preserves invocation
-> order. The guard makes the action unavailable outside an active transaction
-> or on an empty draft; the prose specification assigns the corresponding ECL
-> errors.
-Transactions ~> Without @ transaction: Transaction,
-                        transaction-active? transaction,
-                        draft-depth transaction > 0.
----
-some top: Nat,
-     top = draft-depth transaction,
-     destination: Nat,
-     destination = pending-depth transaction + 1 |
-  transaction-created?' transaction = transaction-created? transaction and
-  transaction-active?' transaction = transaction-active? transaction and
-  transaction-call' transaction = transaction-call transaction and
-  transaction-slot' transaction = transaction-slot transaction and
-  transaction-generation' transaction = transaction-generation transaction and
-  draft-depth' transaction = draft-depth transaction - 1 and
-  (all position: Nat |
-    draft-value' transaction position = draft-value transaction position) and
-  pending-depth' transaction = pending-depth transaction + 1 and
-  pending-value' transaction destination = draft-value transaction top and
-  (all position: Nat, position != destination |
-    pending-value' transaction position = pending-value transaction position) and
-
-  (all other: Transaction, other != transaction |
-    transaction-created?' other = transaction-created? other and
-    transaction-active?' other = transaction-active? other and
-    transaction-call' other = transaction-call other and
-    transaction-slot' other = transaction-slot other and
-    transaction-generation' other = transaction-generation other and
-    draft-depth' other = draft-depth other and
-    pending-depth' other = pending-depth other and
-    (all position: Nat |
-      draft-value' other position = draft-value other position and
-      pending-value' other position = pending-value other position)).
-
-where
-
-> `Commit within` is one atomic publication. The complete remaining draft
-> replaces the slot's durable stack, and all pending outputs append to the
-> caller's ambient stack in order. Neither stack exposes an intermediate state.
-> The transaction then becomes inactive and relinquishes its private stacks.
-WithinCommit ~> Commit within @ transaction: Transaction,
-                              transaction-active? transaction.
----
-some caller: Call,
-     caller = transaction-call transaction,
-     slot: Slot,
-     slot = transaction-slot transaction |
-  ~transaction-active?' transaction and
-  draft-depth' transaction = 0 and
-  pending-depth' transaction = 0 and
-  (all other: Transaction, other != transaction |
-    transaction-active?' other = transaction-active? other and
-    draft-depth' other = draft-depth other and
-    pending-depth' other = pending-depth other) and
-
-  durable-depth' slot = draft-depth transaction and
-  (all position: Nat |
-    durable-value' slot position = draft-value transaction position) and
-  (all other-slot: Slot, other-slot != slot |
-    durable-depth' other-slot = durable-depth other-slot and
-    (all position: Nat |
-      durable-value' other-slot position =
-        durable-value other-slot position)) and
-
-  ambient-depth' caller =
-    ambient-depth caller + pending-depth transaction and
-  (all position: Nat, position <= ambient-depth caller |
-    ambient-value' caller position = ambient-value caller position) and
-  (all source: Nat, source <= pending-depth transaction |
-    some destination: Nat,
-         destination = ambient-depth caller + source |
-      ambient-value' caller destination = pending-value transaction source) and
-  (all position: Nat,
-       position > ambient-depth caller + pending-depth transaction |
-    ambient-value' caller position = ambient-value caller position) and
-  (all other-call: Call, other-call != caller |
-    ambient-depth' other-call = ambient-depth other-call and
-    (all position: Nat |
-      ambient-value' other-call position =
-        ambient-value other-call position)).
-
-where
-
-> `Abort within` makes the transaction inactive and discards its draft and
-> pending outputs without changing the durable or ambient stack. Effects not
-> represented by those stacks lie outside the transaction and are not rolled
-> back.
-Transactions ~> Abort within @ transaction: Transaction,
-                           transaction-active? transaction.
----
-~transaction-active?' transaction and
-transaction-created?' transaction = transaction-created? transaction and
-transaction-call' transaction = transaction-call transaction and
-transaction-slot' transaction = transaction-slot transaction and
-transaction-generation' transaction = transaction-generation transaction and
-draft-depth' transaction = 0 and
-pending-depth' transaction = 0 and
-(all position: Nat |
-  draft-value' transaction position = draft-value transaction position and
-  pending-value' transaction position = pending-value transaction position).
-
-all other: Transaction, other != transaction |
-  transaction-active?' other = transaction-active? other and
-  transaction-created?' other = transaction-created? other and
-  transaction-call' other = transaction-call other and
-  transaction-slot' other = transaction-slot other and
-  transaction-generation' other = transaction-generation other and
-  draft-depth' other = draft-depth other and
-  pending-depth' other = pending-depth other and
-  (all position: Nat |
-    draft-value' other position = draft-value other position and
-    pending-value' other position = pending-value other position).
+    call-definition' other = call-definition other).

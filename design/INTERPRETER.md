@@ -56,7 +56,7 @@ The main components are these:
 | Session | Lifetime root, persistent operand stack, host services, and unit transaction | `session.zig` |
 | Reader and source archive | Turn source into executable values while retaining optional diagnostic lineage | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
-| Names and modules | Late binding, scopes, immutable module images, generations, and durable module state | `env.zig`, `modules.zig` |
+| Names and modules | Late binding, scopes, immutable module images, and generations | `env.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
@@ -687,8 +687,7 @@ An activation needs three related but non-identical facts:
 
 - `scope`: the root its own definitions land in, and whether they may;
 - `resolution_scope`: the root reflection and unlinked words resolve in; and
-- `home`: the module image and registration whose privacy and durable state it
-  may use.
+- `home`: the module image and registration whose privacy it may use.
 
 Whether definitions may land is a flag on the site. Top-level code and module
 construction set it; isolated combinator applications, `@attempt`, and tasks
@@ -704,14 +703,17 @@ an image that has private code but no registered state slot yet.
 This is a recurring architectural rule: correlated ownership, liveness, and
 authority facts cross a boundary as one nominal value.
 
-### Images, registrations, and state have different lifetimes
+### Images and registrations have different lifetimes
 
 A module image is immutable code and metadata with its own environment and
 root scope, created by `@defm` and published in the same step. A registry
-registration publishes an image under a canonical name as one generation. The registry slot owns the durable stack and the FIFO
-arbiter used by `within`; an image supplies the initial stack template.
+registration publishes an image under a canonical name as one generation and
+owns nothing else: a slot holds its current generation and the lease count
+that keeps its storage valid while old code or a resolution cursor can still
+name it. A construction body that leaves values on its stack is refused
+before publication, so no image carries state out of its body.
 
-Separating the three concepts supports these cases cleanly:
+Separating the concepts supports these cases cleanly:
 
 - replacing a registration publishes a new generation without rewriting the
   old image; and
@@ -744,18 +746,6 @@ call-site cache involved. Core is not an image and gains no module lifecycle
 by being nameable: the registry refuses the exact name `core` for both module
 registration and alias publication, which is the single boundary that owns
 registry names, so no later registration can capture the qualifier.
-
-### Stateful module application is an explicit transaction
-
-`within` requests one FIFO state turn, snapshots or drafts the slot's durable
-stack, runs the application against that draft, and publishes only after
-successful completion. The granted turn is the mutation capability. A Unit has
-one consumable turn authority, so the type system excludes nested or
-cross-module state applications.
-
-Old code remains executable, but a superseded home cannot publish new durable
-state. Removal closes admission, lets outstanding turns settle, and separates
-the slot's teardown from delayed generation retirement.
 
 ### Module visibility belongs to the defining source
 

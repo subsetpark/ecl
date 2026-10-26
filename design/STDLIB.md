@@ -617,8 +617,8 @@ to `len 0 =`.
 `( word -- ... )` — Resolve and apply a word value late through the ordinary
 word-dispatch path, exactly as if that word appeared in executable position.
 Non-words are `'type`; missing words are `'undefined-word`. Module homes,
-private resolution, annotations, tracing, builtins, native calls,
-cancellation, and `within` authority are preserved.
+private resolution, annotations, tracing, builtins, native calls, and
+cancellation are preserved.
 
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`'domain` otherwise):
@@ -1051,7 +1051,7 @@ the selector is always one whole-value key, including a list key.
 module path, or the reserved qualifier `'core`, and one unqualified,
 non-reserved binding segment, then construct their qualified executable word
 directly from the interned components. It does not parse source, intern
-anything new, or grant module-state/lifecycle authority; use `execute` to
+anything new, or grant lifecycle authority; use `execute` to
 invoke the result dynamically. `'core 'dup qualify` reaches the primitive even
 where `dup` is shadowed.
 
@@ -1472,20 +1472,6 @@ values as the constructor's separate list operand.
 # => 3 3
 ```
 
-### within
-`( quotation -- ... )` — Run the quotation against a
-private draft of the home module's durable stack, then publish the
-remaining draft as that stack and deliver whatever `without` moved
-outward, in invocation order. Legal only in a published word whose
-definition-site home is a live, current module generation; everywhere else
-it is `'domain`. Parking, nesting, and a second module's slot are
-`'domain`. Any failure publishes nothing. See [Modules](SPEC.md#modules).
-
-### without
-`( -- )` — Move the draft's top value onto the pending outputs of the
-active `within` application. `'domain` outside one, `'underflow` on an
-empty draft. Outputs reach the caller only if the application publishes.
-
 ### word
 `( symbol -- word )` — Convert a symbol to an executable word with the same
 spelling. Conversion does not resolve the name or execute it. The result
@@ -1526,8 +1512,8 @@ arrival order, each as an isolated unit over that stack, so a failing
 quotation leaves the state exactly as it was. A `call` quotation is
 `( state... -- state... result )`: the top of its result stack is the reply and
 the rest is the new state. A `send` quotation is `( state... -- state... )` and
-keeps its whole result stack. This is the stateful-module idiom as an ordinary
-task, and the replacement for the `rng` module's durable stack:
+keeps its whole result stack. This is how a program keeps state that outlives
+a word, for example an ambient random generator:
 
 ```ecl
 [0 0] agent.start 'rng set
@@ -1667,8 +1653,7 @@ scheduler and resumes on its next turn without starting the timer thread.
 Cancellation before or after registration wakes the unit with `'cancelled`
 and retires its timer entry. A negative duration is `'domain`, a non-int is
 `'type`, and a duration whose deadline lies beyond any instant the clock can
-report is `'overflow`; all three fail before anything is registered. Sleeping
-inside a `within` application is `'domain`.
+report is `'overflow`; all three fail before anything is registered.
 
 #### Examples
 
@@ -3190,7 +3175,22 @@ one of the listed symbols; leave every other result unchanged.
 
 Explicit-state pseudorandom draws are pure except for `entropy`; see
 [Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw
-returns the advanced state alongside its result.
+returns the advanced state alongside its result. An ambient generator is an
+agent holding that state: `[0 0] agent.start 'rng set` then
+`(5 rand.int) rng agent.call`.
+
+### deal
+`( state count pool -- state results )` — Draw `count` distinct ints in
+`[0, pool)` without replacement, advancing the state by `count`. Work and
+memory follow `count`, never `pool`. A negative count or pool, or a count
+above the pool, is `'domain`; a non-int count or pool is `'type`.
+
+#### Examples
+
+```ecl
+[7 0] 3 10 rand.deal pair
+# => ([7 3] [7 0 4])
+```
 
 ### entropy
 `( -- result )` — Read one int from the host CSPRNG. This is the language's
@@ -3222,51 +3222,16 @@ own counter position, so materialization order cannot change the list.
 # => ([7 4] [3 0 0 3])
 ```
 
-## rng
-
-These words transact against the module's durable `[key counter]` state. A
-fresh process begins with a fixed key; use `rand.entropy rng.seed` to opt into
-nondeterminism.
-
-### deal
-`( count pool -- results )` — Draw distinct values below `pool` without
-replacement. The sample is unbiased; `count > pool` is `'domain`.
-
-#### Examples
-
-```ecl
-42 rng.seed 4 8 rng.deal
-# => [5 7 0 4]
-```
-
-### float
-`( -- result )` — Draw one uniform float in `[0, 1)`.
-
-### int
-`( bound -- result )` — Draw one uniform integer below a positive bound.
-
-### ints
-`( count bound -- results )` — Draw a vector of uniform integers below a
-positive bound.
-
-#### Examples
-
-```ecl
-42 rng.seed 5 10 rng.ints
-# => [3 1 8 4 0]
-```
-
-### seed
-`( key -- )` — Rekey the generator and reset its counter.
-
 ### shuffle
-`( values -- values )` — Return a uniformly random permutation of a list.
+`( state values -- state values )` — Return a uniformly selected permutation
+of a list, advancing the state by the list's length. Any element kind is
+permuted and the list keeps its representation. A non-list is `'type`.
 
 #### Examples
 
 ```ecl
-42 rng.seed [10 20 30 40] rng.shuffle
-# => [20 40 10 30]
+[7 0] [10 20 30 40] rand.shuffle pair
+# => ([7 4] [40 20 30 10])
 ```
 
 ## str

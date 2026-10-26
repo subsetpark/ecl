@@ -52,8 +52,7 @@ Formal actions use guards to define the states and inputs for which their
 transitions are valid. Models do not enumerate every invalid invocation as an
 error-labelled no-op; error kinds and unchanged-state requirements outside an
 action's guard remain specified in prose. A failure is modeled as an explicit
-action when failure itself changes modeled state, such as aborting an active
-transaction while preserving its durable and caller stacks.
+action when failure itself changes modeled state.
 
 Action parameters identify either inputs supplied by ECL execution or existing
 semantic entities whose transition the action records; they need not denote
@@ -87,9 +86,10 @@ written in and resolves the binding at execution time, against the bindings its
 unit observes.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
-immutable code images from named registrations; a registration owns the
-durable operand stack used by stateful module operations. Tasks execute
-isolated units under structured concurrency.
+immutable code images from named registrations; a registration publishes an
+image under a name and owns no operand stack. Tasks execute isolated units
+under structured concurrency, and a task's mailbox is the only state outside
+a unit's own stack.
 
 ## Notation and terminology
 
@@ -128,8 +128,8 @@ occurrence. A **quotation** is a list applied as a program. A **binding**
 associates a name with an executable body and metadata; it is not a value. A
 **scope** is a binding map with a fixed parent. An **activation** is one
 invocation of a binding. A **module image** is the immutable code and
-definitions `@defm` constructs; a **registration** is the durable named slot
-through which an image is published and invoked.
+definitions `@defm` constructs; a **registration** is the named slot through
+which an image is published and invoked.
 
 ## Source language
 
@@ -546,7 +546,7 @@ Words that are isolated but *not* marked, with their reasons:
 - `each`, `zip-with`, `fold`, `scan`, `stencil`, `unfold`, `for` — they
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
-- `infra` and `within` — they apply on an explicitly named *other* stack.
+- `infra` — it applies on an explicitly supplied *other* stack.
 - `import`, `load`, `unmodule` — they publish or retire without taking a
   quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
@@ -849,8 +849,10 @@ accumulates between units, tasks, or module loads.
   nondeterministic word in the language. A program is reproducible unless
   it explicitly seeds from `rand.entropy`; there is no ambient default seed
   drawn at startup, and no word silently reaches a CSPRNG.
-- The `rng` module carries a state so ordinary code need not thread one
-  by hand (see The standard library).
+- `rand.shuffle` and `rand.deal` thread the same state through a permutation
+  and a draw without replacement. Code that wants an ambient generator keeps
+  the state in an agent: `[0 0] agent.start 'rng set` then
+  `(5 rand.int) rng agent.call` (see The standard library).
 
 ## Chars and strings
 
@@ -911,11 +913,12 @@ that name.
   module path, the reserved name `core`, or a standard-library module name is
   `'domain`, and in each case the body never runs. With a valid name it runs the
   body on a fresh, isolated environment, freezes the resulting image (its
-  environment, its definitions, and the body's final operand stack as an
-  *initial-state template*), and publishes that image as the registration's new
-  generation. Publication is an upsert: a missing name creates its
-  registration, and an existing name installs the new image while keeping the
-  durable state that registration already owns. A body failure publishes
+  environment and its definitions), and publishes that image as the
+  registration's new generation. A body that leaves one or more values on its
+  stack is `'domain` at completion and publishes nothing: a module body
+  defines words and keeps no state. Publication is an upsert: a missing name
+  creates its registration, and an existing name installs the new image as the
+  current generation and carries nothing else over. A body failure publishes
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
@@ -944,15 +947,15 @@ that name.
 
 ### Construction and definitions
 
-- **Construction uses ordinary unit rollback.** Its scope, bindings, and draft
-  initial-state stack are provisional. On failure they are discarded and no
+- **Construction uses ordinary unit rollback.** Its scope and bindings are
+  provisional. On failure they are discarded and no
   module is registered. I/O, completed registry publications, and other
   external effects performed by the body are not rolled back. A construction
   body starts no tasks: `@spawn`, `@give`, and `@each` are `'domain` while
   construction is in progress, at any depth, including inside a helper word the
   body calls and inside an `@attempt` nested in the body. Registration commits atomically
   only after an image exists. A failed registration leaves the previous
-  directory entry, current generation, and durable state exactly as they were.
+  directory entry and current generation exactly as they were.
 - The registry is flat. A module body may define another module with `@defm`,
   but that registration creates an independent module with its own canonical name
   and lifetime; it does not establish lexical nesting or parent ownership.
@@ -978,13 +981,12 @@ that name.
   declaration without retaining it or checking test-name uniqueness. Test
   Sessions retain the catalog; duplicate test names in one test image are
   `'domain`.
-- A test-built module image freezes its definitions, initial-state template,
-  and test catalog together; an application-built image has an empty catalog.
-  Registration publishes that image as one generation:
-  reload replaces code and tests atomically while preserving slot state;
-  removal removes both; aliases never create another suite; and registering
-  one image under two canonical names creates two independently discoverable
-  suites with independent registration state.
+- A test-built module image freezes its definitions and test catalog
+  together; an application-built image has an empty catalog. Registration
+  publishes that image as one generation: reload replaces code and tests
+  atomically; removal removes both; aliases never create another suite; and
+  registering one image under two canonical names creates two independently
+  discoverable suites.
 - **Test discovery and execution form a closed Session mode.** Ordinary
   Sessions reject `tests` and `@test` with `'domain`. A test Session's `tests`
   returns canonical registrations once each, including root sources' private
@@ -995,12 +997,11 @@ that name.
   generation handle, state handle, or executable capability.
 - `descriptor @test` validates and late-binds the descriptor against the
   current canonical registration and its source when specified. A present test
-  runs in a fresh isolated Unit under that generation's private home and durable
-  registration
-  state. It returns exactly `{'ok (values)}` or `{'err error}`; a removed or
+  runs in a fresh isolated Unit under that generation's private home. It
+  returns exactly `{'ok (values)}` or `{'err error}`; a removed or
   replaced-away test is a reified missing-test error. The runner's operand
-  stack never seeds the test, state mutations persist between invocations in
-  the Session, and Session teardown destroys that state. External effects are
+  stack never seeds the test, registry changes persist between invocations in
+  the Session, and Session teardown destroys them. External effects are
   not transactional or rolled back.
 - **`ecl test` delegates framework policy to ECL.** The command requires a
   valid module map with a local scope, loads each ECL artifact of that scope
@@ -1010,7 +1011,7 @@ that name.
   status; project, load, resolve, or runner failures are command failures.
   The default runner is sequential and deterministic, reports every result,
   continues after ordinary failures, and exits 1 when any test failed.
-- `*module*`, `within`, and every other slot-dependent operation use only the
+- `*module*` and every other slot-dependent operation use only the
   registration context established by actual dispatch; they never infer one
   from image identity. Missing authority becomes a `'domain` error only when
   such an operation is reached, so construction roots, escaped quotations, and
@@ -1109,73 +1110,29 @@ that name.
 
   Seed values only initialize the construction stack. They are never traversed
   or re-scoped, and they cannot affect whether the body is module text.
-- **`within` is the explicit stack boundary.** `within` runs a quotation
-  against the current registration's durable stack rather than the ambient
-  operand stack. It requires a
-  `registered(generation, slot, image)` invocation context. A construction root,
-  escaped module quotation, or session activation has no slot and
-  raises `'domain` if it reaches `within`. The operation never infers a slot
-  from an image or targets some caller's slot. Homeless helpers and same-image
-  calls preserve an existing registered context; dispatch into another image
-  replaces it according to the ordinary invocation rules. Semantically,
-  `within` is the module-state counterpart of `infra`: `infra` names a supplied
-  list as a temporary stack, while `within` selects the active registration's
-  durable stack.
-- **`without` is the explicit outward boundary.** Inside an active
-  `within` quotation, `without` moves its top value outward; elsewhere it is
-  `'domain`, and on an empty stack it is `'underflow`. A value remains in the
-  durable stack and is also returned only when the quotation duplicates it
-  before `without`; captured values stay in state unless the quotation consumes
-  or moves them outward.
-- I/O and other effects performed by a failing `within` quotation are not
-  rolled back. A later failure in the enclosing word or unit does not roll back
-  a transaction that already returned.
-- Concurrent `within` attempts have no specified FIFO order or fairness
-  policy. Transactions on distinct slots and activity unrelated to a
-  registration's durable stack may proceed concurrently.
-- **A `within` transaction cannot wait on another ECL task.** `task.await`,
-  `task.await-any`, `task.await-for`, and any other task-waiting operation
-  raise `'domain` while a `within` transaction is active, even if the requested
-  result is already available. The error occurs before consuming a task or
-  registering a wait. An implementation may preempt or internally suspend the
-  executing task for scheduling or I/O without changing the semantics: the
-  transaction retains exclusive use of its slot until it succeeds or fails,
-  while unrelated tasks and other registration slots may continue.
-- **`within` transactions do not nest.** If a `within` transaction is active,
-  reaching another `within` raises `'domain` before inspecting or acquiring
-  its target slot. This applies to the same slot, an alias of that slot, and a
-  different module's slot alike. Ordinary calls into the same or another
-  module remain legal; a call fails on this ground only if it reaches another
-  `within`.
-- **A `within` transaction cannot mutate the module registry.** `unmodule`,
-  `alias`, and any other primitive registry mutation raise `'domain` while a
-  transaction is active, before that operation consumes its operands, resolves
-  a target registration, or publishes any registry change. `@defm` is refused
-  the same way at publication, after its body has run. A transaction therefore holds authority over exactly its already-selected
-  slot and cannot acquire registration authority over another slot as a side
-  effect.
+- **A module holds no state.** A registration publishes an image and nothing
+  else: there is no per-registration operand stack, no transaction against
+  one, and no operation that reads or writes a module's storage. A construction
+  body must consume everything it pushed; a body that leaves values on its
+  stack fails with `'domain` and publishes nothing. State that must outlive a
+  word lives in a task and is reached through its mailbox (see
+  [Mailboxes](#mailboxes)).
 - **Slot lifetime is an owned capability.** Every published generation owns a
   non-retargetable slot lease for its whole lifetime. Resolution retains an
   operation lease before dropping the directory snapshot that supplied the
-  slot entry, and `within`, reload, and removal retain that witness across
-  their complete check/use interval.
-  Removal does not wait for old generation pins, but retired slot storage is
-  not reusable until all such leases, the arbiter, and old directory snapshots
-  have drained. A removed generation can therefore observe only its original
-  closed slot, never an unrelated module that later reuses registry capacity.
-- Failed registration changes neither code nor state. Stack-layout evolution
-  is an explicit user protocol: replacement code must understand the retained
-  representation and may migrate it with an ordinary `within`; ECL neither
-  inspects nor names positions in the stack.
+  slot entry, and reload and removal retain that witness across their
+  complete check/use interval. Removal does not wait for old generation pins,
+  but retired slot storage is not reusable until all such leases and old
+  directory snapshots have drained. A removed generation can therefore
+  observe only its original closed slot, never an unrelated module that later
+  reuses registry capacity.
+- Failed registration changes nothing: the previous generation, if any,
+  stays current.
 - `unmodule` accepts a canonical name or alias. An unregistered name is
-  `'undefined-word`; attempting removal during a `within` transaction is
-  `'domain` under the general registry-mutation rule. An already-dispatched
-  call may finish after removal, but attempting a new `within` from its retired
-  generation is `'domain`.
-- Module state is process-local: there is no persistence across process
-  restart, and the native ABI exposes no module-state capability, so an
-  `.eclmod` word can neither observe an internal module home nor reach a durable
-  stack.
+  `'undefined-word`. An already-dispatched call may finish after removal.
+- Modules are process-local: there is no persistence across process restart,
+  and the native ABI exposes no module capability, so an `.eclmod` word
+  cannot observe an internal module home.
 - **Surface**: `import` consumes a module-name symbol and a list of attribute
   symbols, then publishes those attributes under their own names in the current
   environment — which inside a module body means the image, publicly, on the
@@ -1193,7 +1150,7 @@ that name.
   executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
   its module home, private lookup, annotations, tracing, native/builtin path,
-  cancellation, and `within` authority. `alias` registers a short registry
+  and cancellation. `alias` registers a short registry
   name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
