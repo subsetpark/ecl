@@ -1542,49 +1542,8 @@ fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResol
 pub const ModulePublicNameCursor = Registration.PublicNameCursor;
 
 /// A borrowed reference to one immutable image, valid for the call it is passed
-/// to and no longer. Only a `SealedImage` can produce
-/// one, so the borrow always starts from something that owns a reference; a
-/// consumer that outlives the call — a publication cursor — upgrades it to a
-/// `RetainedImage` immediately rather than trusting its caller's lifetime.
-pub const ImageRef = enum(usize) {
-    _,
-
-    fn init(target: *ModuleImage) ImageRef {
-        return @fromBackingInt(@intCast(@intFromPtr(target)));
-    }
-    fn image(self: ImageRef) *ModuleImage {
-        return @ptrFromInt(@backingInt(self));
-    }
-};
-
-/// One retained image reference, owned for as long as its holder lives. A
-/// publication cursor is resumable across many scheduler turns, so it owns what
-/// it dereferences instead of trusting a caller to outlive it: an `ImageRef` is
-/// a borrow valid at the call that produced it, and nothing stops the caller
-/// from releasing its sealed image before the cursor next advances.
-const RetainedImage = enum(usize) {
-    consumed = 0,
-    _,
-
-    fn retain(borrowed: ImageRef) RetainedImage {
-        const target = borrowed.image();
-        target.retain();
-        return @fromBackingInt(@intCast(@intFromPtr(target)));
-    }
-    fn image(self: RetainedImage) *ModuleImage {
-        std.debug.assert(self != .consumed);
-        return @ptrFromInt(@backingInt(self));
-    }
-    fn deinit(self: *RetainedImage) void {
-        if (self.* == .consumed) return;
-        self.image().release();
-        self.* = .consumed;
-    }
-};
-
-/// Unique ownership of an image that no value and no registration holds yet.
-/// Every exit either transfers the reference into a module value or releases
-/// it; publication never consumes it, because a registration retains its own.
+/// Unique ownership of an image that no registration holds yet. Every exit
+/// either seals it into a `SealedImage` or releases it.
 pub const OwnedImage = enum(usize) {
     consumed = 0,
     _,
@@ -1657,8 +1616,8 @@ pub const OwnedImage = enum(usize) {
 };
 
 /// Unique ownership of a finished image. It has no mutation surface at all:
-/// the only things left to do with an image are register it, hand it to a
-/// program as a value, and release it.
+/// the only things left to do with an image are move it into a registration
+/// cursor or release it.
 pub const SealedImage = enum(usize) {
     consumed = 0,
     _,
@@ -1669,11 +1628,6 @@ pub const SealedImage = enum(usize) {
     fn borrow(self: *const SealedImage) *ModuleImage {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@backingInt(self.*));
-    }
-    /// A borrow for publication. Registration retains its own reference, so
-    /// this capability's holder keeps owning the one it was sealed with.
-    pub fn ref(self: *const SealedImage) ImageRef {
-        return .init(self.borrow());
     }
     pub fn move(self: *SealedImage) SealedImage {
         const result = self.*;
@@ -2724,10 +2678,9 @@ pub const Registry = enum(usize) {
         };
 
         registry: *Registry,
-        /// Retained for the cursor's whole lifetime and released by `deinit`,
-        /// so the image stays readable across every resumption regardless of
-        /// what the caller does with its own reference.
-        image: RetainedImage,
+        /// Owned by the cursor from construction and released by `deinit`;
+        /// the generation record takes its own reference at publication.
+        image: SealedImage,
         name: intern.ModuleName,
         provenance: RegistrationProvenance,
         state: State,
@@ -2741,13 +2694,13 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            image: ImageRef,
+            image: SealedImage,
             name: intern.ModuleName,
             provenance: RegistrationProvenance,
         ) RegistrationCursor {
             return .{
                 .registry = registry,
-                .image = .retain(image),
+                .image = image,
                 .name = name,
                 .provenance = provenance,
                 .state = .{ .maintenance = registry.maintenanceCursor() },
@@ -2802,7 +2755,7 @@ pub const Registry = enum(usize) {
             if (self.registration != null) return;
             self.registration = try Registration.create(
                 self.registry.allocator(),
-                self.image.image(),
+                self.image.borrow(),
                 self.name,
                 self.provenance,
             );
@@ -3039,7 +2992,7 @@ pub const Registry = enum(usize) {
 
     pub fn registrationCursor(
         self: *Registry,
-        image: ImageRef,
+        image: SealedImage,
         name: intern.ModuleName,
         provenance: RegistrationProvenance,
     ) RegistrationCursor {
@@ -3890,10 +3843,10 @@ pub const testing = if (builtin.is_test) struct {
 
     pub fn register(
         registry: *Registry,
-        image: ImageRef,
+        image: *SealedImage,
         name: intern.ModuleName,
     ) CommitError!u64 {
-        var cursor = registry.registrationCursor(image, name, .ordinary);
+        var cursor = registry.registrationCursor(image.move(), name, .ordinary);
         defer cursor.deinit();
         while (true) switch (try cursor.advance()) {
             .pending => {},

@@ -1379,7 +1379,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     defer image.deinit();
     var sealed = try image.seal(null);
     defer sealed.deinit();
-    _ = try modules.testing.register(registry, sealed.ref(), try intern.internModuleName("probe"));
+    _ = try modules.testing.register(registry, &sealed, try intern.internModuleName("probe"));
 
     try Probe.runOk(&runtime, "'task.pending probe.reflect 99");
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);

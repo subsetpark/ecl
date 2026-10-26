@@ -168,7 +168,7 @@ fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void
     defer candidate.deinit();
     var sealed = try candidate.seal(null);
     defer sealed.deinit();
-    _ = try modules.testing.register(registry, sealed.ref(), name);
+    _ = try modules.testing.register(registry, &sealed, name);
 }
 
 test "module names: branded factories enforce the reader symbol grammar" {
@@ -986,7 +986,7 @@ fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool
     defer candidate.deinit();
     var sealed = candidate.seal(null) catch return false;
     defer sealed.deinit();
-    _ = modules.testing.register(context.registry, sealed.ref(), name) catch return false;
+    _ = modules.testing.register(context.registry, &sealed, name) catch return false;
     return true;
 }
 
@@ -1075,20 +1075,18 @@ test "registry: old generation leases survive reload and reclaim after release" 
     } });
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &first_sealed, module_name);
     var old = modules.testing.acquire(&registry, module_name).?;
     var second = try registry.createImage();
     defer second.deinit();
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &second_sealed, module_name);
     try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
     try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
+    // The registration cursor took the sealed image, so the superseded
+    // generation's lease is the last thing keeping the definition body alive.
     old.deinit();
-    // Construction and registration are independent owners now, so the test's
-    // own sealed-image reference is the other retainer of the definition body;
-    // the superseded generation reclaims only once both are gone.
-    first_sealed.deinit();
     host.cleanup().drain();
     try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
 }
@@ -1117,7 +1115,7 @@ test "registry: generation cursors independently pin their snapshot" {
     _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &first_sealed, module_name);
 
     var lease = modules.testing.acquire(&registry, module_name).?;
     var lookup = lease.resolveCursor(intern.namespaceId(value_name));
@@ -1127,7 +1125,7 @@ test "registry: generation cursors independently pin their snapshot" {
     defer second.deinit();
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, &second_sealed, module_name);
     for (0..64) |_| _ = releases.advance(1);
 
     const old = while (true) switch (lookup.advance()) {
@@ -1247,7 +1245,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var first_sealed = try first.seal(null);
     defer first_sealed.deinit();
-    _ = try modules.testing.register(&registry, first_sealed.ref(), first_name);
+    _ = try modules.testing.register(&registry, &first_sealed, first_name);
     try modules.testing.alias(&registry, alias_name, first_name);
     var lease = modules.testing.acquire(&registry, try intern.internModuleName("allocation-alias")).?;
     defer lease.deinit();
@@ -1261,7 +1259,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var second_sealed = try second.seal(null);
     defer second_sealed.deinit();
-    _ = try modules.testing.register(&registry, second_sealed.ref(), first_name);
+    _ = try modules.testing.register(&registry, &second_sealed, first_name);
     var third = try registry.createImage();
     defer third.deinit();
     const constant = try TestBinding.init(allocator);
@@ -1269,7 +1267,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     _ = try third.publishDefinition(word_name, constant.module(effect, .public));
     var third_sealed = try third.seal(null);
     defer third_sealed.deinit();
-    _ = try modules.testing.register(&registry, third_sealed.ref(), second_name);
+    _ = try modules.testing.register(&registry, &third_sealed, second_name);
 }
 
 test "environment and registry APIs propagate every allocation failure" {

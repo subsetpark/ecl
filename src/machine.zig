@@ -4061,35 +4061,31 @@ pub const Machine = struct {
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
         publication: heap.Owned(modules.Registry.BuiltinCandidateCursor),
-        candidate: ?heap.Owned(modules.SealedImage) = null,
         commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
 
         pub fn advance(evaluator: *Machine, self: *BuiltinLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             if (self.commit == null) {
-                if (self.candidate == null) {
-                    switch (self.publication.borrowMut().advance() catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.InvalidName => return evaluator.fail(
-                            .contract,
-                            "builtin module declares an invalid word name",
-                        ),
-                    }) {
-                        .pending => return .stepped,
-                        .complete => |candidate| {
-                            var built = candidate;
-                            errdefer built.deinit();
-                            self.candidate = .init(try built.seal(evaluator.moduleRecognition(.standard_library)));
-                            return .stepped;
-                        },
-                    }
+                switch (self.publication.borrowMut().advance() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidName => return evaluator.fail(
+                        .contract,
+                        "builtin module declares an invalid word name",
+                    ),
+                }) {
+                    .pending => return .stepped,
+                    .complete => |candidate| {
+                        var built = candidate;
+                        errdefer built.deinit();
+                        const sealed = try built.seal(evaluator.moduleRecognition(.standard_library));
+                        self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(
+                            sealed,
+                            self.name,
+                            .standard_library,
+                        ));
+                        return .stepped;
+                    },
                 }
-                self.commit = .init(evaluator.unit.inherited.registry.registrationCursor(
-                    self.candidate.?.borrow().ref(),
-                    self.name,
-                    .standard_library,
-                ));
-                return .stepped;
             }
             switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -4132,12 +4128,10 @@ pub const Machine = struct {
             },
             commit: struct {
                 instance: heap.Owned(*native_module.ModuleInstance),
-                candidate: heap.Owned(modules.SealedImage),
                 cursor: heap.Owned(modules.Registry.RegistrationCursor),
             },
             published: struct {
                 instance: heap.Owned(*native_module.ModuleInstance),
-                candidate: heap.Owned(modules.SealedImage),
             },
 
             pub fn deinit(
@@ -4154,13 +4148,9 @@ pub const Machine = struct {
                     },
                     .commit => |*commit| {
                         commit.cursor.deinit(releases, storage_allocator);
-                        commit.candidate.deinit(releases, storage_allocator);
                         commit.instance.deinit(releases, storage_allocator);
                     },
-                    .published => |*published| {
-                        published.candidate.deinit(releases, storage_allocator);
-                        published.instance.deinit(releases, storage_allocator);
-                    },
+                    .published => |*published| published.instance.deinit(releases, storage_allocator),
                 }
                 self.* = undefined;
             }
@@ -4202,20 +4192,19 @@ pub const Machine = struct {
                         // the publication stay with this driver's state.
                         var built = candidate;
                         errdefer built.deinit();
-                        var sealed = heap.Owned(modules.SealedImage).init(try built.seal(evaluator.moduleRecognition(self.provenance)));
+                        const sealed = try built.seal(evaluator.moduleRecognition(self.provenance));
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
                         const cursor = evaluator.unit.inherited.registry.registrationCursor(
-                            sealed.borrow().ref(),
+                            sealed,
                             self.name,
                             self.provenance,
                         );
                         self.state.borrowMut().* = .{ .commit = .{
                             .instance = .init(instance),
-                            .candidate = .init(sealed.take()),
                             .cursor = .init(cursor),
                         } };
                         return .stepped;
@@ -4233,7 +4222,6 @@ pub const Machine = struct {
                     .complete => {
                         const next: State = .{ .published = .{
                             .instance = commit.instance,
-                            .candidate = commit.candidate,
                         } };
                         var cursor = commit.cursor;
                         self.state.borrowMut().* = next;
@@ -8840,17 +8828,14 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         self.moduleRecognition(owned.provenance),
     ));
     errdefer sealed.deinit(self.releaseDomain(), self.allocator());
-    // The cursor retains the image from its construction, so it is built
-    // only once the driver that will own it exists: nothing can fail after.
     const driver = try self.unit.allocator.create(ModuleCompletionDriver);
-    const registration = self.publicationRegistry(owned.registration, owned.provenance).registrationCursor(
-        sealed.borrow().ref(),
-        owned.registration,
-        owned.provenance,
-    );
+    // The cursor owns the sealed image from here; nothing can fail after.
     driver.* = .{
-        .sealed = .init(sealed.take()),
-        .cursor = .init(registration),
+        .cursor = .init(self.publicationRegistry(owned.registration, owned.provenance).registrationCursor(
+            sealed.take(),
+            owned.registration,
+            owned.provenance,
+        )),
     };
     self.adoptDriver(driver);
 }
@@ -8859,7 +8844,6 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
 const ModuleCompletionDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
-    sealed: heap.Owned(modules.SealedImage),
     cursor: heap.Owned(modules.Registry.RegistrationCursor),
 
     pub fn advance(evaluator: *Machine, self: *ModuleCompletionDriver) MachineError!WorkProgress {
