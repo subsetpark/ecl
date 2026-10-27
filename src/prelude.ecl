@@ -58,6 +58,14 @@
 (sequence -- value : "Return the final element of a nonempty sequence.")
 (dup len 1 - at) `last def
 
+### def max-of
+(sequence -- value : "Return the greatest element of a nonempty sequence.")
+(dup first (max) fold) `max-of def
+
+### def min-of
+(sequence -- value : "Return the least element of a nonempty sequence.")
+(dup first (min) fold) `min-of def
+
 ### def neg
 (x -- y : "**Pervasive.** Negate numeric values with checked integer overflow.")
 (-1 *) `neg def
@@ -74,6 +82,10 @@
 ### def pair
 (first second -- list : "Collect two stack values into a two-element list in stack order.")
 (() cons cons) `pair def
+
+### def rest
+(list -- list : "Return all but the first element of a nonempty list.")
+(dup first pop 1 drop) `rest def
 
 ### def reverse
 (list -- list :
@@ -125,8 +137,8 @@
 
 ### def abs
 (x -- y :
- "**Pervasive.** Return absolute numeric values with checked integer overflow. Defined in ecl; `'abs
-  see` renders the definition.")
+ "**Pervasive.** Return absolute numeric values with checked integer overflow. Defined in ecl; ``
+  `abs see `` renders the definition.")
 (dup neg 0 + swap max) `abs def
 
 ### def append
@@ -146,17 +158,15 @@
   execute, so it is quoted as `((x) core.first)`, the quote's own expansion.")
 (dup type `symbol match? (wrap (core.first) cons) (wrap) if) `literal def
 
-### def max-of
-(sequence -- value : "Return the greatest element of a nonempty sequence.")
-(dup first (max) fold) `max-of def
+### def scan1
+(list quotation -- list :
+ "*Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the
+  successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.")
+(|xs quotation| xs first wrap xs rest xs first quotation scan cat) `scan1 def
 
-### def min-of
-(sequence -- value : "Return the least element of a nonempty sequence.")
-(dup first (min) fold) `min-of def
-
-### def rest
-(list -- list : "Return all but the first element of a nonempty list.")
-(dup first pop 1 drop) `rest def
+### def uncons
+(list -- first rest : "Split a nonempty list into its first element and remaining elements.")
+(dup first swap rest) `uncons def
 
 ### def zip
 (left right -- pairs : "Pair corresponding elements of two conforming sequences.")
@@ -203,12 +213,6 @@
   word `w` is prefixed as `((w) first)`.")
 (swap literal swap compose) `partial def
 
-### def scan1
-(list quotation -- list :
- "*Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the
-  successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.")
-(|xs quotation| xs first wrap xs rest xs first quotation scan cat) `scan1 def
-
 ### def set
 (: "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a
     constant word in the current scope. Reference applies the constant's body and pushes the exact
@@ -224,9 +228,9 @@
     `swap literal swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.")
 (swap literal swap defp) `setp def
 
-### def uncons
-(list -- first rest : "Split a nonempty list into its first element and remaining elements.")
-(dup first swap rest) `uncons def
+### def unappend
+(list -- initial last : "Split a nonempty list into its initial elements and last element.")
+(reverse uncons reverse swap) `unappend def
 
 ### def while-values
 (value predicate step -- list :
@@ -271,10 +275,6 @@
 ### def rollup
 (x y z -- z x y : "Rotate the top three stack values upward, from x y z to z x y.")
 (swap (swap) dip) `rollup def
-
-### def unappend
-(list -- initial last : "Split a nonempty list into its initial elements and last element.")
-(reverse uncons reverse swap) `unappend def
 
 ### def with
 (values quotation -- quotation :
@@ -424,7 +424,7 @@
   nonempty, and odd: `[key action … else]`. Keys are inert data: any value, never executed, with
   duplicates legal and the first `match?` result of 1 winning. Every action and the else must be a
   quotation, and all of them are validated before any comparison or user quotation runs. When no key
-  matches, the else runs. Defined in ecl; `'case see` renders the definition.")
+  matches, the else runs. Defined in ecl; `` `case see `` renders the definition.")
 (dup type `list match?
  # A case table is [key action ... else]: nonempty and odd in length.
  (dup len dup 0 > swap 2 mod 1 = and

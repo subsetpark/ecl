@@ -47,8 +47,8 @@
   "Parse a request line such as `\"GET /users?id=42 HTTP/1.1\"` into `{method target path query
    version}`: three space-separated tokens, with `` `path `` and `` `query `` the target split at
    its first `?`, undecoded, and `` `query `` `\"\"` when there is no `?`. Any other token count is
-   `` `domain `` with `'data {status 400}`; a version other than `HTTP/1.1` or `HTTP/1.0` is ``
-   `domain `` with `'data {status 505}`. A non-string is `` `type ``.")
+   `` `domain `` with `` `data {status 400} ``; a version other than `HTTP/1.1` or `HTTP/1.0` is ``
+   `domain `` with `` `data {status 505} ``. A non-string is `` `type ``.")
  ("http.server.parse-request-line expects a string" checked-string
   " " split
   dup len 3 = () (400 "malformed request line" framing-error) if
@@ -83,8 +83,8 @@
    its values in arrival order, so `(\"Host: a\" \"host: b\")` yields `{\"host\" (\"a\" \"b\")}`.
    The name is the text before the first `:`, and the value is the rest with surrounding ASCII
    whitespace removed. `()` is `{}`. A line that has no `:`, has an empty name or a name containing
-   whitespace, or begins with a space or tab (obsolete line folding) is `` `domain `` with `'data
-   {status 400}`. A non-list or a non-string line is `` `type ``.")
+   whitespace, or begins with a space or tab (obsolete line folding) is `` `domain `` with `` `data
+   {status 400} ``. A non-list or a non-string line is `` `type ``.")
  (dup type `list match? "http.server.parse-headers expects a list of header lines" type-error assert
   dup (str.str?) all? "http.server.parse-headers expects every header line to be a string"
   type-error assert
@@ -112,9 +112,9 @@
   "Return the request body length named by a headers dictionary as `parse-headers` builds it: `0`
    when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros
    allowed, so `{\"content-length\" (\"5\")}` is 5. A value that is not a nonempty string of decimal
-   digits, or repeated values that differ, is `` `domain `` with `'data {status 400}`; a value too
-   large for a 64-bit integer exceeds every body limit and is `` `domain `` with `'data {status
-   413}`. A non-dictionary is `` `type ``.")
+   digits, or repeated values that differ, is `` `domain `` with `` `data {status 400} ``; a value
+   too large for a 64-bit integer exceeds every body limit and is `` `domain `` with `` `data
+   {status 413} ``. A non-dictionary is `` `type ``.")
  (dup type `dict match? "http.server.content-length expects a header dict" type-error assert
   "content-length" [] dict.get
   dup len 0 =

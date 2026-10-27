@@ -1,7 +1,7 @@
 ## fs
 
 Filesystem words accept a named `root` symbol or a directory resource and a `path` string.
-The command line uses `'cwd` for the startup working directory. Applications
+The command line uses `` `cwd `` for the startup working directory. Applications
 may explicitly open other host directories. All filesystem operations are available on each root,
 subject to operating-system permissions and runtime limits.
 
@@ -21,17 +21,17 @@ an absolute target, a relative target that would pop above the root, more than
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
-Path-taking failures carry a data dictionary with `'operation` (the word's own
-symbol), `'root` and `'path` (or `'source-root`, `'source-path`,
-`'destination-root`, and `'destination-path` for `copy`), and a closed
-`'reason` symbol: `'invalid-path`, `'unknown-root`,
-`'not-found`, `'already-exists`, `'not-directory`, `'is-directory`,
-`'not-regular`, `'not-empty`, `'symlink-loop`, `'symlink-escape`,
-`'invalid-utf8`, `'limit`, `'access-denied`, `'read-only`, `'no-space`,
-`'busy`, `'cross-device`, `'unsupported`, `'changed`, or `'io`. The kind is
-`'type` for wrong value kinds or byte-list members outside `0..255`, `'domain`
+Path-taking failures carry a data dictionary with `` `operation `` (the word's own
+symbol), `` `root `` and `` `path `` (or `` `source-root ``, `` `source-path ``,
+`` `destination-root ``, and `` `destination-path `` for `copy`), and a closed
+`` `reason `` symbol: `` `invalid-path ``, `` `unknown-root ``,
+`` `not-found ``, `` `already-exists ``, `` `not-directory ``, `` `is-directory ``,
+`` `not-regular ``, `` `not-empty ``, `` `symlink-loop ``, `` `symlink-escape ``,
+`` `invalid-utf8 ``, `` `limit ``, `` `access-denied ``, `` `read-only ``, `` `no-space ``,
+`` `busy ``, `` `cross-device ``, `` `unsupported ``, `` `changed ``, or `` `io ``. The kind is
+`` `type `` for wrong value kinds or byte-list members outside `0..255`, `` `domain ``
 for malformed paths and unknown roots,
-`'overflow` for a configured limit, `'cancelled` for cancellation, and `'io`
+`` `overflow `` for a configured limit, `` `cancelled `` for cancellation, and `` `io ``
 for filesystem state and host failures. Host error names never appear as data.
 
 Reads, writes, and copies are bounded by the transfer limit
@@ -52,7 +52,7 @@ the source's permission bits under the umask.
 OS permissions, and return a scope-owned port resource. Host symlinks may be
 followed while opening this explicit root. Relative paths are rejected.
 `port.close` closes the resource and joins cleanup; scope exit does the same.
-A closing directory rejects new operations with `'io`. Closure waits for
+A closing directory rejects new operations with `` `io ``. Closure waits for
 admitted operations to release their independent descriptor leases, then joins
 backend cleanup.
 
@@ -86,7 +86,7 @@ The staging directory uses mode `0700` under the process umask.
 `( root -- reservation )` — Retain a selected directory root and one filesystem
 operation slot until joined closure. A reservation can be passed as a root;
 its derived operations share that slot and reject overlapping work with
-`'overflow` and reason `'limit`. Closure waits for admitted work. This supports
+`` `overflow `` and reason `` `limit ``. Closure waits for admitted work. This supports
 compositions that must retain admission across inspection and publication.
 
 ### open-writer
@@ -115,20 +115,20 @@ root. It owns its descriptor until `port.close` or scope exit. An enumeration
 opened through staging or its descendants also closes when staging seals.
 
 ### next-entry
-`( cursor -- entry )` — Return the next `{'name string 'kind symbol}` dictionary,
-or `{}` at stable end. Kinds are `'file`, `'directory`, `'symlink`, and `'other`;
+`( cursor -- entry )` — Return the next `{name string kind symbol}` dictionary,
+or `{}` at stable end. Kinds are `` `file ``, `` `directory ``, `` `symlink ``, and `` `other ``;
 dot entries are omitted and symlinks are described without following them.
 Names must be UTF-8. Order and visibility of concurrent namespace changes follow
 the host filesystem; this is not a directory snapshot. Concurrent calls reserve
 distinct entries, though their results may complete out of order. Each result
 owns its name independently of subsequent calls or cursor closure. A closed
-cursor raises `'io`. Reading does not materialize the whole directory or apply
+cursor raises `` `io ``. Reading does not materialize the whole directory or apply
 the aggregate limits of `list`; callers can stop and close at any entry.
 
 ### commit-dir
 `( stage -- )` — Seal the stage, reject further operations, close its descendant
 resources, and wait for admitted operations before atomically publishing to the
-absent destination. Any existing entry causes an `'io` failure and is preserved;
+absent destination. Any existing entry causes an `` `io `` failure and is preserved;
 failure retains the sealed staging resource for joined cleanup with `port.close`.
 Success joins descriptor closure and keeps the published tree even if the task
 is subsequently cancelled. Namespace publication is atomic; directory-entry
@@ -139,14 +139,14 @@ durability across a host crash is not promised.
 regular file, following a final source link within its root, into an absent
 destination entry; the roots may differ. The copy is staged and published
 atomically without replacing; an existing destination of any kind is
-`'already-exists`, a non-regular source is `'not-regular` or `'is-directory`,
+`` `already-exists ``, a non-regular source is `` `not-regular `` or `` `is-directory ``,
 and no metadata is preserved.
 
 ### create-bytes
 `( bytes root path -- )` — Atomically create an absent regular file holding
 exact bytes. Members are validated before any external state exists. An
 existing regular file, directory, symlink (including a dangling one), or other
-entry is `'already-exists`; a missing parent is `'not-found`.
+entry is `` `already-exists ``; a missing parent is `` `not-found ``.
 
 ### create-text
 `( string root path -- )` — Atomically create an absent regular file holding
@@ -160,17 +160,17 @@ escaping intermediate component, and host failures are errors rather than 0.
 
 ### list
 `( root path -- entries )` — Follow the path to a directory and return its
-children as `{'name string 'kind 'file}`, `{'name string 'kind 'directory}`,
-`{'name string 'kind 'symlink}`, or `{'name string 'kind 'other}`, classified
+children as `{name string kind file}`, `{name string kind directory}`,
+`{name string kind symlink}`, or `{name string kind other}`, classified
 without following, excluding `.` and `..`, and sorted by Unicode scalar order
-of `'name`. A child name that is not valid UTF-8, an entry that vanishes or
+of `` `name ``. A child name that is not valid UTF-8, an entry that vanishes or
 cannot be classified, or an exceeded listing limit fails the whole listing;
 nothing is silently omitted.
 
 ### lstat
 `( root path -- metadata )` — Describe the final entry without following it:
-`{'kind 'file 'size n}` for a regular file, `{'kind 'directory}`,
-`{'kind 'symlink}`, or `{'kind 'other}`. An absent entry is `'not-found`.
+`{kind file size n}` for a regular file, `{kind directory}`,
+`{kind symlink}`, or `{kind other}`. An absent entry is `` `not-found ``.
 
 ### mkdirs
 `( root path -- )` — Create missing intermediate and final directories. Existing
@@ -189,40 +189,40 @@ selected directory has been opened.
 ### mkdir
 `( root path -- )` — Create exactly one absent directory beneath an existing
 parent. There is no recursive parent creation; an existing entry of any kind is
-`'already-exists`.
+`` `already-exists ``.
 
 ### read-bytes
 `( root path -- bytes )` — Read one regular file, following a final link within
 the root, and return its exact bytes as an integer list. The size observed at
-open is the size read; growth or shrink meanwhile is `'changed`. A directory is
-`'is-directory`; a non-regular object is `'not-regular`; a file over the
-transfer limit is `'overflow`.
+open is the size read; growth or shrink meanwhile is `` `changed ``. A directory is
+`` `is-directory ``; a non-regular object is `` `not-regular ``; a file over the
+transfer limit is `` `overflow ``.
 
 ### read-text
 `( root path -- string )` — Read one regular file as `read-bytes` does and
-decode it as UTF-8. Invalid UTF-8 is `'io` with reason `'invalid-utf8`.
+decode it as UTF-8. Invalid UTF-8 is `` `io `` with reason `` `invalid-utf8 ``.
 
 ### remove-dir
 `( root path -- )` — Remove one empty directory without following a final
-link. A nonempty directory is `'not-empty`; a file or symlink is
-`'not-directory`.
+link. A nonempty directory is `` `not-empty ``; a file or symlink is
+`` `not-directory ``.
 
 ### remove-file
 `( root path -- )` — Remove one non-directory entry, including a symlink
-itself, without following it. A directory is `'is-directory`.
+itself, without following it. A directory is `` `is-directory ``.
 
 ### rename
 `( root source-path destination-path -- )` — Rename an entry within one root
 without replacing. The source may be a regular file, symlink, or directory and
-is not followed; an existing destination is `'already-exists`, and a
-destination on another device is `'cross-device` rather than an emulated
+is not followed; an existing destination is `` `already-exists ``, and a
+destination on another device is `` `cross-device `` rather than an emulated
 copy.
 
 ### publish-bytes
 `( bytes root path -- )` — Atomically publish complete file contents, creating
 an absent destination or replacing one that exists. An entry observed before
 staging must be a regular file; a symlink, directory, or other entry is
-`'not-regular`. Use the observed file's permissions, or host defaults on first
+`` `not-regular ``. Use the observed file's permissions, or host defaults on first
 creation. Publication replaces the final directory entry without following it;
 concurrent publications each succeed and the last commit wins. An intervening
 directory causes failure. A failed operation preserves its destination, and
@@ -236,8 +236,8 @@ a crash is not promised.
 ### replace-bytes
 `( bytes root path -- )` — Atomically replace an existing regular file with
 exact bytes. The final entry must be observed as a regular file without
-following: absence is `'not-found`, and a symlink, directory, or other entry
-is `'not-regular`. The replacement is a new inode published by an atomic
+following: absence is `` `not-found ``, and a symlink, directory, or other entry
+is `` `not-regular ``. The replacement is a new inode published by an atomic
 exchange; the word never becomes create-or-replace.
 
 ### replace-text
@@ -247,4 +247,4 @@ under the `replace-bytes` contract.
 ### stat
 `( root path -- metadata )` — Follow the path, including a final link within
 the root, and describe the object reached with the same shapes as `lstat`. A
-dangling link is `'not-found`.
+dangling link is `` `not-found ``.

@@ -202,7 +202,7 @@
   "[output-name input-name reducer]"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["" "v" (sum)]] table.aggregate)
-  'domain
+  `domain
   "must not be empty"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v" (dup)]] table.aggregate)

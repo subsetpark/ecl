@@ -20,10 +20,10 @@ or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its
 directory lease until publication or rollback completes. The destination must
 name a child entry, not `.`. Return normalized regular-file paths in archive
 order. Unsafe, linked, special, duplicate, malformed, or over-limit members
-are `'domain`; invalid byte items are `'domain`; wrong container kinds are
-`'type`; an unknown root or a non-canonical destination is `'domain` carrying the `fs` failure data; an
-exhausted operation quota is `'overflow`; filesystem and destination
-conflicts are `'io`. Failure never publishes a partial destination. See the
+are `` `domain ``; invalid byte items are `` `domain ``; wrong container kinds are
+`` `type ``; an unknown root or a non-canonical destination is `` `domain `` carrying the `fs` failure data; an
+exhausted operation quota is `` `overflow ``; filesystem and destination
+conflicts are `` `io ``. Failure never publishes a partial destination. See the
 environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives)
 for the complete format, limit, containment, and publication contract.
 
@@ -38,8 +38,8 @@ cleanup; it does not impose an aggregate heap budget on retained archives.
 
 ### next-member
 `( archive -- metadata )` — Select the next archive member and return
-`{'path string 'kind symbol 'size int}` in archive order. Kinds are `'file` and
-`'directory`; size is the content length in bytes. `{}` denotes stable end.
+`{path string kind symbol size int}` in archive order. Kinds are `` `file `` and
+`` `directory ``; size is the content length in bytes. `{}` denotes stable end.
 Advancing skips unread contents of the previous member. Metadata owns its path
 independently of later cursor operations or closure.
 
@@ -50,4 +50,4 @@ member, advancing its content position. The maximum must be an integer from
 member. Reads copy bounded chunks into independently owned values; concurrent
 reads consume distinct chunks, with unspecified completion order. Coordinate
 member advancement with reads when using the archive across tasks. Operations
-on a closed archive raise `'io`.
+on a closed archive raise `` `io ``.

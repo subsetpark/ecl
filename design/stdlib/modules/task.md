@@ -11,8 +11,8 @@ task, send its address with the request, and await the helper, whose result
 is the reply. `task.await-for` bounds the exchange.
 
 ```ecl
-(|a v| [] (task.receive) @spawn dup task.address {} 'value v put 'from rolldown put a task.send task.await 'ok at first) 'ask def
-[] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 ask
+(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a task.send task.await `ok at first) `ask def
+[] (task.receive dup `from at swap `value at 1 + swap task.send) @spawn task.address 41 ask
 # => 42
 ```
 
@@ -23,7 +23,7 @@ closed mailbox.
 
 ### await
 `( task -- result )` — Park until the task completes; return its cached
-`{'ok …}`/`{'err …}` result. Idempotent. See
+`{ok …}`/`{err …}` result. Idempotent. See
 [Concurrency](SPEC.md#concurrency).
 
 ### await-any
@@ -33,19 +33,19 @@ completion.
 
 ### await-for
 `( task milliseconds -- result )` — `task.await` with a nonnegative int
-deadline; expiry returns `{'err {'kind 'timeout}}` without cancelling the
+deadline; expiry returns `{err {kind timeout}}` without cancelling the
 task. A terminal task beats even a zero deadline. A deadline beyond any
-instant the scheduler clock can report is `'overflow` before the wait
+instant the scheduler clock can report is `` `overflow `` before the wait
 registers.
 
 ### cancel
 `( task -- )` — Request cancellation; the task's result becomes
-`{'err {'kind 'cancelled …}}`. No-op when already terminal.
+`{err {kind cancelled …}}`. No-op when already terminal.
 
 ### cancel-self
 `( -- )` — Request cancellation of the current task, exactly as `task.cancel`
 does with its handle. It is only a request: execution continues, and the task
-observes it at its next safe point. `'domain` outside a task. There is
+observes it at its next safe point. `` `domain `` outside a task. There is
 deliberately no way to obtain the current task's handle, so a task's result
 can never retain its own task.
 
@@ -55,29 +55,29 @@ preorder.
 
 ### receive
 `( -- value )` — Take the oldest message from the executing task's mailbox,
-parking until one arrives. `'domain` outside a task.
+parking until one arrives. `` `domain `` outside a task.
 
 ### receive-for
 `( milliseconds -- result )` — `task.receive` with a nonnegative int
-deadline: `{'ok value}`, or `{'err {'kind 'timeout}}` when nothing arrives in
+deadline: `{ok value}`, or `{err {kind timeout}}` when nothing arrives in
 time. A deadline beyond any instant the scheduler clock can report is
-`'overflow`. `'domain` outside a task.
+`` `overflow ``. `` `domain `` outside a task.
 
 ### self
-`( -- address )` — The executing task's own address. `'domain` outside a
+`( -- address )` — The executing task's own address. `` `domain `` outside a
 task: the session root owns tasks but has no mailbox.
 
 ### send
 `( value address -- )` — Queue a value in the mailbox an address names. Any
-value may be sent except one containing a task handle, which is `'type`;
+value may be sent except one containing a task handle, which is `` `type ``;
 addresses and ports pass. A mailbox holds sixteen messages, and a sender to a
 full one parks until the receiver takes a message. Sending to a task that has
-ended is `'io` with `'reason 'closed`. Messages from one sender arrive in
+ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in
 order; order across senders is unspecified.
 
 #### Examples
 
 ```ecl
 [] (task.receive 1 +) @spawn dup task.address 41 swap task.send task.await
-# => {'ok [42]}
+# => {ok [42]}
 ```
