@@ -33,7 +33,7 @@ operation or reopen a failed resource.
 
 Byte endpoints preserve exact integer bytes in `0...255`; they perform no text
 decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each
-call stays contiguous under bounded pressure. `port.finish` on the output
+call stays contiguous under bounded pressure. `fd.finish` on the output
 endpoint rejects new writers and sends EOF after admitted writers and queued
 bytes drain, while the input direction remains readable. Framing, TLS,
 encoding, and protocol limits belong to libraries. Deadlines compose tasks

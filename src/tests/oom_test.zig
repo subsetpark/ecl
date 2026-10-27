@@ -6,7 +6,7 @@
 //! ordinals. Package policy uses these same public facilities from ECL.
 //!
 //! Component-level probes elsewhere inject failures into a directly
-//! constructed subject (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, the
+//! constructed subject (`list.zig`, `dict.zig`, env.zig`, `equal.zig`, the
 //! reader, formatter, line-editor, registry, and native-validation probes);
 //! none of them bootstraps a Session. These are the only sweeps over fully
 //! initialized Sessions, so a surface reachable only through one — a
@@ -48,14 +48,14 @@ fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" `cwd \"archive\" archive.unpack-tgz pop");
+    try source.writer.writeAll(" cwd \"archive\" archive.unpack-tgz pop");
     return allocator.dupe(u8, source.written());
 }
 
 fn archiveResourceSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
-    try source.writer.writeAll("`cwd \"generation\" fs.stage-dir `stage set ");
+    try source.writer.writeAll("cwd \"generation\" fs.stage-dir `stage set ");
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
     try source.writer.writeAll(" stage \"archive\" archive.unpack-tgz pop stage fs.commit-dir");
     return allocator.dupe(u8, source.written());
@@ -939,47 +939,48 @@ fn stdlibSessionAllocationProbe(
             // Console, environment, and standard-input refusal paths.
             "\"probe\" io.eprint 1 \"probe\" io.debug pop " ++
                 "\"ECL_OOM_PROBE\" getenv pop " ++
-                "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (io.stdin) @attempt pop",
+                "[] (\"ECL_OOM_ABSENT\" getenv) @attempt pop [] (fd.in) @attempt pop " ++
+                "fd.out [1] fd.write fd.err ([1] [2]) fd.write",
         ),
         .directory_enumeration => try runOk(
             &runtime,
             "oom-enumeration.ecl",
-            "`cwd \"enumerated\" fs.mkdirs \"x\" `cwd \"enumerated/file\" fs.publish-text " ++
-                "`cwd \"enumerated\" fs.open-list `cursor set cursor fs.next-entry pop " ++
+            "cwd \"enumerated\" fs.mkdirs \"x\" cwd \"enumerated/file\" fs.publish-text " ++
+                "cwd \"enumerated\" fs.open-list `cursor set cursor fs.next-entry pop " ++
                 "cursor fs.next-entry pop cursor port.close",
         ),
         .directory_staging => try runOk(
             &runtime,
             "oom-staging.ecl",
-            "`cwd \"published\" fs.stage-dir `s set s \".\" fs.child-dir pop s fs.commit-dir " ++
-                "`cwd \"rollback\" fs.stage-dir `s set s \"a\" fs.mkdirs s port.close",
+            "cwd \"published\" fs.stage-dir `s set s \".\" fs.child-dir pop s fs.commit-dir " ++
+                "cwd \"rollback\" fs.stage-dir `s set s \"a\" fs.mkdirs s port.close",
         ),
         .tree_operations => try runOk(
             &runtime,
             "oom-tree.ecl",
-            "`cwd \"a/b\" fs.mkdirs \"x\" `cwd \"a/b/file\" fs.publish-text `cwd \"a\" fs.remove-tree",
+            "cwd \"a/b\" fs.mkdirs \"x\" cwd \"a/b/file\" fs.publish-text cwd \"a\" fs.remove-tree",
         ),
         .advisory_lock => try runOk(
             &runtime,
             "oom-lock.ecl",
-            "`cwd \"mutex\" fs.lock port.close `cwd \"mutex\" fs.lock port.close",
+            "cwd \"mutex\" fs.lock port.close cwd \"mutex\" fs.lock port.close",
         ),
         .directory_resource => try runOk(
             &runtime,
             "oom-directory.ecl",
-            "`cwd \".\" fs.child-dir dup \".\" fs.stat pop dup port.close port.close",
+            "cwd \".\" fs.child-dir dup \".\" fs.stat pop dup port.close port.close",
         ),
         .filesystem_stream => try runOk(
             &runtime,
             "oom-stream.ecl",
-            "`cwd fs.reserve `root set root \"published\" fs.open-writer `writer set " ++
+            "cwd fs.reserve `root set root \"published\" fs.open-writer `writer set " ++
                 "writer [65 66] fs.write-chunk writer [] fs.write-chunk writer fs.commit-file " ++
                 "root \"aborted\" fs.open-writer `writer set writer [67] fs.write-chunk writer port.close root wrap (\"missing/sub\" fs.child-dir) @attempt pop root port.close",
         ),
         .file_publication => try runOk(
             &runtime,
             "oom-publication.ecl",
-            "\"x\" `cwd \"published\" fs.publish-text [0 255] `cwd \"published\" fs.publish-bytes",
+            "\"x\" cwd \"published\" fs.publish-text [0 255] cwd \"published\" fs.publish-bytes",
         ),
         .filesystem => try runOk(
             &runtime,
@@ -987,14 +988,14 @@ fn stdlibSessionAllocationProbe(
             // Every fs word once, through the same root: encoders, the
             // resolver, staging, listing, metadata, and the structured
             // failure dictionary all have Session-only allocation paths.
-            "\"pr\\n\" `cwd \"p.txt\" fs.create-text " ++
-                "`cwd \"p.txt\" fs.read-text pop `cwd \"p.txt\" fs.read-bytes pop " ++
-                "[7 8] `cwd \"p.txt\" fs.replace-bytes \"z\" `cwd \"p.txt\" fs.replace-text " ++
-                "`cwd \"p.txt\" fs.stat pop `cwd \"p.txt\" fs.lstat pop `cwd \"p.txt\" fs.exists? pop " ++
-                "`cwd \"d\" fs.mkdir `cwd \"d\" fs.list pop " ++
-                "`cwd \"p.txt\" `cwd \"d/c.txt\" fs.copy `cwd \"d/c.txt\" \"d/m.txt\" fs.rename " ++
-                "`cwd \"d/m.txt\" fs.remove-file `cwd \"d\" fs.remove-dir " ++
-                "[] (`cwd \"absent\" fs.read-text) @attempt pop " ++
+            "\"pr\\n\" cwd \"p.txt\" fs.create-text " ++
+                "cwd \"p.txt\" fs.read-text pop cwd \"p.txt\" fs.read-bytes pop " ++
+                "[7 8] cwd \"p.txt\" fs.replace-bytes \"z\" cwd \"p.txt\" fs.replace-text " ++
+                "cwd \"p.txt\" fs.stat pop cwd \"p.txt\" fs.lstat pop cwd \"p.txt\" fs.exists? pop " ++
+                "cwd \"d\" fs.mkdir cwd \"d\" fs.list pop " ++
+                "cwd \"p.txt\" cwd \"d/c.txt\" fs.copy cwd \"d/c.txt\" \"d/m.txt\" fs.rename " ++
+                "cwd \"d/m.txt\" fs.remove-file cwd \"d\" fs.remove-dir " ++
+                "[] (cwd \"absent\" fs.read-text) @attempt pop " ++
                 "[] (`none \"x\" fs.exists?) @attempt pop " ++
                 "\"a//b/../c\" path.normalize pop (\"a\" \"b\") path.join pop " ++
                 "\"a/b.c\" path.dirname pop \"a/b.c\" path.basename pop \"a/b.c\" path.extension pop " ++
@@ -1084,7 +1085,7 @@ fn stdlibSessionAllocationProbe(
                 scaffold_allocator,
                 "`proc (spawn run) import " ++
                     "proc.core.process {{executable \"{s}\" args (\"block\" \"λ\") cwd \"/\" env {{\"ECL_OOM_PROCESS\" \"é🌍\"}}}} port.open " ++
-                    "dup proc.core.stdin port.endpoint dup [0] port.write port.finish " ++
+                    "dup proc.core.stdin port.endpoint dup [0] fd.write port.finish " ++
                     "dup proc.core.stdout port.endpoint pop dup proc.core.stderr port.endpoint pop pop " ++
                     "{{executable \"{s}\" args (\"echo\") stdin [0 1]}} proc.run pop " ++
                     "{{executable \"/definitely/not/allowed\" " ++
@@ -1605,7 +1606,7 @@ test "oom: standard-library and host: native port registered byte input" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
-            "dup portprobe.input port.endpoint [1] port.write " ++
+            "dup portprobe.input port.endpoint [1] fd.write " ++
             "dup portprobe.input port.endpoint port.finish port.close port.close",
     ).run);
 }
@@ -1620,9 +1621,9 @@ test "oom: standard-library and host: native port registered call composition" {
 test "oom: standard-library and host: native port registered byte output" {
     try requireSelectedOomTest(@src());
     try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
-        "dup portprobe.output port.endpoint 1 port.read pop port.close port.close",
+        "dup portprobe.output port.endpoint 1 fd.read pop port.close port.close",
         "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
-            "dup portprobe.input port.endpoint [1] port.write " ++
+            "dup portprobe.input port.endpoint [1] fd.write " ++
             "dup portprobe.input port.endpoint port.finish dup port.await",
     ).run);
 }
@@ -1820,7 +1821,7 @@ test "oom: standard-library and host: common network endpoint publication and tr
             const first_failure_index = failing.alloc_index;
             if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
             try runOk(&runtime, "oom-net-endpoint.ecl", "c net.core.input port.endpoint `r set c net.core.output port.endpoint `w set " ++
-                "w [0 255] port.write w port.finish r 1 port.read pop r 1 port.read pop r 1 port.read pop c port.close");
+                "w [0 255] fd.write w port.finish r 1 fd.read pop r 1 fd.read pop r 1 fd.read pop c port.close");
             return first_failure_index;
         }
     };
@@ -1907,7 +1908,7 @@ test "oom: standard-library and host: native port directional writer" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.declared [] port.open dup portprobe.declared-stream [] port.begin " ++
-            "dup portprobe.declared-output port.endpoint 8 port.read pop " ++
+            "dup portprobe.declared-output port.endpoint 8 fd.read pop " ++
             "dup port.await port.close port.close",
     ).run);
 }
@@ -2231,9 +2232,9 @@ test "oom: standard-library and host: accepted connection SDK lifecycle" {
 test "oom: standard-library and host: native activity stream supervision" {
     try requireSelectedOomTest(@src());
     try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortProbe(
-        "instanceprobe.activity 8 port.open (|p| p instanceprobe.activity-in port.endpoint [1 2] port.write " ++
-            "p instanceprobe.activity-ready port.endpoint 1 port.read pop " ++
-            "p instanceprobe.activity-out port.endpoint 8 port.read pop p port.close) call",
+        "instanceprobe.activity 8 port.open (|p| p instanceprobe.activity-in port.endpoint [1 2] fd.write " ++
+            "p instanceprobe.activity-ready port.endpoint 1 fd.read pop " ++
+            "p instanceprobe.activity-out port.endpoint 8 fd.read pop p port.close) call",
         "",
     ).run);
 }

@@ -38,6 +38,10 @@ pub const Utf8Materializer = struct {
         if (self.builder) |*builder| builder.retirePartial(releases);
     }
 
+    /// Each pass charges one unit per input byte, a block at a time. Within
+    /// a block an ASCII run is counted or copied whole; only the bytes that
+    /// begin a multibyte sequence go through the decoder. A sequence that
+    /// straddles the block end is decoded with it.
     pub fn advance(
         self: *Utf8Materializer,
         work: *poll.WorkBudget,
@@ -50,17 +54,34 @@ pub const Utf8Materializer = struct {
                         try self.beginFill();
                         continue;
                     }
-                    if (!work.spend()) return .pending;
-                    const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
-                    self.max_codepoint = @max(self.max_codepoint, codepoint);
-                    self.count = std.math.add(usize, self.count, 1) catch return error.OutOfMemory;
+                    const granted = work.take(self.bytes.len - self.byte_index);
+                    if (granted == 0) return .pending;
+                    const end = self.byte_index + granted;
+                    while (self.byte_index < end) {
+                        const ascii = asciiPrefix(self.bytes[self.byte_index..end]);
+                        self.count += ascii;
+                        self.byte_index += ascii;
+                        if (self.byte_index == end) break;
+                        const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
+                        self.max_codepoint = @max(self.max_codepoint, codepoint);
+                        self.count += 1;
+                    }
                 },
                 .fill => {
                     if (self.byte_index == self.bytes.len) return self.finish();
-                    if (!work.spend()) return .pending;
-                    const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
-                    self.builder.?.writeCodepoint(self.value_index, codepoint);
-                    self.value_index += 1;
+                    const granted = work.take(self.bytes.len - self.byte_index);
+                    if (granted == 0) return .pending;
+                    const end = self.byte_index + granted;
+                    while (self.byte_index < end) {
+                        const ascii = asciiPrefix(self.bytes[self.byte_index..end]);
+                        self.builder.?.writeAscii(self.value_index, self.bytes[self.byte_index..][0..ascii]);
+                        self.value_index += ascii;
+                        self.byte_index += ascii;
+                        if (self.byte_index == end) break;
+                        const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
+                        self.builder.?.writeCodepoint(self.value_index, codepoint);
+                        self.value_index += 1;
+                    }
                 },
                 .complete => unreachable,
             }
@@ -343,31 +364,57 @@ pub const StringEncoder = struct {
         };
     }
 
+    /// Each pass charges one unit per character, a block at a time. A string
+    /// stored one byte per character has its ASCII runs counted or copied
+    /// whole; every other character is encoded on its own.
     pub fn advanceLimited(self: *StringEncoder, work: *poll.WorkBudget, limit: usize) (error{ OutOfMemory, InvalidCodepoint, Overflow })!StringEncodeResult {
         std.debug.assert(self.phase != .complete);
         if (self.byte_count > limit) return error.Overflow;
         const count: usize = @intCast(self.string.list.length());
+        const narrow: ?[]const u8 = if (self.string.list.kind() == .leaf_char1) heap.chars8(self.string.list)[0..count] else null;
         while (self.index != count) {
-            if (!work.spend()) return .pending;
-            const codepoint = list.atUnchecked(self.string, self.index).char;
-            var encoded: [4]u8 = undefined;
-            const encoded_len = std.unicode.utf8Encode(
-                value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
-                &encoded,
-            ) catch
-                return error.InvalidCodepoint;
-            switch (self.phase) {
-                .count => {
-                    if (encoded_len > limit - self.byte_count) return error.Overflow;
-                    self.byte_count += encoded_len;
-                },
-                .fill => {
-                    @memcpy(self.output.?[self.written..][0..encoded_len], encoded[0..encoded_len]);
-                    self.written += encoded_len;
-                },
-                .complete => unreachable,
+            const granted = work.take(count - self.index);
+            if (granted == 0) return .pending;
+            const end = self.index + granted;
+            while (self.index != end) {
+                if (narrow) |chars| {
+                    const ascii = asciiPrefix(chars[self.index..end]);
+                    if (ascii != 0) {
+                        switch (self.phase) {
+                            .count => {
+                                if (ascii > limit - self.byte_count) return error.Overflow;
+                                self.byte_count += ascii;
+                            },
+                            .fill => {
+                                @memcpy(self.output.?[self.written..][0..ascii], chars[self.index..][0..ascii]);
+                                self.written += ascii;
+                            },
+                            .complete => unreachable,
+                        }
+                        self.index += ascii;
+                        continue;
+                    }
+                }
+                const codepoint = list.atUnchecked(self.string, self.index).char;
+                var encoded: [4]u8 = undefined;
+                const encoded_len = std.unicode.utf8Encode(
+                    value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
+                    &encoded,
+                ) catch
+                    return error.InvalidCodepoint;
+                switch (self.phase) {
+                    .count => {
+                        if (encoded_len > limit - self.byte_count) return error.Overflow;
+                        self.byte_count += encoded_len;
+                    },
+                    .fill => {
+                        @memcpy(self.output.?[self.written..][0..encoded_len], encoded[0..encoded_len]);
+                        self.written += encoded_len;
+                    },
+                    .complete => unreachable,
+                }
+                self.index += 1;
             }
-            self.index += 1;
         }
         switch (self.phase) {
             .count => {
@@ -387,6 +434,33 @@ pub const StringEncoder = struct {
         }
     }
 };
+
+/// The length of the ASCII run at the front of `bytes`: every byte before the
+/// first one at or above 0x80. Sixteen bytes are tested at a time.
+pub fn asciiPrefix(bytes: []const u8) usize {
+    const lanes = 16;
+    const Lane = @Vector(lanes, u8);
+    var index: usize = 0;
+    while (bytes.len - index >= lanes) : (index += lanes) {
+        const lane: Lane = bytes[index..][0..lanes].*;
+        if (@reduce(.Max, lane) >= 0x80) break;
+    }
+    while (index != bytes.len and bytes[index] < 0x80) index += 1;
+    return index;
+}
+
+test "asciiPrefix finds the first non-ASCII byte across lane boundaries" {
+    try std.testing.expectEqual(@as(usize, 0), asciiPrefix(""));
+    try std.testing.expectEqual(@as(usize, 3), asciiPrefix("abc"));
+    try std.testing.expectEqual(@as(usize, 0), asciiPrefix("\xc3\xa9a"));
+    var buffer: [40]u8 = @splat('a');
+    try std.testing.expectEqual(@as(usize, 40), asciiPrefix(&buffer));
+    buffer[17] = 0x80;
+    try std.testing.expectEqual(@as(usize, 17), asciiPrefix(&buffer));
+    buffer[17] = 'b';
+    buffer[39] = 0xff;
+    try std.testing.expectEqual(@as(usize, 39), asciiPrefix(&buffer));
+}
 
 pub fn decodeUtf8Codepoint(bytes: []const u8, index: *usize) error{InvalidUtf8}!u32 {
     const length = std.unicode.utf8ByteSequenceLength(bytes[index.*]) catch

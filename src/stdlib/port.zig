@@ -3,6 +3,7 @@ const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const machine = @import("../machine.zig");
 const Value = @import("../value.zig").Value;
+const list = @import("../list.zig");
 const std = @import("std");
 const message = @import("../port_message.zig");
 const scheduler = @import("../scheduler.zig");
@@ -20,8 +21,6 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
     .{ .name = "begin", .doc = "( resource operation request -- exchange ) Admit a registered operation with bounded structured parameters.", .primitive = begin },
     .{ .name = "endpoint", .effect = "source selector -- endpoint", .doc = "Obtain an attenuated endpoint capability supported by its source.", .primitive = endpoint },
-    .{ .name = "read", .doc = "( readable max -- bytes ) Read a positive byte chunk, or [] at stable EOF.", .primitive = read },
-    .{ .name = "write", .doc = "( writable bytes -- ) Accept a complete byte list in FIFO order under bounded pressure.", .primitive = write },
     .{ .name = "send", .doc = "( sender message -- ) Atomically enqueue a bounded structured message.", .primitive = send },
     .{ .name = "receive", .doc = "( receiver -- event ) Receive one whole message or an EOF event.", .primitive = receive },
     .{ .name = "finish", .effect = "writable --", .doc = "Finish input after previously accepted data. Idempotent.", .primitive = finish },
@@ -46,11 +45,14 @@ fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {
     try evaluator.pushOwned(item);
 }
 
-fn read(evaluator: *machine.Machine) machine.MachineError!void {
+/// The byte-stream primitives are published as `fd.core`; `port` keeps the
+/// resource and exchange words. They live here because they share the
+/// endpoint and transfer machinery with the message words.
+pub fn read(evaluator: *machine.Machine) machine.MachineError!void {
     var maximum = try evaluator.popValue();
     defer maximum.deinit();
     if (maximum.borrow() != .int) return evaluator.typeError("a positive byte count");
-    if (maximum.borrow().int <= 0) return evaluator.fail(.domain, "port.read count must be positive");
+    if (maximum.borrow().int <= 0) return evaluator.fail(.domain, "fd.read count must be positive");
     var item = try evaluator.popValue();
     errdefer item.deinit();
     const backend = ReadBackend.fromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
@@ -62,6 +64,89 @@ fn read(evaluator: *machine.Machine) machine.MachineError!void {
     driver.* = .{ .allocator = evaluator.allocator(), .port = item.take(), .backend = backend, .buffer = buffer };
     evaluator.adoptDriver(driver);
 }
+
+/// `fd.read-line`: the bytes through the next newline, read a transport
+/// chunk at a time into the endpoint's read-ahead; what follows the newline
+/// stays there for the next read. At EOF the rest of the stream is the line,
+/// so `[]` means EOF and only EOF.
+pub fn readLine(evaluator: *machine.Machine) machine.MachineError!void {
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    const backend = ReadBackend.fromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
+    backend.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending reader");
+    errdefer backend.endRead();
+    const driver = try evaluator.allocator().create(LineReadDriver);
+    driver.* = .{ .allocator = evaluator.allocator(), .port = item.take(), .backend = backend };
+    evaluator.adoptDriver(driver);
+}
+
+const LineReadDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
+    /// One transport read per step: a pipe hands over what it has, a file
+    /// this much.
+    const chunk: usize = 64 * 1024;
+    allocator: std.mem.Allocator,
+    port: Value,
+    backend: ReadBackend,
+    scanned: usize = 0,
+    state: union(enum) {
+        reading,
+        materializing: struct { line: []u8, materializer: list.ByteListMaterializer },
+        complete,
+    } = .reading,
+
+    pub fn deinit(self: *LineReadDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        switch (self.state) {
+            .materializing => |*building| {
+                building.materializer.retire(releases);
+                allocator.free(building.line);
+            },
+            .reading, .complete => {},
+        }
+        self.backend.endRead();
+        releases.releaseValue(self.port);
+    }
+
+    fn take(self: *LineReadDriver, count: usize) error{OutOfMemory}!void {
+        const line = try self.allocator.dupe(u8, self.backend.reader.buffered()[0..count]);
+        self.backend.reader.consume(count);
+        self.state = .{ .materializing = .{ .line = line, .materializer = .init(self.allocator, line) } };
+    }
+
+    pub fn advance(evaluator: *machine.Machine, self: *LineReadDriver) machine.MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        while (self.state == .reading) {
+            const waiting = self.backend.reader.buffered();
+            if (std.mem.indexOfScalarPos(u8, waiting, self.scanned, '\n')) |newline| {
+                try self.take(newline + 1);
+                break;
+            }
+            self.scanned = waiting.len;
+            switch (try self.backend.fill(evaluator, @min(chunk, self.backend.readCapacity()))) {
+                .pending => {
+                    try evaluator.park(.{ .external = self.backend.readSource() });
+                    return .{ .yielded = .park };
+                },
+                .eof => {
+                    try self.take(waiting.len);
+                    break;
+                },
+                .data => |count| if (work.take(count) < count or work.exhausted()) return .stepped,
+            }
+        }
+        return switch (try self.state.materializing.materializer.advance(work)) {
+            .pending => .stepped,
+            .complete => |line| complete: {
+                self.state.materializing.materializer.deinit();
+                self.allocator.free(self.state.materializing.line);
+                self.state = .complete;
+                break :complete .{ .output = line };
+            },
+        };
+    }
+};
 
 const ReadDriver = transfer.ReadDriver(ReadBackend);
 const ReadBackend = struct {
@@ -91,12 +176,22 @@ const ReadBackend = struct {
             .failed => |failure| transportFailure(evaluator, failure),
         };
     }
+    fn fill(self: ReadBackend, evaluator: *machine.Machine, max: usize) machine.MachineError!transfer.ReadProgress {
+        return switch (try self.reader.fill(max)) {
+            .pending => .pending,
+            .eof => .eof,
+            .data => |count| .{ .data = count },
+            .failed => |failure| transportFailure(evaluator, failure),
+        };
+    }
 };
 
-fn write(evaluator: *machine.Machine) machine.MachineError!void {
+pub fn write(evaluator: *machine.Machine) machine.MachineError!void {
     var input = try evaluator.popValue();
     errdefer input.deinit();
     if (input.borrow() != .list) return evaluator.typeError("a byte list");
+    if (input.borrow().list.length() > 0 and input.borrow().isString())
+        return evaluator.typeError("a byte list; encode text with io.write");
     var item = try evaluator.popValue();
     errdefer item.deinit();
     const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable byte endpoint");
@@ -114,7 +209,7 @@ fn write(evaluator: *machine.Machine) machine.MachineError!void {
 const WriteDriver = transfer.WriteDriver(WriteBackend);
 const WriteBackend = struct {
     pub const WritePermit = *endpoints.WritePermit;
-    pub const invalid_byte_message = "port.write contains a value outside 0...255";
+    pub const invalid_byte_message = "fd.write contains a value outside 0...255";
     pub fn write(_: WriteBackend, evaluator: *machine.Machine, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
         return switch (permit.write(buffer)) {
             .pending => .pending,
@@ -124,7 +219,7 @@ const WriteBackend = struct {
     }
 };
 
-fn finish(evaluator: *machine.Machine) machine.MachineError!void {
+pub fn finish(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable endpoint");
@@ -415,6 +510,11 @@ fn shutdown(evaluator: *machine.Machine) machine.MachineError!void {
 fn close(evaluator: *machine.Machine) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
+    if (endpoints.Endpoint.fromValue(item.borrow())) |capability| {
+        if (!capability.closable()) return evaluator.typeError("a resource or exchange; a borrowed endpoint closes with its source");
+        try evaluator.startDriver(CloseEndpoint{ .owner = .init(item.take()), .endpoint = capability });
+        return;
+    }
     const target: Target = if (exchanges.Exchange.fromValue(item.borrow())) |exchange|
         .{ .exchange = exchange }
     else if (Resource.fromValue(item.borrow())) |resource|
@@ -427,6 +527,28 @@ fn close(evaluator: *machine.Machine) machine.MachineError!void {
         .mode = .close,
     });
 }
+
+/// Closing an endpoint that is its own resource: request the close, then
+/// park until its cleanup has joined, as closing the resource would.
+const CloseEndpoint = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    owner: heap.Owned(Value),
+    endpoint: *endpoints.Endpoint,
+    requested: bool = false,
+
+    pub fn advance(evaluator: *machine.Machine, self: *CloseEndpoint) machine.MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (!self.requested) {
+            self.endpoint.close();
+            self.requested = true;
+        }
+        if (!self.endpoint.closeJoined()) {
+            try evaluator.park(.{ .external = self.endpoint.closeSource() });
+            return .{ .yielded = .park };
+        }
+        return .completed;
+    }
+};
 
 fn awaitExchange(evaluator: *machine.Machine) machine.MachineError!void {
     return observe(evaluator, .observe);

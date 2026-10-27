@@ -15,6 +15,7 @@ const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
 const sequence = @import("kernel_sequence.zig");
 const kernel_storage = @import("kernel_storage.zig");
+const kernel_flat = @import("kernel_flat.zig");
 const task_prims = @import("task_prims.zig");
 const test_prims = @import("test_prims.zig");
 const Value = value.Value;
@@ -41,7 +42,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
             "that built it and growing the process-lifetime name table when it is new." },
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
         .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a numeric-literal string." },
-        .{ .name = "char", .primitive = charWord, .effect = "value -- char", .doc = "Return a char unchanged, the char with an int's codepoint, or the single char of a one-char string." },
+        .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char or string unchanged, the char with an int's codepoint, or the string whose chars have a list's codepoints." },
         .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn task.await`." },
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dictionary." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "Return the process arguments as a list of strings." },
@@ -531,14 +532,117 @@ fn charWord(evaluator: *Machine) MachineError!void {
                 return evaluator.fail(.domain, "char expects a Unicode scalar value");
             try evaluator.pushOwned(.{ .char = codepoint });
         },
-        .list => |header| {
-            if (!item.borrow().isString()) return evaluator.typeError("a char, int, or one-char string");
-            if (header.length() != 1) return evaluator.fail(.domain, "char expects a one-char string");
-            try evaluator.pushOwned(list.atUnchecked(item.borrow(), 0));
+        .list => {
+            if (item.borrow().isString()) return evaluator.pushOwned(item.take());
+            try evaluator.startDriver(CodepointsDriver{ .source = .init(item.take()) });
         },
-        else => return evaluator.typeError("a char, int, or one-char string"),
+        else => return evaluator.typeError("a char, int, or list of codepoints"),
     }
 }
+
+/// `char` over a list: the string whose chars are the list's codepoints. The
+/// way back from arithmetic, and the one place a string's width is chosen
+/// from the values it will hold: a profiling pass finds the widest, then a
+/// fill pass writes the writer that width selects. Each pass charges one
+/// unit per element.
+const CodepointsDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    source: heap.Owned(Value),
+    phase: enum { profile, fill } = .profile,
+    index: usize = 0,
+    max_codepoint: u32 = 0,
+    writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
+
+    fn scalar(evaluator: *Machine, number: i64) MachineError!u32 {
+        const narrowed = std.math.cast(u21, number) orelse
+            return evaluator.fail(.domain, "char expects a Unicode scalar value");
+        if (!std.unicode.utf8ValidCodepoint(narrowed))
+            return evaluator.fail(.domain, "char expects a Unicode scalar value");
+        return narrowed;
+    }
+
+    fn codepoint(evaluator: *Machine, item: Value) MachineError!u32 {
+        return switch (item) {
+            .char => |existing| existing,
+            .int => |number| scalar(evaluator, number),
+            else => evaluator.typeError("a char, int, or list of codepoints"),
+        };
+    }
+
+    /// The widest codepoint of a block of ints, validated as a block: the
+    /// range test is a min and a max over the block, and only a block that
+    /// fails it, or that reaches the surrogate range, is walked to find the
+    /// faulting element. An int leaf is what arithmetic on a string produces,
+    /// so this is the usual input.
+    fn profileInts(evaluator: *Machine, numbers: []const i64) MachineError!u32 {
+        var low: i64 = std.math.maxInt(i64);
+        var high: i64 = std.math.minInt(i64);
+        for (numbers) |number| {
+            low = @min(low, number);
+            high = @max(high, number);
+        }
+        if (low < 0 or high > 0x10FFFF or (high >= 0xD800 and low <= 0xDFFF)) {
+            for (numbers) |number| _ = try scalar(evaluator, number);
+        }
+        return @intCast(high);
+    }
+
+    pub fn advance(evaluator: *Machine, self: *CodepointsDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        const source = self.source.borrow();
+        const count: usize = @intCast(source.list.length());
+        const kind = source.list.kind();
+        while (!work.exhausted()) switch (self.phase) {
+            .profile => {
+                if (self.index == count) {
+                    self.writer = .init(try .init(evaluator.allocator(), count, self.max_codepoint));
+                    self.phase = .fill;
+                    self.index = 0;
+                    continue;
+                }
+                const end = self.index + work.take(count - self.index);
+                switch (kind) {
+                    .leaf_i64 => self.max_codepoint = @max(
+                        self.max_codepoint,
+                        try profileInts(evaluator, heap.i64s(source.list)[self.index..end]),
+                    ),
+                    .leaf_u8 => for (heap.u8s(source.list)[self.index..end]) |byte| {
+                        self.max_codepoint = @max(self.max_codepoint, byte);
+                    },
+                    else => for (self.index..end) |position| {
+                        self.max_codepoint = @max(self.max_codepoint, try codepoint(evaluator, list.atUnchecked(source, position)));
+                    },
+                }
+                self.index = end;
+            },
+            .fill => {
+                if (self.index == count) {
+                    var writer = self.writer.?.take();
+                    return .{ .output = writer.finish() };
+                }
+                const end = self.index + work.take(@min(count - self.index, kernel_flat.block_size));
+                var block: [kernel_flat.block_size]u32 = undefined;
+                const filled = block[0 .. end - self.index];
+                switch (kind) {
+                    // The profile pass validated every element.
+                    .leaf_i64 => for (heap.i64s(source.list)[self.index..end], filled) |number, *slot| {
+                        slot.* = @truncate(@as(u64, @bitCast(number)));
+                    },
+                    .leaf_u8 => for (heap.u8s(source.list)[self.index..end], filled) |byte, *slot| {
+                        slot.* = byte;
+                    },
+                    else => for (self.index..end, filled) |position, *slot| {
+                        slot.* = try codepoint(evaluator, list.atUnchecked(source, position));
+                    },
+                }
+                self.writer.?.borrowMut().writeCodepoints(self.index, filled);
+                self.index = end;
+            },
+        };
+        return .stepped;
+    }
+};
 
 fn startNumericParse(
     evaluator: *Machine,
@@ -907,12 +1011,6 @@ const GetenvDriver = struct {
         };
     }
 };
-
-/// Reads the whole standard input stream once. The gate lives in the machine
-/// so the CLI mode that owns stdin as program source cannot be raced.
-pub fn ioStdin(evaluator: *Machine) MachineError!void {
-    return evaluator.readStandardInputOwned();
-}
 
 fn args(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(evaluator.unit.arguments);

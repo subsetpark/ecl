@@ -904,7 +904,17 @@ fn scalarFailure(evaluator: *Machine, fault: ScalarError, index: ?usize) Machine
     return evaluator.fail(diagnostic.kind, diagnostic.message);
 }
 
-fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarError!Value {
+/// A char as its codepoint: the scalar authority sees chars as ints.
+fn ordinal(item: Value) Value {
+    return switch (item) {
+        .char => |codepoint| .{ .int = codepoint },
+        else => item,
+    };
+}
+
+fn scalarBinary(comptime operation: BinaryOp, left_item: Value, right_item: Value) ScalarError!Value {
+    const left = ordinal(left_item);
+    const right = ordinal(right_item);
     return switch (operation) {
         .add => add(left, right),
         .sub => sub(left, right),
@@ -923,7 +933,8 @@ fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarE
     };
 }
 
-fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
+fn scalarUnary(comptime operation: UnaryOp, operand_item: Value) ScalarError!Value {
+    const operand = ordinal(operand_item);
     return switch (operation) {
         .not_word => .{ .int = @intFromBool(!(try boolean(operand))) },
         .neg => switch (operand) {
@@ -1012,22 +1023,11 @@ fn bitwiseShift(left: Value, right: Value, shift_left: bool) ScalarError!Value {
 /// tests below along with the tag dispatch; LLVM keeps these out of line
 /// otherwise, and the call stays in the element loop.
 inline fn add(left: Value, right: Value) ScalarError!Value {
-    if (left == .char and right == .int) return offsetChar(left.char, right.int);
-    if (left == .int and right == .char) return offsetChar(right.char, left.int);
-    if (left == .char or right == .char) return error.Type;
     return numericBinary(left, right, .add);
 }
 
 /// `inline` for the same reason as `add`.
 inline fn sub(left: Value, right: Value) ScalarError!Value {
-    if (left == .char and right == .char) {
-        return .{ .int = @as(i64, left.char) - @as(i64, right.char) };
-    }
-    if (left == .char and right == .int) {
-        const offset = std.math.sub(i64, 0, right.int) catch return error.Overflow;
-        return offsetChar(left.char, offset);
-    }
-    if (left == .char or right == .char) return error.Type;
     return numericBinary(left, right, .sub);
 }
 
@@ -1125,13 +1125,6 @@ fn boolean(operand: Value) ScalarError!bool {
     return operand.int == 1;
 }
 
-fn offsetChar(codepoint: u32, offset: i64) ScalarError!Value {
-    const adjusted = std.math.add(i64, @intCast(codepoint), offset) catch return error.Domain;
-    if (adjusted < 0) return error.Domain;
-    const result = value.unicodeScalar(@intCast(adjusted)) orelse return error.Domain;
-    return .{ .char = result };
-}
-
 /// Floats follow IEEE 754, so overflow, poles, and division by zero give an
 /// infinity; only a NaN result, which ECL has no value for, is `'domain`.
 /// No operand is ever NaN, since every boundary that makes floats from outside
@@ -1173,19 +1166,25 @@ fn asFloat(operand: Value) f64 {
 // the first failing index, kind, and message.
 // ===========================================================================
 
-/// The numeric element classes a typed loop carries. `byte` is an invisible
-/// storage class for ordinary integers; operations widen whenever their result
-/// is not provably within the byte range. Chars and symbols are deliberately
-/// absent: a char result chooses its width from the codepoints it produces,
-/// which is a profiling decision, and symbols are not arithmetic.
+/// The element classes a typed loop carries. `byte` and the three char
+/// widths are storage classes of one integral class: a loop widens their
+/// lanes to ints, and no operation produces them; a 0/1 result is a byte, an
+/// arithmetic result an int or a real. Chars enter as their codepoints and
+/// leave as ints; `char` is the way back. The declaration order is the
+/// plan tables' index order.
 const Number = enum {
     byte,
+    char1,
+    char2,
+    char4,
     integer,
     real,
 
     fn Element(comptime self: Number) type {
         return switch (self) {
-            .byte => u8,
+            .byte, .char1 => u8,
+            .char2 => u16,
+            .char4 => u32,
             .integer => i64,
             .real => f64,
         };
@@ -1194,34 +1193,49 @@ const Number = enum {
     fn kind(comptime self: Number) value.HeapKind {
         return switch (self) {
             .byte => .leaf_u8,
+            .char1 => .leaf_char1,
+            .char2 => .leaf_char2,
+            .char4 => .leaf_char4,
             .integer => .leaf_i64,
             .real => .leaf_f64,
         };
     }
 
+    /// Whether a scalar operand has this class: a stored width has no scalar.
+    fn scalar(self: Number) bool {
+        return self == .integer or self == .real;
+    }
+
     fn boxed(comptime self: Number, element: self.Element()) Value {
         return switch (self) {
-            .byte, .integer => .{ .int = element },
+            .byte, .char1, .char2, .char4, .integer => .{ .int = element },
             .real => .{ .float = element },
         };
     }
 
+    /// A result as this class's element, or a scalar operand as its element:
+    /// a char scalar is read as its codepoint.
     fn unboxed(comptime self: Number, item: Value) self.Element() {
         return switch (self) {
             .byte => @intCast(item.int),
-            .integer => item.int,
+            .char1, .char2, .char4 => unreachable,
+            .integer => switch (item) {
+                .int => |number| number,
+                .char => |codepoint| codepoint,
+                else => unreachable,
+            },
             .real => item.float,
         };
     }
 };
 
-const number_classes = [_]Number{ .byte, .integer, .real };
+const number_classes = [_]Number{ .byte, .char1, .char2, .char4, .integer, .real };
 
 fn scalarNumber(item: Value) ?Number {
     return switch (item) {
-        .int => .integer,
+        .int, .char => .integer,
         .float => .real,
-        .char, .symbol, .list, .dict, .task, .port, .address => null,
+        .symbol, .list, .dict, .task, .port, .address => null,
     };
 }
 
@@ -1229,105 +1243,12 @@ fn leafNumber(item: Value) ?Number {
     if (item != .list) return null;
     return switch (item.list.kind()) {
         .leaf_u8 => .byte,
-        .leaf_i64 => .integer,
-        .leaf_f64 => .real,
-        else => null,
-    };
-}
-
-/// Character leaves keep their storage width in the dispatch class. The
-/// scalar meaning remains one Unicode codepoint; the width exists solely so a
-/// loop can select one pinned monomorphic slice before it starts.
-const Character = enum {
-    char1,
-    char2,
-    char4,
-
-    fn Element(comptime self: Character) type {
-        return switch (self) {
-            .char1 => u8,
-            .char2 => u16,
-            .char4 => u32,
-        };
-    }
-
-    fn kind(comptime self: Character) value.HeapKind {
-        return switch (self) {
-            .char1 => .leaf_char1,
-            .char2 => .leaf_char2,
-            .char4 => .leaf_char4,
-        };
-    }
-
-    fn boxed(comptime self: Character, element: self.Element()) Value {
-        return .{ .char = @intCast(element) };
-    }
-};
-
-fn leafCharacter(item: Value) ?Character {
-    if (item != .list) return null;
-    return switch (item.list.kind()) {
         .leaf_char1 => .char1,
         .leaf_char2 => .char2,
         .leaf_char4 => .char4,
+        .leaf_i64 => .integer,
+        .leaf_f64 => .real,
         else => null,
-    };
-}
-
-const FlatScalarClass = enum {
-    byte,
-    integer,
-    char1,
-    char2,
-    char4,
-
-    fn Element(comptime self: FlatScalarClass) type {
-        return switch (self) {
-            .byte => u8,
-            .integer => i64,
-            .char1 => u8,
-            .char2 => u16,
-            .char4 => u32,
-        };
-    }
-
-    fn boxed(comptime self: FlatScalarClass, element: self.Element()) Value {
-        return switch (self) {
-            .byte, .integer => .{ .int = element },
-            .char1, .char2, .char4 => .{ .char = @intCast(element) },
-        };
-    }
-
-    fn isCharacter(self: FlatScalarClass) bool {
-        return self != .byte and self != .integer;
-    }
-
-    fn kind(comptime self: FlatScalarClass) value.HeapKind {
-        return switch (self) {
-            .byte => .leaf_u8,
-            .integer => .leaf_i64,
-            .char1 => .leaf_char1,
-            .char2 => .leaf_char2,
-            .char4 => .leaf_char4,
-        };
-    }
-
-    /// A scalar operand as this class's element: an int for the numeric
-    /// classes, a codepoint for the character ones.
-    fn unboxed(comptime self: FlatScalarClass, item: Value) self.Element() {
-        return switch (self) {
-            .byte => @intCast(item.int),
-            .integer => item.int,
-            .char1, .char2, .char4 => @intCast(item.char),
-        };
-    }
-};
-
-fn characterFlatClass(character: Character) FlatScalarClass {
-    return switch (character) {
-        .char1 => .char1,
-        .char2 => .char2,
-        .char4 => .char4,
     };
 }
 
@@ -1342,9 +1263,11 @@ fn binaryResult(comptime operation: BinaryOp, comptime left: Number, comptime ri
     return switch (operation) {
         .add, .sub, .mul => if (real) .real else .integer,
         .div, .pow, .atan2 => .real,
-        .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr, .and_word, .or_word => .integer,
+        .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr => .integer,
         .wrap_add, .wrap_sub, .wrap_mul => .integer,
-        .eq, .ne, .lt, .gt, .le, .ge => .integer,
+        // A 0/1 result is a byte: a mask over a large list costs one byte per
+        // element, and every consumer of a byte leaf reads it as an int.
+        .eq, .ne, .lt, .gt, .le, .ge, .and_word, .or_word => .byte,
         .min, .max => if (real)
             if (left != right) null else .real
         else if (left == .byte and right == .byte)
@@ -1356,11 +1279,12 @@ fn binaryResult(comptime operation: BinaryOp, comptime left: Number, comptime ri
 
 fn unaryResult(comptime operation: UnaryOp, comptime operand: Number) Number {
     return switch (operation) {
-        .neg => if (operand == .byte) .integer else operand,
-        .abs => operand,
+        .neg => if (operand == .real) .real else .integer,
+        .abs => if (operand == .real or operand == .byte) operand else .integer,
         .sqrt, .exp, .log, .sin, .cos => .real,
         .floor, .ceil, .round => .integer,
-        .not_word, .bnot => .integer,
+        .not_word => .byte,
+        .bnot => .integer,
     };
 }
 
@@ -1387,7 +1311,9 @@ fn binaryLoopPolicy(
     comptime left: Number,
     comptime right: Number,
 ) LoopPolicy {
-    if (left == .integer and right == .integer) return switch (operation) {
+    // Bytes are ints to every loop: a byte lane widens to an int lane before
+    // the operation, so byte and mixed pairs take the int loops.
+    if (left != .real and right != .real) return switch (operation) {
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .vector_infallible,
         .wrap_add, .wrap_sub => .vector_infallible,
         .wrap_mul => if (support.targetHasNativePackedI64Multiply()) .vector_infallible else .scalar_infallible,
@@ -1403,11 +1329,6 @@ fn binaryLoopPolicy(
         .pow, .atan2 => .scalar_checked,
         .int_div, .mod, .and_word, .or_word, .band, .bor, .bxor, .bsl, .bsr => .scalar_checked,
         .wrap_add, .wrap_sub, .wrap_mul => .scalar_checked,
-    };
-    if (left == .byte and right == .byte) return switch (operation) {
-        .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .scalar_infallible,
-        .wrap_add, .wrap_sub, .wrap_mul => .scalar_infallible,
-        .add, .sub, .mul, .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
     };
     return .scalar_checked;
 }
@@ -1437,6 +1358,7 @@ const TypedOutput = union(enum) {
                 .reuse_bytes => |*adoption| adoption.writeRange(offset, block),
                 .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
             },
+            .char1, .char2, .char4 => unreachable,
             .integer => switch (self.*) {
                 .fresh_ints => |*writer| writer.writeRange(offset, block),
                 .reuse_ints => |*adoption| adoption.writeRange(offset, block),
@@ -1462,6 +1384,7 @@ const TypedOutput = union(enum) {
                 .reuse_bytes => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
                 .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
             },
+            .char1, .char2, .char4 => unreachable,
             .integer => switch (self.*) {
                 .fresh_ints => |*writer| writer.unpublishedRange(piece.start, piece.len()),
                 .reuse_ints => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
@@ -1524,143 +1447,6 @@ fn failTypedScalar(
     return context.fail(diagnostic.kind, diagnostic.message);
 }
 
-/// A character binary operation as a `support.Kernel` spec. A fixed result is
-/// one int per position; a dynamic one is a codepoint whose storage width a
-/// profiling pass decides before the fill.
-fn charKernel(
-    comptime operation: BinaryOp,
-    comptime left_class: FlatScalarClass,
-    comptime right_class: FlatScalarClass,
-    comptime shape: Shape,
-    comptime dynamic: bool,
-) type {
-    const Out = if (dynamic) u32 else i64;
-    const Loops = flat.CheckedFamily(left_class.Element(), right_class.Element(), Out);
-    const body = struct {
-        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!Out {
-            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return error.Fault;
-            return if (dynamic) result.char else result.int;
-        }
-    }.run;
-    return struct {
-        const Left = if (shape == .scalar_leaf) left_class.Element() else []const left_class.Element();
-        const Right = if (shape == .leaf_scalar) right_class.Element() else []const right_class.Element();
-
-        /// One staged piece; nothing is stored when it faults.
-        fn runPiece(left: Left, right: Right, piece: flat.Chunk, block: *Loops.Staging) flat.CheckedStatus {
-            return switch (shape) {
-                .leaf_leaf => Loops.binary(body, left, right, piece, block),
-                .leaf_scalar => Loops.binaryScalarRight(body, left, right, piece, block),
-                .scalar_leaf => Loops.binaryScalarLeft(body, left, right, piece, block),
-                .leaf_only => unreachable,
-            };
-        }
-
-        fn valueLeft(item: Value) Left {
-            return if (shape == .scalar_leaf) left_class.unboxed(item) else heap.leafElements(left_class.kind(), item.list);
-        }
-
-        fn valueRight(item: Value) Right {
-            return if (shape == .leaf_scalar) right_class.unboxed(item) else heap.leafElements(right_class.kind(), item.list);
-        }
-
-        noinline fn replay(context: support.Context, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
-            for (piece.start..piece.end) |index| {
-                const a = if (shape == .scalar_leaf) left else left[index];
-                const b = if (shape == .leaf_scalar) right else right[index];
-                _ = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch |fault|
-                    return failTypedScalar(context, report, fault, index);
-            }
-            unreachable;
-        }
-
-        /// The fixed operation as a `support.Kernel`.
-        const FixedSpec = struct {
-            pub const arity = 2;
-            pub const Params = NumericParams;
-            pub const Output = heap.LeafWriter(.leaf_i64);
-
-            pub fn prepare(evaluator: *Machine, _: [2]Value, _: NumericParams, length: usize) error{OutOfMemory}!Output {
-                return .init(evaluator.allocator(), length);
-            }
-
-            pub fn chunk(params: NumericParams, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                const left = valueLeft(operands[0]);
-                const right = valueRight(operands[1]);
-                var block = Loops.Staging.init();
-                var offset: usize = 0;
-                while (offset != range.len()) {
-                    const piece = flat.blockRange(range, offset);
-                    if (runPiece(left, right, piece, &block) == .faulted) return replay(context, params.report, left, right, piece);
-                    output.writeRange(piece.start, block.written());
-                    offset += piece.len();
-                }
-            }
-
-            pub fn finish(output: *Output) Value {
-                return output.finish();
-            }
-        };
-
-        /// The dynamic operation as a `support.Kernel` of twice the length:
-        /// positions below `length / 2` profile the widest codepoint, and the
-        /// rest fill a writer of that width, made when the fill begins. The
-        /// profile charges and faults exactly as the fill would.
-        const DynamicSpec = struct {
-            pub const arity = 2;
-            pub const Params = NumericParams;
-            pub const Output = struct {
-                count: usize,
-                max_codepoint: u32 = 0,
-                writer: ?flat.CodepointWriter = null,
-
-                pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
-                    if (self.writer) |*writer| writer.retire(releases);
-                    self.writer = null;
-                }
-            };
-
-            pub fn prepare(_: *Machine, _: [2]Value, _: NumericParams, length: usize) error{OutOfMemory}!Output {
-                return .{ .count = length / 2 };
-            }
-
-            pub fn chunk(params: NumericParams, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                const left = valueLeft(operands[0]);
-                const right = valueRight(operands[1]);
-                if (range.start < output.count)
-                    try pass(params.report, left, right, output, .{ .start = range.start, .end = @min(range.end, output.count) }, context, true);
-                if (range.end > output.count) {
-                    if (output.writer == null)
-                        output.writer = try flat.CodepointWriter.init(context.allocator(), output.count, output.max_codepoint);
-                    const start = @max(range.start, output.count) - output.count;
-                    try pass(params.report, left, right, output, .{ .start = start, .end = range.end - output.count }, context, false);
-                }
-            }
-
-            fn pass(report: FaultReport, left: Left, right: Right, output: *Output, range: flat.Chunk, context: support.Context, profile: bool) MachineError!void {
-                var block = Loops.Staging.init();
-                var offset: usize = 0;
-                while (offset != range.len()) {
-                    const piece = flat.blockRange(range, offset);
-                    if (runPiece(left, right, piece, &block) == .faulted) return replay(context, report, left, right, piece);
-                    if (profile) {
-                        for (block.written()) |codepoint| output.max_codepoint = @max(output.max_codepoint, codepoint);
-                    } else output.writer.?.writeCodepoints(piece.start, block.written());
-                    offset += piece.len();
-                }
-            }
-
-            pub fn finish(output: *Output) Value {
-                return output.writer.?.finish();
-            }
-        };
-
-        const Spec = if (dynamic) DynamicSpec else FixedSpec;
-        const run = support.Kernel(Spec).run;
-        const nested = support.Kernel(Spec).nested;
-    };
-}
-
 /// The next piece of a charged range. A vector loop writes its output's own
 /// range and stages nothing, so it takes the rest of the range as one block and
 /// pays its fixed per-block work once; a scalar loop's staging is bounded by the
@@ -1702,6 +1488,18 @@ fn nextPiece(comptime vector: bool, range: flat.Chunk, offset: usize) flat.Chunk
     return flat.blockRange(range, offset);
 }
 
+/// Narrows a block of lane values to the result element, by bit pattern: a
+/// lane that faulted is discarded by its mask, so its value need not fit.
+fn narrowLanes(comptime In: type, comptime Out: type, comptime lanes: usize, values: @Vector(lanes, In)) @Vector(lanes, Out) {
+    if (In == Out) return values;
+    comptime std.debug.assert(@bitSizeOf(Out) < @bitSizeOf(In));
+    if (comptime @typeInfo(In).int.signedness == .signed) {
+        const pattern: @Vector(lanes, u64) = @bitCast(values);
+        return @truncate(pattern);
+    }
+    return @truncate(values);
+}
+
 /// A binary typed operation: one range loop (runPieces) and its replay, as
 /// a `support.Kernel` spec run at top level (run) or inside pervasion
 /// (nested).
@@ -1711,7 +1509,20 @@ fn binaryKernel(
     comptime right_class: Number,
     comptime shape: Shape,
 ) type {
-    const out = comptime binaryResult(operation, left_class, right_class).?;
+    return binaryKernelInto(operation, left_class, right_class, shape, comptime binaryResult(operation, left_class, right_class).?);
+}
+
+/// `binaryKernel` with the result class chosen by the caller: a scalar program
+/// keeps a 0/1 result in its int registers where a standalone operation would
+/// publish bytes.
+fn binaryKernelInto(
+    comptime operation: BinaryOp,
+    comptime left_class: Number,
+    comptime right_class: Number,
+    comptime shape: Shape,
+    comptime out: Number,
+) type {
+    @setEvalBranchQuota(10_000);
     const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
     const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
     const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
@@ -1756,20 +1567,67 @@ fn binaryKernel(
             return out.unboxed(result);
         }
     }.run;
+    // Integral lanes as ints: a byte lane widens, an int lane is itself.
+    const Wide = @Vector(lanes, i64);
+    const integral = left_class != .real and right_class != .real;
+    const wide = struct {
+        fn left(a: @Vector(lanes, left_class.Element())) Wide {
+            return if (left_class == .integer) a else @intCast(a);
+        }
+        fn right(b: @Vector(lanes, right_class.Element())) Wide {
+            return if (right_class == .integer) b else @intCast(b);
+        }
+    };
     const vector_body = struct {
         fn run(
             a: @Vector(lanes, left_class.Element()),
             b: @Vector(lanes, right_class.Element()),
         ) @Vector(lanes, out.Element()) {
-            const ones: @Vector(lanes, i64) = @splat(1);
-            const zeroes: @Vector(lanes, i64) = @splat(0);
+            const Out = out.Element();
+            const ones: @Vector(lanes, Out) = @splat(1);
+            const zeroes: @Vector(lanes, Out) = @splat(0);
+            if (integral) {
+                const wa = wide.left(a);
+                const wb = wide.right(b);
+                return switch (operation) {
+                    .eq => @select(Out, wa == wb, ones, zeroes),
+                    .ne => @select(Out, wa != wb, ones, zeroes),
+                    .lt => @select(Out, wa < wb, ones, zeroes),
+                    .gt => @select(Out, wa > wb, ones, zeroes),
+                    .le => @select(Out, wa <= wb, ones, zeroes),
+                    .ge => @select(Out, wa >= wb, ones, zeroes),
+                    // A same-class pair keeps its class; `binaryResult`
+                    // widens a mixed pair's selection to ints.
+                    .min => if (left_class == right_class) @select(Out, b < a, b, a) else @select(Out, wb < wa, wb, wa),
+                    .max => if (left_class == right_class) @select(Out, b > a, b, a) else @select(Out, wb > wa, wb, wa),
+                    .band => wa & wb,
+                    .bor => wa | wb,
+                    .bxor => wa ^ wb,
+                    .wrap_add => wa +% wb,
+                    .wrap_sub => wa -% wb,
+                    .wrap_mul => wa *% wb,
+                    .add,
+                    .sub,
+                    .mul,
+                    .div,
+                    .int_div,
+                    .mod,
+                    .pow,
+                    .atan2,
+                    .and_word,
+                    .or_word,
+                    .bsl,
+                    .bsr,
+                    => unreachable,
+                };
+            }
             return switch (operation) {
-                .eq => @select(i64, a == b, ones, zeroes),
-                .ne => @select(i64, a != b, ones, zeroes),
-                .lt => @select(i64, a < b, ones, zeroes),
-                .gt => @select(i64, a > b, ones, zeroes),
-                .le => @select(i64, a <= b, ones, zeroes),
-                .ge => @select(i64, a >= b, ones, zeroes),
+                .eq => @select(Out, a == b, ones, zeroes),
+                .ne => @select(Out, a != b, ones, zeroes),
+                .lt => @select(Out, a < b, ones, zeroes),
+                .gt => @select(Out, a > b, ones, zeroes),
+                .le => @select(Out, a <= b, ones, zeroes),
+                .ge => @select(Out, a >= b, ones, zeroes),
                 .min => @select(left_class.Element(), b < a, b, a),
                 .max => @select(left_class.Element(), b > a, b, a),
                 .band => a & b,
@@ -1810,20 +1668,23 @@ fn binaryKernel(
             a: @Vector(lanes, left_class.Element()),
             b: @Vector(lanes, right_class.Element()),
         ) Vectors.Masked {
-            if (left_class == .integer and right_class == .integer and
-                (operation == .and_word or operation == .or_word))
-            {
+            if (integral and (operation == .and_word or operation == .or_word)) {
                 // Both operands must be 0 or 1, exactly `boolean`'s test.
-                const ones: @Vector(lanes, i64) = @splat(1);
-                const zeros: @Vector(lanes, i64) = @splat(0);
-                const values = if (operation == .and_word) a & b else a | b;
-                return .{ .values = values, .faults = Vectors.mask((a | b) & ~ones != zeros) };
+                const wa = wide.left(a);
+                const wb = wide.right(b);
+                const ones: Wide = @splat(1);
+                const zeros: Wide = @splat(0);
+                // Faulting lanes are discarded, so narrowing may truncate them.
+                const values = narrowLanes(i64, out.Element(), lanes, if (operation == .and_word) wa & wb else wa | wb);
+                return .{ .values = values, .faults = Vectors.mask((wa | wb) & ~ones != zeros) };
             }
-            if (left_class == .integer and right_class == .integer) {
+            if (integral) {
+                const wa = wide.left(a);
+                const wb = wide.right(b);
                 const result = switch (operation) {
-                    .add => @addWithOverflow(a, b),
-                    .sub => @subWithOverflow(a, b),
-                    .mul => @mulWithOverflow(a, b),
+                    .add => @addWithOverflow(wa, wb),
+                    .sub => @subWithOverflow(wa, wb),
+                    .mul => @mulWithOverflow(wa, wb),
                     else => unreachable,
                 };
                 const no_overflow: @Vector(lanes, u1) = @splat(0);
@@ -1940,6 +1801,7 @@ fn binaryKernel(
                             .byte => .{ .reuse_bytes = claimed },
                             .integer => .{ .reuse_ints = claimed },
                             .real => .{ .reuse_reals = claimed },
+                            .char1, .char2, .char4 => unreachable,
                         },
                         .adopted = true,
                     };
@@ -1982,7 +1844,12 @@ fn binaryKernel(
 
 /// A unary typed operation; see `binaryKernel`.
 fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type {
-    const out = comptime unaryResult(operation, operand_class);
+    return unaryKernelInto(operation, operand_class, comptime unaryResult(operation, operand_class));
+}
+
+/// `unaryKernel` with the result class chosen by the caller; see `binaryKernelInto`.
+fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, comptime out: Number) type {
+    @setEvalBranchQuota(10_000);
     const policy = comptime unaryLoopPolicy(operation, operand_class);
     const Checked = flat.CheckedFamily(operand_class.Element(), void, out.Element());
     const lanes = std.simd.suggestVectorLength(operand_class.Element()) orelse 1;
@@ -2021,7 +1888,8 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
                         // The operand must be 0 or 1, exactly `boolean`'s test.
                         const ones: @Vector(lanes, operand_class.Element()) = @splat(1);
                         const zeros: @Vector(lanes, operand_class.Element()) = @splat(0);
-                        return .{ .values = @intCast(a ^ ones), .faults = Vectors.mask(a & ~ones != zeros) };
+                        // Faulting lanes are discarded, so narrowing may truncate them.
+                        return .{ .values = narrowLanes(operand_class.Element(), out.Element(), lanes, a ^ ones), .faults = Vectors.mask(a & ~ones != zeros) };
                     },
                     else => unreachable,
                 }
@@ -2076,6 +1944,7 @@ fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type
                         .byte => .{ .reuse_bytes = claimed },
                         .integer => .{ .reuse_ints = claimed },
                         .real => .{ .reuse_reals = claimed },
+                        .char1, .char2, .char4 => unreachable,
                     },
                     .adopted = true,
                 };
@@ -2130,6 +1999,7 @@ fn freshOutput(comptime out: Number, evaluator: *Machine, length: usize) error{O
         .byte => .{ .fresh_bytes = try .init(evaluator.allocator(), length) },
         .integer => .{ .fresh_ints = try .init(evaluator.allocator(), length) },
         .real => .{ .fresh_reals = try .init(evaluator.allocator(), length) },
+        .char1, .char2, .char4 => unreachable,
     };
 }
 
@@ -2159,8 +2029,8 @@ const NumericBinaryPlan = opaque {
     /// One indexed load per call. The nested comparison chain this replaces
     /// was a fixed cost of every nested row.
     fn selectFor(comptime operation: BinaryOp, left: Number, right: Number, shape: Shape) ?*const NumericBinaryPlan {
-        // There is no byte scalar, so neither broadcast shape pairs one with a leaf.
-        std.debug.assert(!(shape == .scalar_leaf and left == .byte) and !(shape == .leaf_scalar and right == .byte));
+        // A stored width has no scalar, so neither broadcast shape pairs one with a leaf.
+        std.debug.assert(!(shape == .scalar_leaf and !left.scalar()) and !(shape == .leaf_scalar and !right.scalar()));
         std.debug.assert(shape != .leaf_only);
         const table = comptime plans(operation);
         return table[@backingInt(left)][@backingInt(right)][@backingInt(shape)];
@@ -2180,8 +2050,8 @@ const NumericBinaryPlan = opaque {
         for (number_classes) |candidate_left| {
             for (number_classes) |candidate_right| {
                 for (binary_shapes) |candidate_shape| {
-                    if (candidate_shape == .scalar_leaf and candidate_left == .byte) continue;
-                    if (candidate_shape == .leaf_scalar and candidate_right == .byte) continue;
+                    if (candidate_shape == .scalar_leaf and !candidate_left.scalar()) continue;
+                    if (candidate_shape == .leaf_scalar and !candidate_right.scalar()) continue;
                     const out = binaryResult(operation, candidate_left, candidate_right) orelse continue;
                     const Kernel = binaryKernel(operation, candidate_left, candidate_right, candidate_shape);
                     const data = Data{
@@ -2200,115 +2070,6 @@ const NumericBinaryPlan = opaque {
         return table;
     }
 };
-
-fn leafFlatScalarClass(item: Value) ?FlatScalarClass {
-    if (leafNumber(item)) |number| return switch (number) {
-        .byte => .byte,
-        .integer => .integer,
-        .real => null,
-    };
-    if (leafCharacter(item)) |character| return characterFlatClass(character);
-    return null;
-}
-
-fn scalarFlatScalarClass(item: Value) ?FlatScalarClass {
-    return switch (item) {
-        .int => .integer,
-        // A scalar has no storage width. u32 is the honest loop class because
-        // it can carry every scalar without a narrowing precondition.
-        .char => .char4,
-        else => null,
-    };
-}
-
-/// The result variant is selected before generating a loop. In particular, a
-/// numeric pair must never instantiate a character loop merely because the
-/// runtime dispatcher would reject that pair later.
-const CharacterBinaryPlan = opaque {
-    const Data = struct {
-        left: FlatScalarClass,
-        right: FlatScalarClass,
-        shape: Shape,
-        /// A dynamic kernel profiles before it fills, so its work is twice
-        /// its length.
-        dynamic: bool,
-        run: RunBinary,
-        nested: NestedBinary,
-    };
-
-    fn select(operation: BinaryOp, left: FlatScalarClass, right: FlatScalarClass, shape: Shape) ?*const CharacterBinaryPlan {
-        return switch (operation) {
-            inline else => |selected| selectFor(selected, left, right, shape),
-        };
-    }
-
-    fn selectFor(comptime operation: BinaryOp, left: FlatScalarClass, right: FlatScalarClass, shape: Shape) ?*const CharacterBinaryPlan {
-        const classes = [_]FlatScalarClass{ .byte, .integer, .char1, .char2, .char4 };
-        inline for (classes) |candidate_left| {
-            inline for (classes) |candidate_right| {
-                const both_char = comptime candidate_left.isCharacter() and candidate_right.isCharacter();
-                const fixed = comptime both_char and switch (operation) {
-                    .sub, .eq, .ne, .lt, .gt, .le, .ge => true,
-                    else => false,
-                };
-                const dynamic = comptime switch (operation) {
-                    .add => candidate_left.isCharacter() != candidate_right.isCharacter(),
-                    .sub => candidate_left.isCharacter() and candidate_right == .integer,
-                    .min, .max => both_char,
-                    else => false,
-                };
-                if (comptime !fixed and !dynamic) continue;
-                inline for (binary_shapes) |candidate_shape| {
-                    // Scalars have no narrow storage class.
-                    if (comptime candidate_shape == .scalar_leaf and candidate_left != .integer and candidate_left != .char4) continue;
-                    if (comptime candidate_shape == .leaf_scalar and candidate_right != .integer and candidate_right != .char4) continue;
-                    if (candidate_left == left and candidate_right == right and candidate_shape == shape) {
-                        const Kernel = comptime charKernel(operation, candidate_left, candidate_right, candidate_shape, !fixed);
-                        const data = comptime Data{
-                            .left = candidate_left,
-                            .right = candidate_right,
-                            .shape = candidate_shape,
-                            .dynamic = !fixed,
-                            .run = Kernel.run,
-                            .nested = Kernel.nested,
-                        };
-                        return @ptrCast(&data);
-                    }
-                }
-            }
-        }
-        return null;
-    }
-};
-
-fn startNestedCharBinary(
-    evaluator: *Machine,
-    operation: BinaryOp,
-    left_item: Value,
-    right_item: Value,
-    report: FaultReport,
-) MachineError!?support.NestedOutcome {
-    const left_leaf = leafFlatScalarClass(left_item);
-    const right_leaf = leafFlatScalarClass(right_item);
-    const left_scalar = scalarFlatScalarClass(left_item);
-    const right_scalar = scalarFlatScalarClass(right_item);
-    const shape: Shape = if (left_leaf != null and right_leaf != null)
-        .leaf_leaf
-    else if (left_leaf != null and right_scalar != null)
-        .leaf_scalar
-    else if (left_scalar != null and right_leaf != null)
-        .scalar_leaf
-    else
-        return null;
-    const left_class = left_leaf orelse left_scalar.?;
-    const right_class = right_leaf orelse right_scalar.?;
-    if (!left_class.isCharacter() and !right_class.isCharacter()) return null;
-    const length = try conformingLength(evaluator, shape, left_item, right_item);
-    if (length == 0) return null;
-    const plan = CharacterBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
-    const data: *const CharacterBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    return try data.nested(evaluator, .{ left_item, right_item }, null, .{ .report = report, .reuse = false }, if (data.dynamic) 2 * length else length);
-}
 
 fn firstFlatElement(item: Value) ?Value {
     if (item != .list or item.list.length() == 0) return null;
@@ -2404,11 +2165,7 @@ fn startNestedBinary(
     root: ?*heap.OwnedValue,
     report: FaultReport,
 ) MachineError!?support.NestedOutcome {
-    // The builders are disjoint: numeric needs both operands numeric, and
-    // character needs one character operand. The common numeric row is tried
-    // first so it does not pay the character classification.
     if (try startNestedNumericBinary(evaluator, operation, left, right, root, report)) |typed| return typed;
-    if (try startNestedCharBinary(evaluator, operation, left, right, report)) |typed| return typed;
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left, right, report);
     return null;
 }
@@ -2503,43 +2260,10 @@ fn startTypedBinary(
     report: FaultReport,
 ) MachineError!bool {
     if (try startNumericBinary(evaluator, operation, left, right, report)) return true;
-    // The numeric kernel classified exactly as the numeric builder does, so
-    // what remains is the character kernels', classified as the character
-    // builder does. An empty result's representation is the generic route's
-    // to choose, and so is a pair no plan admits.
-    if (try startCharacterBinary(evaluator, operation, left, right, report)) return true;
+    // An empty result's representation is the generic route's to choose, and
+    // so is a pair no plan admits.
     _ = try rejectUnsupportedFlatBinary(evaluator, operation, left.borrow(), right.borrow(), report);
     return false;
-}
-
-fn startCharacterBinary(
-    evaluator: *Machine,
-    operation: BinaryOp,
-    left: *heap.OwnedValue,
-    right: *heap.OwnedValue,
-    report: FaultReport,
-) MachineError!bool {
-    const left_item = left.borrow();
-    const right_item = right.borrow();
-    const left_leaf = leafFlatScalarClass(left_item);
-    const right_leaf = leafFlatScalarClass(right_item);
-    const shape: Shape = if (left_leaf != null and right_leaf != null)
-        .leaf_leaf
-    else if (left_leaf != null and scalarFlatScalarClass(right_item) != null)
-        .leaf_scalar
-    else if (right_leaf != null and scalarFlatScalarClass(left_item) != null)
-        .scalar_leaf
-    else
-        return false;
-    const left_class = left_leaf orelse scalarFlatScalarClass(left_item).?;
-    const right_class = right_leaf orelse scalarFlatScalarClass(right_item).?;
-    if (!left_class.isCharacter() and !right_class.isCharacter()) return false;
-    const length = try conformingLength(evaluator, shape, left_item, right_item);
-    if (length == 0) return false;
-    const plan = CharacterBinaryPlan.select(operation, left_class, right_class, shape) orelse return false;
-    const data: *const CharacterBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    try data.run(evaluator, .{ left, right }, .{ .report = report }, if (data.dynamic) 2 * length else length);
-    return true;
 }
 
 fn startTypedUnary(
@@ -2735,15 +2459,22 @@ fn blockNumber(item: Value) Number {
     return if (class == .byte) .integer else class;
 }
 
+/// A program's registers hold ints and reals, so a 0/1 result that would be
+/// bytes outside a program is an int inside one; the program narrows its
+/// final result to bytes itself when every value fits.
+fn widened(class: Number) Number {
+    return if (class == .byte) .integer else class;
+}
+
 fn blockBinaryResult(operation: BinaryOp, left: Number, right: Number) ?Number {
     @setEvalBranchQuota(100_000);
     return switch (operation) {
         inline else => |selected| switch (left) {
             inline .integer, .real => |left_class| switch (right) {
-                inline .integer, .real => |right_class| comptime binaryResult(selected, left_class, right_class),
-                .byte => unreachable,
+                inline .integer, .real => |right_class| if (comptime binaryResult(selected, left_class, right_class)) |class| widened(class) else null,
+                .byte, .char1, .char2, .char4 => unreachable,
             },
-            .byte => unreachable,
+            .byte, .char1, .char2, .char4 => unreachable,
         },
     };
 }
@@ -2751,8 +2482,8 @@ fn blockBinaryResult(operation: BinaryOp, left: Number, right: Number) ?Number {
 fn blockUnaryResult(operation: UnaryOp, operand: Number) Number {
     return switch (operation) {
         inline else => |selected| switch (operand) {
-            inline .integer, .real => |operand_class| comptime unaryResult(selected, operand_class),
-            .byte => unreachable,
+            inline .integer, .real => |operand_class| widened(comptime unaryResult(selected, operand_class)),
+            .byte, .char1, .char2, .char4 => unreachable,
         },
     };
 }
@@ -2773,11 +2504,12 @@ fn binaryBlock(operation: BinaryOp, left: BlockValue, right: BlockValue, ints: [
                     const result = comptime binaryResult(selected, left_class, right_class);
                     if (comptime (left_scalar and right_scalar) or result == null) unreachable else {
                         const shape: Shape = comptime if (left_scalar) .scalar_leaf else if (right_scalar) .leaf_scalar else .leaf_leaf;
-                        const Kernel = binaryKernel(selected, left_class, right_class, shape);
-                        return switch (comptime result.?) {
+                        const out = comptime widened(result.?);
+                        const Kernel = binaryKernelInto(selected, left_class, right_class, shape, out);
+                        return switch (out) {
                             .integer => Kernel.runBlock(left_items, right_items, ints),
                             .real => Kernel.runBlock(left_items, right_items, reals),
-                            .byte => unreachable,
+                            .byte, .char1, .char2, .char4 => unreachable,
                         };
                     }
                 },
@@ -2793,11 +2525,12 @@ fn unaryBlock(operation: UnaryOp, operand: BlockValue, ints: []i64, reals: []f64
         inline else => |selected| switch (operand) {
             inline .ints, .reals => |items, tag| {
                 const operand_class: Number = comptime if (tag == .ints) .integer else .real;
-                const Kernel = unaryKernel(selected, operand_class);
-                return switch (comptime unaryResult(selected, operand_class)) {
+                const out = comptime widened(unaryResult(selected, operand_class));
+                const Kernel = unaryKernelInto(selected, operand_class, out);
+                return switch (out) {
                     .integer => Kernel.runBlock(items, ints),
                     .real => Kernel.runBlock(items, reals),
-                    .byte => unreachable,
+                    .byte, .char1, .char2, .char4 => unreachable,
                 };
             },
             .int_scalar, .real_scalar => unreachable,
@@ -2868,7 +2601,7 @@ const BlockPlan = struct {
             .result = switch (classes[program.result]) {
                 .integer => .{ .ints = try allocator.alloc(i64, length) },
                 .real => .{ .reals = try allocator.alloc(f64, length) },
-                .byte => unreachable,
+                .byte, .char1, .char2, .char4 => unreachable,
             },
         };
         return plan;
@@ -3216,6 +2949,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
 /// Reports a program's fault as the faulting word would: that word active, at
 /// its position in the quotation, with the shared scalar diagnostic.
 fn failProgram(evaluator: *Machine, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
+    @setEvalBranchQuota(10_000);
     evaluator.setActiveWord(.plain(instruction.word));
     const failure = scalarFailure(evaluator, fault, null);
     evaluator.setFailureSite(phrase.list, instruction.index);
@@ -3271,6 +3005,7 @@ pub fn typedConstantCandidate(operation: BinaryOp, input: Value, constant: Value
 }
 
 pub fn typedBinaryCandidate(operation: BinaryOp, left: Value, right: Value) bool {
+    @setEvalBranchQuota(10_000);
     const left_leaf = leafNumber(left);
     const right_leaf = leafNumber(right);
     const left_flat = left == .list and left.list.kind() != .generic_spine;
@@ -3283,7 +3018,7 @@ pub fn typedBinaryCandidate(operation: BinaryOp, left: Value, right: Value) bool
     if (length == 0) return false;
     // The only successful flat result with no single representation is the
     // settled mixed numeric min/max case. Every other nonnumeric combination
-    // either has a typed character result or faults at its first element.
+    // faults at its first element.
     if (left_leaf != null and right_leaf != null and left_leaf.? != right_leaf.? and
         (operation == .min or operation == .max)) return false;
     const left_class = left_leaf orelse scalarNumber(left);
@@ -3357,7 +3092,7 @@ fn reduceKernel(
     return struct {
         fn accumulated(output: *const ReduceOutput) accumulator_class.Element() {
             return switch (accumulator_class) {
-                .byte => unreachable,
+                .byte, .char1, .char2, .char4 => unreachable,
                 .integer => output.accumulator.integer,
                 .real => output.accumulator.real,
             };
@@ -3365,7 +3100,7 @@ fn reduceKernel(
 
         fn store(output: *ReduceOutput, element: accumulator_class.Element()) void {
             output.accumulator = switch (accumulator_class) {
-                .byte => unreachable,
+                .byte, .char1, .char2, .char4 => unreachable,
                 .integer => .{ .integer = element },
                 .real => .{ .real = element },
             };
@@ -3383,7 +3118,7 @@ fn reduceKernel(
             var accumulator = accumulated(output);
             for (piece.start..piece.end) |index| {
                 const element: f64 = switch (element_class) {
-                    .byte, .integer => @floatFromInt(elements[index]),
+                    .byte, .char1, .char2, .char4, .integer => @floatFromInt(elements[index]),
                     .real => elements[index],
                 };
                 accumulator = switch (operation) {
@@ -3462,10 +3197,10 @@ fn reduceKernel(
                         const diagnostic = scalarDiagnostic(fault);
                         return evaluator.fail(diagnostic.kind, diagnostic.message);
                     };
-                } else params.initial;
+                } else ordinal(params.initial);
                 var output: Output = .{
                     .accumulator = switch (accumulator_class) {
-                        .byte => unreachable,
+                        .byte, .char1, .char2, .char4 => unreachable,
                         .integer => .{ .integer = seed.int },
                         .real => .{ .real = seed.float },
                     },
@@ -3607,20 +3342,33 @@ pub fn foldLeafRow(
     accumulator_owned: bool,
     row: Value,
 ) MachineError!RowFold {
-    const class = leafNumber(accumulator) orelse return .declined;
-    if (leafNumber(row) != class) return .declined;
+    @setEvalBranchQuota(100_000);
+    const accumulator_class = leafNumber(accumulator) orelse return .declined;
+    const row_class = leafNumber(row) orelse return .declined;
     const length: usize = @intCast(row.list.length());
     if (length == 0 or accumulator.list.length() != length) return .declined;
     if (length > evaluator.remainingKernelFuel()) return .declined;
     return switch (operation) {
-        inline else => |selected| switch (class) {
-            .byte => .declined,
-            inline .integer, .real => |selected_class| if (comptime binaryResult(selected, selected_class, selected_class) != selected_class)
-                .declined
-            else
-                rowFoldStep(selected, selected_class).run(evaluator, accumulator, accumulator_owned, row, length),
+        inline else => |selected| switch (accumulator_class) {
+            inline else => |selected_accumulator| switch (row_class) {
+                inline else => |selected_row| if (comptime rowFoldAccepts(selected, selected_accumulator, selected_row))
+                    rowFoldStep(selected, selected_accumulator, selected_row).run(evaluator, accumulator, accumulator_owned, row, length)
+                else
+                    .declined,
+            },
         },
     };
+}
+
+/// Whether a row step is typed: read from the result lattice, as
+/// `columnAccumulator` reads it. The step's result must be of one class and
+/// a further step from that class over the same rows must keep it, so the
+/// fold's accumulator class settles after at most one step. Byte rows settle
+/// on ints, int and real rows on reals; `min` and `max` over mixed classes
+/// have no single-class result and stay on the per-row cursor.
+fn rowFoldAccepts(comptime operation: BinaryOp, comptime accumulator: Number, comptime row: Number) bool {
+    const out = binaryResult(operation, accumulator, row) orelse return false;
+    return binaryResult(operation, out, row) == out;
 }
 
 /// The accumulator class of a fold over rows of `element` leaves: what the
@@ -3727,7 +3475,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                     const items = elements[position..][0..count];
                     if (row == 0) {
                         for (target, items) |*slot, item| slot.* = switch (accumulator) {
-                            .byte => unreachable,
+                            .byte, .char1, .char2, .char4 => unreachable,
                             .integer => if (element == .real) unreachable else @intCast(item),
                             .real => if (element == .real) item else @floatFromInt(item),
                         };
@@ -3798,28 +3546,31 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
     };
 }
 
-fn rowFoldStep(comptime operation: BinaryOp, comptime class: Number) type {
-    const Element = class.Element();
+fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number, comptime row_class: Number) type {
+    const out = comptime binaryResult(operation, accumulator_class, row_class).?;
+    const Left = accumulator_class.Element();
+    const Right = row_class.Element();
+    const Element = out.Element();
     const Staging = flat.Block(Element);
     return struct {
         /// See `reduceKernel`: float `+ - *` fault only on a NaN result, so a
         /// clean unchecked block needs no per-element test.
-        const unchecked = class == .real and
+        const unchecked = accumulator_class == .real and row_class == .real and
             (operation == .add or operation == .sub or operation == .mul);
 
         fn run(evaluator: *Machine, accumulator: Value, accumulator_owned: bool, row: Value, length: usize) MachineError!RowFold {
             try evaluator.advanceKernel(length);
-            var right = heap.LeafReader(class.kind()).acquire(row.list);
+            var right = heap.LeafReader(row_class.kind()).acquire(row.list);
             defer right.release(evaluator.releaseDomain());
-            if (accumulator_owned) if (heap.UniqueLeafAdoption(class.kind()).claim(accumulator.list, length)) |claimed| {
+            if (out == accumulator_class and accumulator_owned) if (heap.UniqueLeafAdoption(out.kind()).claim(accumulator.list, length)) |claimed| {
                 var adoption = claimed;
                 errdefer adoption.abandon();
-                try apply(evaluator, adoption.sourceSlice(class.kind()), right.slice(), adoption.inPlaceRange(0, length));
+                try apply(evaluator, adoption.sourceSlice(out.kind()), right.slice(), adoption.inPlaceRange(0, length));
                 return .{ .in_place = adoption.finish() };
             };
-            var left = heap.LeafReader(class.kind()).acquire(accumulator.list);
+            var left = heap.LeafReader(accumulator_class.kind()).acquire(accumulator.list);
             defer left.release(evaluator.releaseDomain());
-            var writer = try heap.LeafWriter(class.kind()).init(evaluator.allocator(), length);
+            var writer = try heap.LeafWriter(out.kind()).init(evaluator.allocator(), length);
             errdefer writer.retirePartial(evaluator.releaseDomain());
             try apply(evaluator, left.slice(), right.slice(), writer.unpublishedRange(0, length));
             return .{ .fresh = writer.finish() };
@@ -3827,11 +3578,11 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime class: Number) type {
 
         /// `out` may alias `left`: each block is computed from operands not
         /// yet stored over, then stored.
-        fn apply(evaluator: *Machine, left: []const Element, right: []const Element, out: []Element) MachineError!void {
+        fn apply(evaluator: *Machine, left: []const Left, right: []const Right, out_items: []Element) MachineError!void {
             var block = Staging.init();
             var start: usize = 0;
-            while (start != out.len) {
-                const end = @min(start + flat.block_size, out.len);
+            while (start != out_items.len) {
+                const end = @min(start + flat.block_size, out_items.len);
                 if (unchecked) {
                     var clean = true;
                     for (start..end, 0..) |index, slot| {
@@ -3845,7 +3596,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime class: Number) type {
                         block.items[slot] = next;
                     }
                     if (clean) {
-                        @memcpy(out[start..end], block.items[0 .. end - start]);
+                        @memcpy(out_items[start..end], block.items[0 .. end - start]);
                         start = end;
                         continue;
                     }
@@ -3853,15 +3604,15 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime class: Number) type {
                 for (start..end, 0..) |index, slot| {
                     const next = @call(.always_inline, scalarBinary, .{
                         operation,
-                        class.boxed(left[index]),
-                        class.boxed(right[index]),
+                        accumulator_class.boxed(left[index]),
+                        row_class.boxed(right[index]),
                     }) catch |fault| {
                         const diagnostic = scalarDiagnostic(fault);
                         return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
                     };
-                    block.items[slot] = class.unboxed(next);
+                    block.items[slot] = out.unboxed(next);
                 }
-                @memcpy(out[start..end], block.items[0 .. end - start]);
+                @memcpy(out_items[start..end], block.items[0 .. end - start]);
                 start = end;
             }
         }

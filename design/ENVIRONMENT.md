@@ -742,11 +742,15 @@ The command reads these environment variables at startup:
 
 ### Standard input
 
-`io.stdin` is available in `-e` and script-file modes. It reads the complete
-input stream once. There is no ambient file access: file words live in `fs`
-and act beneath the selected named root or directory resource. Standard input carries program source in `ecl -` and in
-non-terminal invocation with no arguments, so `io.stdin` raises `` `io `` in those
-modes. A second read also raises `` `io ``.
+Standard input is the device `fd.in`, available in `-e` and script-file
+modes: `fd.read` returns what the host has, `fd.read-all` the rest of the
+stream as bytes, and `io.read` or `io.lines` the same as text. An exhausted
+stream reads as `[]` or `""` on every later read. There is no ambient file
+access: file words live in `fs` and act beneath the selected named root or
+directory resource. Standard input carries program source in `ecl -` and in
+non-terminal invocation with no arguments, so `fd.in` raises `` `io `` in those
+modes. `io.stdin` remains as `fd.in io.read`. Standard output and error are
+`fd.out` and `fd.err`; `io.print` and `io.eprint` write text through them.
 
 ### REPL
 

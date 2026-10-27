@@ -14,7 +14,7 @@ I/O runtime to report a programming defect.
 
 `git.snapshot [] port.open` creates a scope-owned resource. Start an exchange
 with `resource git.fetch request port.begin`, acquire its readable byte endpoint
-with `exchange git.output port.endpoint`, and consume `port.read` until `[]`.
+with `exchange git.output port.endpoint`, and consume `fd.read` until `[]`.
 Then `exchange port.result` returns the resolved 40-character lowercase commit
 string. Close the exchange and resource through `port.close`. A streaming
 exchange requires a concurrent consumer; waiting for its result before consuming

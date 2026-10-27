@@ -31,11 +31,11 @@
   reader chunks bytes append size bytes len +
   dup 67108864 <=
   `overflow error.new "Git package archive exceeds 64 MiB" error.with-message assert
-  reader 65536 port.read) `chunk defp
+  reader 65536 fd.read) `chunk defp
 
  ### defp collect
  (reader -- bytes : "Drain a native byte endpoint before requesting its structured result.")
- (|reader| reader [] 0 reader 65536 port.read
+ (|reader| reader [] 0 reader 65536 fd.read
   (dup empty? not) (chunk) while pop pop swap pop raze) `collect defp
 
  ### defp collect-exchange

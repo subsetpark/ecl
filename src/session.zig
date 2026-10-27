@@ -21,6 +21,7 @@ const poll = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
+const standard_streams = @import("standard_streams.zig");
 const map_state = @import("module_snapshot.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
@@ -246,7 +247,7 @@ const SessionCore = struct {
     module_snapshot: ?*map_state.Snapshot,
     local_preload: LocalPreloadState = .idle,
     environ: EnvironSnapshot,
-    standard_input: machine.StandardInput,
+    standard_streams: standard_streams.Devices,
     arguments: Value,
     console: console_api.Console,
     scheduler: scheduler_api.Scheduler,
@@ -497,9 +498,10 @@ pub const Session = enum(usize) {
             .ecl_path = owned_ecl_path,
             .module_snapshot = owned_module_snapshot,
             .environ = snapshot,
-            .standard_input = .init(
-                host.standard_input,
-            ),
+            // SAFETY: the devices borrow the console, which lives in this
+            // core, so they are initialized on the line after the core is;
+            // nothing reads the field before that.
+            .standard_streams = undefined,
             .arguments = argv.take(),
             .console = console_api.Console.init(
                 host.output,
@@ -508,6 +510,7 @@ pub const Session = enum(usize) {
             .scheduler = scheduler,
             .root_tasks = root_tasks,
         };
+        core.standard_streams = .init(allocator, host.io, host.standard_input, &core.console);
         core.scheduler.attachRetirement();
         test_authority = null;
         return @fromBackingInt(@intCast(@intFromPtr(core)));
@@ -522,6 +525,7 @@ pub const Session = enum(usize) {
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
+        core.standard_streams.deinit(core.releaseDomain());
         core.http_owner.deinit();
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
@@ -620,7 +624,7 @@ pub const Session = enum(usize) {
                     .http_access = core.http_owner.access(),
                     .wall_clock = core.wall_clock,
                     .environ = core.environ.view(),
-                    .standard_input = &core.standard_input,
+                    .standard_streams = &core.standard_streams,
                 } },
             },
             core.arguments,

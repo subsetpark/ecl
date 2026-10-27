@@ -16,7 +16,7 @@
   "Return 1 when a value is a string, a list whose every element is a char, and 0 for every other
    value. The empty string answers 1, and so does the empty list: they are one value. Never
    raises.")
- (dup type `list match? ((type `char match?) all?) (pop 0) if) `str? def
+ (dup str.core.kind [string (pop 1) generic ((type `char match?) all?) (pop 0)] case) `str? def
 
  ### defp checked-error
  (candidate failure -- string :
@@ -54,12 +54,12 @@
  ### def upper
  (string -- string : "Uppercase ASCII letters, leaving every other scalar unchanged.")
  ("str.upper expects a string" checked
-  dup dup \a >= swap \z <= and 32 * -) `upper def
+  dup dup \a >= swap \z <= and 32 * - char) `upper def
 
  ### def lower
  (string -- string : "Lowercase ASCII letters, leaving every other scalar unchanged.")
  ("str.lower expects a string" checked
-  dup dup \A >= swap \Z <= and 32 * +) `lower def
+  dup dup \A >= swap \Z <= and 32 * + char) `lower def
 
  ### defp trim-left-valid
  (string -- string : "Remove leading ASCII whitespace from a validated string.")

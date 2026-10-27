@@ -73,7 +73,7 @@ const source_groups = [_]SourceGroup{
     // they are ordinary production sources under the bounded-traversal rules.
     embeddedGroup(true, &.{
         "stdlib/dict.zig",  "stdlib/rand.zig",   "stdlib/json.zig", "stdlib/http.zig", "stdlib/archive.zig", "stdlib/fs.zig",
-        "stdlib/clock.zig", "stdlib/source.zig", "stdlib/host.zig",
+        "stdlib/clock.zig", "stdlib/source.zig", "stdlib/host.zig", "stdlib/str.zig",
     }),
     embeddedGroup(true, &.{
         "combinators.zig",
@@ -103,18 +103,18 @@ const source_groups = [_]SourceGroup{
     // vocabulary in external.zig and are opened only by their Session-owned
     // owner.
     embeddedGroup(true, &.{
-        "scheduler.zig",          "scheduler_core.zig",  "turn_core.zig",         "external.zig",          "console.zig",         "task_prims.zig",    "archive_document.zig",
-        "mailbox.zig",            "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",  "port_builder.zig",
-        "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig", "port_result.zig",
-        "port_error_data.zig",    "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",  "filesystem_port.zig",
-        "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
+        "scheduler.zig",        "scheduler_core.zig",     "turn_core.zig",       "external.zig",          "console.zig",           "task_prims.zig",      "archive_document.zig",
+        "standard_streams.zig", "mailbox.zig",            "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",
+        "port_builder.zig",     "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig",
+        "port_result.zig",      "port_error_data.zig",    "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",
+        "filesystem_port.zig",  "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
     }),
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
     embeddedGroup(true, &.{
         "native/ports.zig",        "native/abi.zig",        "native/capability.zig", "native/sdk.zig",
         "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",     "native_port.zig",
-        "native_call.zig",         "stdlib/io.zig",         "stdlib/port.zig",
+        "native_call.zig",         "stdlib/io.zig",         "stdlib/port.zig",       "stdlib/fd.zig",
     }),
 };
 

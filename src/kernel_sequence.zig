@@ -199,6 +199,146 @@ const FlatGatherDriver = struct {
     }
 };
 
+/// `mask where at` as one pass: the elements of the source at the positions
+/// `where` would list, each repeated its count, without the index list. The
+/// phrase admits a byte-leaf mask, or an empty one, over a typed leaf; a
+/// generic source keeps the words, whose gather already handles it. A
+/// nonzero count at a position the source lacks is `at`'s out-of-bounds
+/// fault, as the words would report it; nothing else can fault. Counting
+/// charges one unit per mask position, filling one per position and one per
+/// element written, as `where` charges its fill.
+pub fn compress(evaluator: *Machine, source: *heap.OwnedValue, mask: *heap.OwnedValue) MachineError!void {
+    const source_kind = source.borrow().list.kind();
+    const length: usize = if (mask.borrow().list.kind() == .leaf_u8) @intCast(mask.borrow().list.length()) else 0;
+    inline for (leaf_kinds) |candidate| if (candidate == source_kind) {
+        return support.Kernel(CompressKernel(candidate)).run(evaluator, .{ source, mask }, {}, length);
+    };
+    unreachable;
+}
+
+/// Whether `compress` takes this source and mask: see `compress`.
+pub fn compressCandidate(source: Value, mask: Value) bool {
+    if (source != .list or mask != .list) return false;
+    const typed = for (leaf_kinds) |candidate| {
+        if (source.list.kind() == candidate) break true;
+    } else false;
+    return typed and (mask.list.kind() == .leaf_u8 or mask.list.length() == 0);
+}
+
+/// Counts, then fills, like `WhereKernel`, but the fill copies the source's
+/// elements. A mask whose counts are all 0 or 1 fills without a repetition
+/// loop: every position stores its element at the write cursor, which only
+/// a selected position advances, so the store needs no branch.
+fn CompressKernel(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    return struct {
+        pub const arity = 2;
+        pub const Params = void;
+        pub const Output = struct {
+            phase: enum { count, fill } = .count,
+            /// The next mask position.
+            index: usize = 0,
+            total: usize = 0,
+            written: usize = 0,
+            /// No count read so far is above one.
+            mask: bool = true,
+            /// The mask's length: the positions each phase reads.
+            positions: usize = 0,
+            writer: ?heap.LeafWriter(kind) = null,
+            /// No element selected is the empty list `at` returns.
+            empty: ?Value = null,
+
+            pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
+                if (self.writer) |*writer| writer.retirePartial(releases);
+                if (self.empty) |item| releases.releaseValue(item);
+            }
+        };
+
+        pub fn prepare(_: *Machine, _: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+            return .{ .positions = length };
+        }
+
+        fn counts(mask: Value) []const u8 {
+            if (mask.list.kind() != .leaf_u8) return &.{};
+            return heap.leafElements(.leaf_u8, mask.list)[0..@intCast(mask.list.length())];
+        }
+
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            const source = operands[0];
+            const length: usize = @intCast(source.list.length());
+            const all = counts(operands[1]);
+            switch (output.phase) {
+                .count => {
+                    const block = all[range.start..range.end];
+                    // Positions the source has only need their sum; beyond
+                    // it, a nonzero count is the gather's fault.
+                    const inside = @min(block.len, length -| range.start);
+                    var total: usize = 0;
+                    var bits: u8 = 0;
+                    for (block[0..inside]) |count| {
+                        total += count;
+                        bits |= count;
+                    }
+                    for (block[inside..]) |count| {
+                        if (count != 0) return context.fail(.domain, "at index is out of bounds");
+                    }
+                    output.total += total;
+                    output.mask = output.mask and bits <= 1;
+                    output.index = range.end;
+                },
+                .fill => {
+                    const end = @min(output.index + range.len(), all.len);
+                    const block = all[output.index..end];
+                    const items = heap.leafElements(kind, source.list);
+                    const out = output.writer.?.unpublishedRange(0, output.total);
+                    if (output.mask) {
+                        // Every position stores at the write cursor; only a
+                        // selected one advances it. The store is in bounds
+                        // while elements remain to select, so the loop ends
+                        // at the last selected position, not at the block.
+                        for (block, output.index..) |count, position| {
+                            if (output.written == output.total) break;
+                            out[output.written] = items[position];
+                            output.written += count;
+                        }
+                    } else for (block, output.index..) |count, position| {
+                        if (output.written == output.total) break;
+                        const element: Element = items[position];
+                        @memset(out[output.written..][0..count], element);
+                        output.written += count;
+                    }
+                    output.index = end;
+                },
+            }
+        }
+
+        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+            if (output.phase == .fill) return null;
+            output.phase = .fill;
+            output.index = 0;
+            if (output.total == 0) {
+                output.empty = try list.fromValues(context.allocator(), &.{});
+                return null;
+            }
+            output.writer = try .init(context.allocator(), output.total);
+            // A bound on the fill's work; done ends it once every position is read.
+            return output.positions +| output.total;
+        }
+
+        pub fn done(output: *const Output) bool {
+            return output.phase == .fill and (output.empty != null or output.written == output.total);
+        }
+
+        pub fn finish(output: *Output) Value {
+            if (output.empty) |item| {
+                output.empty = null;
+                return item;
+            }
+            return output.writer.?.finish();
+        }
+    };
+}
+
 /// Finding one key in one dict: no descent, so no frame stack. The miss is the
 /// same failure `IndexCursor` reports, because it is the only other caller of
 /// this cursor for the same job.
@@ -2377,9 +2517,10 @@ fn cutPrimitive(evaluator: *Machine) MachineError!void {
     });
 }
 
-/// Validates every start, then materializes each piece from borrowed cells and
-/// finally the list of pieces. One cell buffer, sized for the longest piece,
-/// is reused for every piece.
+/// Validates every start, then materializes each piece and finally the list
+/// of pieces. A piece of a typed leaf is one range copy into a leaf of the
+/// same kind. A piece of a generic spine goes through borrowed cells, one
+/// buffer sized for the longest piece and reused for every piece.
 const CutDriver = struct {
     collection: heap.Owned(Value),
     starts: heap.Owned(Value),
@@ -2390,6 +2531,7 @@ const CutDriver = struct {
     cells: ?heap.Owned([]Value) = null,
     piece: usize = 0,
     filled: usize = 0,
+    typed: ?heap.Owned(list.LeafRangeMaterializer) = null,
     inner: ?heap.Owned(list.ValueMaterializer) = null,
     outer: ?heap.Owned(list.ValueMaterializer) = null,
 
@@ -2431,15 +2573,26 @@ const CutDriver = struct {
                 self.longest = @max(self.longest, length - self.previous);
             return .stepped;
         }
+        const header = self.collection.borrow().list;
         if (self.pieces == null) {
             self.pieces = .init(try .init(evaluator.releaseDomain(), count));
-            self.cells = .init(try evaluator.allocator().alloc(Value, self.longest));
+            if (header.kind() == .generic_spine)
+                self.cells = .init(try evaluator.allocator().alloc(Value, self.longest));
             if (count == 0) self.outer = .init(.init(evaluator.allocator(), self.pieces.?.borrow().values()));
             return .stepped;
         }
         if (self.outer) |*outer| return switch (try outer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
+        };
+        if (self.typed) |*typed| switch (try typed.borrowMut().advance(evaluator.workBudget())) {
+            .pending => return .stepped,
+            .complete => |piece_value| {
+                typed.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.typed = null;
+                self.finishPiece(evaluator, piece_value);
+                return .stepped;
+            },
         };
         if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .stepped,
@@ -2454,6 +2607,10 @@ const CutDriver = struct {
         const size = self.end(self.piece) - first;
         if (size == 0) {
             self.finishPiece(evaluator, try emptyLike(evaluator.allocator(), self.collection.borrow()));
+            return .stepped;
+        }
+        if (list.LeafRangeMaterializer.init(evaluator.allocator(), header, first, first + size)) |copy| {
+            self.typed = .init(copy);
             return .stepped;
         }
         const cells = self.cells.?.borrow();

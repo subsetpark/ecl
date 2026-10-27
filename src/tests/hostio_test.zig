@@ -139,20 +139,73 @@ test "hostio: getenv returns the snapshot value and unset is an error" {
     });
 }
 
-test "hostio: stdin reads piped data and errors when stdin is the source" {
+test "hostio: fd.in is refused when stdin is the program source" {
     // The mode gate is a Session capability, so it is observable without a
-    // child process: a session whose stdin is the program source refuses the
-    // read outright. `test/e2e.zig` covers the real piped-data case.
-    try expectError(.{ .source = "io.stdin", .standard_input = .program_source }, .{
+    // child process: a session whose stdin is the program source has no
+    // input device. Reading the real stream needs a real pipe, so piped
+    // data, short reads, and stable EOF are proven against the binary in
+    // `test/e2e.zig`.
+    try expectError(.{ .source = "fd.in", .standard_input = .program_source }, .{
         .name = "stdin is the program source",
-        .source = "io.stdin",
+        .source = "fd.in",
         .kind = "io",
-        .word = "io.stdin",
+        .word = "fd.core.in",
         .message = "stdin is the program source",
     });
-    // Reading the real stream needs a real pipe, so the piped-data case and
-    // the once-only claim are proven against the binary in `test/e2e.zig`
-    // rather than by making this suite depend on the test runner's stdin.
+    try expectError(.{ .source = "io.stdin", .standard_input = .program_source }, .{
+        .name = "io.stdin is fd.in read",
+        .source = "io.stdin",
+        .kind = "io",
+        .word = "fd.core.in",
+        .message = "stdin is the program source",
+    });
+}
+
+test "hostio: the standard devices are one value each" {
+    try expectStack(
+        .{ .source = "fd.out fd.out match? fd.in fd.in match? fd.out fd.err match?" },
+        "1 1 0",
+    );
+}
+
+test "hostio: fd.out and fd.err write bytes, io.write encodes text" {
+    // Bytes go out as they are, including a NUL and a byte that is not
+    // UTF-8, and a list of byte lists is written as one contiguous run.
+    try expectStackWithStreams(
+        .{ .source = "fd.out [72 105] fd.write fd.out ([10] [0 255]) fd.write fd.err [69 10] fd.write 1" },
+        "1",
+        "Hi\n\x00\xff",
+        "E\n",
+    );
+    try expectStackWithStreams(
+        .{ .source = "fd.out (\"a\" \"b\") io.write fd.out \"c\" io.write-line fd.err \"d\" io.write 1" },
+        "1",
+        "abc\n",
+        "d",
+    );
+    try expectStackWithOutput(.{ .source = "fd.out [] fd.write fd.out \"\" fd.write 1" }, "1", "");
+    try expectError(.{ .source = "fd.out \"x\" fd.write" }, .{
+        .name = "text is not bytes",
+        .source = "fd.out \"x\" fd.write",
+        .kind = "type",
+        .word = "fd.core.write",
+    });
+    try expectError(.{ .source = "fd.out fd.close" }, .{
+        .name = "devices are not resources",
+        .source = "fd.out fd.close",
+        .kind = "type",
+        .word = "port.core.close",
+    });
+}
+
+test "hostio: fd.bytes? recognizes exact byte lists and the stream words live under fd" {
+    try expectStack(.{ .source = "[1 2 255] fd.bytes? [1 256] fd.bytes? [-1] fd.bytes? \"ab\" fd.bytes? \"ab\" bytes fd.bytes? [] fd.bytes? 7 fd.bytes? [1 \\a] fd.bytes? [1 2.0] fd.bytes? 300 range fd.bytes? 256 range fd.bytes?" }, "1 0 0 0 1 1 0 0 0 0 1");
+    try expectError(.{ .source = "fd.in 1 port.read" }, .{
+        .name = "port.read is gone",
+        .source = "fd.in 1 port.read",
+        .kind = "undefined-word",
+        .word = "port.read",
+    });
 }
 
 test "hostio: inspect preserves its value" {
@@ -169,7 +222,7 @@ test "hostio: eprint writes to the diagnostics stream and not to output" {
         .name = "non-string",
         .source = "5 io.eprint",
         .kind = "type",
-        .word = "io.eprint",
+        .word = "io.core.eprint",
     });
     // A fixture can explicitly discard diagnostics while capturing output.
     var heap: test_heap.SessionHeap = .init;

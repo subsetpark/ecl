@@ -1705,6 +1705,46 @@ core words.
 # => {kind io msg "unavailable"}
 ```
 
+## fd
+
+Byte streams. An fd is a byte endpoint: the standard devices, a file opened
+with `fs.open-reader`, a process pipe from `proc.stdin`, `proc.stdout`, or
+`proc.stderr`, and a connection's endpoints are all one kind to the words
+here, which name the operations every byte endpoint shares. Nothing in `fd`
+decodes or encodes text: that is `io`. A read of either kind may leave bytes
+read ahead with the endpoint value, so a program that reads lines keeps the
+value it reads them through. The host primitives are published as `fd.core`.
+
+### bytes?
+`( value -- bool )` — Return 1 when the value is a list of integers in `0...255`, what `write` accepts as one piece, and 0 for anything else, including a string.
+
+### close
+`( fd -- )` — Close an endpoint that is its own resource, such as `fs.open-reader`'s, and join its cleanup; idempotent. A resource closes as `port.close` closes it. An endpoint borrowed from a resource (a process pipe, a connection) closes with that resource, and the standard devices never close: both are `` `type ``.
+
+### err
+`( -- fd )` — The diagnostics device: a writable byte endpoint on standard error, shared by every unit of the session and the same value on every call.
+
+### finish
+`( fd -- )` — Finish an endpoint's write direction after accepted writes drain. Idempotent; later writes are `` `io ``.
+
+### in
+`( -- fd )` — The standard input device: a readable byte endpoint shared by every unit of the session, the same value on every call. Reads return what the host has, `[]` at stable EOF, and keep returning `[]` afterwards; one read may be pending at a time. `` `io `` when standard input is the program source (`ecl -`, and non-terminal invocation with no arguments).
+
+### out
+`( -- fd )` — The standard output device: a writable byte endpoint shared by every unit of the session, the same value on every call. Writes from different units are served in the order they began and each call's bytes stay contiguous.
+
+### read
+`( fd max -- bytes )` — Read at most positive integer `max` bytes, parking until data or EOF. Return exact integer bytes in `0...255`; `[]` means stable EOF, including on later reads. Reads may be shorter than `max`. A wrong resource or non-integer `max` is `` `type ``; `max <= 0` is `` `domain ``; overlapping reads are `` `contract ``; a transport failure is `` `io ``. No text decoding is performed; use `chars`.
+
+### read-all
+`( fd -- bytes )` — Read to EOF and return every byte as one list. A later `read-all` on the same endpoint returns `[]`. Errors are `read`'s.
+
+### read-line
+`( fd -- bytes )` — Read through the next newline and return those bytes, newline included, so `[]` is unambiguously EOF. At EOF the rest of the stream is the line, and `[]` follows on every later read. Bytes after the newline stay with the endpoint value for its next read of either kind, so read lines through one value. Errors are `read`'s.
+
+### write
+`( fd data -- )` — Write bytes. `data` is a list of integer bytes in `0...255`, or a list of such lists, written contiguously in order, so a program assembling output from pieces need not join them first. A string is `` `type ``: encode text with `io.write`. Invalid byte elements are `` `domain ``; a finished endpoint or transport failure is `` `io ``.
+
 ## fs
 
 Filesystem words accept a named `root` symbol or a directory resource and a `path` string.
@@ -1724,7 +1764,7 @@ Resolution is descriptor-relative beneath the root's retained handle. An
 intermediate symlink is followed only while its target stays within the root;
 an absolute target, a relative target that would pop above the root, more than
 40 followed links, or more than 64 KiB of expanded resolver input is refused.
-`child-dir`, `open-list`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
+`child-dir`, `open-list`, `open-reader`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
@@ -1863,6 +1903,14 @@ backend cleanup.
 confined directory. The cursor is a port resource, distinct from a directory
 root. It owns its descriptor until `port.close` or scope exit. An enumeration
 opened through staging or its descendants also closes when staging seals.
+
+### open-reader
+`( root path -- fd )` — Open a regular file, following a final link within the
+root, as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all`
+and the `io` readers, with no size limit: the stream is read a chunk at a
+time. The calling scope owns the file; `fd.close` closes it earlier and joins
+cleanup, and a read after either is `` `io ``. A directory is `` `is-directory ``; a
+non-regular object is `` `not-regular ``.
 
 ### open-writer
 `( root path -- writer )` — Open private storage for an absent regular file.
@@ -2301,48 +2349,49 @@ Validation of the arguments completes before any request is accepted. A non-port
 
 ## io
 
+Text over byte streams. Every word here that touches a stream encodes or
+decodes UTF-8 at that boundary, through `bytes` and `chars`; the console
+conveniences are the same words applied to `fd.out` and `fd.err`. The host
+primitives are published as `io.core`.
+
 ### debug
-`( value label -- value )` — Write the string label, `": "`, and the value's
-pretty-printed representation plus newline, leaving the value on the stack.
-Semantically `io.prin ": " io.prin io.inspect`; a non-string label is the
-same `` `type `` failure as `io.prin`.
+`( value label -- value )` — Write the string label, `": "`, and the value's pretty-printed representation plus newline, leaving the value on the stack. Semantically `io.prin ": " io.prin io.inspect`; a non-string label is the same `` `type `` failure as `io.prin`.
 
 ### eprint
-`( string -- )` — Write a string followed by a newline to the Session's
-diagnostics stream: standard error under the command line, the host's
-diagnostics writer when embedded, and never standard output. When the host
-supplies no diagnostics writer the string is dropped and the word succeeds.
-Non-string is `` `type ``; a failed write is `` `io ``.
+`( string -- )` — Write a string followed by a newline to the Session's diagnostics stream: standard error under the command line, the host's diagnostics writer when embedded, and never standard output. When the host supplies no diagnostics writer the string is dropped and the word succeeds. Non-string is `` `type ``; a failed write is `` `io ``.
 
 ### inspect
-`( value -- value )` — Pretty-print a value while leaving it on the stack;
-the pipeline probe. Semantically `dup io.pp`.
+`( value -- value )` — Pretty-print a value while leaving it on the stack; the pipeline probe. Semantically `dup io.pp`.
 
 ### pp
-`( value -- )` — Pretty-print any value plus newline in the display layout of
-Printing. Best-effort: huge leaves may be elided, so there is no round-trip
-guarantee. Use core `str` for canonical rendering.
+`( value -- )` — Pretty-print any value plus newline in the display layout of Printing. Best-effort: huge leaves may be elided, so there is no round-trip guarantee. Use core `str` for canonical rendering.
 
 ### prin
-`( string -- )` — Write a string's characters as UTF-8 without adding a
-newline. Non-string is `` `type ``.
+`( string -- )` — Write a string's characters as UTF-8 to standard output without adding a newline. Non-string is `` `type ``.
 
 ### print
-`( string -- )` — Write a string followed by a newline. Semantically
-`io.prin "\n" io.prin`.
+`( string -- )` — Write a string followed by a newline to standard output. Semantically `io.prin "\n" io.prin`.
+
+### read
+`( fd -- string )` — Read a byte endpoint to EOF and decode it as UTF-8: `fd.read-all chars`. Invalid UTF-8 is `` `domain `` with `reason invalid-utf8`; read the bytes with `fd.read-all` instead. A later `read` returns `""`.
+
+### read-line
+`( fd -- string )` — Read one line of UTF-8 text through its newline, newline included, so `""` is unambiguously EOF: `fd.read-line chars`. At EOF the rest of the stream is the line. Invalid UTF-8 is `` `domain ``. Bytes past the newline stay with the endpoint value, so read lines through one value.
 
 ### stack
-Stack-polymorphic; leaves the operand stack unchanged. Print each value in the
-currently visible operand window as a bottom-up indexed display block. `[0]`
-is the bottom and the largest index is the top; continuation lines align after
-the prefix. An isolated quotation sees only values above its isolation floor.
-An empty visible window writes nothing. Rendering is best-effort and may use
-the same multiline dictionary, array, and elision layout as `io.pp`.
+`( -- )` — Stack-polymorphic; leaves the operand stack unchanged. Print each value in the currently visible operand window as a bottom-up indexed display block. `[0]` is the bottom and the largest index is the top; continuation lines align after the prefix. An isolated quotation sees only values above its isolation floor. An empty visible window writes nothing. Rendering is best-effort and may use the same multiline dictionary, array, and elision layout as `io.pp`.
+
+### write
+`( fd chardata -- )` — Encode text as UTF-8 and write it to a byte endpoint. `chardata` is a string, or a list of strings written contiguously in order. No newline is added. A non-string element is `` `type ``.
+
+### lines
+`( fd -- strings )` — Read a byte endpoint to EOF and split the decoded text at every newline, without the newlines; a final newline ends the last line rather than starting an empty one. Invalid UTF-8 is `` `domain ``.
 
 ### stdin
-`( -- string )` — Read the whole standard input stream once. Legal where stdin
-carries data (`-e` and script-file modes); `` `io `` where stdin is the program
-source or when it has already been read.
+`( -- string )` — Read the whole of standard input as text: `fd.in read`. A later call returns `""`; `` `io `` when standard input is the program source. Prefer `fd.in` with `fd.read-all` or `io.read`.
+
+### write-line
+`( fd string -- )` — Encode a string as UTF-8 and write it followed by a newline: `io.write`'s contract.
 
 ## json
 
@@ -2399,7 +2448,7 @@ operation or reopen a failed resource.
 
 Byte endpoints preserve exact integer bytes in `0...255`; they perform no text
 decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each
-call stays contiguous under bounded pressure. `port.finish` on the output
+call stays contiguous under bounded pressure. `fd.finish` on the output
 endpoint rejects new writers and sends EOF after admitted writers and queued
 bytes drain, while the input direction remains readable. Framing, TLS,
 encoding, and protocol limits belong to libraries. Deadlines compose tasks
@@ -2454,7 +2503,7 @@ net.close
 `( connection max -- bytes )` — Read at most positive integer `max` bytes, also bounded by the host receive capacity. Park when no data is ready; short reads are normal and do not mark message boundaries. Return exact integer bytes in `0...255`, or `[]` only at stable EOF; later reads also return `[]`. A wrong capability or non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; an overlapping read is `` `contract ``. Buffered bytes precede a transport failure, which raises `` `io ``. Abortive closure may discard buffered bytes. No text decoding is performed; use `chars` only on complete UTF-8 sequences.
 
 ### write
-`( connection bytes -- )` — Accept a complete list of integer bytes in `0...255` in FIFO order, parking under bounded pressure. Each call stays contiguous, but TCP does not preserve message boundaries. Convert strings explicitly with `bytes`. A non-list is `` `type ``; an element outside `0...255` is `` `domain ``; finished output, closure, peer reset, or other transport failure is `` `io ``. Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not establish peer receipt. To send EOF while retaining input, use `net.core.output port.endpoint port.finish`.
+`( connection bytes -- )` — Accept a complete list of integer bytes in `0...255` in FIFO order, parking under bounded pressure. Each call stays contiguous, but TCP does not preserve message boundaries. Convert strings explicitly with `bytes`. A non-list or a string is `` `type ``; an element outside `0...255` is `` `domain ``; finished output, closure, peer reset, or other transport failure is `` `io ``. Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not establish peer receipt. To send EOF while retaining input, use `net.core.output port.endpoint fd.finish`.
 
 ## path
 
@@ -2521,12 +2570,10 @@ remain usable in their receiving scope. Closed children remain opaque identities
 | `port.open` | `( factory config -- resource )` | Initialize a resource and publish it into the calling scope. Failure joins cleanup through that scope. |
 | `port.begin` | `( resource operation request -- exchange )` | Admit a registered operation on its declared FIFO lane, parking while admission capacity is full. |
 | `port.call` | `( resource operation request -- value )` | Begin, claim the result, and close the exchange. Requires no additional streaming input or output. |
-| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint supported by its resource or permitted by its exchange's operation. Supports registered byte and message endpoints. |
-| `port.read` | `( readable max -- bytes )` | Read up to a positive maximum; `[]` denotes stable EOF. Overlapping readers raise `` `contract ``. |
-| `port.write` | `( writable bytes -- )` | Accept a complete byte list under bounded pressure. Concurrent calls execute FIFO and remain contiguous. |
+| `port.endpoint` | `( source selector -- endpoint )` | Borrow a direction-specific endpoint supported by its resource or permitted by its exchange's operation. Supports registered byte and message endpoints; a byte endpoint is an fd for the `fd` words. |
 | `port.send` | `( sender message -- )` | Enqueue one complete structured message atomically, parking under pressure. Empty values are valid messages. |
 | `port.receive` | `( receiver -- event )` | Return `{kind message value value}` or `{kind eof}`. Overlapping receivers raise `` `contract ``. |
-| `port.finish` | `( writable-or-sender -- )` | Finish input after accepted data. Idempotent; later writes or sends raise `` `io ``. |
+| `port.finish` | `( sender -- )` | Finish a message sender after accepted sends, so its receiver sees `{kind eof}`. Idempotent; later sends raise `` `io ``. Byte endpoints finish with `fd.finish`. |
 | `port.await` | `( exchange -- )` | Wait for successful completion or raise the terminal error. Repeatable; does not drain output. |
 | `port.result` | `( exchange -- value )` | Wait and claim the terminal result once. A later successful-result claim raises `` `contract ``. |
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
@@ -2604,13 +2651,10 @@ repeatable. Existing capabilities in messages share use and retain their owner.
 `( source selector -- endpoint )` — Borrow an attenuated endpoint supported by its source.
 
 ### finish
-`( writable -- )` — Finish input after admitted writes. Idempotent.
+`( sender -- )` — Finish a message sender after admitted sends, so its receiver sees {kind eof}. Idempotent. Byte endpoints finish with fd.finish.
 
 ### open
 `( factory config -- resource )` — Initialize a registered resource in the calling scope.
-
-### read
-`( readable max -- bytes )` — Read a positive byte chunk, or [] at stable EOF.
 
 ### receive
 `( receiver -- event )` — Receive {kind message value value} or {kind eof}; one receiver may wait.
@@ -2623,9 +2667,6 @@ repeatable. Existing capabilities in messages share use and retain their owner.
 
 ### shutdown
 `( resource -- )` — Perform registered graceful shutdown and join cleanup. Unsupported resources raise `domain.
-
-### write
-`( writable bytes -- )` — Accept a complete byte list in FIFO order under bounded pressure.
 
 ### call
 `( resource operation request -- value )` — Begin an operation, claim its result, and close the exchange. Use only when no additional streaming input or output is required. Close the exchange before returning or re-raising its error.
@@ -2658,7 +2699,9 @@ repeatable. Process exit leaves the resource open for further operations;
 closing the resource prevents new admission and joins backend cleanup.
 
 `proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint
-selectors for process resources. `port.endpoint` with stdin grants writing and
+selectors for process resources, and `proc.stdin`, `proc.stdout`, and
+`proc.stderr` are the endpoints they select, usable with every `fd` and `io`
+word. `port.endpoint` with stdin grants writing and
 finishing; stdout and stderr grant reading. Their byte, EOF, and single-reader
 contracts are shared with the corresponding process words. Finishing stdin
 delivers accepted bytes before closing that direction, is idempotent, and
@@ -2722,17 +2765,8 @@ streams do not decode Unicode. A port is an opaque identity capability that
 prints `<port:N>` and has type `` `port ``; it exposes no PID and cannot be passed
 through JSON. Native words can view and forward its opaque identity.
 
-### close-input
-`( resource -- )` — Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A concurrent or later write, including an empty write, is `` `io ``. Output remains readable; this does not wait for process exit or close the process resource.
-
 ### kill
 `( resource -- )` — Request force termination of the process group and arrange direct-child reap. Idempotent and safe after natural exit while the resource remains open. This does not wait for exit; use `proc.wait` to observe termination and `port.close` to join cleanup.
-
-### read-stderr
-`( resource max -- bytes )` — Read at most positive integer `max` bytes from stderr, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; at most one stderr read may be pending, so overlap is `` `contract ``; pipe failure is `` `io ``. Drain stdout concurrently when it can fill, or use `proc.run` to capture both streams.
-
-### read-stdout
-`( resource max -- bytes )` — Read at most positive integer `max` bytes from stdout, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; at most one stdout read may be pending, so overlap is `` `contract ``; pipe failure is `` `io ``. Use `chars` to decode UTF-8. Drain stderr concurrently when it can fill, or use `proc.run` to capture both streams.
 
 ### spawn
 `( spec -- resource )` — Start the directly named, authorized executable with stdin, stdout, and stderr pipes. `spec` is a symbol-keyed dictionary:
@@ -2745,6 +2779,15 @@ Strings must not contain NUL, and environment names must be nonempty and contain
 
 The child and its process group, pipe tasks, and spawning task-scope membership commit before the port becomes visible. The calling task scope owns the live child: scope closure cancels the process group and waits for reap even if a port value remains stored elsewhere. Returning or storing the port does not detach it; `@give` is the one way to change owner, and the unit it is given to kills the group when it ends. Use `proc.run` for bounded capture, or drain both output streams concurrently.
 
+### stderr
+`( resource -- fd )` — The process's stderr as a readable byte endpoint, with `stdout`'s contract.
+
+### stdin
+`( resource -- fd )` — The process's stdin as a writable byte endpoint for `fd.write` and `fd.finish`. Each call borrows a new endpoint value over the same pipe; the pipe closes with the process resource, so the value is `` `type `` to `fd.close`.
+
+### stdout
+`( resource -- fd )` — The process's stdout as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all`, and the `io` readers. Each call borrows a new endpoint value over the same pipe, and a line reader's read-ahead belongs to the value, so read lines through one value. Drain stderr concurrently when it can fill, or use `proc.run` to capture both streams.
+
 ### terminate
 `( resource -- )` — Request ordinary termination of the process group without waiting for exit, escalating to force termination during cleanup when needed. Idempotent and safe after natural exit while the resource remains open. Use `proc.wait` to observe termination and `port.close` to join cleanup.
 
@@ -2756,6 +2799,15 @@ The child and its process group, pipe tasks, and spawning task-scope membership 
 - `{kind unknown status n}`.
 
 Any number of waiters and later calls receive the same dictionary. A nonzero exit code is ordinary termination data, not an ECL error. A pipe failure raises `` `io ``. Output pipes can fill and prevent exit, so drain both concurrently or use `proc.run`. Waiting requires an open resource; after closure, observe a previously completed exchange instead of admitting another wait. This leaves the resource open; use `port.close` to join cleanup.
+
+### close-input
+`( resource -- )` — Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A concurrent or later write, including an empty write, is `` `io ``. Output remains readable; this does not wait for process exit or close the process resource.
+
+### read-stderr
+`( resource max -- bytes )` — Read at most positive integer `max` bytes from stderr, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; at most one stderr read may be pending, so overlap is `` `contract ``; pipe failure is `` `io ``. Drain stdout concurrently when it can fill, or use `proc.run` to capture both streams.
+
+### read-stdout
+`( resource max -- bytes )` — Read at most positive integer `max` bytes from stdout, parking when no data is ready. Return exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads may be shorter than `max`. A non-integer maximum is `` `type ``; a nonpositive maximum is `` `domain ``; at most one stdout read may be pending, so overlap is `` `contract ``; pipe failure is `` `io ``. Use `chars` to decode UTF-8. Drain stderr concurrently when it can fill, or use `proc.run` to capture both streams.
 
 ### write
 `( resource bytes -- )` — Queue exact stdin bytes, a list of integers in `0...255`, parking under bounded pressure. Convert text with `bytes`. Calls are serialized in scheduler-arrival order and each call's bytes remain contiguous. A non-list is `` `type ``; invalid byte elements are `` `domain ``; finished, closed, or broken stdin is `` `io ``. Acceptance does not mean all bytes have reached the child. Drain stdout and stderr concurrently to avoid pipe deadlock.

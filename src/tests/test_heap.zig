@@ -31,7 +31,7 @@
 //! - **An allocation-failure path is only covered by a
 //!   `checkAllAllocationFailures` probe.** Ordinary tests run each
 //!   allocation once and it succeeds. Component-level probes live beside
-//!   their component (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, and
+//!   their component (`list.zig`, `dict.zig`, env.zig`, `equal.zig`, and
 //!   the reader, formatter, line-editor, registry, and native-validation
 //!   probes) and construct their subject directly. `oom_test` is the only
 //!   sweep over an initialized Session, so a surface reachable only through

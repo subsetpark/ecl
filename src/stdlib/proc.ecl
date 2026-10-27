@@ -25,6 +25,25 @@
    streams concurrently.")
  (proc.core.process swap port.open) `spawn def
 
+ ### def stdin
+ (resource -- fd :
+  "The process's stdin as a writable byte endpoint for `fd.write` and `fd.finish`. Each call borrows
+   a new endpoint value over the same pipe; the pipe closes with the process resource, so the value
+   is `` `type `` to `fd.close`.")
+ (proc.core.stdin port.endpoint) `stdin def
+
+ ### def stdout
+ (resource -- fd :
+  "The process's stdout as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all`,
+   and the `io` readers. Each call borrows a new endpoint value over the same pipe, and a line
+   reader's read-ahead belongs to the value, so read lines through one value. Drain stderr
+   concurrently when it can fill, or use `proc.run` to capture both streams.")
+ (proc.core.stdout port.endpoint) `stdout def
+
+ ### def stderr
+ (resource -- fd : "The process's stderr as a readable byte endpoint, with `stdout`'s contract.")
+ (proc.core.stderr port.endpoint) `stderr def
+
  ### def write
  (resource bytes -- :
   "Queue exact stdin bytes, a list of integers in `0...255`, parking under bounded pressure. Convert
@@ -32,14 +51,14 @@
    contiguous. A non-list is `` `type ``; invalid byte elements are `` `domain ``; finished, closed,
    or broken stdin is `` `io ``. Acceptance does not mean all bytes have reached the child. Drain
    stdout and stderr concurrently to avoid pipe deadlock.")
- (swap proc.core.stdin port.endpoint swap port.write) `write def
+ (swap stdin swap fd.write) `write def
 
  ### def close-input
  (resource -- :
   "Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A
    concurrent or later write, including an empty write, is `` `io ``. Output remains readable; this
    does not wait for process exit or close the process resource.")
- (proc.core.stdin port.endpoint port.finish) `close-input def
+ (stdin fd.finish) `close-input def
 
  ### def read-stdout
  (resource max -- bytes :
@@ -49,7 +68,7 @@
    `domain ``; at most one stdout read may be pending, so overlap is `` `contract ``; pipe failure
    is `` `io ``. Use `chars` to decode UTF-8. Drain stderr concurrently when it can fill, or use
    `proc.run` to capture both streams.")
- (swap proc.core.stdout port.endpoint swap port.read) `read-stdout def
+ (swap stdout swap fd.read) `read-stdout def
 
  ### def read-stderr
  (resource max -- bytes :
@@ -59,7 +78,7 @@
    `domain ``; at most one stderr read may be pending, so overlap is `` `contract ``; pipe failure
    is `` `io ``. Drain stdout concurrently when it can fill, or use `proc.run` to capture both
    streams.")
- (swap proc.core.stderr port.endpoint swap port.read) `read-stderr def
+ (swap stderr swap fd.read) `read-stderr def
 
  ### def wait
  (resource -- termination :
@@ -97,22 +116,18 @@
   dup 0 >= `domain error.new "expected a nonnegative integer" error.with-message assert)
  `nonnegative defp
 
- ### defp byte?
- (value -- bool : "Recognize an exact byte.")
- (dup type `int match? (dup 0 >= swap 255 <= and) (pop 0) if) `byte? defp
-
  ### defp capture-step
  (reader limit chunks size chunk -- reader limit chunks size chunk :
   "Accumulate one bounded output chunk.")
  (|reader limit chunks size chunk|
   reader limit chunks chunk append size chunk len +
   dup limit <= `overflow error.new "process capture limit exceeded" error.with-message assert
-  reader 4096 port.read) `capture-step defp
+  reader 4096 fd.read) `capture-step defp
 
  ### defp capture
  (reader limit -- bytes : "Drain bounded chunks and reject capture overflow.")
  (|reader limit|
-  reader limit [] 0 reader 4096 port.read
+  reader limit [] 0 reader 4096 fd.read
   (dup len 0 >) (capture-step) while pop pop rollup pop pop raze) `capture defp
 
  ### defp await-all
@@ -131,11 +146,11 @@
  (spec process stdout-limit stderr-limit -- result :
   "Concurrently feed, drain, and observe process exit.")
  (|spec process stdout-limit stderr-limit|
-  process proc.core.stdin port.endpoint spec `stdin [] dict.get pair
-  (dup len 0 > (over swap port.write) (pop) if port.finish {}) @spawn
-  process proc.core.stdout port.endpoint stdout-limit pair
+  process stdin spec `stdin [] dict.get pair
+  (dup len 0 > (over swap fd.write) (pop) if fd.finish {}) @spawn
+  process stdout stdout-limit pair
   (capture `stdout swap pair dict.from-flat) @spawn
-  process proc.core.stderr port.endpoint stderr-limit pair
+  process stderr stderr-limit pair
   (capture `stderr swap pair dict.from-flat) @spawn
   process wrap (wait `term swap pair dict.from-flat) @spawn
   4 pack await-all run-result process port.close) `run-streams defp
@@ -199,7 +214,7 @@
   assert
   dup `stdin [] dict.get dup type `list match? `type error.new "expected a stdin byte list"
   error.with-message assert
-  (byte?) all? `domain error.new "expected stdin bytes in 0...255" error.with-message assert
+  fd.bytes? `domain error.new "expected stdin bytes in 0...255" error.with-message assert
   dup `timeout-ms 0 dict.get nonnegative pop
   dup wrap (run-body) @spawn dup rolldown pair (run-wait) @attempt
   swap dup task.cancel task.await pop

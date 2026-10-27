@@ -67,18 +67,18 @@
    read is `` `contract ``. Buffered bytes precede a transport failure, which raises `` `io ``.
    Abortive closure may discard buffered bytes. No text decoding is performed; use `chars` only on
    complete UTF-8 sequences.")
- (swap net.core.input port.endpoint swap port.read) `read def
+ (swap net.core.input port.endpoint swap fd.read) `read def
 
  ### def write
  (connection bytes -- :
   "Accept a complete list of integer bytes in `0...255` in FIFO order, parking under bounded
    pressure. Each call stays contiguous, but TCP does not preserve message boundaries. Convert
-   strings explicitly with `bytes`. A non-list is `` `type ``; an element outside `0...255` is ``
-   `domain ``; finished output, closure, peer reset, or other transport failure is `` `io ``.
-   Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not establish
-   peer receipt. To send EOF while retaining input, use `net.core.output port.endpoint
-   port.finish`.")
- (swap net.core.output port.endpoint swap port.write) `write def
+   strings explicitly with `bytes`. A non-list or a string is `` `type ``; an element outside
+   `0...255` is `` `domain ``; finished output, closure, peer reset, or other transport failure is
+   `` `io ``. Acceptance is distinct from delivery, output EOF, and resource cleanup, and does not
+   establish peer receipt. To send EOF while retaining input, use `net.core.output port.endpoint
+   fd.finish`.")
+ (swap net.core.output port.endpoint swap fd.write) `write def
 
  ### def close
  (resource -- :

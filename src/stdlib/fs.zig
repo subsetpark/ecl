@@ -31,6 +31,7 @@ const Value = value.Value;
 pub const words = [_]env.BuiltinWord{
     .{ .name = "reserve", .doc = "( root -- reservation ) Retain one filesystem admission across derived operations.", .primitive = reserve },
     .{ .name = "open-writer", .doc = "( root path -- writer ) Own private streaming storage for an absent file.", .primitive = openWriter },
+    .{ .name = "open-reader", .doc = "( root path -- fd ) Open a regular file as a scope-owned readable byte endpoint.", .primitive = openReader },
     .{ .name = "write-chunk", .doc = "( writer bytes -- ) Append at most 65536 bytes within the total stream limit.", .primitive = writeChunk },
     .{ .name = "commit-file", .doc = "( writer -- ) Seal and atomically publish a stream, then join cleanup.", .primitive = commitFile },
     .{ .name = "open-list", .doc = "( root path -- cursor ) Open a scope-owned incremental directory enumeration.", .primitive = openList },
@@ -64,6 +65,7 @@ pub const words = [_]env.BuiltinWord{
 const Operation = enum {
     reserve,
     open_writer,
+    open_reader,
     open_list,
     stage_dir,
     mkdirs,
@@ -93,6 +95,7 @@ const Operation = enum {
         return switch (self) {
             .open_list => "open-list",
             .open_writer => "open-writer",
+            .open_reader => "open-reader",
             .stage_dir => "stage-dir",
             .open_dir => "open-dir",
             .child_dir => "child-dir",
@@ -131,7 +134,7 @@ const Operation = enum {
 
     fn resolveMode(self: Operation) fsport.ResolveMode {
         return switch (self) {
-            .open_list, .mkdirs, .child_dir, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
+            .open_list, .mkdirs, .child_dir, .open_reader, .read_bytes, .read_text, .stat, .list, .copy => .follow_final,
             else => .no_follow_final,
         };
     }
@@ -140,7 +143,7 @@ const Operation = enum {
     fn requiresEntry(self: Operation) bool {
         return switch (self) {
             .open_writer, .stage_dir, .create_bytes, .create_text, .replace_bytes, .replace_text, .publish_bytes, .publish_text, .lock, .mkdir, .rename, .remove_tree, .remove_file, .remove_dir => true,
-            .reserve, .open_list, .mkdirs, .open_dir, .child_dir, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
+            .reserve, .open_list, .mkdirs, .open_dir, .child_dir, .open_reader, .read_bytes, .read_text, .stat, .lstat, .exists, .list, .copy => false,
         };
     }
 };
@@ -150,6 +153,9 @@ fn reserve(evaluator: *Machine) MachineError!void {
 }
 fn openWriter(evaluator: *Machine) MachineError!void {
     return begin(evaluator, .open_writer);
+}
+fn openReader(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .open_reader);
 }
 
 fn openList(evaluator: *Machine) MachineError!void {
@@ -1053,6 +1059,7 @@ const Driver = struct {
             .open_dir => unreachable,
             .child_dir, .open_list => self.acquireDirectory(evaluator),
             .read_bytes, .read_text => self.beginRead(evaluator),
+            .open_reader => self.openReaderEndpoint(evaluator),
             .stat => self.inspect(evaluator, true),
             .lstat => self.inspect(evaluator, false),
             .exists => self.testExistence(evaluator),
@@ -1130,6 +1137,38 @@ const Driver = struct {
     }
 
     // -- reads --------------------------------------------------------------
+
+    /// `open-reader`: the file is opened as `read-bytes` opens it, but is
+    /// adopted by the calling scope as a resource whose endpoint is the
+    /// result. There is no size limit: the stream is read a chunk at a time.
+    fn openReaderEndpoint(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+        const entry = switch (self.resolved.?) {
+            .directory => return self.fail(evaluator, .is_directory),
+            .entry => |entry| entry,
+        };
+        const file = switch (fsport.openRegularForRead(self.io, entry.parent.dir, entry.name)) {
+            .failed => |reason| return self.fail(evaluator, reason),
+            .file => |file| file,
+        };
+        switch (fsport.regularFileInfo(self.io, file, std.math.maxInt(u64))) {
+            .failed => |reason| {
+                file.close(self.io);
+                return self.fail(evaluator, reason);
+            },
+            .regular => {},
+        }
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse {
+            file.close(self.io);
+            return evaluator.fail(.cancelled, "reader scope is closing");
+        }));
+        // Adoption consumes the descriptor on either outcome.
+        self.state = .complete;
+        const result = directory.adoptReader(self.access, scope, file) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ScopeClosing => return evaluator.fail(.cancelled, "reader scope is closing"),
+        };
+        return .{ .output = result };
+    }
 
     fn beginRead(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
         const entry = switch (self.resolved.?) {

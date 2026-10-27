@@ -5,6 +5,23 @@
  (equal raises-containing documented)
  import
 
+ ### test string-predicate
+ (-- : "Recognize strings by content across every list representation.")
+ ("abc" str.str? 1 equal
+  "" str.str? 1 equal
+  [] str.str? 1 equal
+  (\a \b) str.str? 1 equal
+  "ab" 1 (pop \x) update str.str? 1 equal
+  "ab" 1 (pop 5) update str.str? 0 equal
+  "abc" bytes str.str? 0 equal
+  [1 2] str.str? 0 equal
+  [1.5] str.str? 0 equal
+  [a] str.str? 0 equal
+  42 str.str? 0 equal
+  `a str.str? 0 equal
+  {a 1} str.str? 0 equal)
+ `string-predicate test
+
  ### test case-operations
  (-- : "Apply ASCII-only case conversion while preserving every codepoint.")
  ("hello" str.upper "HELLO" equal

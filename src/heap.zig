@@ -1127,6 +1127,20 @@ pub const AnyListBuilder = union(enum) {
         }
     }
 
+    /// Stores a run of ASCII bytes as characters, one dispatch for the run.
+    pub fn writeAscii(self: *AnyListBuilder, index: usize, bytes: []const u8) void {
+        switch (self.*) {
+            .char1 => |*builder| @memcpy(builder.items()[index..][0..bytes.len], bytes),
+            .char2 => |*builder| for (bytes, builder.items()[index..][0..bytes.len]) |byte, *slot| {
+                slot.* = byte;
+            },
+            .char4 => |*builder| for (bytes, builder.items()[index..][0..bytes.len]) |byte, *slot| {
+                slot.* = byte;
+            },
+            else => unreachable,
+        }
+    }
+
     pub fn writeValue(self: *AnyListBuilder, index: usize, item: Value) void {
         self.writeValues(index, &.{item});
     }
