@@ -11,7 +11,9 @@
  (dup type 'list match? ((type 'char match?) all?) (pop 0) if) 'text? defp
 
  ### def valid?
- (value -- bool : "Return 1 when a value satisfies the error dictionary schema.")
+ (value -- bool :
+  "Return 1 when a value satisfies the error dictionary schema: a required symbol `'kind` and
+   well-typed optional `'msg`, `'word`, `'trace`, and `'data` fields. Extra fields are allowed.")
  (dup type 'dict match?
   (dup 'kind dict.has?
    over 'kind 'missing dict.get type 'symbol match?
@@ -40,13 +42,14 @@
   {'kind 'type 'msg "expected a valid error dict"} assert) 'checked defp
 
  ### def new
- (kind -- error : "Build an error dictionary from a kind symbol.")
+ (kind -- error : "Build the error dictionary `{'kind kind}` from a kind symbol.")
  (dup type 'symbol match?
   {'kind 'type 'msg "error.new expects a kind symbol"} assert
   'kind swap pair dict.from-flat) 'new def
 
  ### def with-message
- (error message -- error : "Return an error dictionary carrying a string message.")
+ (error message -- error :
+  "Validate the error and string message and return the error with `'msg` set to `message`.")
  (|failure message|
   failure checked pop
   message text?
@@ -54,7 +57,8 @@
   failure 'msg message put) 'with-message def
 
  ### def with-data
- (error data -- error : "Return an error dictionary carrying a data dictionary.")
+ (error data -- error :
+  "Validate both dictionaries and return the error with `'data` set to `data`.")
  (|failure data|
   failure checked pop
   data type 'dict match?
@@ -62,7 +66,8 @@
   failure 'data data put) 'with-data def
 
  ### def kind?
- (error kind -- bool : "Return 1 when an error has the given kind symbol.")
+ (error kind -- bool :
+  "Validate both inputs and return 1 when the error has the given kind symbol.")
  (|failure kind|
   failure checked pop
   kind type 'symbol match?
@@ -70,7 +75,9 @@
   failure 'kind at kind match?) 'kind? def
 
  ### def kind-in?
- (error kinds -- bool : "Return 1 when an error kind occurs in a list of kind symbols.")
+ (error kinds -- bool :
+  "Validate an error and a list of kind symbols, then return 1 when the error's kind occurs in the
+   list.")
  (|failure kinds|
   failure checked pop
   kinds type 'list match?

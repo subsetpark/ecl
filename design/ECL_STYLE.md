@@ -79,8 +79,10 @@ The following rules are enforced for checked-in first-party source:
   `set`/`setp` accept the same annotation-before-value position; an
   intentionally undocumented literal constant instead puts its concise
   explanatory comment immediately beneath the navigation header.
-- Annotations carry reflective documentation; navigation comments only organize
-  the source.
+- Annotations carry the documentation; navigation comments only organize the
+  source. A public word's annotation is also its `design/STDLIB.md` entry, so
+  its docstring states the full observable contract: shape, application
+  context, failures, and edge cases. Examples stay in the reference fragment.
 
 Keep tests at the direct module construction root, beside definitions. Use a
 meaningful annotation docstring for checked-in tests; the body may call private

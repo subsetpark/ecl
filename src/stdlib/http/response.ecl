@@ -37,9 +37,9 @@
 
  ### def valid?
  (value -- bool :
-  "Return 1 when a value is a response dict: exactly 'status, 'headers, and 'body, with an int
-   status in 100...599, a headers dict from string names to a string or a list of strings, and a
-   string or byte-list body. Never raises.")
+  "Return 1 for a response dictionary: exactly `'status`, `'headers`, and `'body`, with an integer
+   status in `100...599`, a headers dictionary from string names to a string or a list of strings,
+   and a string or byte-list body. Never raises.")
  (dup type 'dict match?
   (dup ['status 'headers 'body] dict.keys-exactly?
    (dup 'status at status? over 'headers at headers? and over 'body at body? and nip)
@@ -63,13 +63,13 @@
 
  ### def new
  (status -- response :
-  "Return {'status status 'headers {} 'body \"\"}. A status outside 100...599 is 'type.")
+  "Return `{'status status 'headers {} 'body \"\"}`. A status outside `100...599` is `'type`.")
  (checked-status 'status swap 'headers {} 'body "" 6 pack dict.from-flat) 'new def
 
  ### def text
  (status string -- response :
-  "Return {'status status 'headers {\"content-type\" (\"text/plain; charset=utf-8\")} 'body string}.
-   A bad status or a non-string body is 'type.")
+  "Return a response with the string as its body and `{\"content-type\" (\"text/plain;
+   charset=utf-8\")}` as its headers. A bad status or a non-string body is `'type`.")
  (dup str.str? "http.response.text expects a string body" type-error assert
   swap checked-status swap
   (|status body|
@@ -79,9 +79,9 @@
 
  ### def json
  (status value -- response :
-  "Return {'status status 'headers {\"content-type\" (\"application/json\")} 'body text} where text
-   renders the value with json.emit. A bad status is 'type; a value json.emit rejects fails as
-   json.emit does.")
+  "Return a response whose body is the value rendered with `json.emit` and whose headers are
+   `{\"content-type\" (\"application/json\")}`. A bad status is `'type`; a value `json.emit` rejects
+   fails as `json.emit` does.")
  (swap checked-status swap
   (|status value|
    'status status 'headers {"content-type" ("application/json")} 'body value json.emit 6 pack
@@ -90,8 +90,8 @@
 
  ### def redirect
  (location -- response :
-  "Return {'status 302 'headers {\"location\" (location)} 'body \"\"}. A non-string location is
-   'type.")
+  "Return a 302 response with `{\"location\" (location)}` as its headers and an empty body. A
+   non-string location is `'type`.")
  (dup str.str? "http.response.redirect expects a string location" type-error assert
   (|location| 'status 302 'headers "location" location wrap pair dict.from-flat 'body "" 6 pack
    dict.from-flat)
@@ -111,9 +111,9 @@
 
  ### def header
  (response name -- values :
-  "Return every value of a header as a list, matching the name regardless of letter case and in dict
-   order; a string value counts as one. () when the header is absent. A non-response or non-string
-   name is 'type.")
+  "Return every value of a header as a list, matching the name regardless of letter case and in
+   dictionary order; a string value counts as one. `()` when the header is absent. A non-response or
+   non-string name is `'type`.")
  (checked-name swap checked 'headers at dict.pairs swap (values-of) partial each raze) 'header def
 
  ### def header?
@@ -129,7 +129,7 @@
  (class 2 =) 'ok? def
 
  ### def with-status
- (response status -- response : "Return the response with a new status. A bad status is 'type.")
+ (response status -- response : "Return the response with a new status. A bad status is `'type`.")
  (checked-status swap checked 'status rolldown put) 'with-status def
 
  ### def with-body
@@ -141,8 +141,8 @@
  ### def with-header
  (response name value -- response :
   "Return the response with a value added under the header name exactly as given: a string or a list
-   of strings, appended to any values already under that name, an existing string value counting as
-   one. A non-string name or a bad value is 'type.")
+   of strings, appended to any values already under that name; an existing string value, even the
+   empty string, counts as one. A non-string name or a bad value is `'type`.")
  (dup header-values? "http.response.with-header expects a string or a list of strings" type-error
   assert
   dup str.str? (wrap) () if
@@ -156,9 +156,9 @@
 
  ### def with-headers
  (response headers -- response :
-  "Return the response with a headers dict merged over its own; a right-hand name replaces a
-   left-hand one exactly. A headers value that is not a dict of string names to header values is
-   'type.")
+  "Return the response with a headers dictionary merged over its own; a right-hand name replaces a
+   left-hand one exactly. A value that is not a dictionary of string names to header values is
+   `'type`.")
  (dup headers? "http.response.with-headers expects a dict of headers" type-error assert
   swap checked dup 'headers at rolldown dict.merge 'headers swap put) 'with-headers def
 ) 'http.response @defm

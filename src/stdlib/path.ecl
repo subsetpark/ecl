@@ -11,11 +11,11 @@
  defp
 
  ### def absolute?
- (path -- bool : "Return 1 when the path begins with a slash.")
+ (path -- bool : "Return 1 exactly when the path begins with `/`.")
  ("path.absolute? expects a string path" checked "/" str.starts?) 'absolute? def
 
  ### def relative?
- (path -- bool : "Return 1 when the path does not begin with a slash.")
+ (path -- bool : "Return 1 when the path does not begin with `/`: the complement of `absolute?`.")
  ("path.relative? expects a string path" checked "/" str.starts? not) 'relative? def
 
  ### defp skip-component?
@@ -49,9 +49,10 @@
 
  ### def normalize
  (path -- path :
-  "Lexically clean a slash path: collapse repeated separators and `.` components, resolve `..`
-   against preceding components, keep leading `..` in a relative path, clamp an absolute path at
-   `/`, and return `.` for an empty result.")
+  "Lexically clean a slash path: collapse repeated separators and `.` components, resolve each `..`
+   against a preceding component, keep leading `..` components in a relative path, clamp an absolute
+   path at `/`, and return `.` for an empty result. Absolute paths remain absolute and relative
+   paths remain relative.")
  ("path.normalize expects a string path" checked
   dup "/" str.starts?
   swap "/" split
@@ -63,8 +64,8 @@
 
  ### def join
  (segments -- path :
-  "Join string segments with `/` and normalize the result; empty segments are ignored and an empty
-   or all-empty list yields `.`.")
+  "Join a list of string segments with `/` and normalize the result. Empty segments are ignored; an
+   empty or all-empty list yields `.`. A non-list or a non-string member is `'type`.")
  (dup type 'list match?
   'type error.new "path.join expects a list of string segments" error.with-message assert
   dup (str.str?) all?
@@ -73,8 +74,8 @@
 
  ### def dirname
  (path -- path :
-  "Return the normalized directory portion before the last slash, or `.` when the path has no
-   slash.")
+  "Return the normalized directory portion before the last slash, or `.` when the path has no slash.
+   `dirname` of `/a` is `/`.")
  ("path.dirname expects a string path" checked
   "/" split
   dup len 1 =
@@ -99,7 +100,8 @@
  ### def extension
  (path -- extension :
   "Return the suffix beginning at the final dot of the last element, including the dot, or the empty
-   string when that element has no dot.")
+   string when that element has no dot: `.gz` for `x/y.tar.gz`, `.bashrc` for `.bashrc`, and `.` for
+   `a.`.")
  ("path.extension expects a string path" checked
   "/" split last "." split
   dup len 1 =
@@ -109,8 +111,9 @@
 
  ### def components
  (path -- components :
-  "Normalize the path and return its non-separator components; `.` and `/` yield an empty list and
-   retained leading `..` components remain.")
+  "Normalize the path and return its non-separator components as a list of strings. `.` and `/`
+   yield an empty list; retained leading `..` components remain; absoluteness is observable only
+   through `absolute?`.")
  ("path.components expects a string path" checked normalize
   dup "." match? (pop []) ("/" split ("" match? not) filter) if) 'components def
 
@@ -122,8 +125,8 @@
  ### def valid-relative?
  (path -- bool :
   "Return 1 when the string is a canonical relative path accepted by `fs`: `.` alone, or nonempty
-   components separated by single slashes with no `.`, `..`, or NUL and no leading or trailing
-   slash. Normalize first when accepting untrusted text; this predicate never normalizes.")
+   components separated by single slashes with no `.`, `..`, or NUL component and no leading or
+   trailing slash. This predicate never normalizes; normalize first when accepting untrusted text.")
  ("path.valid-relative? expects a string path" checked
   dup "." match?
   (pop 1)

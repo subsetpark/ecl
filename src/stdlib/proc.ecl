@@ -4,72 +4,89 @@
 (
  ### def spawn
  (spec -- resource :
-  "Start an authorized executable with stdin, stdout, and stderr pipes. spec is a symbol-keyed dict:
-   required 'executable is an absolute path string; optional 'args is a list of argument strings
-   (default []), 'cwd is an absolute path string without . or .. components (default the
-   host-configured starting directory), and 'env is a string-to-string dict overlaid on the host's
-   environment base (default {}). Strings must not contain NUL; environment names must be nonempty
-   and contain no =. There is no shell expansion or PATH search; 'args excludes the executable name.
-   Unknown fields, invalid values, or denied authority are 'domain; wrong field types are 'type;
-   launch failures are 'io. The calling task scope owns the process group and joins cleanup when it
-   ends; retaining the port does not detach it. Use proc.run for bounded capture, or drain both
-   output streams concurrently.")
+  "Start the directly named, authorized executable with stdin, stdout, and stderr pipes. `spec` is a
+   symbol-keyed dictionary:
+   - `'executable`, required: an absolute path string.
+   - `'args`: a list of argument strings, default `[]`; it excludes the executable name.
+   - `'cwd`: an absolute path string without `.` or `..` components, default the host-configured
+     starting directory.
+   - `'env`: a string-to-string dictionary overlaid on the host's environment base, default `{}`.
+
+   Strings must not contain NUL, and environment names must be nonempty and contain no `=`. There is
+   no shell expansion or `PATH` search. Unknown fields, invalid values, or denied authority are
+   `'domain`; wrong field types are `'type`; launch failures are `'io`.
+
+   The child and its process group, pipe tasks, and spawning task-scope membership commit before the
+   port becomes visible. The calling task scope owns the live child: scope closure cancels the
+   process group and waits for reap even if a port value remains stored elsewhere. Returning or
+   storing the port does not detach it; `@give` is the one way to change owner, and the unit it is
+   given to kills the group when it ends. Use `proc.run` for bounded capture, or drain both output
+   streams concurrently.")
  (proc.core.process swap port.open) 'spawn def
 
  ### def write
  (resource bytes -- :
-  "Accept a list of integer stdin bytes in 0...255, parking under bounded pressure. Convert text
-   with bytes. Calls stay contiguous in FIFO order. A non-list is 'type; invalid byte elements are
-   'domain; finished or broken stdin is 'io. Acceptance does not mean all bytes have reached the
-   child. Drain stdout and stderr concurrently to avoid pipe deadlock.")
+  "Queue exact stdin bytes, a list of integers in `0...255`, parking under bounded pressure. Convert
+   text with `bytes`. Calls are serialized in scheduler-arrival order and each call's bytes remain
+   contiguous. A non-list is `'type`; invalid byte elements are `'domain`; finished, closed, or
+   broken stdin is `'io`. Acceptance does not mean all bytes have reached the child. Drain stdout
+   and stderr concurrently to avoid pipe deadlock.")
  (swap proc.core.stdin port.endpoint swap port.write) 'write def
 
  ### def close-input
  (resource -- :
-  "Finish stdin after accepted bytes drain, sending EOF to the child. Idempotent. Subsequent writes,
-   including empty writes, fail with 'io. Output remains readable; this does not wait for process
-   exit or close the process resource.")
+  "Finish stdin after queued bytes have been written, sending EOF to the child. Idempotent. A
+   concurrent or later write, including an empty write, is `'io`. Output remains readable; this does
+   not wait for process exit or close the process resource.")
  (proc.core.stdin port.endpoint port.finish) 'close-input def
 
  ### def read-stdout
  (resource max -- bytes :
-  "Read at most positive integer max bytes from stdout, parking until data or EOF. Return exact
-   integer bytes in 0...255; [] means stable EOF, including on later reads. Reads may be shorter
-   than max. A non-integer max is 'type; max <= 0 is 'domain; overlapping stdout reads are
-   'contract; pipe failure is 'io. Use chars to decode UTF-8. Drain stderr concurrently when it can
-   fill, or use proc.run to capture both streams.")
+  "Read at most positive integer `max` bytes from stdout, parking when no data is ready. Return
+   exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads
+   may be shorter than `max`. A non-integer maximum is `'type`; a nonpositive maximum is `'domain`;
+   at most one stdout read may be pending, so overlap is `'contract`; pipe failure is `'io`. Use
+   `chars` to decode UTF-8. Drain stderr concurrently when it can fill, or use `proc.run` to capture
+   both streams.")
  (swap proc.core.stdout port.endpoint swap port.read) 'read-stdout def
 
  ### def read-stderr
  (resource max -- bytes :
-  "Read at most positive integer max bytes from stderr, parking until data or EOF. Return exact
-   integer bytes in 0...255; [] means stable EOF, including on later reads. Reads may be shorter
-   than max. A non-integer max is 'type; max <= 0 is 'domain; overlapping stderr reads are
-   'contract; pipe failure is 'io. Drain stdout concurrently when it can fill, or use proc.run to
-   capture both streams.")
+  "Read at most positive integer `max` bytes from stderr, parking when no data is ready. Return
+   exact integer bytes in `0...255`; `[]` means stable EOF, and later reads also return `[]`. Reads
+   may be shorter than `max`. A non-integer maximum is `'type`; a nonpositive maximum is `'domain`;
+   at most one stderr read may be pending, so overlap is `'contract`; pipe failure is `'io`. Drain
+   stdout concurrently when it can fill, or use `proc.run` to capture both streams.")
  (swap proc.core.stderr port.endpoint swap port.read) 'read-stderr def
 
  ### def wait
  (resource -- termination :
-  "Wait for direct-child termination without draining stdout or stderr. Return {'kind 'exited 'code
-   n}, {'kind 'signaled 'signal n}, {'kind 'stopped 'signal n}, or {'kind 'unknown 'status n}. A
-   nonzero exit code is ordinary result data. Repeated waiters receive the same result while the
-   resource is open; pipe failures are 'io. Output pipes can fill and prevent exit, so drain both
-   concurrently or use proc.run. This leaves the resource open; use port.close to join cleanup.")
+  "Park until direct-child termination without draining stdout or stderr, and return the immutable
+   terminal result:
+   - `{'kind 'exited 'code n}`;
+   - `{'kind 'signaled 'signal n}`;
+   - `{'kind 'stopped 'signal n}`; or
+   - `{'kind 'unknown 'status n}`.
+
+   Any number of waiters and later calls receive the same dictionary. A nonzero exit code is
+   ordinary termination data, not an ECL error. A pipe failure raises `'io`. Output pipes can fill
+   and prevent exit, so drain both concurrently or use `proc.run`. Waiting requires an open
+   resource; after closure, observe a previously completed exchange instead of admitting another
+   wait. This leaves the resource open; use `port.close` to join cleanup.")
  (proc.core.wait [] port.call) 'wait def
 
  ### def terminate
  (resource -- :
-  "Request ordinary process-group termination without waiting for exit. Idempotent and safe after
-   natural exit while the resource remains open. Cleanup escalates to force termination when needed.
-   Use proc.wait to observe termination and port.close to join cleanup.")
+  "Request ordinary termination of the process group without waiting for exit, escalating to force
+   termination during cleanup when needed. Idempotent and safe after natural exit while the resource
+   remains open. Use `proc.wait` to observe termination and `port.close` to join cleanup.")
  (proc.core.terminate [] port.call pop) 'terminate def
 
  ### def kill
  (resource -- :
   "Request force termination of the process group and arrange direct-child reap. Idempotent and safe
-   after natural exit while the resource remains open. Does not wait for exit; use proc.wait to
-   observe termination and port.close to join cleanup.")
+   after natural exit while the resource remains open. This does not wait for exit; use `proc.wait`
+   to observe termination and `port.close` to join cleanup.")
  (proc.core.kill [] port.call pop) 'kill def
 
  ### defp nonnegative
@@ -148,20 +165,33 @@
 
  ### def run
  (spec -- result :
-  "Run a process with concurrent stdin feeding and bounded stdout/stderr capture, then join cleanup.
-   spec is a symbol-keyed dict with required 'executable (absolute path string), optional 'args
-   (argument strings, default []), 'cwd (absolute path without . or .. components, default the
-   host-configured starting directory), and 'env (string-to-string environment overlay, default {}).
-   These obey proc.spawn's path, string, and host-authority rules. Additional optional fields:
-   'stdin is a list of integer bytes in 0...255 (default []); 'stdout-limit and 'stderr-limit are
-   nonnegative integer byte limits, each defaulting to its host-policy maximum and never exceeding
-   it; 'timeout-ms is a nonnegative integer deadline covering spawn and execution (omitted means no
-   deadline). Stdin is finished after feeding. Return {'term termination 'stdout byte-list 'stderr
-   byte-list}; termination has proc.wait's shape, including {'kind 'exited 'code n}. Nonzero exit
-   codes do not raise. Decode output explicitly with chars. Capture overflow raises 'overflow,
-   deadline expiry raises 'timeout, and cancellation raises 'cancelled, after joined cleanup. Wrong
-   field types are 'type; invalid values or denied authority are 'domain; launch, pipe, or reap
-   failures are 'io. Run-only fields are rejected by proc.spawn.")
+  "Spawn through the ordinary port controller, supply all stdin while draining stdout and stderr
+   concurrently, wait for direct-child reap, join cleanup, and return `{'term termination 'stdout
+   stdout-bytes 'stderr stderr-bytes}`. `spec` takes the `proc.spawn` fields under the same path,
+   string, and host-authority rules, plus these optional run-only fields, which `proc.spawn`
+   rejects:
+   - `'stdin`: a list of integer bytes in `0...255`, default `[]`; strings require explicit `bytes`
+     conversion.
+   - `'stdout-limit`: a nonnegative integer maximum of total captured stdout bytes, default the host
+     stdout capture maximum.
+   - `'stderr-limit`: a nonnegative integer maximum of total captured stderr bytes, default the host
+     stderr capture maximum.
+   - `'timeout-ms`: a nonnegative integer deadline in milliseconds covering spawn and execution;
+     omitted means no process deadline, while scheduler cancellation remains effective.
+
+   Each capture limit must be no larger than its host maximum, and zero permits only empty output on
+   that stream. Stdin is finished after feeding, including when omitted. The result always contains
+   all three keys: `'term` has the `proc.wait` shape, and `'stdout` and `'stderr` are byte lists,
+   empty when nothing was captured. Nonzero exit codes are returned as data; inspect `'term` to
+   decide whether the command succeeded, and decode output explicitly with `chars`.
+
+   Capture overflow kills and cleans the process before raising `'overflow`. Deadline expiry does
+   the same before raising `'timeout`; task cancellation raises `'cancelled`, also after joined
+   cleanup. Wrong field types are `'type`; invalid values or denied authority are `'domain`; spawn,
+   pipe, broken-input, and reap failures are `'io`. The deadline covers the child task that opens
+   and runs the process. Output collectors enforce their limits independently; a failed collector
+   cancels the remaining work and joins resource cleanup. Successful input acceptance is distinct
+   from backend pipe completion, and a later broken pipe still fails the run.")
  (dup type 'dict match? 'type error.new "expected a process specification dict" error.with-message
   assert
   dup 'stdin [] dict.get dup type 'list match? 'type error.new "expected a stdin byte list"

@@ -54,6 +54,11 @@ in those guides rather than expanding this index with incident-specific history.
   the representation that carries them. Write a change at the level of the
   surrounding section; do not transcribe every mechanism, name, or status code.
   Implementation narrative belongs in code comments.
+- `design/STDLIB.md` is generated; run `zig build stdlib` after changing its
+  inputs. A word defined in ECL is documented by its annotation, whose effect
+  and docstring become the entry; its fragment entry under `design/stdlib`
+  holds only examples. Builtins are documented in the fragments. Entry order
+  within a section is computed, not authored.
 - Run every build, test, or script with stdin closed and under a bounded timeout.
   Capture the command's exit status immediately, before `tail`, `grep`, or any
   other helper. A silent command is not evidence that the intended test ran.

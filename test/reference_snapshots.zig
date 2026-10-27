@@ -843,7 +843,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\(:
-        \\ "Bind a value as a constant word in the current scope; an optional annotation may precede the value.")
+        \\ "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v 'name set` is observationally `v literal 'name def`: the stored body is `((v) first)`. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested by `literal` and remain captured data.")
         \\(swap literal swap def)
         \\stderr:
         \\<empty>

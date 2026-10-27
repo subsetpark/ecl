@@ -44,11 +44,11 @@
 
  ### def parse-request-line
  (line -- request-line :
-  "Parse a request line such as \"GET /users?id=42 HTTP/1.1\" into {'method \"GET\" 'target
-   \"/users?id=42\" 'path \"/users\" 'query \"id=42\" 'version \"HTTP/1.1\"}: 'path and 'query are
-   the target split at its first ?, undecoded, with 'query \"\" when absent. A line without exactly
-   three space-separated tokens is 'domain with 'data {'status 400}; a version other than HTTP/1.1
-   or HTTP/1.0 is 'domain with 'data {'status 505}; a non-string is 'type.")
+  "Parse a request line such as `\"GET /users?id=42 HTTP/1.1\"` into `{'method 'target 'path 'query
+   'version}`: three space-separated tokens, with `'path` and `'query` the target split at its first
+   `?`, undecoded, and `'query` `\"\"` when there is no `?`. Any other token count is `'domain` with
+   `'data {'status 400}`; a version other than `HTTP/1.1` or `HTTP/1.0` is `'domain` with `'data
+   {'status 505}`. A non-string is `'type`.")
  ("http.server.parse-request-line expects a string" checked-string
   " " split
   dup len 3 = () (400 "malformed request line" framing-error) if
@@ -79,12 +79,12 @@
 
  ### def parse-headers
  (lines -- headers :
-  "Fold a list of header lines such as (\"Host: a\" \"X-Multi: one\" \"x-multi: two\") into a dict
-   from ASCII-lowercased name to the list of its values, trimmed of surrounding ASCII whitespace, in
-   arrival order: {\"host\" (\"a\") \"x-multi\" (\"one\" \"two\")}. A non-list, or a list with an
-   element that is not a string, is 'type. A line that has no :, has an empty name or a name
-   containing whitespace, or begins with a space or tab (obsolete line folding) is 'domain with
-   'data {'status 400}. () is {}.")
+  "Fold a list of header-line strings into a dictionary from ASCII-lowercased name to the list of
+   its values in arrival order, so `(\"Host: a\" \"host: b\")` yields `{\"host\" (\"a\" \"b\")}`.
+   The name is the text before the first `:`, and the value is the rest with surrounding ASCII
+   whitespace removed. `()` is `{}`. A line that has no `:`, has an empty name or a name containing
+   whitespace, or begins with a space or tab (obsolete line folding) is `'domain` with `'data
+   {'status 400}`. A non-list or a non-string line is `'type`.")
  (dup type 'list match? "http.server.parse-headers expects a list of header lines" type-error assert
   dup (str.str?) all? "http.server.parse-headers expects every header line to be a string"
   type-error assert
@@ -109,11 +109,12 @@
 
  ### def content-length
  (headers -- length :
-  "Return the request body length named by a headers dict as parse-headers builds it: 0 when
-   content-length is absent, otherwise the int that every occurrence spells ({\"content-length\"
-   (\"5\")} is 5). A value that is not a nonempty string of decimal digits, or repeated values that
-   differ, is 'domain with 'data {'status 400}; a value too large for a 64-bit int exceeds every
-   body limit and is 'domain with 'data {'status 413}; a non-dict is 'type.")
+  "Return the request body length named by a headers dictionary as `parse-headers` builds it: `0`
+   when `content-length` is absent, otherwise the integer every occurrence spells, leading zeros
+   allowed, so `{\"content-length\" (\"5\")}` is 5. A value that is not a nonempty string of decimal
+   digits, or repeated values that differ, is `'domain` with `'data {'status 400}`; a value too
+   large for a 64-bit integer exceeds every body limit and is `'domain` with `'data {'status 413}`.
+   A non-dictionary is `'type`.")
  (dup type 'dict match? "http.server.content-length expects a header dict" type-error assert
   "content-length" [] dict.get
   dup len 0 =
@@ -231,20 +232,22 @@
 
  ### def render-response
  (response -- bytes :
-  "Validate a response in full and serialize it to the exact bytes the server writes. The response
-   is the dict {'status 'headers 'body} with exactly those keys: 'status an int in 200...599, since
-   interim 1xx responses are not served, with an empty body when it is 204, 205, or 304; 'headers a
-   dict from header names, nonempty strings of HTTP token characters, to a string or a list of
-   strings containing no CR, LF, NUL, or control character other than tab, written once per value in
-   the given order with the name as given ({\"set-cookie\" (\"a=1\" \"b=2\")} writes two lines);
-   'body a string, written as UTF-8, or a byte list of ints in 0...255. The bytes are the status
-   line HTTP/1.1 status reason (an empty reason for codes outside the built-in table), the header
-   lines, Content-Length (omitted for 204 and 304, whose length is not the empty body's),
-   Connection: close, an empty line, and the body. A non-dict is 'type; any other key set, a status
-   outside the range, a body with status 204, 205, or 304, a header name that is not a token or is
-   content-length, connection, or transfer-encoding in any letter case, a header value that is not a
-   clean string or list of them, or a body of another kind is 'domain. Every byte the server writes
-   has passed this word.")
+  "Validate a response dictionary in full and return the exact bytes the server writes for it:
+   `HTTP/1.1 <status> <reason>` CRLF, one `name: value` line per header value in the given order
+   with the name as given, so `{\"set-cookie\" (\"a=1\" \"b=2\")}` writes two lines,
+   `Content-Length: <n>` CRLF (omitted for 204 and 304, whose length is not the empty body's),
+   `Connection: close` CRLF, CRLF, then the body bytes, a string written as UTF-8. The reason phrase
+   comes from a fixed table covering 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 408,
+   411, 413, 431, 500, 503, and 505 and is empty for any other status, with the space before it
+   always written. Every byte the server writes has passed this word.
+
+   A non-dictionary is `'type`. The following are `'domain`: keys other than exactly `'status`,
+   `'headers`, and `'body`; a status that is not an integer in `200...599`, since interim 1xx
+   responses are not served; a nonempty body with status 204, 205, or 304; a headers value that is
+   not a dictionary; a header name that is not a nonempty string of HTTP token characters; a header
+   value that is neither a string nor a list of strings, or that contains CR, LF, NUL, or a control
+   character other than tab; a header whose lowercased name is `content-length`, `connection`, or
+   `transfer-encoding`; and a body that is neither a string nor a list of integers in `0...255`.")
  (checked-response
   (|response|
    response 'body at body-bytes
@@ -288,16 +291,19 @@
 
  ### def route
  (request routes -- response :
-  "Dispatch a request over a list of [method pattern handler] rows: method is a string compared
-   exactly against the request's 'method (\"GET\"), pattern is a slash path whose segments must
-   equal the request's 'path segments except that a segment beginning with : matches any nonempty
-   segment and binds it by name (\"/users/:id\"), and handler is a ( request -- response )
-   quotation. The first row whose method and pattern both match has its handler applied inline to
-   the request with a 'params dict of the bound segments added ({\"id\" \"42\"}). When some pattern
-   matches but no method does, the result is 405 with an allow header listing those rows' methods;
-   when no pattern matches, http.response.not-found. Middleware is composition: wrap the handler
-   quotation. A non-list routes or a row that is not a three-element list of string, string, and
-   quotation is 'type or 'shape before any comparison.")
+  "*Inline.* Dispatch a request over a list of `[method pattern handler]` rows. The method is a
+   string compared exactly against the request's `'method`. A pattern is a slash path such as
+   `\"/users/:id\"` whose segments must equal the request's `'path` segments one for one, except
+   that a segment beginning with `:` binds any nonempty path segment under its name in a string
+   dictionary. The first row whose pattern and method both match has the request, with `'params` set
+   to that dictionary, passed to its handler, which is applied inline with the contract `( request
+   -- response )`. Middleware is composition: wrap the handler quotation with `compose`.
+
+   When some pattern matches but no matching row's method does, the result is `405 \"method not
+   allowed\" text` with an `allow` header joining the matching rows' methods with `,`; when no
+   pattern matches, the result is `http.response.not-found`. Every row is checked before any
+   comparison: a non-list routes value is `'type`, a row that is not a list of three elements is
+   `'shape`, and a non-string method, non-string pattern, or non-quotation handler is `'type`.")
  (dup type 'list match? "http.server.route expects a list of rows" type-error assert
   dup (checked-route) for
   over 'path at route-matches
@@ -593,45 +599,48 @@
 
  ### def @serve
  (listener config handler -- :
-  "Serve HTTP/1.1 requests from a net listener until cancelled: accept in a loop and give each
-   connection to a child unit that owns it. The child frames one request under the read deadline,
-   applies the handler as [request] handler @attempt in a fresh unit, writes its single response
-   with Content-Length and Connection: close, and closes the connection.
+  "*Unit constructor*, contract `( request -- response )` enforced per request. Serve HTTP/1.1
+   requests from a `net` listener until the unit ends: accept in a loop and give each connection to
+   a child unit that owns it. The child frames one request under the read deadline, applies the
+   handler as `[request] handler @attempt` in a fresh unit, writes its single response with
+   `Content-Length` and `Connection: close`, and closes the connection.
 
-   The handler is a quotation ( request -- response ). The request is the dict {'method 'target
-   'path 'query 'headers 'body 'peer}: 'method and 'target are the request-line tokens; 'path and
-   'query are the target split at the first ?, undecoded, with 'query \"\" when absent; 'headers
-   maps each ASCII-lowercased header name to the list of its trimmed values in arrival order; 'body
-   is the exact Content-Length byte list, [] when there is none; 'peer is the peer's address:port,
-   an IPv6 address in brackets. The response is the dict {'status 'headers 'body} that
-   render-response accepts; every byte written to a connection has passed render-response.
+   The request is the dictionary `{'method 'target 'path 'query 'headers 'body 'peer}`: `'method`
+   and `'target` are the request-line tokens; `'path` and `'query` are the target split at the first
+   `?`, undecoded, with `'query` `\"\"` when absent; `'headers` maps each ASCII-lowercased header
+   name to the list of its trimmed values in arrival order; `'body` is the exact `Content-Length`
+   byte list, `[]` when there is none; `'peer` is the peer's `address:port`, an IPv6 address in
+   brackets. The response is the dictionary `{'status 'headers 'body}` that `render-response`
+   accepts; every byte written to a connection has passed `render-response`.
 
-   The config is a dict whose keys are all optional; {} is valid:
-   - 'max-header-bytes (32768): most head bytes accepted before the CRLFCRLF terminator; more is
+   The configuration is a dictionary whose keys are all optional, so `{}` is valid. Each limit is an
+   int greater than zero.
+   - `'max-header-bytes` (32768): most head bytes accepted before the CRLFCRLF terminator; more is
      431.
-   - 'max-body-bytes (1048576): largest Content-Length accepted; more is 413 before any body byte is
-     read.
-   - 'max-in-flight (128): most connections served at once; accepting waits for a free slot.
-   - 'read-timeout-ms (10000): deadline for reading one whole request; expiry is 408.
-   - 'on-failure ((str io.eprint)): a ( error -- ) quotation applied to the error of every request
-     answered 500; a failure of the quotation itself is discarded.
-   Each limit is an int greater than zero.
+   - `'max-body-bytes` (1048576): largest `Content-Length` accepted; more is 413 before any body
+     byte is read.
+   - `'max-in-flight` (128): most connections served at once; accepting waits for a free slot.
+   - `'read-timeout-ms` (10000): deadline for reading one whole request; expiry is 408.
+   - `'on-failure` (`(str io.eprint)`): a `( error -- )` quotation applied to the error of every
+     request answered 500; a failure of the quotation itself is discarded.
 
    A HEAD request is answered with the handler's status and headers and no body. Requests the server
-   cannot serve are answered with a minimal text/plain response and closed: 400 for a malformed
+   cannot serve are answered with a minimal `text/plain` response and closed: 400 for a malformed
    request line or header, an HTTP/1.1 request without exactly one well-formed Host header,
-   non-UTF-8 head bytes, a bad Content-Length, or end of stream after some bytes; 411 for any
-   Transfer-Encoding; 505 for a version other than HTTP/1.1 or HTTP/1.0; 431 and 413 for the size
+   non-UTF-8 head bytes, a bad `Content-Length`, or end of stream after some bytes; 411 for any
+   `Transfer-Encoding`; 505 for a version other than HTTP/1.1 or HTTP/1.0; 431 and 413 for the size
    limits; 408 for the deadline; 500 when the handler fails, leaves other than one value, or leaves
-   a response render-response rejects, in which case 'on-failure receives the error. A peer that
+   a response `render-response` rejects, in which case `'on-failure` receives the error. A peer that
    sends nothing before closing, or resets during the exchange, is closed silently.
 
-   A non-port listener, non-dict config, non-quotation handler, non-int limit, or non-quotation
-   'on-failure is 'type; an unknown config key or a limit not greater than zero is 'domain. The word
-   fails 'cancelled when the serving unit is cancelled and re-raises failures of net.accept. Closing
-   the listener ends an admitted accept with 'io or 'cancelled; admission after closure fails 'io.
-   Every child is quiesced by scope rules and every connection a child owns is closed with it. It
-   never closes the listener, which stays the caller's to close.")
+   Validation of the arguments completes before any request is accepted. A non-port listener, a
+   non-dictionary configuration, a non-quotation handler, a non-int limit, or a non-quotation
+   `'on-failure` is `'type`; an unknown configuration key or a limit not greater than zero is
+   `'domain`. The word fails `'cancelled` when the serving unit is cancelled and re-raises an
+   acceptor's `'io` failure of `net.accept`. Closing the listener ends an admitted accept with `'io`
+   or `'cancelled`; admission after closure fails `'io`. Every child is quiesced by scope rules, and
+   every connection a child owns is closed with it. It never closes the listener, which stays the
+   caller's to close.")
  (|listener config handler|
   listener type 'port match? "http.server.@serve expects a net listener" type-error assert
   handler type 'list match? "http.server.@serve expects a handler quotation" type-error assert

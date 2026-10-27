@@ -32,7 +32,9 @@
   dup (checked pop) for) 'checked-all defp
 
  ### def ok
- (values -- result : "Build an ok result from a list of successful stack values.")
+ (values -- result :
+  "Build an ok result from a list of successful stack values, representing the stack a successful
+   computation left.")
  (dup type 'list match?
   'type error.new "result.ok expects a list of success values" error.with-message assert
   'ok swap pair dict.from-flat) 'ok def
@@ -44,25 +46,25 @@
   'err swap pair dict.from-flat) 'err def
 
  ### def ok?
- (result -- bool : "Return 1 for an ok result.")
+ (result -- bool : "Return 1 when a well-formed result is a success.")
  (checked 'ok dict.has?) 'ok? def
 
  ### def err?
- (result -- bool : "Return 1 for an err result.")
+ (result -- bool : "Return 1 when a well-formed result is a failure.")
  (checked 'err dict.has?) 'err? def
 
  ### def or-raise
- (result -- values : "Return the success list or raise the stored error.")
+ (result -- values : "Return a success list, or re-raise the stored error dict unchanged.")
  (checked dup 'ok dict.has? ('ok at) ('err at raise) if) 'or-raise def
 
  ### def or-else
- (result fallback -- value : "Return the success list or a fallback value for an err result.")
+ (result fallback -- value : "Return a success list, or the fallback value for a failure.")
  (swap checked swap over 'ok dict.has? (pop 'ok at) (nip) if) 'or-else def
 
  ### def and-then
  (result quotation -- result :
-  "For an ok result, run the quotation under @attempt on an isolated stack seeded with the success
-   values. Return an err result unchanged.")
+  "For a success, use its payload as the explicit values list for `@attempt`, running the quotation
+   on an isolated stack seeded with the success values. Return a failure unchanged.")
  (swap checked swap over 'ok dict.has?
   (swap 'ok at swap @attempt)
   (pop)
@@ -70,7 +72,8 @@
 
  ### def map-err
  (result quotation -- result :
-  "Apply an isolated ( error -- error ) quotation to an err result. Return an ok result unchanged.")
+  "Replace a failure's error dict with the one its isolated `( error -- error )` quotation returns.
+   Return a success unchanged.")
  (swap checked swap over 'err dict.has?
   (swap 'err at wrap swap @attempt
    dup 'ok dict.has?
@@ -85,8 +88,8 @@
 
  ### def recover
  (result quotation -- result :
-  "For an err result, run the quotation under @attempt with the stored error. Return an ok result
-   unchanged.")
+  "For a failure, run the recovery quotation under `@attempt` on an isolated stack seeded with the
+   stored error dict. Return a success unchanged.")
  (swap checked swap over 'err dict.has?
   (swap 'err at wrap swap @attempt)
   (pop)
@@ -94,7 +97,8 @@
 
  ### def recover-kinds
  (result kinds quotation -- result :
-  "Recover an err result when its kind is listed. Return all other results unchanged.")
+  "Recover a failure only when its kind is one of the listed symbols. Return every other result
+   unchanged.")
  (|result kinds handler|
   result checked pop
   kinds type 'list match?
@@ -115,8 +119,8 @@
 
  ### def either
  (result on-ok on-err -- ... :
-  "Call on-ok with the success list or on-err with the error dictionary. Branches run inline and may
-   leave any number of values.")
+  "Eliminate a result exhaustively: call `on-ok` with the success list or `on-err` with the error
+   dict. Neither branch is isolated; each runs inline and may leave any number of values.")
  (|result on-ok on-err|
   result checked pop
   result 'ok dict.has?
@@ -126,7 +130,8 @@
 
  ### def all
  (results -- result :
-  "Return the first err result, or an ok result containing all success lists in input order.")
+  "Return the leftmost failure unchanged, or one success whose value is the list of success stacks
+   in input order.")
  (checked-all
   dup ('err dict.has?) each where
   dup len 0 >
@@ -136,7 +141,7 @@
 
  ### def partition
  (results -- successes errors :
-  "Return the success lists and error dictionaries as separate lists in input order.")
+  "Split results into success lists and error dicts, both in input order, without re-raising.")
  (checked-all ('ok dict.has?) core.partition
   (('ok at) each) dip ('err at) each) 'partition def
 
