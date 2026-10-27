@@ -6,7 +6,7 @@
 //! ordinals. Package policy uses these same public facilities from ECL.
 //!
 //! Component-level probes elsewhere inject failures into a directly
-//! constructed subject (`list.zig`, `dict.zig`, env.zig`, `equal.zig`, the
+//! constructed subject (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, the
 //! reader, formatter, line-editor, registry, and native-validation probes);
 //! none of them bootstraps a Session. These are the only sweeps over fully
 //! initialized Sessions, so a surface reachable only through one — a
@@ -48,14 +48,14 @@ fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" cwd \"archive\" archive.unpack-tgz pop");
+    try source.writer.writeAll(" `cwd \"archive\" archive.unpack-tgz pop");
     return allocator.dupe(u8, source.written());
 }
 
 fn archiveResourceSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
-    try source.writer.writeAll("cwd \"generation\" fs.stage-dir `stage set ");
+    try source.writer.writeAll("`cwd \"generation\" fs.stage-dir `stage set ");
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
     try source.writer.writeAll(" stage \"archive\" archive.unpack-tgz pop stage fs.commit-dir");
     return allocator.dupe(u8, source.written());
@@ -945,42 +945,42 @@ fn stdlibSessionAllocationProbe(
         .directory_enumeration => try runOk(
             &runtime,
             "oom-enumeration.ecl",
-            "cwd \"enumerated\" fs.mkdirs \"x\" cwd \"enumerated/file\" fs.publish-text " ++
-                "cwd \"enumerated\" fs.open-list `cursor set cursor fs.next-entry pop " ++
+            "`cwd \"enumerated\" fs.mkdirs \"x\" `cwd \"enumerated/file\" fs.publish-text " ++
+                "`cwd \"enumerated\" fs.open-list `cursor set cursor fs.next-entry pop " ++
                 "cursor fs.next-entry pop cursor port.close",
         ),
         .directory_staging => try runOk(
             &runtime,
             "oom-staging.ecl",
-            "cwd \"published\" fs.stage-dir `s set s \".\" fs.child-dir pop s fs.commit-dir " ++
-                "cwd \"rollback\" fs.stage-dir `s set s \"a\" fs.mkdirs s port.close",
+            "`cwd \"published\" fs.stage-dir `s set s \".\" fs.child-dir pop s fs.commit-dir " ++
+                "`cwd \"rollback\" fs.stage-dir `s set s \"a\" fs.mkdirs s port.close",
         ),
         .tree_operations => try runOk(
             &runtime,
             "oom-tree.ecl",
-            "cwd \"a/b\" fs.mkdirs \"x\" cwd \"a/b/file\" fs.publish-text cwd \"a\" fs.remove-tree",
+            "`cwd \"a/b\" fs.mkdirs \"x\" `cwd \"a/b/file\" fs.publish-text `cwd \"a\" fs.remove-tree",
         ),
         .advisory_lock => try runOk(
             &runtime,
             "oom-lock.ecl",
-            "cwd \"mutex\" fs.lock port.close cwd \"mutex\" fs.lock port.close",
+            "`cwd \"mutex\" fs.lock port.close `cwd \"mutex\" fs.lock port.close",
         ),
         .directory_resource => try runOk(
             &runtime,
             "oom-directory.ecl",
-            "cwd \".\" fs.child-dir dup \".\" fs.stat pop dup port.close port.close",
+            "`cwd \".\" fs.child-dir dup \".\" fs.stat pop dup port.close port.close",
         ),
         .filesystem_stream => try runOk(
             &runtime,
             "oom-stream.ecl",
-            "cwd fs.reserve `root set root \"published\" fs.open-writer `writer set " ++
+            "`cwd fs.reserve `root set root \"published\" fs.open-writer `writer set " ++
                 "writer [65 66] fs.write-chunk writer [] fs.write-chunk writer fs.commit-file " ++
                 "root \"aborted\" fs.open-writer `writer set writer [67] fs.write-chunk writer port.close root wrap (\"missing/sub\" fs.child-dir) @attempt pop root port.close",
         ),
         .file_publication => try runOk(
             &runtime,
             "oom-publication.ecl",
-            "\"x\" cwd \"published\" fs.publish-text [0 255] cwd \"published\" fs.publish-bytes",
+            "\"x\" `cwd \"published\" fs.publish-text [0 255] `cwd \"published\" fs.publish-bytes",
         ),
         .filesystem => try runOk(
             &runtime,
@@ -988,14 +988,14 @@ fn stdlibSessionAllocationProbe(
             // Every fs word once, through the same root: encoders, the
             // resolver, staging, listing, metadata, and the structured
             // failure dictionary all have Session-only allocation paths.
-            "\"pr\\n\" cwd \"p.txt\" fs.create-text " ++
-                "cwd \"p.txt\" fs.read-text pop cwd \"p.txt\" fs.read-bytes pop " ++
-                "[7 8] cwd \"p.txt\" fs.replace-bytes \"z\" cwd \"p.txt\" fs.replace-text " ++
-                "cwd \"p.txt\" fs.stat pop cwd \"p.txt\" fs.lstat pop cwd \"p.txt\" fs.exists? pop " ++
-                "cwd \"d\" fs.mkdir cwd \"d\" fs.list pop " ++
-                "cwd \"p.txt\" cwd \"d/c.txt\" fs.copy cwd \"d/c.txt\" \"d/m.txt\" fs.rename " ++
-                "cwd \"d/m.txt\" fs.remove-file cwd \"d\" fs.remove-dir " ++
-                "[] (cwd \"absent\" fs.read-text) @attempt pop " ++
+            "\"pr\\n\" `cwd \"p.txt\" fs.create-text " ++
+                "`cwd \"p.txt\" fs.read-text pop `cwd \"p.txt\" fs.read-bytes pop " ++
+                "[7 8] `cwd \"p.txt\" fs.replace-bytes \"z\" `cwd \"p.txt\" fs.replace-text " ++
+                "`cwd \"p.txt\" fs.stat pop `cwd \"p.txt\" fs.lstat pop `cwd \"p.txt\" fs.exists? pop " ++
+                "`cwd \"d\" fs.mkdir `cwd \"d\" fs.list pop " ++
+                "`cwd \"p.txt\" `cwd \"d/c.txt\" fs.copy `cwd \"d/c.txt\" \"d/m.txt\" fs.rename " ++
+                "`cwd \"d/m.txt\" fs.remove-file `cwd \"d\" fs.remove-dir " ++
+                "[] (`cwd \"absent\" fs.read-text) @attempt pop " ++
                 "[] (`none \"x\" fs.exists?) @attempt pop " ++
                 "\"a//b/../c\" path.normalize pop (\"a\" \"b\") path.join pop " ++
                 "\"a/b.c\" path.dirname pop \"a/b.c\" path.basename pop \"a/b.c\" path.extension pop " ++
