@@ -178,8 +178,10 @@ characters. An atom is classified whole-token, in this order:
    U+10FFFF are parse errors).
 3. **Quote** — `` ` `` followed by a symbol. It is reader sugar for the two
    forms `(symbol) core.first`, so `` `foo `` and `(foo) first` push the
-   same value. `` ` `` is reserved token-initially and banned inside
-   symbols.
+   same value. The expansion is literal wherever it appears, so `` [`a `b] ``
+   is the four-element list `((a) core.first (b) core.first)`; only `{ }`
+   rejects a quote, since the expansion would break its key/value pairing.
+   `` ` `` is reserved token-initially and banned inside symbols.
 4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
 
@@ -270,7 +272,7 @@ A symbol is one kind of value whether it was written bare or built at
 runtime: `(dup) first` and `` `dup `` yield the same symbol, and `{dup 1}`
 stores it as a key. The position of a symbol in a list, not its value,
 decides what running the list does with it: `(dup) call` executes `dup`,
-while `` (dup) call `` runs the quote's expansion `(dup) core.first` and
+while `` (`dup) call `` runs the quote's expansion `(dup) core.first` and
 pushes the symbol. Symbols print bare, delimited as `'...'` only when the
 bare spelling would not read back as the same symbol. Resolution and
 provenance metadata belong to stored symbol occurrences rather than their
@@ -302,7 +304,9 @@ Printing never exposes storage specialization. A non-string list uses `[...]`
 when its value has canonical array shape—a homogeneous flat vector of
 numbers or chars, or a rectangular nesting of such vectors—and `(...)`
 otherwise. A vector of symbols has a quotation's shape and prints with
-`(...)` however it was built. Both delimiters read as the same list kind.
+`(...)` however it was built, and a quotation prints its quote expansions,
+so `` (`x) `` prints as `((x) core.first)`. Both delimiters read as the same
+list kind.
 Thus `(1 2 3)` prints as `[1 2 3]`, `[dup swap]` prints as `(dup swap)`, and
 the ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings
 use quoted string syntax.
@@ -400,10 +404,12 @@ the source is read into: the session, the module image under construction, or
 core for the prelude. Moving, copying, concatenating, or splicing values
 preserves each occurrence's own slot, so one quotation may contain symbols
 from several roots, and a quotation has no single resolution root. A symbol
-`qualify` or native code builds links to the slot for its name in the root of
-the activation that built it; symbols built by the implementation itself link
-to core. A symbol built from a string by `symbol` or `intern` carries no link
-and links where it is first run.
+that `qualify`, `symbol`, `intern`, or native code builds links to the slot
+for its name in the root of the activation that built it, so a quotation
+assembled from strings resolves where it was assembled rather than where it
+is later called. A symbol the implementation builds for itself (an error-dict
+key, a trace entry) carries no link and means core's binding wherever it
+runs.
 
 A reader-produced aggregate may separately retain **reader lineage**, which
 records that the aggregate and its reader-built descendants came from a
