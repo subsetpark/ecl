@@ -17,7 +17,7 @@ Resolution is descriptor-relative beneath the root's retained handle. An
 intermediate symlink is followed only while its target stays within the root;
 an absolute target, a relative target that would pop above the root, more than
 40 followed links, or more than 64 KiB of expanded resolver input is refused.
-`child-dir`, `open-list`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
+`child-dir`, `open-list`, `open-reader`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
 follow a final link under the same rule; every other word acts on the final
 entry itself. Containment is never a lexical prefix check.
 
@@ -88,6 +88,14 @@ operation slot until joined closure. A reservation can be passed as a root;
 its derived operations share that slot and reject overlapping work with
 `'overflow` and reason `'limit`. Closure waits for admitted work. This supports
 compositions that must retain admission across inspection and publication.
+
+### open-reader
+`( root path -- fd )` — Open a regular file, following a final link within the
+root, as a readable byte endpoint for `fd.read`, `fd.read-line`, `fd.read-all`
+and the `io` readers, with no size limit: the stream is read a chunk at a
+time. The calling scope owns the file; `fd.close` closes it earlier and joins
+cleanup, and a read after either is `'io`. A directory is `'is-directory`; a
+non-regular object is `'not-regular`.
 
 ### open-writer
 `( root path -- writer )` — Open private storage for an absent regular file.

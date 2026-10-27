@@ -28,7 +28,7 @@ test "every idiom entry hits across values empties spines floats and failures" {
                 (entry.operation == .direct and entry.operation.direct == .fold1)))
                 compareReductionModes(source)
             else if (variant == .failure and entry.operation == .direct and switch (entry.operation.direct) {
-                .sum, .product, .reshape_sum, .reshape_product => true,
+                .sum, .product, .reshape_sum, .reshape_product, .where_at => true,
                 else => false,
             })
                 compareTotalFailure(source)
@@ -453,6 +453,16 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             else
                 "[1 4611686018427387904 1 4] [2 2]",
         },
+        // The mask follows the list. `empty` is the empty mask, which selects
+        // nothing from anything; `spine` is a generic source; the failure
+        // variant has a count at a position the source lacks, `at`'s fault.
+        .where_at => switch (variant) {
+            .atom => "\"abcd\" [1 0 2 1]",
+            .empty => "\"abc\" []",
+            .spine => "\"abc\" bytes [2 0 1]",
+            .float => "[0.1 -0.0 0.2] [1 1 0]",
+            .failure => "\"abc\" [1 0 1 1]",
+        },
         // A non-list operand declines to the definition, so the failure
         // variant faults inside the recognized reduction.
         .sum, .product => switch (variant) {
@@ -685,6 +695,40 @@ fn expectHits(source: []const u8, expected: u64) !void {
     if (expected != run.runtime.lastIdiomHits())
         std.log.err("idiom hit count for {s}: expected {d}, got {d}", .{ source, expected, run.runtime.lastIdiomHits() });
     try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
+}
+
+test "idioms: where at fuses only the trusted at and keeps at's results" {
+    // Every representation a source can have, masks shorter than the source,
+    // counts above one, and a mask that is all zeros, against the words run
+    // one at a time.
+    for ([_][]const u8{
+        "\"abcdef\" [1 0 1] where at",
+        "\"abcdef\" bytes [0 2 1] where at",
+        "[1 2 3 4] [1 1 0 1] where at",
+        "[1.5 2.5] [0 1] where at",
+        "['a 'b 'c] [1 0 1] where at",
+        "\"\u{2713}x\u{2713}\" [1 0 1] where at",
+        "[1 2 3] [0 0 0] where at",
+        "[1 2 3] [1 0 1] 0 = where at",
+        "\"abc\" bytes 1000000 take dup 98 = where at len",
+        "\"abc\" bytes 1000000 take dup 97 > where at len",
+        "\"abc\" 1000000 take dup \\b = where at len",
+        "\"\u{2713}x\" 1000 take dup \\x > where at",
+    }) |source| {
+        compareExecutions(source) catch |err| {
+            std.log.err("where at differs for `{s}`", .{source});
+            return err;
+        };
+        try expectPhraseHits(source, 1);
+    }
+    // A user `at` in scope is not the trusted word: the phrase declines and
+    // the words run as written, through that definition.
+    try expectPhraseHits("(pop pop \"shadowed\") 'at def \"abc\" [1 0 1] where at", 0);
+    try expectPhraseHits("[1 2 3] [1 0 1] where", 0);
+    // A mask that is not bytes, or a generic source, keeps the two words,
+    // whose own gather handles them.
+    try expectPhraseHits("[1 2 3] [1 0 1000] where at", 0);
+    try expectPhraseHits("([1] \"a\" [2]) [1 0 3] where at", 0);
 }
 
 test "idioms: a caller's quotation is recognized inside prelude definitions" {

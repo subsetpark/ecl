@@ -331,16 +331,16 @@ test "native: common call closes failed exchanges and leaves its resource usable
 test "native: byte endpoints preserve exact bytes finish and stable eof" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
-        "w [0 10 255 1] port.write w port.finish w port.finish x port.await " ++
-        "r 8 port.read r 8 port.read r 8 port.read " ++
+        "w [0 10 255 1] fd.write w port.finish w port.finish x port.await " ++
+        "r 8 fd.read r 8 fd.read r 8 fd.read " ++
         "x port.result x port.close p port.close r type portprobe.cleaned", "[0 10 255 1] [] [] () 'port 1");
 }
 
 test "native: endpoint attenuation rejects other directions and ownership transfer" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
-        "w wrap (8 port.read) @attempt 'err at 'kind at " ++
-        "r wrap ([1] port.write) @attempt 'err at 'kind at " ++
+        "w wrap (8 fd.read) @attempt 'err at 'kind at " ++
+        "r wrap ([1] fd.write) @attempt 'err at 'kind at " ++
         "r wrap (port.finish) @attempt 'err at 'kind at " ++
         "w wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at " ++
         "w port.finish x port.await x port.close p port.close portprobe.cleaned", "'type 'type 'type 'domain 1");
@@ -349,9 +349,9 @@ test "native: endpoint attenuation rejects other directions and ownership transf
 test "native: media pipeline drains output and diagnostics concurrently under pressure" {
     for ([_]u32{ 1, 8 }) |workers| for ([_]u32{ 1, 8 }) |capacity| try expectPortProgramAtCapacity(workers, 4, capacity, "portprobe.factory [] port.open 'p set p portprobe.pipeline [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set " ++
-        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 port.read cat) partial while r 8 port.read) @spawn 'a set " ++
-        "x portprobe.diagnostics port.endpoint wrap (|r| [] (dup len 32 <) r (8 port.read cat) partial while r 8 port.read) @spawn 'b set " ++
-        "w [3] 32 take port.write w port.finish " ++
+        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) partial while r 8 fd.read) @spawn 'a set " ++
+        "x portprobe.diagnostics port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) partial while r 8 fd.read) @spawn 'b set " ++
+        "w [3] 32 take fd.write w port.finish " ++
         "a task.await 'ok at dup first [3] 32 take match? swap 1 at len " ++
         "b task.await 'ok at dup first [252] 32 take match? swap 1 at len " ++
         "x port.await x port.close p port.close portprobe.cleaned", "1 0 1 0 1");
@@ -363,10 +363,10 @@ test "native: input finish preserves an accepted writer through its final byte" 
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "0 (dup 32 <) (portprobe.reset " ++
         "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set x portprobe.output port.endpoint 'r set " ++
-        "w wrap ([1] 32 take port.write) @spawn 'a set r 8 port.read 'prefix set w port.finish " ++
-        "prefix (dup len 32 <) (r 8 port.read cat) while [1] 32 take match? " ++
-        "r 8 port.read len a task.await 'ok at pop " ++
-        "w wrap ([] port.write) @attempt 'err at 'kind at " ++
+        "w wrap ([1] 32 take fd.write) @spawn 'a set r 8 fd.read 'prefix set w port.finish " ++
+        "prefix (dup len 32 <) (r 8 fd.read cat) while [1] 32 take match? " ++
+        "r 8 fd.read len a task.await 'ok at pop " ++
+        "w wrap ([] fd.write) @attempt 'err at 'kind at " ++
         "x port.await x port.close p port.close portprobe.cleaned " ++
         "4 pack [1 0 'io 1] match? 'contract error.new assert 1 +) while", "32");
 }
@@ -374,8 +374,8 @@ test "native: input finish preserves an accepted writer through its final byte" 
 test "native: concurrent writes remain contiguous through repeated byte pressure" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.echo [] port.begin 'x set " ++
         "x portprobe.input port.endpoint 'w set " ++
-        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 port.read cat) partial while) @spawn 'reader set " ++
-        "w wrap ([1] 16 take port.write) @spawn 'a set w wrap ([2] 16 take port.write) @spawn 'b set " ++
+        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) partial while) @spawn 'reader set " ++
+        "w wrap ([1] 16 take fd.write) @spawn 'a set w wrap ([2] 16 take fd.write) @spawn 'b set " ++
         "a task.await 'ok at pop b task.await 'ok at pop w port.finish " ++
         "reader task.await 'ok at first dup [1] 16 take [2] 16 take cat match? " ++
         "swap [2] 16 take [1] 16 take cat match? or " ++
@@ -384,7 +384,7 @@ test "native: concurrent writes remain contiguous through repeated byte pressure
 
 test "native: overlapping endpoint reads fail without consuming the pending read" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.blocked [] port.begin 'x set 1 portprobe.await-blocked " ++
-        "x portprobe.output port.endpoint 'r set r wrap (8 port.read) @spawn 'a set r wrap (8 port.read) @spawn 'b set " ++
+        "x portprobe.output port.endpoint 'r set r wrap (8 fd.read) @spawn 'a set r wrap (8 fd.read) @spawn 'b set " ++
         "a b pair task.await-any 'err at 'kind at swap pop " ++
         "x port.cancel a task.await pop b task.await pop x port.close p port.close portprobe.cleaned", "'contract 1");
 }
@@ -392,16 +392,16 @@ test "native: overlapping endpoint reads fail without consuming the pending read
 test "native: accepted output precedes failure and explicit eof remains stable" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.buffered-failure [] port.begin 'x set " ++
         "x wrap (port.await) @attempt 'err at 'kind at x portprobe.output port.endpoint 'r set " ++
-        "r 8 port.read r wrap (8 port.read) @attempt 'err at 'kind at x port.close " ++
+        "r 8 fd.read r wrap (8 fd.read) @attempt 'err at 'kind at x port.close " ++
         "p portprobe.finished-failure [] port.begin 'y set y wrap (port.await) @attempt pop " ++
-        "y portprobe.output port.endpoint 's set s 8 port.read s 8 port.read s 8 port.read " ++
+        "y portprobe.output port.endpoint 's set s 8 fd.read s 8 fd.read s 8 fd.read " ++
         "y port.close p port.close portprobe.cleaned", "'domain [4 5 6] 'domain [4 5 6] [] [] 1");
 }
 
 test "native: early consumer completion interrupts a blocked byte producer" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open 'p set p portprobe.early-exit [] port.begin 'x set " ++
-        "x portprobe.input port.endpoint 'w set w wrap ([7] 32 take port.write) @attempt 'err at 'kind at " ++
-        "w port.finish x port.await x portprobe.output port.endpoint 8 port.read " ++
+        "x portprobe.input port.endpoint 'w set w wrap ([7] 32 take fd.write) @attempt 'err at 'kind at " ++
+        "w port.finish x port.await x portprobe.output port.endpoint 8 fd.read " ++
         "x port.close p port.close portprobe.cleaned", "'io [7] 1");
 }
 
@@ -601,8 +601,8 @@ test "native: Session shutdown joins active controllers before releasing images"
 }
 
 const streamCounter = "'count set 'resource set resource portprobe.counter-echo [] port.begin 'exchange set " ++
-    "exchange portprobe.counter-input port.endpoint wrap (|w| w [1] count take port.write w port.finish) @spawn 'writer set " ++
-    "exchange portprobe.counter-output port.endpoint 'r set 0 (dup count <) (r 4096 port.read len +) while " ++
+    "exchange portprobe.counter-input port.endpoint wrap (|w| w [1] count take fd.write w port.finish) @spawn 'writer set " ++
+    "exchange portprobe.counter-output port.endpoint 'r set 0 (dup count <) (r 4096 fd.read len +) while " ++
     "writer task.await 'ok at pop exchange port.await exchange port.close ";
 
 test "native: package ports stream beyond capacity and retain ordered state" {
@@ -1645,7 +1645,7 @@ test "native: allocation failure survives controller and endpoint boundaries" {
         }), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         for ([_][]const u8{
-            "port.await",                                    "port.result", "portprobe.output port.endpoint 1 port.read",
+            "port.await",                                    "port.result", "portprobe.output port.endpoint 1 fd.read",
             "portprobe.receiver port.endpoint port.receive",
         }) |observe| {
             try expectOk(&runtime, "portprobe.reset portprobe.factory [] port.open 'p set");
@@ -1739,9 +1739,9 @@ test "native: resource message finish and shutdown join their controllers" {
 
 test "native: resource byte endpoints make independent progress under tiny rings" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.resource-bytes [] port.begin 'x set " ++
-        "p portprobe.resource-input port.endpoint wrap (dup [1 2 3] port.write port.finish) @spawn 't set " ++
-        "p portprobe.resource-output port.endpoint 'r set r 8 port.read r 8 port.read r 8 port.read " ++
-        "r 8 port.read t task.await 'ok at pop x port.await x port.close p port.close portprobe.cleaned", "[1] [2] [3] [] 1");
+        "p portprobe.resource-input port.endpoint wrap (dup [1 2 3] fd.write port.finish) @spawn 't set " ++
+        "p portprobe.resource-output port.endpoint 'r set r 8 fd.read r 8 fd.read r 8 fd.read " ++
+        "r 8 fd.read t task.await 'ok at pop x port.await x port.close p port.close portprobe.cleaned", "[1] [2] [3] [] 1");
 }
 
 test "native: resource closure discards self-retaining channel messages exactly once" {
@@ -1761,8 +1761,8 @@ test "native: cancellation interrupts resource message readers without finishing
 test "native: cancellation interrupts resource byte readers and leaves the lane reusable" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.factory [] port.open 'p set p portprobe.resource-bytes [] port.begin 'x set " ++
         "1 portprobe.await-blocked x port.cancel x wrap (port.await) @attempt 'err at 'kind at x port.close " ++
-        "p portprobe.resource-bytes [] port.begin 'y set p portprobe.resource-input port.endpoint dup [42] port.write port.finish " ++
-        "p portprobe.resource-output port.endpoint dup 1 port.read swap 1 port.read " ++
+        "p portprobe.resource-bytes [] port.begin 'y set p portprobe.resource-input port.endpoint dup [42] fd.write port.finish " ++
+        "p portprobe.resource-output port.endpoint dup 1 fd.read swap 1 fd.read " ++
         "y port.await y port.close p port.close portprobe.cleaned", "'cancelled [42] [] 1");
 }
 
@@ -2149,24 +2149,24 @@ test "native: authoring tutorial composes scalar results and bounded byte stream
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "tutorial.counter [] port.open 'p set " ++
         "p tutorial.increment 3 port.call p tutorial.increment 4 port.call " ++
         "p tutorial.echo [] port.begin 'x set x tutorial.input port.endpoint wrap " ++
-        "(dup [1 2 3 4] port.write port.finish) @spawn 'writer set " ++
-        "x tutorial.output port.endpoint 'r set [] (dup len 4 <) (r 4 port.read cat) while " ++
-        "r 4 port.read writer task.await result.or-raise pop x port.await x port.close p port.close", "3 7 [1 2 3 4] []");
+        "(dup [1 2 3 4] fd.write port.finish) @spawn 'writer set " ++
+        "x tutorial.output port.endpoint 'r set [] (dup len 4 <) (r 4 fd.read cat) while " ++
+        "r 4 fd.read writer task.await result.or-raise pop x port.await x port.close p port.close", "3 7 [1 2 3 4] []");
 }
 
 test "native: named declarations supply handlers and exchange endpoints" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.declared [] port.open 'p set " ++
         "p portprobe.declared-result {'answer 42} port.call 'answer at " ++
         "p portprobe.declared-stream [] port.begin 'x set " ++
-        "x portprobe.declared-output port.endpoint dup 1 port.read swap dup 1 port.read swap dup 1 port.read swap 1 port.read " ++
+        "x portprobe.declared-output port.endpoint dup 1 fd.read swap dup 1 fd.read swap dup 1 fd.read swap 1 fd.read " ++
         "x port.await x port.close p port.close portprobe.cleaned", "42 [40] [41] [42] [] 1");
 }
 
 test "native: directional controllers distinguish byte and message EOF" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .ring_capacity = 1, .message_capacity = 1 }, "portprobe.declared [] port.open 'p set " ++
         "p portprobe.declared-byte-echo [] port.begin 'x set " ++
-        "x portprobe.declared-input port.endpoint dup [7] port.write port.finish " ++
-        "x portprobe.declared-output port.endpoint dup 1 port.read swap 1 port.read x port.await x port.close " ++
+        "x portprobe.declared-input port.endpoint dup [7] fd.write port.finish " ++
+        "x portprobe.declared-output port.endpoint dup 1 fd.read swap 1 fd.read x port.await x port.close " ++
         "p portprobe.declared-message-echo [] port.begin 'y set " ++
         "y portprobe.declared-messages-in port.endpoint dup [] port.send port.finish " ++
         "y portprobe.declared-messages-out port.endpoint 'r set r port.receive dup 'kind at swap 'value at len r port.receive 'kind at y port.await y port.close " ++
@@ -2176,9 +2176,9 @@ test "native: directional controllers distinguish byte and message EOF" {
 
 test "native: complete controller writes retain FIFO turns across bounded pressure" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramAtCapacity(workers, 2, 1, "portprobe.declared [] port.open 'p set p portprobe.declared-shared-output port.endpoint 'r set " ++
-        "p portprobe.declared-first [] port.begin 'a set r 1 port.read " ++
+        "p portprobe.declared-first [] port.begin 'a set r 1 fd.read " ++
         "p portprobe.declared-second [] port.begin 'b set " ++
-        "r 1 port.read r 1 port.read r 1 port.read r 1 port.read r 1 port.read " ++
+        "r 1 fd.read r 1 fd.read r 1 fd.read r 1 fd.read r 1 fd.read " ++
         "a port.await b port.await a port.close b port.close p port.close portprobe.cleaned", "[40] [41] [42] [50] [51] [52] 1");
 }
 
@@ -2453,10 +2453,10 @@ test "native: finalizer allocation failure joins private cleanup" {
 test "native: resource activities own independent bounded byte streams and join cleanup" {
     try expectCooperativeAcceptance(
         "instanceprobe.activity [] port.open (|p| " ++
-            "p instanceprobe.activity-ready port.endpoint dup 4 port.read [7] match? {'kind 'user 'msg \"independent marker\"} assert " ++
-            "4 port.read empty? {'kind 'user 'msg \"activity return closes output\"} assert " ++
-            "p wrap (instanceprobe.activity-in port.endpoint dup [65] 32768 take port.write port.finish) @spawn " ++
-            "0 p instanceprobe.activity-out port.endpoint dup 4096 port.read (dup empty? not) (|total reader chunk| chunk [65] chunk len take match? {'kind 'user 'msg \"echo bytes\"} assert total chunk len + reader reader 4096 port.read) while " ++
+            "p instanceprobe.activity-ready port.endpoint dup 4 fd.read [7] match? {'kind 'user 'msg \"independent marker\"} assert " ++
+            "4 fd.read empty? {'kind 'user 'msg \"activity return closes output\"} assert " ++
+            "p wrap (instanceprobe.activity-in port.endpoint dup [65] 32768 take fd.write port.finish) @spawn " ++
+            "0 p instanceprobe.activity-out port.endpoint dup 4096 fd.read (dup empty? not) (|total reader chunk| chunk [65] chunk len take match? {'kind 'user 'msg \"echo bytes\"} assert total chunk len + reader reader 4096 fd.read) while " ++
             "pop pop 32768 = {'kind 'user 'msg \"concurrent bounded echo\"} assert " ++
             "task.await 'ok dict.has? {'kind 'user 'msg \"writer completed\"} assert p port.close) call " ++
             "instanceprobe.next 10065 = {'kind 'user 'msg \"activities joined before cleanup\"} assert",
@@ -2466,11 +2466,11 @@ test "native: resource activities own independent bounded byte streams and join 
 test "native: resource activity failure reaches the stream and cancellation joins blocked pumps" {
     try expectCooperativeAcceptance(
         "instanceprobe.activity 1 port.open (|p| " ++
-            "p instanceprobe.activity-in port.endpoint [1] port.write " ++
-            "p instanceprobe.activity-out port.endpoint wrap (4 port.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"activity stream failure\"} assert " ++
+            "p instanceprobe.activity-in port.endpoint [1] fd.write " ++
+            "p instanceprobe.activity-out port.endpoint wrap (4 fd.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"activity stream failure\"} assert " ++
             "p port.close) call " ++
             "instanceprobe.activity 2 port.open (|p| " ++
-            "p wrap (dup instanceprobe.activity-in port.endpoint [1] port.write instanceprobe.activity-out port.endpoint 4 port.read) @attempt " ++
+            "p wrap (dup instanceprobe.activity-in port.endpoint [1] fd.write instanceprobe.activity-out port.endpoint 4 fd.read) @attempt " ++
             "'err at 'kind at 'io match? {'kind 'user 'msg \"resource failure closes pumps\"} assert p port.close) call " ++
             "instanceprobe.activity [] port.open dup port.close port.close " ++
             "instanceprobe.next 30065 = {'kind 'user 'msg \"joined failed and blocked pumps\"} assert",
@@ -2511,13 +2511,13 @@ test "native: activity allocation failure reaches its output and joins cleanup" 
     defer inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, inputs.inputs(.{ .ecl_path = native_fixture.directory }), .cooperative, .language_tests);
     defer runtime.deinit();
-    try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-activity-oom.ecl", "instanceprobe.activity 3 port.open dup instanceprobe.activity-in port.endpoint [1] port.write instanceprobe.activity-out port.endpoint 4 port.read"));
+    try std.testing.expectError(error.OutOfMemory, runtime.runUnit("native-activity-oom.ecl", "instanceprobe.activity 3 port.open dup instanceprobe.activity-in port.endpoint [1] fd.write instanceprobe.activity-out port.endpoint 4 fd.read"));
 }
 
 test "native: activity shutdown seals input and drains accepted bytes before joined closure" {
     try expectCooperativeAcceptance(
         "instanceprobe.activity 4 port.open (|p| " ++
-            "p instanceprobe.activity-in port.endpoint [1 2 3] port.write " ++
+            "p instanceprobe.activity-in port.endpoint [1 2 3] fd.write " ++
             "p port.shutdown p port.shutdown p port.close) call " ++
             "instanceprobe.next 10065 = {'kind 'user 'msg \"shutdown joined activity cleanup\"} assert",
     );
@@ -2543,9 +2543,9 @@ test "native: allocator facade preserves instance quotas after failed growth" {
 test "native: activity output precedes a later stream failure" {
     try expectCooperativeAcceptance(
         "instanceprobe.activity 5 port.open (|p| " ++
-            "p instanceprobe.activity-in port.endpoint [1 2 3] port.write " ++
-            "p instanceprobe.activity-out port.endpoint dup 4 port.read [1 2 3] match? {'kind 'user 'msg \"buffered bytes precede failure\"} assert " ++
-            "wrap (4 port.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"activity failure preserved\"} assert p port.close) call",
+            "p instanceprobe.activity-in port.endpoint [1 2 3] fd.write " ++
+            "p instanceprobe.activity-out port.endpoint dup 4 fd.read [1 2 3] match? {'kind 'user 'msg \"buffered bytes precede failure\"} assert " ++
+            "wrap (4 fd.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"activity failure preserved\"} assert p port.close) call",
     );
 }
 
@@ -2566,8 +2566,8 @@ test "native: instance endpoint capacities are isolated and preserve bounded str
     try expectOk(&second, "instanceprobe.next pop");
     for ([_]*session.Session{ &first, &second }, [_]u32{ 3, 7 }) |runtime, capacity| {
         var buffer: [1024]u8 = undefined;
-        const source = try std.fmt.bufPrint(&buffer, "instanceprobe.activity 6 port.open (|p| p instanceprobe.activity-out port.endpoint dup 64 port.read len {d} = {{'kind 'user 'msg \"configured output capacity\"}} assert " ++
-            "0 over 64 port.read (dup empty? not) (|reader total chunk| reader total chunk len + reader 64 port.read) while pop pop pop p port.close) call", .{capacity});
+        const source = try std.fmt.bufPrint(&buffer, "instanceprobe.activity 6 port.open (|p| p instanceprobe.activity-out port.endpoint dup 64 fd.read len {d} = {{'kind 'user 'msg \"configured output capacity\"}} assert " ++
+            "0 over 64 fd.read (dup empty? not) (|reader total chunk| reader total chunk len + reader 64 fd.read) while pop pop pop p port.close) call", .{capacity});
         try expectOk(runtime, source);
     }
 }
@@ -2676,8 +2676,8 @@ test "native: host static and dynamic registration share instance and resource b
         try expectOk(&runtime, "instanceprobe.next 65 = {'kind 'user 'msg \"host configuration\"} assert " ++
             "instanceprobe.resource 999 port.open dup instanceprobe.shared-value [] port.call 66 = {'kind 'user 'msg \"registered selector\"} assert port.close " ++
             "instanceprobe.cooperative [] port.open dup instanceprobe.seal 0 port.call 42 = {'kind 'user 'msg \"registered finalizer\"} assert port.close " ++
-            "instanceprobe.activity [] port.open (|p| p instanceprobe.activity-in port.endpoint dup [65] port.write port.finish " ++
-            "p instanceprobe.activity-out port.endpoint dup 8 port.read [65] match? {'kind 'user 'msg \"registered stream\"} assert 8 port.read empty? {'kind 'user 'msg \"registered EOF\"} assert p port.close) call");
+            "instanceprobe.activity [] port.open (|p| p instanceprobe.activity-in port.endpoint dup [65] fd.write port.finish " ++
+            "p instanceprobe.activity-out port.endpoint dup 8 fd.read [65] match? {'kind 'user 'msg \"registered stream\"} assert 8 fd.read empty? {'kind 'user 'msg \"registered EOF\"} assert p port.close) call");
     }
 }
 
@@ -2794,9 +2794,9 @@ test "native: diagnostic publication rejects non-dictionaries excess keys and ca
 
 test "native: activity stream failure preserves buffered output and operation admission" {
     try expectCooperativeAcceptance("instanceprobe.activity 7 port.open (|p| " ++
-        "p instanceprobe.activity-in port.endpoint [1 2] port.write " ++
-        "p instanceprobe.activity-out port.endpoint dup 8 port.read [1 2] match? {'kind 'user 'msg \"accepted output\"} assert " ++
-        "wrap (8 port.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"stream failure\"} assert " ++
+        "p instanceprobe.activity-in port.endpoint [1 2] fd.write " ++
+        "p instanceprobe.activity-out port.endpoint dup 8 fd.read [1 2] match? {'kind 'user 'msg \"accepted output\"} assert " ++
+        "wrap (8 fd.read) @attempt 'err at 'kind at 'io match? {'kind 'user 'msg \"stream failure\"} assert " ++
         "p instanceprobe.activity-health [] port.call 1 = {'kind 'user 'msg \"operation admission\"} assert p port.close) call");
 }
 
@@ -2865,10 +2865,10 @@ test "native: activity supervision stops output and drains input without data au
         }), .cooperative, .language_tests);
         defer runtime.deinit();
         try expectOk(&runtime, "instanceprobe.activity 8 port.open (|p| " ++
-            "p instanceprobe.activity-in port.endpoint [1 2] port.write " ++
-            "p instanceprobe.activity-ready port.endpoint 1 port.read [7] match? {'kind 'user 'msg \"joined supervision\"} assert " ++
-            "p instanceprobe.activity-out port.endpoint dup 4 port.read [1 2] match? {'kind 'user 'msg \"accepted prefix\"} assert " ++
-            "4 port.read [] match? {'kind 'user 'msg \"stopped output EOF\"} assert " ++
+            "p instanceprobe.activity-in port.endpoint [1 2] fd.write " ++
+            "p instanceprobe.activity-ready port.endpoint 1 fd.read [7] match? {'kind 'user 'msg \"joined supervision\"} assert " ++
+            "p instanceprobe.activity-out port.endpoint dup 4 fd.read [1 2] match? {'kind 'user 'msg \"accepted prefix\"} assert " ++
+            "4 fd.read [] match? {'kind 'user 'msg \"stopped output EOF\"} assert " ++
             "p instanceprobe.activity-health [] port.call 102 = {'kind 'user 'msg \"input drained to EOF\"} assert " ++
             "p port.close) call");
     }

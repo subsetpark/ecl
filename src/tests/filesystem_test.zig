@@ -431,6 +431,31 @@ test "fs: text and byte reads round trip exactly across chunk boundaries" {
     try scratch.expectAbsent("nine");
 }
 
+test "filesystem: open-reader is a scope-owned readable endpoint" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const options = scratch.filesystem();
+    try scratch.write("text", "héllo\nworld\n");
+    try scratch.write("tail", "a\nb");
+    try scratch.write("empty", "");
+    try scratch.directory.dir.createDir(io, "dir", .default_dir);
+
+    // Line reads, chunk reads, and the whole rest of the stream, through one
+    // value; after EOF every read is empty.
+    try expectStack(options, "'root \"text\" fs.open-reader dup fd.read-line chars swap dup 2 fd.read swap dup io.read-line swap dup fd.read-all swap dup fd.read-all swap fd.read-line", "\"héllo\\n\" [119 111] \"rld\\n\" () () []");
+    // The rest of the stream is the last line; the empty file is EOF at once.
+    try expectStack(options, "'root \"tail\" fs.open-reader dup fd.read-line swap fd.read-line 'root \"empty\" fs.open-reader fd.read-line", "[97 10] [98] []");
+    try expectStack(options, "'root \"text\" fs.open-reader io.lines 'root \"text\" fs.open-reader io.read", "(\"héllo\" \"world\") \"héllo\\nworld\\n\"");
+    // Two readers over one file are independent.
+    try expectStack(options, "'root \"text\" fs.open-reader 'root \"text\" fs.open-reader fd.read-line swap fd.read-line match?", "1");
+    // fd.close closes the file and is idempotent; a read afterwards is 'io,
+    // as is a read through a value whose opening scope has ended.
+    try expectStack(options, "'root \"text\" fs.open-reader dup fd.close dup fd.close wrap (1 fd.read) @attempt 'err at 'kind at", "'io");
+    try expectStack(options, "[] ('root \"text\" fs.open-reader) @spawn task.await 'ok at first wrap (1 fd.read) @attempt 'err at 'kind at", "'io");
+    try expectFsFailure(options, "'root \"absent\" fs.open-reader", "io", "fs.open-reader", "not-found");
+    try expectFsFailure(options, "'root \"dir\" fs.open-reader", "io", "fs.open-reader", "is-directory");
+}
+
 test "fs: recursive directory operations preserve containment and existing parents" {
     var scratch = try Scratch.init();
     defer scratch.deinit();

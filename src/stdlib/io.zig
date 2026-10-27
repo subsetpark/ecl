@@ -1,4 +1,5 @@
-//! Console operations, grouped behind the `io` module.
+//! Console primitives behind the `io` module, published as `io.core`; the
+//! `io` module itself is ECL source over these and over the `fd` devices.
 //!
 //! The host-backed words reuse the core implementations directly. Derived
 //! words schedule fixed quotations in their definition-site module,
@@ -58,15 +59,10 @@ pub const words = [_]env.BuiltinWord{
         .doc = "Print bottom-up indexed blocks for the visible operand stack without changing it.",
         .primitive = prims.ioStack,
     },
-    .{
-        .name = "stdin",
-        .doc = "( -- string ) Read the whole standard input stream once.",
-        .primitive = prims.ioStdin,
-    },
 };
 
 fn print(evaluator: *Machine) MachineError!void {
-    return callWithNewline(evaluator, "io.prin", "io.prin");
+    return callWithNewline(evaluator, "io.core.prin", "io.core.prin");
 }
 
 /// Bounded like `prin`: the string is encoded under the kernel poll quantum
@@ -115,7 +111,7 @@ fn writeDiagnosticsLine(evaluator: *Machine, bytes: []const u8) MachineError!voi
 fn inspect(evaluator: *Machine) MachineError!void {
     const quotation = try list.fromValues(evaluator.allocator(), &.{
         .{ .word = try evaluator.coreWord(try intern.intern("dup")) },
-        .{ .word = try evaluator.coreWord(try intern.intern("io.pp")) },
+        .{ .word = try evaluator.coreWord(try intern.intern("io.core.pp")) },
     });
     try evaluator.callOwned(quotation.list);
 }
@@ -127,10 +123,10 @@ fn debug(evaluator: *Machine) MachineError!void {
     );
     defer separator.deinit();
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try evaluator.coreWord(try intern.intern("io.prin")) },
+        .{ .word = try evaluator.coreWord(try intern.intern("io.core.prin")) },
         separator.borrow(),
-        .{ .word = try evaluator.coreWord(try intern.intern("io.prin")) },
-        .{ .word = try evaluator.coreWord(try intern.intern("io.inspect")) },
+        .{ .word = try evaluator.coreWord(try intern.intern("io.core.prin")) },
+        .{ .word = try evaluator.coreWord(try intern.intern("io.core.inspect")) },
     });
     try evaluator.callOwned(quotation.list);
 }

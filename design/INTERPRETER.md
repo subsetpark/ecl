@@ -2456,6 +2456,19 @@ bounded redraw from the kernel's terminal facts.
 This is an instance of the owning-boundary rule: the sink that writes bytes
 owns escaping for every producer upstream.
 
+The standard streams are port endpoints (`standard_streams.zig`), the same
+`Endpoint` the network and process resources hand out. A Session owns one
+input device and two output devices for its whole life, publishes each as one
+endpoint value on first use, and releases the values after its scheduler has
+stopped; they are not resources, so no task scope owns them and nothing
+closes them. Input reads are host reads on the calling worker, so a reader
+never parks and the device registers no readiness. Output permits take FIFO
+turns: a permit behind the head parks through the ordinary readiness
+registration and is woken when the head retires, so one call's bytes stay
+contiguous across scheduler interleaving. The console serializes whole writes
+beneath that, which is also where the text words write, so a text write may
+land between the chunks of a concurrent byte write but never inside one.
+
 ### The REPL is a host around the same Session
 
 TTY detection in `main.zig` is the only path that constructs the line editor.

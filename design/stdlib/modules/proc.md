@@ -26,7 +26,9 @@ repeatable. Process exit leaves the resource open for further operations;
 closing the resource prevents new admission and joins backend cleanup.
 
 `proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint
-selectors for process resources. `port.endpoint` with stdin grants writing and
+selectors for process resources, and `proc.stdin`, `proc.stdout`, and
+`proc.stderr` are the endpoints they select, usable with every `fd` and `io`
+word. `port.endpoint` with stdin grants writing and
 finishing; stdout and stderr grant reading. Their byte, EOF, and single-reader
 contracts are shared with the corresponding process words. Finishing stdin
 delivers accepted bytes before closing that direction, is idempotent, and
@@ -101,6 +103,12 @@ through JSON. Native words can view and forward its opaque identity.
 ### run
 
 ### spawn
+
+### stderr
+
+### stdin
+
+### stdout
 
 ### terminate
 

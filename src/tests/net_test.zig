@@ -578,11 +578,11 @@ test "net: common endpoints finish output while preserving input and closed iden
             _ = remaining.join();
         };
         try runtime.run("l net.accept 'c set c net.core.input port.endpoint 'r set c net.core.output port.endpoint 'w set " ++
-            "w [0 1 255] port.write w port.finish w port.finish " ++
-            "r 8 port.read r 8 port.read r 8 port.read r 8 port.read " ++
-            "[] (w [] port.write) @attempt 'err at 'kind at " ++
+            "w [0 1 255] fd.write w port.finish w port.finish " ++
+            "r 8 fd.read r 8 fd.read r 8 fd.read r 8 fd.read " ++
+            "[] (w [] fd.write) @attempt 'err at 'kind at " ++
             "c port.close c port.close w type r type " ++
-            "r 1 port.read");
+            "r 1 fd.read");
         try runtime.expectDisplay("[111] [107] [] [] 'io 'port 'port []");
         const observed = peer.?.join();
         peer = null;
@@ -603,8 +603,8 @@ test "net: common endpoint selectors reject foreign resources and wrong directio
         _ = remaining.join();
     };
     try runtime.run("l net.accept 'c set c net.core.input port.endpoint 'r set c net.core.output port.endpoint 'w set " ++
-        "[] (w 1 port.read) @attempt 'err at 'kind at " ++
-        "[] (r [] port.write) @attempt 'err at 'kind at " ++
+        "[] (w 1 fd.read) @attempt 'err at 'kind at " ++
+        "[] (r [] fd.write) @attempt 'err at 'kind at " ++
         "[] (r port.finish) @attempt 'err at 'kind at " ++
         "[] (c proc.core.stdout port.endpoint) @attempt 'err at 'kind at c port.close");
     try runtime.expectDisplay("'type 'type 'type 'type");
@@ -648,7 +648,7 @@ test "net: read returns exact bytes bounded by max and the receive capacity and 
         .name = "zero count",
         .source = "c 0 net.read",
         .kind = "domain",
-        .word = "port.core.read",
+        .word = "fd.core.read",
     });
 }
 
@@ -666,7 +666,7 @@ test "net: write delivers exact bytes in order under bounded send pressure" {
         "[] (d \"text\" net.write) @attempt 'err at 'kind at " ++
         "[] (d 1 net.write) @attempt 'err at 'kind at " ++
         "d [7] net.write d net.close");
-    try runtime.expectDisplay("'domain 'domain 'type");
+    try runtime.expectDisplay("'domain 'type 'type");
     try expectPeerBytes(second.join(), &.{7});
 }
 
@@ -739,14 +739,14 @@ test "net: a connection belongs to the accepting unit's scope and closes with it
         .name = "connection swept by its scope",
         .source = "c 4 net.read",
         .kind = "io",
-        .word = "port.core.read",
+        .word = "fd.core.read",
         .message_contains = "closed",
     });
     try runtime.runError("c [1] net.write", .{
         .name = "write after scope closure",
         .source = "c [1] net.write",
         .kind = "io",
-        .word = "port.core.write",
+        .word = "fd.core.write",
         .message_contains = "finished",
     });
 }
@@ -854,7 +854,7 @@ test "net: a peer reset fails reads and address operations" {
         .name = "read after reset",
         .source = "c 16 net.read",
         .kind = "io",
-        .word = "port.core.read",
+        .word = "fd.core.read",
         .message_contains = "reset",
     });
     // A connection the peer tore down is terminal: its endpoints are no
@@ -1207,7 +1207,7 @@ test "net: EOF remains stable across endpoint borrows and resource closure" {
             _ = peer.join();
         };
         try runtime.run("l net.accept 'c set c net.core.input port.endpoint 'r set " ++
-            "r 1 port.read c port.close r 1 port.read c 1 net.read l port.close");
+            "r 1 fd.read c port.close r 1 fd.read c 1 net.read l port.close");
         try runtime.expectDisplay("[] [] []");
         const observed = peer.join();
         joined = true;

@@ -10,7 +10,7 @@ test "numeric: scalar leaf and mixed numeric semantics match" {
     try helper.expectStack(
         "[1 2 3] 0.5 + 9007199254740993 9007199254740992.0 = \\a 1 + " ++
             "[0 127 128 255] 1 + [0 1 255] neg [0 255] abs",
-        "[1.5 2.5 3.5] 0 \\b [1 128 129 256] [0 -1 -255] [0 255]",
+        "[1.5 2.5 3.5] 0 98 [1 128 129 256] [0 -1 -255] [0 255]",
     );
     try helper.expectError(.{
         .name = "symbols are not numeric leaves",
@@ -24,27 +24,27 @@ test "numeric: empty leaves bypass scalar signature selection" {
     try helper.expectStack("\"\" \"\" + \"\" neg", "() ()");
 }
 
-test "numeric: character plans preserve widths shapes and fallback" {
+test "numeric: characters are codepoints in arithmetic and comparison" {
     try helper.expectStacks(&.{
         .{
-            .name = "leaf pairs across all character widths",
+            .name = "leaf pairs across all character widths leave as ints",
             .source = "\"az\" \"λμ\" - \"λμ\" \"🙂🙃\" < \"🙂🙃\" \"az\" max",
-            .expected = "[-858 -834] [1 1] \"🙂🙃\"",
+            .expected = "[-858 -834] [1 1] [128578 128579]",
         },
         .{
-            .name = "character scalars have no narrow storage width",
+            .name = "character scalars are codepoints too",
             .source = "\\λ \"az\" - \"λμ\" \\🙂 < \"🙂🙃\" \\a min",
-            .expected = "[858 833] [1 1] \"aa\"",
+            .expected = "[858 833] [1 1] [97 97]",
         },
         .{
             .name = "numeric leaves and scalar broadcasting",
             .source = "\"az\" [1 2] + [1 2] \"az\" + 1 \"λμ\" + \"🙂🙃\" 1 -",
-            .expected = "\"b|\" \"b|\" \"μν\" \"🙁🙂\"",
+            .expected = "[98 124] [98 124] [956 957] [128577 128578]",
         },
         .{
-            .name = "byte subtraction retains the scalar fallback semantics",
-            .source = "\"λμ\" [1 2] - [\"az\" \"λμ\"] 1 +",
-            .expected = "\"κκ\" (\"b{\" \"μν\")",
+            .name = "char is the way back to a string",
+            .source = "\"λμ\" [1 2] - char \"az\" 1 + char",
+            .expected = "\"κκ\" \"b{\"",
         },
     });
 }
@@ -94,7 +94,7 @@ test "numeric: transcendental non-finite edges" {
 test "numeric: ragged broadcast dict alignment and representation parity" {
     try helper.expectStack("[[1 2] [3]] 10 *", "([10 20] [30])");
     try helper.expectStack("[[1 2] [3 4]] 1 +", "([2 3]\n [4 5])");
-    try helper.expectStack("[\"az\" \"λ🙂\"] 1 +", "(\"b{\" \"μ🙃\")");
+    try helper.expectStack("[\"az\" \"λ🙂\"] 1 +", "([98 123]\n [956 128579])");
     try helper.expectStack(
         "{'a 1 'b 2} {'b 10 'c 30} + {'a 1} [10 20] +",
         "{'a 1 'b 12 'c 30} {'a [11 21]}",
@@ -282,12 +282,7 @@ test "kernel: wrapping words are integer arithmetic modulo 2^64" {
         .kind = "type",
         .word = "+%",
     });
-    try helper.expectError(.{
-        .name = "wrapping refuses chars",
-        .source = "\\a 1 *%",
-        .kind = "type",
-        .word = "*%",
-    });
+    try helper.expectStack("\\a 1 *% \\a -1 +%", "97 96");
 }
 
 test "kernel: bitwise words are pattern words over the integer bit pattern" {
@@ -335,8 +330,8 @@ test "kernel: bitwise words are pattern words over the integer bit pattern" {
             .word = "band",
         },
         .{
-            .name = "characters are not patterns",
-            .source = "\\a bnot",
+            .name = "floats are not patterns under pervasion either",
+            .source = "[1.5] bnot",
             .kind = "type",
             .word = "bnot",
         },

@@ -117,14 +117,33 @@ test "process: common factories preserve byte streams and repeatable termination
     }, "[0] [1] [255] 0 0 'port", workers);
 }
 
+test "process: stdin stdout and stderr are byte endpoints and the old words compose over them" {
+    const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
+    defer allocator.free(fixture_path);
+    const program = try source(
+        "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
+            "p proc.stdin 'w set p proc.stdout 'r set " ++
+            "w [97 10 98 99 10 100] fd.write w fd.finish " ++
+            "r fd.read-line r fd.read-line r io.read-line r fd.read-line r fd.read-line " ++
+            "p proc.stderr 1 fd.read " ++
+            "p proc.wait 'code at w wrap (fd.close) @attempt 'err at 'kind at p port.close p type",
+        .{fixture_path},
+    );
+    defer allocator.free(program);
+    for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
+        .stdin_capacity = 1,
+        .stdout_capacity = 1,
+    }, "[97 10] [98 99 10] \"d\" [] [] [] 0 'type 'port", workers);
+}
+
 test "process: common factories preserve unicode arguments environment and working directory" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);
     const expected = "cwd=/\nprobe=é🌍\narg[0]=\narg[1]=λ\n";
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"inspect\" \"\" \"λ\") 'cwd \"/\" 'env {{\"ECL_PROCESS_PROBE\" \"é🌍\"}}}} port.open 'p set " ++
-            "p proc.core.stdout port.endpoint 'r set [] (dup len {d} <) (r 8 port.read cat) while chars " ++
-            "\"cwd=/\\nprobe=é🌍\\narg[0]=\\narg[1]=λ\\n\" match? r 8 port.read p proc.wait 'code at p port.close",
+            "p proc.core.stdout port.endpoint 'r set [] (dup len {d} <) (r 8 fd.read cat) while chars " ++
+            "\"cwd=/\\nprobe=é🌍\\narg[0]=\\narg[1]=λ\\n\" match? r 8 fd.read p proc.wait 'code at p port.close",
         .{ fixture_path, expected.len },
     );
     defer allocator.free(program);
@@ -169,10 +188,10 @@ test "process: common endpoints stream concurrently through one-byte buffers" {
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
             "p proc.core.stdin port.endpoint 's set p proc.core.stdout port.endpoint 'r set " ++
-            "p proc.core.stderr port.endpoint 'd set s wrap (|w| w [0 1 255] 30 take port.write w port.finish) @spawn 'writer set " ++
-            "[] (dup len 30 <) (r 8 port.read cat) while [0 1 255] 30 take match? " ++
-            "writer task.await 'ok at len s port.finish r 8 port.read len r 8 port.read len d 8 port.read len " ++
-            "p proc.wait 'code at p port.close s wrap ([] port.write) @attempt 'err at 'kind at",
+            "p proc.core.stderr port.endpoint 'd set s wrap (|w| w [0 1 255] 30 take fd.write w port.finish) @spawn 'writer set " ++
+            "[] (dup len 30 <) (r 8 fd.read cat) while [0 1 255] 30 take match? " ++
+            "writer task.await 'ok at len s port.finish r 8 fd.read len r 8 fd.read len d 8 fd.read len " ++
+            "p proc.wait 'code at p port.close s wrap ([] fd.write) @attempt 'err at 'kind at",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -188,8 +207,8 @@ test "process: common selectors borrow process resources and separate output fro
     defer allocator.free(fixture_path);
     const program = try source(
         "{{'executable \"{s}\" 'args (\"split\" \"abcd\" \"wxyz\")}} proc.spawn 'p set " ++
-            "p proc.core.stdout port.endpoint wrap (|r| [] (dup len 4 <) r (8 port.read cat) partial while chars) @spawn 'out set " ++
-            "p proc.core.stderr port.endpoint wrap (|r| [] (dup len 4 <) r (8 port.read cat) partial while chars) @spawn 'err set " ++
+            "p proc.core.stdout port.endpoint wrap (|r| [] (dup len 4 <) r (8 fd.read cat) partial while chars) @spawn 'out set " ++
+            "p proc.core.stderr port.endpoint wrap (|r| [] (dup len 4 <) r (8 fd.read cat) partial while chars) @spawn 'err set " ++
             "out task.await 'ok at first err task.await 'ok at first p proc.wait 'code at p port.close",
         .{fixture_path},
     );
@@ -206,14 +225,14 @@ test "process: common and domain readers share exclusion and cancellation restor
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
             "p proc.core.stdin port.endpoint 's set p proc.core.stdout port.endpoint 'r set " ++
-            "[] (r 1 port.read) @spawn 'a set [] (p 1 proc.read-stdout) @spawn 'b set " ++
+            "[] (r 1 fd.read) @spawn 'a set [] (p 1 proc.read-stdout) @spawn 'b set " ++
             "a b pair task.await-any 'err at 'kind at swap pop a task.cancel b task.cancel " ++
-            "a task.await pop b task.await pop s [9] port.write r wrap (1 port.read) @spawn 'readback set " ++
+            "a task.await pop b task.await pop s [9] fd.write r wrap (1 fd.read) @spawn 'readback set " ++
             "p wrap [] (|q| s port.finish readback task.await 'ok at first q proc.wait pop q port.close) @give task.await 'ok at first " ++
-            "r wrap ([] port.write) @attempt 'err at 'kind at s wrap (1 port.read) @attempt 'err at 'kind at " ++
+            "r wrap ([] fd.write) @attempt 'err at 'kind at s wrap (1 fd.read) @attempt 'err at 'kind at " ++
             "r wrap (port.finish) @attempt 'err at 'kind at " ++
             "r wrap [] (pop) 3 pack (@give) @attempt 'err at 'kind at " ++
-            "r 1 port.read len r type",
+            "r 1 fd.read len r type",
         .{fixture_path},
     );
     defer allocator.free(program);
@@ -308,7 +327,7 @@ test "process: registered operations recover the wait lane and preserve result c
     defer allocator.free(fixture_path);
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"ready\")}} port.open 'p set " ++
-            "p proc.core.stdout port.endpoint 1 port.read pop " ++
+            "p proc.core.stdout port.endpoint 1 fd.read pop " ++
             "p proc.core.wait [] port.begin 'first set first port.cancel " ++
             "first wrap (port.await) @attempt 'err at 'kind at first port.close " ++
             "p proc.core.wait [] port.begin 'second set " ++
@@ -333,8 +352,8 @@ test "process: registered operations reject requests before affecting the proces
     const program = try source(
         "proc.core.process {{'executable \"{s}\" 'args (\"echo\")}} port.open 'p set " ++
             "p wrap (proc.core.kill [1] port.call) @attempt 'err at 'kind at " ++
-            "p proc.core.stdin port.endpoint dup [97] port.write port.finish " ++
-            "p proc.core.stdout port.endpoint 1 port.read " ++
+            "p proc.core.stdin port.endpoint dup [97] fd.write port.finish " ++
+            "p proc.core.stdout port.endpoint 1 fd.read " ++
             "p proc.core.wait [] port.call 'code at p port.close " ++
             "p wrap (proc.core.wait [] port.call) @attempt 'err at 'kind at",
         .{fixture_path},

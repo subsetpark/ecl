@@ -12,6 +12,8 @@ const Stage = @import("directory_stage.zig").Stage;
 const Stream = @import("filesystem_stream.zig").Stream;
 const fs = @import("filesystem_port.zig");
 const Value = @import("value.zig").Value;
+const endpoints = @import("port_endpoint.zig");
+const byte_stream = @import("port_bytes.zig");
 
 fn Handle(comptime Object: type) type {
     return struct {
@@ -301,11 +303,110 @@ pub fn adoptLock(access: *external.FilesystemAccess, scope: *scheduler.TaskScope
     return adoptHandle(std.Io.File, access, scope, file, null);
 }
 
+const FileCell = Handle(std.Io.File);
+
+/// A file opened for reading, as `fs.open-reader` returns it: the scope owns
+/// the file through a handle cell exactly as it owns a lock, and the value
+/// the program holds is a reader endpoint over that cell, so `fd.read` and
+/// the words over it apply unchanged and `fd.close` closes the file. The
+/// scope closing closes it too; a read after that is `'io`.
+pub const FileReader = struct {
+    memory: std.mem.Allocator,
+    cell: *FileCell,
+    io: std.Io,
+    busy: std.atomic.Value(bool) = .init(false),
+    eof: std.atomic.Value(bool) = .init(false),
+
+    const capacity: usize = 1024 * 1024;
+
+    pub fn allocator(self: *FileReader) std.mem.Allocator {
+        return self.memory;
+    }
+    pub fn releasePort(self: *FileReader) void {
+        self.cell.releaseReadiness();
+        self.memory.destroy(self);
+    }
+    pub fn beginRead(self: *FileReader) error{Busy}!void {
+        if (self.busy.swap(true, .acq_rel)) return error.Busy;
+    }
+    pub fn endRead(self: *FileReader) void {
+        self.busy.store(false, .release);
+    }
+    pub fn readCapacity(_: *FileReader) usize {
+        return capacity;
+    }
+    pub fn read(self: *FileReader, destination: []u8) byte_stream.Read {
+        if (self.eof.load(.acquire)) return .eof;
+        std.Io.Threaded.mutexLockUncancelable(&self.cell.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.cell.mutex);
+        const file = switch (self.cell.phase) {
+            .open => |active| active.object,
+            else => return .{ .failed = byte_stream.Failure.init(.io, "file reader is closed") },
+        };
+        const count = file.readStreaming(self.io, &.{destination}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return .{ .failed = byte_stream.Failure.init(.io, @errorName(err)) },
+        };
+        if (count == 0) {
+            self.eof.store(true, .release);
+            return .eof;
+        }
+        return .{ .data = count };
+    }
+    pub fn readSource(self: *FileReader) external.ReadinessSource {
+        return external.readinessSource(FileReader, self, 0);
+    }
+    pub fn retainReadiness(_: *FileReader) void {}
+    pub fn releaseReadiness(_: *FileReader) void {}
+    pub fn registerReadiness(_: *FileReader, _: u64, _: external.WakeTarget) external.RegisterError!external.RegisterResult {
+        return .{ .ready = .ready };
+    }
+    pub fn closeSource(self: *FileReader) void {
+        self.cell.resourceClose();
+    }
+    pub fn closeJoined(self: *FileReader) bool {
+        return self.cell.resourceJoined();
+    }
+    pub fn closeReadiness(self: *FileReader) external.ReadinessSource {
+        return self.cell.resourceSource();
+    }
+};
+
+/// Consumes the file on either outcome and returns the reader endpoint.
+pub fn adoptReader(access: *external.FilesystemAccess, scope: *scheduler.TaskScope, file: std.Io.File) error{ OutOfMemory, ScopeClosing }!Value {
+    const cell = try adoptCell(std.Io.File, access, scope, file, null, null);
+    errdefer {
+        cell.resourceClose();
+        cell.releasePort();
+    }
+    const issuer = fs.resourceIssuer(access);
+    const reader = try issuer.allocator().create(FileReader);
+    errdefer issuer.allocator().destroy(reader);
+    // The endpoint takes over the cell's creation reference, as a resource
+    // value would; the scope holds its own through publication.
+    reader.* = .{ .memory = issuer.allocator(), .cell = cell, .io = fs.hostIo(access) };
+    return try endpoints.Endpoint.create(FileReader, .reader, issuer.next(), reader);
+}
+
 fn adoptHandle(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup) error{ OutOfMemory, ScopeClosing }!Value {
     return adoptReservedHandle(Object, access, scope, dir, dependent, null);
 }
 // Consumes both the object and its optional reservation on either outcome.
 fn adoptReservedHandle(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup, reservation: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!Value {
+    const ResourceCell = Handle(Object);
+    const cell = try adoptCell(Object, access, scope, dir, dependent, reservation);
+    return resource.Resource.create(ResourceCell, .direct, cell.issuer.next(), cell) catch |err| {
+        cell.resourceClose();
+        cell.releasePort();
+        return err;
+    };
+}
+
+/// The scope-owned cell behind every handle resource: created, published
+/// into the scope, and attached to its parent's group. The caller wraps it
+/// as a resource value or as an endpoint. Consumes the object and the
+/// reservation on either outcome.
+fn adoptCell(comptime Object: type, access: *external.FilesystemAccess, scope: *scheduler.TaskScope, dir: Object, dependent: ?*scheduler.ExternalGroup, reservation: ?*fs.Reservation) error{ OutOfMemory, ScopeClosing }!*Handle(Object) {
     const issuer = @import("filesystem_port.zig").resourceIssuer(access);
     const io = @import("filesystem_port.zig").hostIo(access);
     const ResourceCell = Handle(Object);
@@ -326,11 +427,7 @@ fn adoptReservedHandle(comptime Object: type, access: *external.FilesystemAccess
         cell.releasePort();
         return err;
     };
-    return resource.Resource.create(ResourceCell, .direct, issuer.next(), cell) catch |err| {
-        cell.resourceClose();
-        cell.releasePort();
-        return err;
-    };
+    return cell;
 }
 
 pub fn isDirectory(item: Value) bool {

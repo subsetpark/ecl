@@ -37,17 +37,52 @@ const ReaderTable = struct {
     capacity: *const fn (*anyopaque) usize,
     read: *const fn (*anyopaque, []u8) bytes.Read,
     source: *const fn (*anyopaque) external.ReadinessSource,
+    /// Present when the endpoint is its own resource, as a file reader is,
+    /// so closing the endpoint closes it. A borrowed endpoint has none: it
+    /// closes with the resource or device that issued it.
+    closer: ?*const CloserTable,
+};
+const CloserTable = struct {
+    close: *const fn (*anyopaque) void,
+    joined: *const fn (*anyopaque) bool,
+    source: *const fn (*anyopaque) external.ReadinessSource,
 };
 const WriterTable = struct {
     begin: *const fn (*anyopaque, std.mem.Allocator) error{ OutOfMemory, Finished }!*WritePermit,
     finish: *const fn (*anyopaque) void,
+};
+/// Bytes read from the transport ahead of what the program has consumed.
+/// A line read fills it and takes one line; a plain read drains it before
+/// touching the transport again. It belongs to the endpoint value, so a
+/// program reading lines keeps the value it reads them through.
+const Pending = struct {
+    buffer: std.ArrayList(u8) = .empty,
+    consumed: usize = 0,
+
+    fn remaining(self: *const Pending) []const u8 {
+        return self.buffer.items[self.consumed..];
+    }
+    fn consume(self: *Pending, count: usize) void {
+        self.consumed += count;
+        if (self.consumed == self.buffer.items.len) {
+            self.buffer.clearRetainingCapacity();
+            self.consumed = 0;
+        }
+    }
+    fn compact(self: *Pending) void {
+        if (self.consumed == 0) return;
+        const kept = self.buffer.items.len - self.consumed;
+        std.mem.copyForwards(u8, self.buffer.items[0..kept], self.buffer.items[self.consumed..]);
+        self.buffer.items.len = kept;
+        self.consumed = 0;
+    }
 };
 const State = struct {
     allocator: std.mem.Allocator,
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
     direction: union(Direction) {
-        reader: *const ReaderTable,
+        reader: struct { table: *const ReaderTable, pending: Pending = .{} },
         writer: *const WriterTable,
         sender: *messages.Queue,
         receiver: *messages.Queue,
@@ -96,13 +131,30 @@ pub const Endpoint = opaque {
             fn finish(raw: *anyopaque) void {
                 typed(raw).finish();
             }
-            const reader: ReaderTable = .{ .begin = beginRead, .end = endRead, .capacity = capacity, .read = read, .source = source };
+            fn adapterClose(raw: *anyopaque) void {
+                typed(raw).closeSource();
+            }
+            fn adapterCloseJoined(raw: *anyopaque) bool {
+                return typed(raw).closeJoined();
+            }
+            fn adapterCloseReadiness(raw: *anyopaque) external.ReadinessSource {
+                return typed(raw).closeReadiness();
+            }
+            const closer: CloserTable = .{ .close = adapterClose, .joined = adapterCloseJoined, .source = adapterCloseReadiness };
+            const reader: ReaderTable = .{
+                .begin = beginRead,
+                .end = endRead,
+                .capacity = capacity,
+                .read = read,
+                .source = source,
+                .closer = if (@hasDecl(Adapter, "closeSource")) &closer else null,
+            };
             const writer: WriterTable = .{ .begin = beginWrite, .finish = finish };
         };
         const owned = try allocator.create(State);
         errdefer allocator.destroy(owned);
         owned.* = .{ .allocator = allocator, .payload = adapter, .release = Bridge.release, .direction = switch (direction) {
-            .reader => .{ .reader = &Bridge.reader },
+            .reader => .{ .reader = .{ .table = &Bridge.reader } },
             .writer => .{ .writer = &Bridge.writer },
             .sender => .{ .sender = adapter.sender().? },
             .receiver => .{ .receiver = adapter.receiver().? },
@@ -131,8 +183,29 @@ pub const Endpoint = opaque {
             .reader, .writer, .sender => null,
         };
     }
+    /// Whether `close` reaches anything: true only for an endpoint that is
+    /// its own resource.
+    pub fn closable(self: *Endpoint) bool {
+        return switch (self.state().direction) {
+            .reader => |reader_state| reader_state.table.closer != null,
+            .writer, .sender, .receiver => false,
+        };
+    }
+    pub fn close(self: *Endpoint) void {
+        const owned = self.state();
+        owned.direction.reader.table.closer.?.close(owned.payload);
+    }
+    pub fn closeJoined(self: *Endpoint) bool {
+        const owned = self.state();
+        return owned.direction.reader.table.closer.?.joined(owned.payload);
+    }
+    pub fn closeSource(self: *Endpoint) external.ReadinessSource {
+        const owned = self.state();
+        return owned.direction.reader.table.closer.?.source(owned.payload);
+    }
     pub fn releasePort(self: *Endpoint) void {
         const owned = self.state();
+        if (owned.direction == .reader) owned.direction.reader.pending.buffer.deinit(owned.allocator);
         owned.release(owned.payload);
         owned.allocator.destroy(owned);
     }
@@ -144,20 +217,54 @@ pub const Reader = opaque {
     fn state(self: *Reader) *State {
         return @ptrCast(@alignCast(self));
     }
+    fn table(self: *Reader) *const ReaderTable {
+        return self.state().direction.reader.table;
+    }
+    fn pending(self: *Reader) *Pending {
+        return &self.state().direction.reader.pending;
+    }
     pub fn beginRead(self: *Reader) error{Busy}!void {
-        return self.state().direction.reader.begin(self.state().payload);
+        return self.table().begin(self.state().payload);
     }
     pub fn endRead(self: *Reader) void {
-        self.state().direction.reader.end(self.state().payload);
+        self.table().end(self.state().payload);
     }
     pub fn readCapacity(self: *Reader) usize {
-        return self.state().direction.reader.capacity(self.state().payload);
+        return self.table().capacity(self.state().payload);
     }
+    /// Bytes already read ahead come first; the transport is read only when
+    /// none are waiting. Callers hold the read exclusion, which is what makes
+    /// the pending buffer theirs.
     pub fn read(self: *Reader, destination: []u8) bytes.Read {
-        return self.state().direction.reader.read(self.state().payload, destination);
+        const waiting = self.pending().remaining();
+        if (waiting.len > 0) {
+            const count = @min(waiting.len, destination.len);
+            @memcpy(destination[0..count], waiting[0..count]);
+            self.pending().consume(count);
+            return .{ .data = count };
+        }
+        return self.table().read(self.state().payload, destination);
     }
     pub fn readSource(self: *Reader) external.ReadinessSource {
-        return self.state().direction.reader.source(self.state().payload);
+        return self.table().source(self.state().payload);
+    }
+    /// The bytes read ahead and not yet consumed.
+    pub fn buffered(self: *Reader) []const u8 {
+        return self.pending().remaining();
+    }
+    pub fn consume(self: *Reader, count: usize) void {
+        self.pending().consume(count);
+    }
+    /// One transport read of up to `max` bytes appended to the read-ahead.
+    pub fn fill(self: *Reader, max: usize) error{OutOfMemory}!bytes.Read {
+        const owned = self.state();
+        const waiting = self.pending();
+        waiting.compact();
+        try waiting.buffer.ensureUnusedCapacity(owned.allocator, max);
+        const spare = waiting.buffer.unusedCapacitySlice()[0..max];
+        const outcome = self.table().read(owned.payload, spare);
+        if (outcome == .data) waiting.buffer.items.len += outcome.data;
+        return outcome;
     }
 };
 

@@ -18,6 +18,7 @@ const turn_core = @import("turn_core.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
+const standard_streams = @import("standard_streams.zig");
 const resolution_core = @import("resolution_core.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
@@ -1760,7 +1761,7 @@ pub const RuntimeContext = struct {
     http_access: *@import("http_service.zig").Access,
     wall_clock: WallClock,
     environ: Environ,
-    standard_input: *StandardInput,
+    standard_streams: *standard_streams.Devices,
 };
 
 /// Wall time is always available at runtime. Overrides are deterministic
@@ -1783,25 +1784,10 @@ pub const TlsTrust = struct {
 /// deterministic environment and no primitive ever races a host `setenv`.
 pub const Environ = @import("startup_environment.zig").View;
 
-/// Whole-stream standard input. The stream is claimable exactly once per
-/// session, and only in the CLI modes where stdin is not itself the program
-/// source; both refusals are ordinary `'io` errors rather than a partial
-/// read of a stream something else already owns.
+/// Where standard input stands at session start: data a program may read
+/// through `fd.in`, or the program source itself, which `fd.in` refuses.
 pub const StandardInput = struct {
-    pub const Availability = enum { data, program_source };
-    pub const Claim = enum { granted, program_source, already_read };
-
-    availability: Availability,
-    claimed: std.atomic.Value(bool) = .init(false),
-
-    pub fn init(availability: Availability) StandardInput {
-        return .{ .availability = availability };
-    }
-    pub fn claim(self: *StandardInput) Claim {
-        if (self.availability == .program_source) return .program_source;
-        if (self.claimed.swap(true, .seq_cst)) return .already_read;
-        return .granted;
-    }
+    pub const Availability = standard_streams.Availability;
 };
 
 fn IdiomFallbackAdapters(comptime Payload: type) type {
@@ -4702,100 +4688,6 @@ pub const Machine = struct {
             }
         }
         pub const ownership: heap.DriverOwnership = .fields;
-    };
-    /// Consumes nothing: the whole stream is read into one owned string.
-    pub fn readStandardInputOwned(self: *Machine) MachineError!void {
-        const stream = self.unit.inherited.runtime().standard_input;
-        switch (stream.claim()) {
-            .granted => {},
-            .program_source => return self.fail(.io, "stdin is the program source"),
-            .already_read => return self.fail(.io, "standard input has already been read"),
-        }
-        try self.startDriver(StandardInputDriver{ .allocator = self.unit.allocator });
-    }
-    const StandardInputDriver = struct {
-        const State = union(enum) {
-            open,
-            read: std.Io.File.Reader,
-            text: heap.Owned(kernel_storage.Utf8Materializer),
-            complete,
-
-            fn deinit(
-                self: *State,
-                releases: *heap.ReleaseDomain,
-                storage_allocator: std.mem.Allocator,
-            ) void {
-                switch (self.*) {
-                    .text => |*text| text.deinit(releases, storage_allocator),
-                    .open, .read, .complete => {},
-                }
-            }
-        };
-
-        retirement: heap.ReleaseDomain.Retirement = .{},
-        allocator: std.mem.Allocator,
-        buffer: std.ArrayList(u8) = .empty,
-        // SAFETY: only ever read through the prefix a read call just filled.
-        chunk: [read_chunk]u8 = undefined,
-        state: State = .open,
-
-        const read_chunk: usize = 8192;
-
-        pub fn advance(evaluator: *Machine, self: *StandardInputDriver) MachineError!WorkProgress {
-            try evaluator.pollKernel();
-            switch (self.state) {
-                .open => {
-                    self.state = .{ .read = std.Io.File.stdin().reader(
-                        evaluator.unit.inherited.runtime().host_io,
-                        &.{},
-                    ) };
-                    return .{ .yielded = .wait };
-                },
-                .read => |*file_reader| {
-                    const amount = file_reader.interface.readSliceShort(&self.chunk) catch {
-                        const name = if (file_reader.err) |err| @errorName(err) else "ReadFailed";
-                        return evaluator.failFmt(.io, "cannot read standard input: {s}", .{name});
-                    };
-                    if (amount == 0) {
-                        self.state = .{ .text = .init(.init(
-                            self.allocator,
-                            self.buffer.items,
-                        )) };
-                        return .stepped;
-                    }
-                    try self.buffer.appendSlice(self.allocator, self.chunk[0..amount]);
-                    // Give ready units a turn before another potentially
-                    // blocking host read, even on a continuously ready stream.
-                    return .{ .yielded = .wait };
-                },
-                .text => |*text| switch (text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidUtf8 => return evaluator.fail(
-                        .io,
-                        "standard input is not valid UTF-8",
-                    ),
-                }) {
-                    .pending => return .stepped,
-                    .complete => |text_value| {
-                        text.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.state = .complete;
-                        return .{ .output = text_value };
-                    },
-                },
-                .complete => unreachable,
-            }
-        }
-        pub fn advanceRetirement(
-            releases: *heap.ReleaseDomain,
-            storage_allocator: std.mem.Allocator,
-            self: *StandardInputDriver,
-        ) bool {
-            self.state.deinit(releases, storage_allocator);
-            self.buffer.deinit(self.allocator);
-            storage_allocator.destroy(self);
-            return true;
-        }
-        pub const ownership: heap.DriverOwnership = .bounded_retirement;
     };
     /// Records the offending path or url on the failure being raised, which is
     /// the shape every host-IO error reports. Keeps `ErrorDataKey` private

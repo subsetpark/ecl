@@ -51,11 +51,15 @@ pub const DirectOp = enum {
     /// two-axis reshape would build, without building them.
     reshape_sum,
     reshape_product,
+    /// `where` continued by `at`: the elements a mask selects, without the
+    /// index list `where` would build.
+    where_at,
 
     pub fn spelling(self: DirectOp) []const u8 {
         return switch (self) {
             .str_format => "str.format",
             .reshape_sum, .reshape_product => "reshape",
+            .where_at => "where",
             .lex_cmp_with => "lex-cmp-with",
             else => @tagName(self),
         };
@@ -262,7 +266,7 @@ const lex_cmp_with_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 4]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 5]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -379,6 +383,14 @@ pub const registry = blk: {
         };
         index += 1;
     }
+    entries[index] = .{
+        .context = .direct,
+        .pattern = &.{},
+        .operation = .{ .direct = .where_at },
+        .source_word = "where",
+        .following = &.{.{ .spelling = "at", .binding = .builtin }},
+    };
+    index += 1;
     std.debug.assert(index == entries.len);
     for (&entries) |*entry| {
         if (entry.operation == .direct) entry.offers = entry.operation.direct.offers();
@@ -790,8 +802,24 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
             last = try followingWord(evaluator, form.word, expected.binding) orelse break false;
         } else true;
         if (!matched) continue;
-        const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
         const owner = last.?;
+        if (entry.operation.direct == .where_at) {
+            if (!compressShape(evaluator)) continue;
+            evaluator.unit.idiom_hits += 1;
+            evaluator.unit.phrase_hits += 1;
+            evaluator.skipFollowingForms(count);
+            _ = evaluator.commitDirectIdiomTrace();
+            // The fused pass reports as `at` would: it is the only word that
+            // can fault, and a builtin has no site inside a body.
+            evaluator.setActiveWord(owner.trace_word);
+            var mask = try evaluator.popValue();
+            defer mask.deinit();
+            var source = try evaluator.popValue();
+            defer source.deinit();
+            try sequence.compress(evaluator, &source, &mask);
+            return .applied;
+        }
+        const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
         const idiom = owner.idiom orelse continue;
         evaluator.unit.idiom_hits += 1;
         evaluator.unit.phrase_hits += 1;
@@ -824,6 +852,14 @@ fn columnOperation(operation: DirectOp) numeric.BinaryOp {
         .reshape_product => .mul,
         else => unreachable,
     };
+}
+
+/// Whether `list mask where at` can run as one pass over the list: see
+/// `kernel_sequence.compress`. Anything else runs the words as written.
+fn compressShape(evaluator: *Machine) bool {
+    if (evaluator.available() < 2) return false;
+    const stack = evaluator.unit.stack.items;
+    return sequence.compressCandidate(stack[stack.len - 2], stack[stack.len - 1]);
 }
 
 /// The rows and columns of `list [rows columns] reshape` when its fold over
@@ -1153,7 +1189,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             // Any other operand reaches the definition, so its error is the
             // definition's.
             .sum, .product => evaluator.available() >= 1 and stack[stack.len - 1] == .list,
-            .reshape_sum, .reshape_product => unreachable, // See `applyPhrase`.
+            .reshape_sum, .reshape_product, .where_at => unreachable, // See `applyPhrase`.
             else => evaluator.available() >= 1,
         },
     };
@@ -1198,7 +1234,7 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .str_format => dict_text.formatForIdiom(evaluator),
         .sum => applyTotal(evaluator, .add, 0),
         .product => applyTotal(evaluator, .mul, 1),
-        .reshape_sum, .reshape_product => unreachable, // See `applyPhrase`.
+        .reshape_sum, .reshape_product, .where_at => unreachable, // See `applyPhrase`.
     };
 }
 
