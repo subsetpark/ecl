@@ -72,7 +72,17 @@ const modules = [_]Module{
         .name = "<stdlib:str>",
         .text = @embedFile("stdlib/str.ecl"),
     } } },
-    .{ .name = "io", .entry = .{ .builtin = &io_module.words } },
+    .{ .name = "str.core", .entry = .{ .builtin = &@import("stdlib/str.zig").words } },
+    .{ .name = "io", .entry = .{ .source = .{
+        .name = "<stdlib:io>",
+        .text = @embedFile("stdlib/io.ecl"),
+    } } },
+    .{ .name = "io.core", .entry = .{ .builtin = &io_module.words } },
+    .{ .name = "fd", .entry = .{ .source = .{
+        .name = "<stdlib:fd>",
+        .text = @embedFile("stdlib/fd.ecl"),
+    } } },
+    .{ .name = "fd.core", .entry = .{ .builtin = &@import("stdlib/fd.zig").words } },
     .{ .name = "csv", .entry = .{ .native = Csv.descriptor() } },
     .{ .name = "json", .entry = .{ .builtin = &json_module.words } },
     .{ .name = "host", .entry = .{ .builtin = &@import("stdlib/host.zig").words } },

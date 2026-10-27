@@ -215,7 +215,7 @@ test "conversion: float accepts floats, ints, and numeric literals only" {
     try expectError(&runtime, "'x float", &.{"'kind 'type"});
 }
 
-test "conversion: char accepts chars, scalar ints, and one-char strings only" {
+test "conversion: char accepts chars, ints, strings, and lists of codepoints" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -223,16 +223,19 @@ test "conversion: char accepts chars, scalar ints, and one-char strings only" {
     try expectStack(&runtime, "\\a char", "\\a");
     try expectStack(&runtime, "97 char 955 char 0 char int", "\\a \\λ 0");
     try expectStack(&runtime, "1114111 char int", "1114111");
-    try expectStack(&runtime, "\"λ\" char", "\\λ");
+    try expectStack(&runtime, "\"λ\" char \"\" char \"ab\" char", "\"λ\" \"\" \"ab\"");
+    try expectStack(&runtime, "[97 98 99] char \"abc\" 1 + char [955 97] char [128512 97] char (\\a 98) char [] char", "\"abc\" \"bcd\" \"λa\" \"😀a\" \"ab\" \"\"");
+    try expectStack(&runtime, "\"abc\" 1 + char str.core.kind", "'string");
     try expectError(&runtime, "1114112 char", &.{ "'kind 'domain", "Unicode scalar" });
     try expectError(&runtime, "55296 char", &.{ "'kind 'domain", "Unicode scalar" });
     try expectError(&runtime, "57343 char", &.{ "'kind 'domain", "Unicode scalar" });
     try expectError(&runtime, "-1 char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "\"\" char", &.{ "'kind 'domain", "one-char" });
-    try expectError(&runtime, "\"ab\" char", &.{ "'kind 'domain", "one-char" });
+    try expectError(&runtime, "[1114112] char", &.{ "'kind 'domain", "Unicode scalar" });
+    try expectError(&runtime, "[97 55296] char", &.{ "'kind 'domain", "Unicode scalar" });
     try expectError(&runtime, "2.0 char", &.{"'kind 'type"});
     try expectError(&runtime, "'x char", &.{"'kind 'type"});
-    try expectError(&runtime, "[97] char", &.{"'kind 'type"});
+    try expectError(&runtime, "[97 2.0] char", &.{"'kind 'type"});
+    try expectError(&runtime, "[[97]] char", &.{"'kind 'type"});
 }
 
 test "conversion: every conversion word reports its own name and underflows cleanly" {

@@ -1344,6 +1344,8 @@ fn splitPrimitive(evaluator: *Machine) MachineError!void {
             return error.OutOfMemory;
     const text_kind = text.borrow().list.kind();
     const separator_kind = separator.borrow().list.kind();
+    if (text_kind == .leaf_char1 and separator_kind == .leaf_char1 and separator_len != 0)
+        return support.Kernel(NarrowSplitKernel).run(evaluator, .{ &text, &separator }, {}, text_len);
     inline for (char_leaf_kinds) |candidate_text| {
         if (text_kind == candidate_text) inline for (char_leaf_kinds) |candidate_separator| {
             if (separator_kind == candidate_separator) return support.Kernel(SplitKernel(candidate_text, candidate_separator)).run(
@@ -1358,6 +1360,107 @@ fn splitPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 const char_leaf_kinds = [_]value.HeapKind{ .leaf_char1, .leaf_char2, .leaf_char4 };
+
+/// `split` of a one-byte-wide string at a one-byte-wide separator: the
+/// common case (`"\n"` on ASCII text), and the one where no part can be
+/// narrower than the text, so no part needs profiling. Two phases: a count
+/// of the separators, which sizes the result spine exactly, and a fill that
+/// finds each separator again and copies the part before it straight into a
+/// one-byte-wide leaf. Both searches are the standard library's vectorized
+/// ones; no bounds table is kept. The scan length is the text's length; the
+/// fill charges one unit per part plus one per codepoint copied.
+const NarrowSplitKernel = struct {
+    pub const arity = 2;
+    pub const Params = void;
+    pub const Output = struct {
+        phase: enum { count, fill } = .count,
+        text_len: usize,
+        separator_len: usize,
+        /// Count: the first position a search may start at, so a separator
+        /// straddling a chunk boundary is counted once. Fill: where the next
+        /// part starts.
+        cursor: usize = 0,
+        /// Count: separators seen. After the count: parts to emit.
+        part_count: usize = 0,
+        emitted: usize = 0,
+        spine: ?heap.OwnedValueBuffer = null,
+
+        pub fn retire(self: *Output, _: *heap.ReleaseDomain) void {
+            if (self.spine) |*spine| spine.deinit();
+        }
+    };
+
+    pub fn prepare(_: *Machine, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+        return .{
+            .text_len = @intCast(operands[0].list.length()),
+            .separator_len = @intCast(operands[1].list.length()),
+        };
+    }
+
+    pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        const text = heap.leafElements(.leaf_char1, operands[0].list);
+        const separator = heap.leafElements(.leaf_char1, operands[1].list);
+        switch (output.phase) {
+            .count => count(output, text, separator, range),
+            .fill => try fill(output, context, text, separator, range.len()),
+        }
+    }
+
+    pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        switch (output.phase) {
+            .count => {
+                output.part_count += 1;
+                output.spine = try heap.OwnedValueBuffer.init(context.releaseDomain(), output.part_count);
+                output.cursor = 0;
+                output.phase = .fill;
+                return output.text_len + output.part_count;
+            },
+            .fill => return null,
+        }
+    }
+
+    pub fn finish(output: *Output) Value {
+        return output.spine.?.takeList();
+    }
+
+    /// The next separator at or after `from`, or the text's end.
+    fn find(text: []const u8, separator: []const u8, from: usize) usize {
+        if (separator.len == 1) return std.mem.indexOfScalarPos(u8, text, from, separator[0]) orelse text.len;
+        return std.mem.indexOfPos(u8, text, from, separator) orelse text.len;
+    }
+
+    /// Counts the separators whose start lies in `range`. A match may run
+    /// past the range's end; the cursor then keeps the next chunk from
+    /// starting inside it.
+    fn count(output: *Output, text: []const u8, separator: []const u8, range: kernel_flat.Chunk) void {
+        var position = @max(output.cursor, range.start);
+        const visible = text[0..@min(text.len, range.end + separator.len - 1)];
+        while (position < range.end) {
+            const hit = find(visible, separator, position);
+            if (hit >= range.end) break;
+            output.part_count += 1;
+            position = hit + separator.len;
+        }
+        output.cursor = @max(position, range.end);
+    }
+
+    /// Emits whole parts while `units` last: one unit to begin a part, one
+    /// per codepoint copied. The part that exhausts the budget is still
+    /// emitted whole, so a part is never left half built across steps.
+    fn fill(output: *Output, context: support.Context, text: []const u8, separator: []const u8, units: usize) error{OutOfMemory}!void {
+        var remaining = units;
+        while (remaining != 0 and output.emitted != output.part_count) {
+            const end = find(text, separator, output.cursor);
+            const part = text[output.cursor..end];
+            var builder = try heap.ListBuilder(.leaf_char1).init(context.allocator(), part.len, part.len);
+            @memcpy(builder.items()[0..part.len], part);
+            output.spine.?.appendOwned(.{ .list = builder.finish() });
+            output.emitted += 1;
+            output.cursor = end + separator.len;
+            remaining -|= 1 + part.len;
+        }
+    }
+};
 
 /// Splits a string at every occurrence of a separator, in three phases: the
 /// scan records each part's bounds, the profile finds each part's widest

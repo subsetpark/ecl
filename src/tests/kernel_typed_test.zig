@@ -397,10 +397,9 @@ test "typed differential: numeric logical and bitwise pervasion parity across si
         try expectParity(&runtime, .{ .ints = numbers }, "dup pair neg");
     }
 
-    // Character-element pervasion has two typed result shapes: fixed i64 for
-    // subtraction/comparison, and a profiling/fill pass for character results.
-    // These cases force all source widths, both operand orders, width crossings
-    // in both directions, and first-element rejection for invalid words.
+    // Character elements are their codepoints to every typed loop, and no
+    // result is a char. These cases force all source widths and both
+    // operand orders, against the generic route.
     const ascii_chars = [_]u32{ 'a', 0xff, 'z' };
     const bmp_chars = [_]u32{ 0x100, 0x03bb, 0xffff };
     const astral_chars = [_]u32{ 0x10000, 0x1f642, 0x10fffe };
@@ -1182,11 +1181,11 @@ test "typed kernels: fault blocks report the first logical index and validate al
 
     // A type fault: every element faults, and the first index is still the one
     // reported.
-    const chars = try allocator.alloc(value.Value, 4);
-    defer allocator.free(chars);
-    for (chars, 0..) |*item, index| item.* = .{ .char = @intCast('a' + index) };
-    const string = try list.fromValues(allocator, chars);
-    const rendered = try outcome(&runtime, &.{string}, "1 band");
+    const floats = try allocator.alloc(value.Value, 4);
+    defer allocator.free(floats);
+    for (floats, 0..) |*item, index| item.* = .{ .float = @floatFromInt(index) };
+    const reals = try list.fromValues(allocator, floats);
+    const rendered = try outcome(&runtime, &.{reals}, "1 band");
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'type") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "'index 0") != null);

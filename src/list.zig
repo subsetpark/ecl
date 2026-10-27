@@ -143,6 +143,48 @@ pub const ByteListMaterializer = ExactSliceMaterializer(u8, .leaf_u8);
 pub const I64Materializer = ExactSliceMaterializer(i64, .leaf_i64);
 pub const F64Materializer = ExactSliceMaterializer(f64, .leaf_f64);
 pub const SymbolMaterializer = ExactSliceMaterializer(u32, .leaf_symbol);
+pub const Char1Materializer = ExactSliceMaterializer(u8, .leaf_char1);
+pub const Char2Materializer = ExactSliceMaterializer(u16, .leaf_char2);
+pub const Char4Materializer = ExactSliceMaterializer(u32, .leaf_char4);
+
+/// A resumable copy of one index range of a typed leaf into a leaf of the
+/// same kind: one memcpy per budget grant, no per-element values. A generic
+/// spine has no such copy and answers null.
+pub const LeafRangeMaterializer = union(enum) {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    u8: ByteListMaterializer,
+    i64: I64Materializer,
+    f64: F64Materializer,
+    symbol: SymbolMaterializer,
+    char1: Char1Materializer,
+    char2: Char2Materializer,
+    char4: Char4Materializer,
+
+    pub fn init(allocator: std.mem.Allocator, header: *ListHandle, first: usize, end: usize) ?LeafRangeMaterializer {
+        return switch (header.kind()) {
+            .generic_spine => null,
+            .leaf_u8 => .{ .u8 = .init(allocator, heap.u8s(header)[first..end]) },
+            .leaf_i64 => .{ .i64 = .init(allocator, heap.i64s(header)[first..end]) },
+            .leaf_f64 => .{ .f64 = .init(allocator, heap.f64s(header)[first..end]) },
+            .leaf_symbol => .{ .symbol = .init(allocator, heap.symbols(header)[first..end]) },
+            .leaf_char1 => .{ .char1 = .init(allocator, heap.chars8(header)[first..end]) },
+            .leaf_char2 => .{ .char2 = .init(allocator, heap.chars16(header)[first..end]) },
+            .leaf_char4 => .{ .char4 = .init(allocator, heap.chars32(header)[first..end]) },
+            .dict, .task, .port, .address, .reserved_mask => unreachable,
+        };
+    }
+    pub fn advance(self: *LeafRangeMaterializer, work: *poll.WorkBudget) error{OutOfMemory}!MaterializeResult {
+        return switch (self.*) {
+            inline else => |*materializer| materializer.advance(work),
+        };
+    }
+    pub fn retire(self: *LeafRangeMaterializer, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            inline else => |*materializer| materializer.retire(releases),
+        }
+    }
+};
 
 pub const CodepointMaterializer = struct {
     pub const owned_disposal: heap.OwnedDisposal = .retire;

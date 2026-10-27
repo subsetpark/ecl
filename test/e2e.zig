@@ -1326,7 +1326,7 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
 
     var scalar = try run(&.{ build_options.ecl_exe, "-e", "inf 1 + 9007199254740993 9007199254740992.0 = \\a 1 +" });
     defer scalar.deinit();
-    try scalar.expect(.{ .exit_code = 0, .stdout = "inf 0 \\b\n", .stderr = "" });
+    try scalar.expect(.{ .exit_code = 0, .stdout = "inf 0 98\n", .stderr = "" });
 
     var float_domain = try run(&.{ build_options.ecl_exe, "-e", "inf inf -" });
     defer float_domain.deinit();
@@ -1742,12 +1742,11 @@ test "e2e: stdin is data in -e mode and refuses to be read as program source" {
         .stderr = "",
     });
 
+    // A drained stream reads as empty, not as an error: `io.stdin` is
+    // `fd.in io.read`, and the device keeps answering.
     var twice = try runWithInput(&.{ build_options.ecl_exe, "-e", "io.stdin pop io.stdin" }, "data");
     defer twice.deinit();
-    try twice.expect(.{
-        .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "standard input has already been read" },
-    });
+    try twice.expect(.{ .exit_code = 0, .stdout = "\"\"\n", .stderr = "" });
 
     var as_source = try runWithInput(&.{build_options.ecl_exe}, "io.stdin\n");
     defer as_source.deinit();
@@ -1755,6 +1754,78 @@ test "e2e: stdin is data in -e mode and refuses to be read as program source" {
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'io", "stdin is the program source" },
     });
+}
+
+test "e2e: fd reads standard input as bytes and writes bytes to both streams" {
+    // A short read returns what is there, bytes that are not UTF-8 are
+    // readable, and the drained stream reads as [] again and again.
+    var binary = try runWithInput(
+        &.{ build_options.ecl_exe, "-e", "fd.in 2 fd.read io.pp fd.in fd.read-all io.pp fd.in fd.read-all io.pp" },
+        "ab\xffz",
+    );
+    defer binary.deinit();
+    try binary.expect(.{ .exit_code = 0, .stdout = "[97 98]\n[255 122]\n()\n", .stderr = "" });
+
+    // Bytes reach the real descriptors unencoded, iodata in one run.
+    var written = try run(&.{ build_options.ecl_exe, "-e", "fd.out [72 105] fd.write fd.out ([10] [0 255]) fd.write fd.err [69 10] fd.write" });
+    defer written.deinit();
+    try written.expect(.{ .exit_code = 0, .stdout = "Hi\n\x00\xff", .stderr = "E\n" });
+
+    var text = try runWithInput(
+        &.{ build_options.ecl_exe, "-e", "fd.in io.lines io.pp fd.out (\"a\" \"b\") io.write fd.out \"c\" io.write-line io.stdin io.pp" },
+        "one\ntwo\n",
+    );
+    defer text.deinit();
+    try text.expect(.{ .exit_code = 0, .stdout = "(\"one\" \"two\")\nabc\n\"\"\n", .stderr = "" });
+
+    var as_source = try runWithInput(&.{build_options.ecl_exe}, "fd.in\n");
+    defer as_source.deinit();
+    try as_source.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "stdin is the program source" },
+    });
+}
+
+test "e2e: line reads over standard input keep their newline and interleave with chunk reads" {
+    // Read-ahead belongs to the device value: a chunk read after a line read
+    // continues where the line ended, and a line read after that continues
+    // where the chunk ended. The unterminated tail is the last line; [] and
+    // "" follow at EOF.
+    var lines = try runWithInput(
+        &.{ build_options.ecl_exe, "-e", "fd.in fd.read-line io.pp fd.in 2 fd.read io.pp fd.in io.read-line io.pp fd.in io.read-line io.pp fd.in io.read-line io.pp fd.in fd.read-line io.pp" },
+        "ab\ncdef\n\ngamma",
+    );
+    defer lines.deinit();
+    try lines.expect(.{ .exit_code = 0, .stdout = "[97 98 10]\n[99 100]\n\"ef\\n\"\n\"\\n\"\n\"gamma\"\n[]\n", .stderr = "" });
+}
+
+test "e2e: concurrent fd writes stay contiguous" {
+    // Each write is larger than one kernel quantum, so its chunks are
+    // interleaved by the scheduler; the device's write turns keep every
+    // call's bytes together.
+    var result = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "[] (3 (fd.out 70000 range 0 * 65 + fd.write) times {}) @spawn " ++
+            "[] (3 (fd.out 70000 range 0 * 66 + fd.write) times {}) @spawn " ++
+            "task.await pop task.await pop",
+    });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 6 * 70000), result.stdout.len);
+    var index: usize = 0;
+    var a_runs: usize = 0;
+    var b_runs: usize = 0;
+    while (index < result.stdout.len) : (index += 70000) {
+        const run_bytes = result.stdout[index..][0..70000];
+        for (run_bytes) |byte| try std.testing.expectEqual(run_bytes[0], byte);
+        switch (run_bytes[0]) {
+            'A' => a_runs += 1,
+            'B' => b_runs += 1,
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), a_runs);
+    try std.testing.expectEqual(@as(usize, 3), b_runs);
 }
 
 test "e2e: entropy is the one draw that differs between processes" {

@@ -1423,8 +1423,11 @@ descent:
   unchanged (union with identity fill).
 - Symbols and words are not numeric: pervading into a quotation errors at
   the first symbol or word leaf.
-- Chars participate ordinally: `char int +` is a char, `char char -` is an
-  int, `char char +` is an error; comparison is by codepoint.
+- Chars enter every numeric word (arithmetic, comparison, the bitwise and
+  wrapping words) as their codepoints and leave as ints: `char int +` and
+  `char char -` are ints, `char int =` compares the codepoint with the int,
+  and no numeric result is a char. `char` is the way back: over a list of
+  codepoints it is the string they spell.
 
 Selection operations use the same recursive shape rule on their selector
 rather than on the collection value. For a list collection, `at`, `put`, and
@@ -1456,15 +1459,16 @@ traverse an outer list of whole keys without descending into those keys.
 - `str` output for numbers round-trips (see Printing); float equality is
   numeric everywhere (see Equality).
 - The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` read an int
-  as its 64-bit two's-complement pattern and are int-only, so a float or a char
-  is `'type` rather than a coercion. They never overflow — `bsl` truncates bits
-  off the top where `*` would raise. Their `count` operand is the one place
+  as its 64-bit two's-complement pattern and a char as its codepoint; they are
+  otherwise int-only, so a float is `'type` rather than a coercion. They never
+  overflow — `bsl` truncates bits off the top where `*` would raise. Their `count` operand is the one place
   they can fail on a value: a shift outside `0..63` is `'domain`. They pervade
   and align dicts like every other pervasive word.
 - The wrapping words `+%`, `-%`, and `*%` are the integer sum, difference, and
   product modulo 2^64 in two's complement: where `+`, `-`, and `*` raise
   `'overflow`, they wrap, as Zig's operators of the same spelling do. They are
-  int-only like the bitwise words, so a float or a char is `'type`, and with
+  int-only like the bitwise words (a char is its codepoint, a float is
+  `'type`), and with
   `band` they give arithmetic modulo any power of two up to 2^64.
 
 ## Randomness
@@ -1508,10 +1512,11 @@ inverse: it encodes a string as UTF-8 and returns a byte list unchanged. `int`
 accepts an int, a string in the integer-literal grammar, or a char, whose
 codepoint it returns. `float` accepts a float, an int, or a string in the
 numeric-literal grammar. A float is not accepted by `int`: `floor`, `round`,
-and `ceil` name the rounding. `char` accepts a char, an int in the Unicode
-scalar range, or a one-char string. A string outside the literal grammar is
-`'parse`; an int outside the scalar range or a string of the wrong length is
-`'domain`; every other operand kind is `'type`. `str` remains the readable
+and `ceil` name the rounding. `char` accepts a char or a string, returned
+unchanged, an int in the Unicode scalar range, or a list of such ints and
+chars, which becomes the string they spell. A string outside the literal
+grammar is `'parse`; an int outside the scalar range is `'domain`; every
+other operand kind is `'type`. `str` remains the readable
 representation and `parse` remains the reader; neither is a conversion.
 
 Symbol conversion is split so that programs cannot grow the interned name
@@ -2411,6 +2416,20 @@ permissions. Path manipulation is pure string computation and proves nothing
 about containment; containment is enforced at the root's retained directory
 handle. Filesystem operations are bounded drivers whose staged mutations either
 publish atomically or leave the destination unchanged.
+
+The standard streams are endpoints of this kind, named by `fd.in`, `fd.out`,
+and `fd.err`. They belong to the Session rather than to a task scope: every
+unit shares the same three values, nothing closes them, and `@give` does not
+move them. Input reads return what the host has and `[]` at stable EOF, on
+every later read as well; one reader may be pending. Output writes from
+different units are served in the order they began, and each call's bytes
+stay contiguous. When standard input is the program source there is no input
+device, and `fd.in` is `'io`. Text crosses these endpoints only through the
+`io` words, which encode and decode UTF-8 at the boundary. A file opened with
+`fs.open-reader` and a process pipe are endpoints of the same kind. A read
+may leave bytes read ahead with the endpoint value, and `fd.close` closes an
+endpoint that is its own resource; one borrowed from a resource closes with
+it.
 
 The shipped `proc` module provides subprocess words. A process specification names one absolute executable path,
 an argument vector, an optional absolute working directory, and an explicit

@@ -15,14 +15,6 @@
  (source selector -- endpoint : "Borrow an attenuated endpoint supported by its source.")
  (port.core.endpoint) 'endpoint def
 
- ### def read
- (readable max -- bytes : "Read a positive byte chunk, or [] at stable EOF.")
- (port.core.read) 'read def
-
- ### def write
- (writable bytes -- : "Accept a complete byte list in FIFO order under bounded pressure.")
- (port.core.write) 'write def
-
  ### def send
  (sender message -- :
   "Atomically enqueue one bounded structured message, including an empty value.")
@@ -34,7 +26,9 @@
  (port.core.receive) 'receive def
 
  ### def finish
- (writable -- : "Finish input after admitted writes. Idempotent.")
+ (sender -- :
+  "Finish a message sender after admitted sends, so its receiver sees {'kind 'eof}. Idempotent. Byte
+   endpoints finish with fd.finish.")
  (port.core.finish) 'finish def
 
  ### def await

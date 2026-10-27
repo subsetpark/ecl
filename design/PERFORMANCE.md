@@ -701,6 +701,79 @@ control) left the mixed short-task and cancellation p50 values within 6% in
 both directions at one and eight workers. Eight-worker cancellation p95/p99
 tails above 500 µs appeared once on each side and did not reproduce.
 
+## Standard streams, masks, and `where at` — 2026-10-26
+
+Eight changes measured together on one input, the Benchmarks Game fasta
+output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
+`-Dcpu=native`, Apple M4 Max, instructions retired per process
+(`/usr/bin/time -l`), control master `75b6503`.
+
+1. The standard streams are port endpoints (`fd.in`, `fd.out`, `fd.err`),
+   so a program reads and writes bytes without decoding. `io.stdin bytes`
+   decoded 254 MB to codepoints and encoded it back: 55.8 G instructions.
+   `fd.in fd.read-all` is 0.44 G; reading and writing the whole stream back
+   is 0.55 G.
+2. `Utf8Materializer` and `StringEncoder` take ASCII runs sixteen bytes at a
+   time and charge the budget per byte instead of per codepoint. `io.read`
+   31.6 G → 0.90 G; `fs.read-text` 31.3 G → 0.71 G; `chars` 31.5 G → 0.75 G;
+   `bytes` 24.1 G → 0.37 G; `io.prin` 24.0 G → 0.36 G.
+3. `cut` copies a typed leaf's pieces as ranges of the same kind, so `chunk`
+   over bytes is 24.3 G → 5.0 G and `cut` into three pieces ~22 G → 6.4 G.
+4. A 0/1 result is a byte leaf: `10 =` over the input is 3.56 G and 2,430 MiB
+   → 2.09 G and 491 MiB. Every integral operand pair takes the int SIMD
+   loops with byte lanes widened, and a byte row folds into an int
+   accumulator in one pass, read from the result lattice as the column fold
+   reads it.
+5. `where` continued by `at` is one pass that never builds the index list:
+   `dup 10 <> where at` over the input is 6.72 G and 2,399 MiB → 4.84 G and
+   730 MiB.
+6. Chars are codepoints in every numeric word and leave as ints; `char` over
+   a list of codepoints is the way back. The character kernel, its plan
+   table, and the `Character` class are gone, so a char operand takes the
+   int loops: `1 +` over a 1,000,000-char string 30.9 M → 5.5 M
+   instructions, `\b =` over it 8.9 M → 2.1 M. `char` over an int leaf
+   validates each block by its minimum and maximum, 12.5 instructions per
+   element, so `str.upper` (now `... 32 * - char`) is 72 M → 35 M per
+   1,000,000 chars.
+7. The byte-stream words are one module: `fd.read`/`fd.write` replace
+   `port.read`/`port.write`, process pipes and files opened with
+   `fs.open-reader` are endpoints like the devices, and `fd.read-line` keeps
+   its read-ahead on the endpoint value. `fd.in io.lines` over the input is
+   10.6 G against 41.0 G for `io.stdin "\n" split`; a streaming
+   `fs.open-reader` read in 1 MiB chunks is 0.14 G and 9 MiB against 0.37 G
+   and 491 MiB for `fs.read-bytes`. `proc.run` validates its `'stdin` with
+   the native `fd.bytes?` instead of a prelude predicate per element: a 4 MB
+   stdin is 26.3 G → 0.43 G.
+8. `split` of a one-byte-wide string at a one-byte-wide separator is two
+   passes with no bounds table: a vectorized count of the separators sizes
+   the spine, and a fill finds each separator again and copies the part into
+   a one-byte-wide leaf. The general kernel kept one 24-byte record per text
+   position, profiled every part's widest codepoint, and wrote parts through
+   a codepoint writer. `"\n" split` of the 254 MB input into 4.17 M lines:
+   3.57 G → 2.75 G, of which the scan is under 0.1 G; `fd.in io.lines` 10.6 G
+   → 4.06 G. What remains is about 530 instructions per part, independent
+   of its length: on macOS the system malloc behind the session heap costs
+   about 500 instructions per allocation (`sample` puts 62% of the split in
+   `_xzm_malloc_tc` and its callees). Routing blocks of 2 KB and under to
+   `std.heap.smp_allocator` took the split to 2.61 G and every suite program
+   down 0 to 8%, but revcomp's peak RSS went 3.4 GB → 5.9 GB with one worker,
+   so the heap stays on malloc; a session-owned small-object allocator that
+   returns memory is the next step for part-heavy programs. Views over a
+   parent leaf were considered and measured out: they keep the allocation,
+   which is the cost, and save only the copy, about 20 instructions.
+
+Whole programs, same input, validated against the C references:
+
+| Program | Control | Treatment | growler/k |
+|---|---:|---:|---:|
+| k-nucleotide, N = 25M | 79.3 G, 2,988 MiB | 21.7 G, 994 MiB | 13.4 G |
+| reverse-complement, N = 25M | 184.1 G, 3,892 MiB | 32.1 G, 3,397 MiB | 19.3 G |
+| fasta, N = 25M | 125.8 G | 86.6 G | 264.6 G |
+
+The rest of the suite in one interleaved round: fannkuch-vector +4%
+(byte masks summed into int rows and the fused `where at` replacing a typed
+gather), mandelbrot +1%, fft +1%, the others unchanged.
+
 ## Offered phrases match from the call-site cache — 2026-10-18
 
 Each application of a combinator to a user quotation, such as `(+) fold1` once
