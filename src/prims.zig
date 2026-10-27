@@ -32,13 +32,13 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value kind as a symbol." },
         .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Execute a word through ordinary name resolution and dispatch." },
         .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "Parse source text into an unevaluated quotation." },
-        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, a symbol or word spelling, " ++
+        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, a symbol spelling, " ++
             "a char as a one-element string, or a byte list decoded as UTF-8." },
         .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged." },
-        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or the already-interned symbol a string spells; " ++
-            "a spelling that was never interned is `domain." },
-        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or create the symbol a string spells, growing the " ++
-            "process-lifetime name table when it is new." },
+        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol unchanged, or the already-interned symbol a string spells, linked to the root of the " ++
+            "activation that built it; a spelling that was never interned is `domain." },
+        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol unchanged, or create the symbol a string spells, linked to the root of the activation " ++
+            "that built it and growing the process-lifetime name table when it is new." },
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
         .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a numeric-literal string." },
         .{ .name = "char", .primitive = charWord, .effect = "value -- char", .doc = "Return a char unchanged, the char with an int's codepoint, or the single char of a one-char string." },
@@ -423,7 +423,9 @@ fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineErr
 }
 
 /// `symbol` and `intern` differ only in the final cursor: lookup answers
-/// absence with `'domain`, insertion grows the process-lifetime table.
+/// absence with `domain, insertion grows the process-lifetime table. Either
+/// way the symbol links to the root of the activation that built it, as one
+/// written there would: a symbol built from a string is lexical, not dynamic.
 const SymbolConversionDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     source_value: heap.Owned(Value),
@@ -474,12 +476,12 @@ const SymbolConversionDriver = struct {
                 .complete => |maybe_id| {
                     const id = maybe_id orelse
                         return evaluator.fail(.domain, "symbol spelling is not interned; use intern to create it");
-                    return .{ .output = .{ .symbol = .{ .name = id } } };
+                    return .{ .output = .{ .symbol = try evaluator.linkedWord(id) } };
                 },
             },
             .insert => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
-                .complete => |id| return .{ .output = .{ .symbol = .{ .name = id } } },
+                .complete => |id| return .{ .output = .{ .symbol = try evaluator.linkedWord(id) } },
             },
         };
         return .stepped;

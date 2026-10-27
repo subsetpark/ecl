@@ -230,3 +230,34 @@ test "conversion: every conversion word reports its own name and underflows clea
         try expectError(&runtime, word, &.{ "kind underflow", expected });
     }
 }
+
+test "conversion: a symbol built from a string links to the root that built it" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // `q` is `(dup)` assembled at the session, so `dup` is the session's
+    // wherever the quotation is later called: at the session directly, and
+    // inside a module whose own chain never reaches the session.
+    try expectStack(
+        &runtime,
+        "(pop 99) `dup def [] ((call) `apply def) `conv-link @defm " ++
+            "\"dup\" symbol wrap `q set 1 q call 1 q conv-link.apply",
+        "99 99",
+    );
+}
+
+test "conversion: a symbol the implementation builds means core's binding" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // The failing word in an error dict is a symbol no program wrote, so
+    // running it reaches core's `at` even though the session shadows `at`.
+    try expectStack(
+        &runtime,
+        "(pop pop 55) `at def [] ([] 5 core.at) @attempt `err 0 dict.get `word 0 dict.get wrap `q set " ++
+            "[7 8] 1 q call",
+        "8",
+    );
+}

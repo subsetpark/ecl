@@ -94,21 +94,22 @@ pub const DictPayload = struct {
     hashes: *ListHandle,
 };
 
-/// A symbol: its interned name, and — when it was read as source — its
-/// name's slot in the root its text was written in. The slot rides here
+/// A symbol: its interned name, and its name's slot in the root it was
+/// written in — by the reader, or by `symbol`, `intern`, or `qualify` on
+/// behalf of the activation that built it. The slot rides here
 /// rather than on the enclosing quotation because a symbol occurrence is the
 /// unit that resolves when its list runs — which is what makes splicing work,
 /// since `cat` copies `Value`s and each token keeps the slot it was linked
 /// to. The slot is resolution metadata, never identity: equality, hashing,
-/// and printing ignore it, and a zero slot links lazily where it is run. It
+/// and printing ignore it, and a zero slot means core's binding. It
 /// costs nothing: `Value` is pinned at 16 bytes and the name uses four of
 /// its eight payload bytes.
 pub const Symbol = struct {
     name: u32,
     /// `env.SlotId` as a bare integer, kept untyped here so `value.zig` stays
-    /// free of any dependency on the environment. Zero is a symbol linked to
-    /// nothing: every runtime-built symbol, and the locals backend's reserved
-    /// words.
+    /// free of any dependency on the environment. Zero is a symbol the
+    /// implementation built for itself (it means core's binding when run) or
+    /// one of the locals backend's reserved words.
     slot: u32 = 0,
 };
 

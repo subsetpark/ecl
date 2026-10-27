@@ -5977,8 +5977,11 @@ pub const Machine = struct {
             };
             return executeResolved(self, &resolved);
         };
-        // A word built at run time without a slot links where it executes.
-        const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
+        // A symbol with no slot was built by the implementation for itself (an
+        // error-dict key, a trace entry, a `type` result) and means core's
+        // binding wherever it runs; every symbol a program builds is linked
+        // where it is built.
+        const linked = if (word.slot == 0) try self.coreWord(word.name) else word;
         // A binding borrowed below stays valid for the dispatch: a unit that
         // may define replaces bindings only by running code, which starts
         // after the dispatch has retained what it keeps (a scheduled body, an

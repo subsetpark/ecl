@@ -648,7 +648,8 @@ other value is also `'type`.
 symbol for a string, interning the spelling when it is new. A string that is
 not a valid symbol spelling is `'domain`; any other value is `'type`. Interned
 names live for the whole process and are never reclaimed, so never apply this
-to unbounded external input; `symbol` is the lookup-only form. See
+to unbounded external input; `symbol` is the lookup-only form. The symbol
+links to the root of the activation that built it. See
 [Conversions](SPEC.md#conversions).
 
 #### Examples
@@ -930,7 +931,9 @@ already-interned symbol whose spelling a string names. A spelling that is not
 yet interned is `'domain`, as is a string that is not a valid symbol spelling;
 any other value is `'type`. Every symbol written in loaded source is interned,
 so this succeeds for any key a program compares against and never grows the
-interned name space; use `intern` to create one. See
+interned name space; use `intern` to create one. The symbol links to the
+root of the activation that built it, so `"dup" symbol wrap` executes the
+same `dup` as `(dup)` written there. See
 [Conversions](SPEC.md#conversions).
 
 #### Examples
