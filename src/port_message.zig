@@ -53,12 +53,12 @@ const State = struct {
                 const scalar = value.unicodeScalar(codepoint) orelse return error.InvalidValue;
                 try charge(&self.footprint.bytes, std.unicode.utf8CodepointSequenceLength(scalar) catch return error.InvalidValue, self.limits.bytes);
             },
-            .symbol => |id| try charge(&self.footprint.bytes, intern.get(id).len, self.limits.bytes),
+            .symbol => |id| try charge(&self.footprint.bytes, intern.get(id.name).len, self.limits.bytes),
             .port => |port| {
                 try charge(&self.footprint.capabilities, 1, self.limits.capabilities);
                 self.attachments[self.footprint.capabilities - 1] = port;
             },
-            .word, .task, .address => return error.InvalidValue,
+            .task, .address => return error.InvalidValue,
             .list, .dict => {
                 const count: usize = if (item == .list) @intCast(item.list.length()) else std.math.mul(usize, @intCast(item.dict.length()), 2) catch return error.Overflow;
                 // Reject a wide aggregate before constructing traversal work.
@@ -197,24 +197,10 @@ test "port message: validation is bounded and pins the immutable input" {
     try std.testing.expectEqual(@as(i64, 42), list.atUnchecked(message.view().?, 0).int);
 }
 
-test "port message: words are rejected recursively and failure is sticky" {
-    var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
-    defer cleanup.deinit();
-    const words = try list.fromValues(std.testing.allocator, &.{.{ .word = .{ .name = try intern.intern("dup") } }});
-    defer cleanup.releaseValue(words);
-    const input = try dict.fromUniquePairs(std.testing.allocator, cleanup.domain(), &.{.{ .{ .symbol = try intern.intern("key") }, words }});
-    defer cleanup.releaseValue(input);
-    const message = try Message.create(std.testing.allocator, input, .{});
-    defer message.retire(cleanup.domain());
-    try std.testing.expectError(error.InvalidValue, validate(message));
-    try std.testing.expectError(error.InvalidValue, validate(message));
-    try std.testing.expect(message.view() == null);
-}
-
 test "port message: node and text budgets include repeated occurrences" {
     var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
-    const symbol: Value = .{ .symbol = try intern.intern("abcd") };
+    const symbol: Value = .{ .symbol = .{ .name = try intern.intern("abcd") } };
     const input = try list.fromValues(std.testing.allocator, &.{ symbol, symbol });
     defer cleanup.releaseValue(input);
     for ([_]Limits{ .{ .nodes = 2 }, .{ .bytes = 7 } }) |limits| {

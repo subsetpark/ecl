@@ -5,8 +5,6 @@ const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
-const list = @import("list.zig");
-const dict = @import("dict.zig");
 const lexer = @import("lexer.zig");
 const poll = @import("poll.zig");
 
@@ -27,11 +25,6 @@ pub const SpannedValue = struct {
 pub const Error = error{ OutOfMemory, Parse };
 const LocalName = enum(u32) { _ };
 const LocalMap = poll.FixedMap(LocalName, usize);
-const WalkFrame = struct {
-    item: Value,
-    next_child: ?usize = null,
-};
-
 pub const Lowered = struct {
     forms: []SpannedValue,
     values: heap.OwnedValueBuffer,
@@ -59,12 +52,7 @@ pub const LowerCursor = struct {
     };
     const BodyWork = union(enum) {
         top,
-        nested,
         lookup_top: LocalMap.RawLookupCursor,
-        lookup_nested: struct {
-            name: u32,
-            cursor: LocalMap.RawLookupCursor,
-        },
     };
     const Words = [3]u32;
     const Output = struct {
@@ -82,7 +70,6 @@ pub const LowerCursor = struct {
         names: struct { locals: LocalMap, work: NameWork },
         body: struct {
             locals: LocalMap,
-            walk: poll.ChunkStack(WalkFrame),
             index: usize = 0,
             work: BodyWork = .top,
         },
@@ -102,10 +89,7 @@ pub const LowerCursor = struct {
             switch (self.*) {
                 .locals_init => |*cursor| cursor.deinit(),
                 .names => |*names_state| names_state.locals.deinit(),
-                .body => |*body_state| {
-                    body_state.walk.deinit();
-                    body_state.locals.deinit();
-                },
+                .body => |*body_state| body_state.locals.deinit(),
                 .allocate_values => |allocation| allocator.free(allocation.forms),
                 .output => |*output| {
                     output.values.deinit();
@@ -164,7 +148,7 @@ pub const LowerCursor = struct {
                     if (kind != .word) return self.failName(name);
                     names_state.work = .{ .symbol = .{
                         .index = classification.index,
-                        .cursor = .init(name.bytes),
+                        .cursor = .initSegment(name.bytes),
                     } };
                 },
             },
@@ -172,7 +156,8 @@ pub const LowerCursor = struct {
                 .pending => {},
                 .complete => |valid| {
                     const name = self.names[symbol.index];
-                    if (!valid or intern.isReservedWordBytes(name.bytes)) return self.failName(name);
+                    if (!valid or intern.isReservedWordBytes(name.bytes) or
+                        std.mem.indexOfScalar(u8, name.bytes, '\'') != null) return self.failName(name);
                     names_state.work = .{ .bytes = .{ .index = symbol.index } };
                 },
             },
@@ -227,107 +212,24 @@ pub const LowerCursor = struct {
                     return false;
                 },
             },
-            .lookup_nested => |*lookup| switch (lookup.cursor.advance()) {
-                .pending => return false,
-                .complete => |found| {
-                    _ = body_state.walk.pop().?;
-                    if (found != null) {
-                        self.diag.setFmt(
-                            self.body[body_state.index].span,
-                            "local `{s}` crosses a quotation boundary; use `partial` to construct a quotation that captures it",
-                            .{intern.get(lookup.name)},
-                        );
-                        return error.Parse;
-                    }
-                    body_state.work = .nested;
-                    return false;
-                },
-            },
-            .nested => {},
             .top => {
                 if (body_state.index == self.body.len) return true;
-                return switch (self.body[body_state.index].value) {
-                    .word => |id| result: {
-                        body_state.work = .{ .lookup_top = body_state.locals.rawLookup(
-                            @fromBackingInt(@intCast(id.name)),
-                        ) };
-                        break :result false;
-                    },
-                    .list => |header| result: {
-                        self.local_indices[body_state.index] = null;
-                        try body_state.walk.push(.{ .item = .{ .list = header } });
-                        body_state.work = .nested;
-                        break :result false;
-                    },
-                    .dict => |header| result: {
-                        self.local_indices[body_state.index] = null;
-                        try body_state.walk.push(.{ .item = .{ .dict = header } });
-                        body_state.work = .nested;
-                        break :result false;
-                    },
-                    .int, .float, .char, .symbol, .task, .port, .address => result: {
+                switch (self.body[body_state.index].value) {
+                    .symbol => |id| body_state.work = .{ .lookup_top = body_state.locals.rawLookup(
+                        @fromBackingInt(@intCast(id.name)),
+                    ) },
+                    // A local is an occurrence at the body's own level. A
+                    // nested list or dict is data whose symbols are the
+                    // symbols they spell: `(|x| [x])` lists the symbol `x`,
+                    // and `` (|x| `x) `` quotes it.
+                    .int, .float, .char, .list, .dict, .task, .port, .address => {
                         self.local_indices[body_state.index] = null;
                         body_state.index += 1;
-                        break :result false;
                     },
-                };
+                }
+                return false;
             },
         }
-        if (!body_state.walk.isEmpty()) {
-            const frame = body_state.walk.topPtr().?;
-            return switch (frame.item) {
-                .word => |id| result: {
-                    body_state.work = .{ .lookup_nested = .{
-                        .name = id.name,
-                        .cursor = body_state.locals.rawLookup(@fromBackingInt(@intCast(id.name))),
-                    } };
-                    break :result false;
-                },
-                .list => result: {
-                    if (frame.next_child == null) {
-                        frame.next_child = @intCast(frame.item.list.length());
-                        break :result false;
-                    }
-                    if (frame.next_child.? == 0) {
-                        _ = body_state.walk.pop().?;
-                        break :result false;
-                    }
-                    frame.next_child.? -= 1;
-                    try body_state.walk.push(.{ .item = list.atUnchecked(frame.item, frame.next_child.?) });
-                    break :result false;
-                },
-                // A dict literal is inert like every other container, so a
-                // local named inside one would silently become an ordinary
-                // word-shaped key or value. Walking keys and values makes
-                // that the same diagnosed mistake it is everywhere else.
-                .dict => |header| result: {
-                    if (frame.next_child == null) {
-                        const entries: usize = @intCast(dict.keysOf(header).list.length());
-                        frame.next_child = entries * 2;
-                        break :result false;
-                    }
-                    if (frame.next_child.? == 0) {
-                        _ = body_state.walk.pop().?;
-                        break :result false;
-                    }
-                    frame.next_child.? -= 1;
-                    const child = frame.next_child.?;
-                    const entry = child / 2;
-                    try body_state.walk.push(.{ .item = if (child % 2 == 0)
-                        dict.keyAt(header, entry)
-                    else
-                        dict.valueAt(header, entry) });
-                    break :result false;
-                },
-                .int, .float, .char, .symbol, .task, .port, .address => result: {
-                    _ = body_state.walk.pop().?;
-                    break :result false;
-                },
-            };
-        }
-        body_state.work = .top;
-        body_state.index += 1;
-        return false;
     }
 
     fn append(output: *Output, form: SpannedValue) void {
@@ -347,7 +249,7 @@ pub const LowerCursor = struct {
             // so nothing between here and the declaration had to see past them.
             switch (output.epilogue_step) {
                 0 => {
-                    self.atom(output, .{ .word = .{ .name = output.words[2], .slot = env.localOperandSlot(@intCast(self.names.len)) } });
+                    self.atom(output, .{ .symbol = .{ .name = output.words[2], .slot = env.localOperandSlot(@intCast(self.names.len)) } });
                     output.epilogue_step = 1;
                     return .pending;
                 },
@@ -359,7 +261,7 @@ pub const LowerCursor = struct {
             return .{ .complete = .{ .forms = forms, .values = values } };
         }
         if (self.local_indices[output.body_index]) |index| {
-            self.atom(output, .{ .word = .{ .name = output.words[1], .slot = env.localOperandSlot(@intCast(index)) } });
+            self.atom(output, .{ .symbol = .{ .name = output.words[1], .slot = env.localOperandSlot(@intCast(index)) } });
             output.body_index += 1;
             return .pending;
         }
@@ -390,16 +292,12 @@ pub const LowerCursor = struct {
             .names => |*names_state| result: {
                 if (try self.advanceName(names_state)) {
                     const locals = names_state.locals;
-                    self.state = .{ .body = .{
-                        .locals = locals,
-                        .walk = .init(self.allocator),
-                    } };
+                    self.state = .{ .body = .{ .locals = locals } };
                 }
                 break :result .pending;
             },
             .body => |*body_state| result: {
                 if (try self.advanceBody(body_state)) {
-                    body_state.walk.deinit();
                     body_state.locals.deinit();
                     self.state = .{ .word_start = .{} };
                 }
@@ -474,7 +372,7 @@ pub const LowerCursor = struct {
             .output => |*output| result: {
                 switch (output.prefix_step) {
                     0 => {
-                        self.atom(output, .{ .word = .{ .name = output.words[0], .slot = env.localOperandSlot(@intCast(self.names.len)) } });
+                        self.atom(output, .{ .symbol = .{ .name = output.words[0], .slot = env.localOperandSlot(@intCast(self.names.len)) } });
                         output.prefix_step = 1;
                         break :result .pending;
                     },

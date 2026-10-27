@@ -19,8 +19,8 @@ Verified against the checkout at `b3bb8cd` on 2026-10-25 and re-checked at
 **Module state.** `src/modules.zig` `ModuleSlot` (line ~1097) owns a FIFO
 `Arbiter`, the durable `state` stack, `lease_refs`, a live/closing/retired
 phase, and a recycling chain. `src/machine.zig` carries `beginWithin`
-(line ~6480), the Unit's single turn authority (`~2563`), and the
-`StateAcquireDriver` and publication drivers (`~9348`–`9600`) that copy the
+(line ~6480), the Unit's single turn authority (~2563), and the
+`StateAcquireDriver` and publication drivers (~9348–9600) that copy the
 durable stack into a draft and publish it back. `within` and `without` are
 primitives in `src/module_prims.zig`. The only ECL user of `within` in the
 tree is `src/stdlib/rng.ecl`; `fs.zig` and `table.ecl` mention the word in
@@ -29,7 +29,7 @@ and publication copies) and #105 (recycled slot assertion).
 
 **Anonymous modules.** `@module`, `register`, and `invoke` are primitives in
 `src/module_prims.zig`; `@defm` is implemented as `@module` then `register`.
-The `'module` value kind exists in `src/value.zig` and is rejected by JSON,
+The `` `module `` value kind exists in `src/value.zig` and is rejected by JSON,
 native views, and port messages. No shipped ECL source or app uses any of the
 three words. Twelve Zig test files and four acceptance scripts under
 `test/acceptance/modules/` and `test/acceptance/` do.
@@ -53,8 +53,8 @@ task.await`", "a dying unit also cancels its unawaited tasks") and the
 formal `concurrency.pant` records the spawning unit as the owner. The
 runtime's behavior is the one this workstream adopts.
 
-**Randomness.** `rand` is a Zig builtin module (`src/stdlib/rand.zig`: `int`,
-`ints`, `float`, `entropy`); `rng` is ECL source holding `[key counter]` on
+**Randomness.** `rand` is a Zig builtin module (src/stdlib/rand.zig: int,
+ints, float, entropy); `rng` is ECL source holding `[key counter]` on
 its durable stack, with `deal` and `shuffle` written in ECL. The stdlib
 manifest (`src/stdlib.zig` ~116–120) allows one entry per module name. `rng`
 is used by `test/stdlib-tests/random.ecl`, one line of `test/e2e.zig`, and
@@ -115,7 +115,7 @@ stale; `zig build check-formal` checks the bounded models with z3.
   https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/
   Already the design's lifetime model. This workstream applies it precisely:
   the owner of a spawn is the nearest enclosing scope, scopes are task scopes
-  and the session root, and a stack transaction (`@attempt`) is not a scope.
+  and the session root, and a stack transaction (@attempt) is not a scope.
 
 - **paper — Perceus: garbage-free reference counting with reuse** —
   https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/
@@ -150,7 +150,7 @@ precommit` passed on each commit; the gameplan file is local and gitignored.
   spawning unit; `zig build check-formal` passes.
 - `design/INTERPRETER.md` "Tasks form a lifetime tree" distinguishes units
   (stack transactions) from scopes (lifetime owners).
-- `@spawn` and `@give` are `'domain` while a module-construction boundary is
+- `@spawn` and `@give` are `` `domain `` while a module-construction boundary is
   open anywhere in the unit's frame stack: the direct `@defm` body, a helper
   word the body calls, or an `@attempt` nested in the body. `@each` is refused
   through the `@spawn` the prelude defines it over, with `@each` in the error
@@ -158,7 +158,7 @@ precommit` passed on each commit; the gameplan file is local and gitignored.
   now pure code in fact as well as intent.
 - A behavioral test pins each measured fact in Current State: live task out
   of `@attempt`, no cancellation on `@attempt` failure, REPL-style survival
-  across root units, and the new `'domain`.
+  across root units, and the new `` `domain ``.
 - `zig build spec`, `check-spec`, and `precommit` pass.
 
 **Why this is a safe pause point**: The spec now describes the shipped
@@ -188,9 +188,9 @@ diagnostic now names `@defm`. `zig build precommit` passed on each commit.
   running the body, and fails only when the body fails or publication is
   refused.
 - `@defm` is a primitive again (reversing #147's prelude definition over
-  `@module` and `register`): a non-symbol name is `'type`; an invalid path,
-  `core`, or a standard-library name is `'domain`; none of these runs the body.
-- The `'module` value kind is gone from `src/value.zig`, the heap, `print`,
+  `@module` and `register`): a non-symbol name is `` `type ``; an invalid path,
+  `core`, or a standard-library name is `` `domain ``; none of these runs the body.
+- The `` `module `` value kind is gone from `src/value.zig`, the heap, `print`,
   `match?`, `type` (which now lists nine kinds), the reader's `<module>`
   marker, and the JSON, native-view, and port-message rejection paths.
   `design/formal/values.pant` drops `module-type` in the same patch, since the
@@ -238,26 +238,26 @@ reports, and issue #13 was closed with a note that mailboxes were chosen.
 - Every task owns a mailbox: a separately counted object reachable from the
   cell, never pointing back at it, closed by the task's terminal transition.
   Closing discards queued messages, which breaks any queue cycle.
-- A new `'address` value kind: opaque, prints as `<address:n>`, `match?` by
+- A new `` `address `` value kind: opaque, prints as `<address:n>`, `match?` by
   mailbox identity, unreadable, rejected by JSON, native views, and port
   messages exactly as tasks are. `task.address ( task -- address )` and
-  `task.self ( -- address )`; `task.self` is `'domain` outside a task.
+  `task.self ( -- address )`; `task.self` is `` `domain `` outside a task.
 - `task.send ( value address -- )` parks under pressure at capacity 16, is
-  per-sender FIFO, and is `'io` with `{'reason 'closed}` on a closed
+  per-sender FIFO, and is `` `io `` with `{reason closed}` on a closed
   mailbox. Any value may be sent except one containing a task handle, which
-  is `'type`; the check runs under the work budget and skips flat
+  is `` `type ``; the check runs under the work budget and skips flat
   specialized lists without traversal.
 - `task.receive ( -- value )` parks in the receiving task and returns the
-  sent value as it was sent; `'domain` outside a task.
+  sent value as it was sent; `` `domain `` outside a task.
   `task.receive-for ( ms -- result )`
-  returns `{'ok value}` or `{'err {'kind 'timeout}}`, with `'overflow` for
+  returns `{ok value}` or `{err {kind timeout}}`, with `` `overflow `` for
   an unreachable deadline, as `await-for` does.
 - Mailbox waits park through the external-readiness arbitration ports use,
   with a resume variant that returns a deadline as a value; receiver and
   sender cancellation go through the existing `WaitSet` arbitration.
 - No request/reply primitive. `call` is an ECL composition: a helper task
-  whose address travels as `'from` and whose result is the reply, bounded only
-  by `task.await-for`. The runtime one-shot reply mailbox, with `'dropped`
+  whose address travels as `` `from `` and whose result is the reply, bounded only
+  by `task.await-for`. The runtime one-shot reply mailbox, with `` `dropped ``
   detection, self-call refusal, and abandonment, is issue #150.
 - `SPEC.src.md` Concurrency gains a mailbox section and `concurrency.pant`
   gains the `Mailboxes` context with `Send`, `Receive`, and closure on the
@@ -289,7 +289,7 @@ note that the design chose mailboxes.
 commits. Pure ECL over the Milestone 3 words; no runtime change. Landed as
 planned with these notes: `agent.call-for` validates its deadline before
 sending, so a refused duration never reaches the agent (a deadline the clock
-cannot represent is still `'overflow` after the send); the module's loop is
+cannot represent is still `` `overflow `` after the send); the module's loop is
 stack-shuffled because a local cannot be read inside an `if` branch; the two
 stdlib export tables the Zig tests zipped against `stdlib.names()` became one
 shared table in `kernel_test_support.zig`. Gates: `precommit` and `test-ecl`
@@ -304,14 +304,14 @@ passed; the first-class suite `stdlib.test.agent` has six tests.
   `agent.call ( quotation address -- result )`, which applies the quotation
   to the server's stack as a unit, pops the top of the result stack as the
   reply, keeps the rest as the new state, and re-raises the quotation's error
-  in the caller (an empty result stack is `'domain`); and
+  in the caller (an empty result stack is `` `domain ``); and
   `agent.send ( quotation address -- )`, which applies without a reply and
   keeps the whole result stack. Call quotations are therefore
   `( state... -- state... result )`, mirroring `rand`. `agent.call` is
   composed from the Milestone 3 words: a helper task receives the reply and
   `task.await` returns it, so an unbounded call to a dead server hangs until
   #150 lands; `agent.call-for ( quotation address milliseconds -- result )`
-  bounds it with `task.await-for` and raises `'timeout` in the caller after
+  bounds it with `task.await-for` and raises `` `timeout `` in the caller after
   cancelling its helper; the quotation still runs on the server later.
 - Each application runs as a unit, so a failing quotation restores the
   server's stack: state is unchanged on error without any copying by the
@@ -322,7 +322,7 @@ passed; the first-class suite `stdlib.test.agent` has six tests.
   preservation, send without reply, and cancellation through the handle
   obtained by spawning `agent.serve` directly.
 - `STDLIB.md` documents the module with the `rng` replacement idiom:
-  `[0 0] agent.start 'rng set` then `(5 rand.int) rng agent.call`.
+  ``[0 0] agent.start `rng set`` then `(5 rand.int) rng agent.call`.
 
 **Why this is a safe pause point**: A new library module over Milestone 3's
 primitives. `rng` still exists, so nothing is lost yet.
@@ -337,7 +337,7 @@ primitives. `rng` still exists, so nothing is lost yet.
 commits. Landed with these deviations from the gameplan: the `rng` deletion
 moved from the second patch into the first, because `rng.ecl` seeded a
 durable stack in its construction body and could not load once a nonempty
-body stack became `'domain`; `rand.shuffle` and `rand.deal` are phased
+body stack became `` `domain ``; `rand.shuffle` and `rand.deal` are phased
 `support.Kernel` kernels (the audit forbids `pushOwned` and hash maps in
 kernel files, so `deal` keeps its displacements in an open-addressed table);
 the registration cursor re-validates that the found slot is still live under
@@ -362,13 +362,13 @@ after its completion driver is allocated. Gates: `precommit`,
   not state. Issues #24 and #105 are closed by removal: the arbiter and the
   recycled-slot race test are gone, and slot reusability reduces to directory
   quiescence plus the lease count.
-- `@defm` with a nonempty final body stack is `'domain`. Registration is
+- `@defm` with a nonempty final body stack is `` `domain ``. Registration is
   name → current generation; replacement publishes a new generation and
   keeps nothing else. `undefm` closes admission and retires.
 - `src/stdlib/rng.ecl` is deleted and removed from the manifest.
   `src/kernel_random.zig` gains `shuffle ( state values -- state values )`
   and `deal ( state count pool -- state results )` as counter-based kernels
-  exposed through `src/stdlib/rand.zig`, with the documented `'domain`
+  exposed through `src/stdlib/rand.zig`, with the documented `` `domain ``
   conditions; `deal` is a virtual Fisher-Yates whose cost follows the count,
   never the pool, and advances the state by the count; `shuffle` advances it
   by the list's length. `test/stdlib-tests/random.ecl`, `test/e2e.zig`, and
@@ -416,7 +416,7 @@ graph those had justified. Landed with these deviations from the plan: the
 slot deletion and the cursor unification shipped as one commit, because
 rewriting three cursors against image entries only to replace them was
 double work; `*module*` inside a construction body answers with the name (a
-loosening the user chose over keeping a `'domain` branch); a helper word
+loosening the user chose over keeping a `` `domain `` branch); a helper word
 called during construction is now spelled `name.word` in traces, since the
 image knows its name before its body runs; and `unmodule` was renamed
 `undefm` in the same pass. Gates: `precommit` (which runs both retention
@@ -465,13 +465,13 @@ replacement for `rng` ships before `rng` is deleted.
 
 ## Open Questions
 
-- Whether the `agent` server should accept a `{'kind 'stop}` protocol message
+- Whether the `agent` server should accept a `{kind stop}` protocol message
   or rely on cancellation through the handle. Default is cancellation only.
 
 ## Decisions Made
 
 - **The mailbox layer is minimal.** The runtime provides only what it alone
-  can: the `'address` kind, one mailbox per task closed at the terminal
+  can: the `` `address `` kind, one mailbox per task closed at the terminal
   transition, `task.address`, `task.self`, `task.send`, `task.receive`, and
   `task.receive-for`. Request/reply is composed in ECL (a helper task as the
   reply mailbox); the runtime one-shot reply mailbox is issue #150, to land as
@@ -481,20 +481,20 @@ replacement for `rng` ships before `rng` is deleted.
   `ParkRequest.mailbox` variant shares that registration and resumes the
   driver on a deadline so `receive-for` returns the timeout as a value.
 - **The root has no mailbox.** `task.receive`, `task.receive-for`, and
-  `task.self` are `'domain` at the root; `task.send` works anywhere. A root
+  `task.self` are `` `domain `` at the root; `task.send` works anywhere. A root
   mailbox is a separate, additive feature if ever wanted.
 - **Mailbox words are `task.`-qualified only.** No bare `receive`.
 - **`agent.call` pops the top of the result stack as the reply.** The
   alternative, keeping the whole result stack, breaks `(100 rand.int)` on the
   next call because the drawn value would sit above the generator state. So
   call quotations are `( state... -- state... result )` and an empty result
-  stack is `'domain`; `agent.send` keeps everything.
-- **`agent.call-for` raises `'timeout`.** Chosen over returning a
+  stack is `` `domain ``; `agent.send` keeps everything.
+- **`agent.call-for` raises `` `timeout ``.** Chosen over returning a
   `task.await-for`-style envelope so the call family has one result shape; a
   bounded call is `agent.call` with a deadline.
 - **`task.receive` returns the sent value, not an envelope.** With the
   one-shot reply moved to #150 the runtime fills no envelope field, so a
-  `{'value v}` wrapper would be ceremony on every receive. A composed caller
+  `{value v}` wrapper would be ceremony on every receive. A composed caller
   that needs a reply address puts it in the value it sends. `task.send` takes
   the value below the address (`( value address -- )`), matching
   `(rand.int) rng task.send` and the `agent` words.
@@ -515,7 +515,7 @@ replacement for `rng` ships before `rng` is deleted.
 - **No service constructor and no service in module bodies.** Ownership is
   already "nearest enclosing scope, else session root"; user code starts
   services and names them with `set`. `@spawn` in a construction body is
-  `'domain`.
+  `` `domain ``.
 - **The construction refusal reaches any depth.** Not just the direct body
   (as `test` is restricted) but helper words the body calls and `@attempt`
   nested in the body, because the purpose is purity of construction, and a
@@ -544,7 +544,7 @@ replacement for `rng` ships before `rng` is deleted.
   alias differ only in validation and in which entries change; a comptime
   kind gives each its own error set without an unreachable arm.
 - **Loosen rather than preserve.** `*module*` in a body returns the name
-  and traces inside a body are qualified, because keeping the old `'domain`
+  and traces inside a body are qualified, because keeping the old `` `domain ``
   and plain spelling would have cost a published-state branch for no
   observable benefit.
 
@@ -555,31 +555,31 @@ All `cmd` assertions run the built binary as
 echoed final stack or the error dictionary on stderr.
 
 - **DoD-1 — unit constructors are refused during construction, at any depth**
-  - **Assert**: `@spawn`, `@give`, and `@each` fail with `'domain` while a
+  - **Assert**: `@spawn`, `@give`, and `@each` fail with `` `domain `` while a
     module construction is open, including inside a helper word the body
     defines and inside an `@attempt` nested in the body, and nothing registers.
-  - **Verify by** `cmd`: `[] ([] (1) @spawn pop (1) 'x def) 'm @defm m.x`;
-    `[] ([] [] (1) @give pop) 'm @defm`; `[] ([1] [] (1) @each pop) 'm @defm`;
-    `[] (([] (1) @spawn) 'start def start) 'm @defm`;
-    `[] ([] ([] (1) @spawn) @attempt pop) 'm @defm`; then `m.x` alone.
-  - **Expected**: each construction exits nonzero with `'kind 'domain` and a
+  - **Verify by** `cmd`: ``[] ([] (1) @spawn pop (1) `x def) `m @defm m.x``;
+    ``[] ([] [] (1) @give pop) `m @defm``; ``[] ([1] [] (1) @each pop) `m @defm``;
+    ``[] (([] (1) @spawn) `start def start) `m @defm``;
+    ``[] ([] ([] (1) @spawn) @attempt pop) `m @defm``; then `m.x` alone.
+  - **Expected**: each construction exits nonzero with `` `kind `domain `` and a
     message naming `@spawn` or `@give` (the `@each` case names `@each` in its
-    trace); `m.x` alone is `'undefined-word`.
+    trace); `m.x` alone is `` `undefined-word ``.
   - **Traces to**: Milestone 1 — `refuseDuringConstruction` in
     `src/task_prims.zig` over `Unit.inModuleConstruction` in `src/machine.zig`.
 
 - **DoD-2 — a task survives `@attempt`**
   - **Assert**: a task spawned inside `@attempt` is alive after `@attempt`
     returns and completes normally.
-  - **Verify by** `cmd`: `[] ([] (300 clock.sleep 7) @spawn) @attempt 'ok at first task.await`.
-  - **Expected**: `{'ok [7]}`, exit 0.
+  - **Verify by** `cmd`: ``[] ([] (300 clock.sleep 7) @spawn) @attempt `ok at first task.await``.
+  - **Expected**: `{ok [7]}`, exit 0.
   - **Traces to**: Milestone 1 — `design/SPEC.md` scope rule; pinned by the
     new concurrency behavioral test.
 
 - **DoD-3 — a failing `@attempt` cancels nothing**
   - **Assert**: a task spawned inside a failing `@attempt` is still pending
     afterwards.
-  - **Verify by** `cmd`: `[] ([] (300 clock.sleep) @spawn pop 'domain error.new fail) @attempt pop task.pending len`.
+  - **Verify by** `cmd`: ``[] ([] (300 clock.sleep) @spawn pop `domain error.new fail) @attempt pop task.pending len``.
   - **Expected**: `1`.
   - **Traces to**: Milestone 1 — same.
 
@@ -594,27 +594,27 @@ echoed final stack or the error dictionary on stderr.
 
 - **DoD-4 — anonymous constructors are gone**
   - **Assert**: `@module`, `register`, and `invoke` are undefined words.
-  - **Verify by** `cmd`: `[] (1) @module`, `'register which`, and
-    `'invoke which` as three `-e` runs.
-  - **Expected**: each exits nonzero with `'kind 'undefined-word` naming the
+  - **Verify by** `cmd`: `[] (1) @module`, `` `register which ``, and
+    `` `invoke which `` as three `-e` runs.
+  - **Expected**: each exits nonzero with `` `kind `undefined-word `` naming the
     word.
   - **Traces to**: Milestone 2 — `src/module_prims.zig`.
 
 - **DoD-5 — `@defm` validates its name before running the body**
   - **Assert**: a reserved name fails before the body's own error can occur.
-  - **Verify by** `cmd`: `[] ("body ran" 'user error.new fail) 'core @defm`;
-    `[] (1 'x set) 'bad..name @defm`; `[] (1 'x set) 'dict @defm`;
-    `'wrong [] (1 'x set) @defm`.
-  - **Expected**: the first three are `'kind 'domain` (the first never
-    `'user`, the third naming the standard library); the last is `'kind
+  - **Verify by** `cmd`: ``[] ("body ran" `user error.new fail) `core @defm``;
+    ``[] (1 `x set) `bad..name @defm``; ``[] (1 `x set) `dict @defm``;
+    `` `wrong [] (1 `x set) @defm ``.
+  - **Expected**: the first three are `` `kind `domain `` (the first never
+    `` `user ``, the third naming the standard library); the last is `'kind
     'type` with `'word '@defm`.
   - **Traces to**: Milestone 2 — `defmWord` in `src/module_prims.zig`.
 
 - **DoD-6 — `type` has no module kind**
-  - **Assert**: no expression produces a value whose `type` is `'module`.
-  - **Verify by** `cmd`: `[] (1 'x set) 'm @defm m.x type`; `timeout 600
+  - **Assert**: no expression produces a value whose `type` is `` `module ``.
+  - **Verify by** `cmd`: ``[] (1 `x set) `m @defm m.x type``; `timeout 600
     zig build source-audit < /dev/null`.
-  - **Expected**: `'int`; the audit exits 0 with `module-type` absent from
+  - **Expected**: `` `int ``; the audit exits 0 with `module-type` absent from
     `design/formal/values.pant`.
   - **Traces to**: Milestone 2 — `src/value.zig`, `design/formal/values.pant`.
 
@@ -631,17 +631,17 @@ echoed final stack or the error dictionary on stderr.
 - **DoD-7 — composed request and reply round trip**
   - **Assert**: `agent.call`'s composition (a helper task as the reply
     mailbox) returns the server's answer.
-  - **Verify by** `cmd`: `(|a v| [] (task.receive) @spawn dup task.address {} 'value v put 'from rolldown put a task.send task.await 'ok at first) 'ask def [] (task.receive dup 'from at swap 'value at 1 + swap task.send) @spawn task.address 41 ask`.
+  - **Verify by** `cmd`: ``(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a task.send task.await `ok at first) `ask def [] (task.receive dup `from at swap `value at 1 + swap task.send) @spawn task.address 41 ask``.
   - **Expected**: `42`.
   - **Traces to**: Milestone 3 — `task.send`/`task.receive` in
     `src/task_prims.zig`; Milestone 4 ships the same composition as
     `agent.call`.
 
 - **DoD-8 — handles do not cross mailboxes**
-  - **Assert**: sending a value containing a task handle is `'type` and
+  - **Assert**: sending a value containing a task handle is `` `type `` and
     delivers nothing.
   - **Verify by** `cmd`: `[] (task.receive) @spawn dup task.address swap wrap task.send`.
-  - **Expected**: `'kind 'type`, exit nonzero, and the process exits
+  - **Expected**: `` `kind `type ``, exit nonzero, and the process exits
     promptly after the root scope cancels the receiver.
   - **Traces to**: Milestone 3 — send validation in `src/task_prims.zig`.
 
@@ -655,41 +655,41 @@ echoed final stack or the error dictionary on stderr.
   - **Traces to**: Milestone 3 — flat-list fast path in the handle check.
 
 - **DoD-10 — sending to a terminated task fails closed**
-  - **Assert**: `task.send` to a terminal task is `'io` with reason `'closed`.
+  - **Assert**: `task.send` to a terminal task is `` `io `` with reason `` `closed ``.
   - **Verify by** `cmd`: `[] (1) @spawn dup task.await pop task.address 1 swap task.send`.
-  - **Expected**: `'kind 'io` with `'data {'reason 'closed}`.
+  - **Expected**: `` `kind `io `` with `` `data {reason closed} ``.
   - **Traces to**: Milestone 3 — mailbox closure on terminal transition.
 
 - **DoD-11, DoD-12, DoD-13 — moved to issue #150.** A caller failing when its
-  server dies (`'dropped`), a dropped reply address failing the caller, and
+  server dies ( dropped ), a dropped reply address failing the caller, and
   self-call refusal are properties of the runtime one-shot reply mailbox,
   which this workstream does not build. Until then an unbounded composed call
   to a dead server hangs; `task.await-for` bounds it.
 
 - **DoD-14 — receive deadline**
   - **Assert**: `task.receive-for` on an empty mailbox returns the timeout
-    result after the deadline, and a delivered message as `{'ok value}`.
-  - **Verify by** `cmd`: `[] (50 task.receive-for) @spawn task.await 'ok at first 'err at 'kind at`; `[] (1000 task.receive-for) @spawn dup task.address 7 swap task.send task.await`.
-  - **Expected**: `'timeout`; `{'ok [{'ok 7}]}`.
+    result after the deadline, and a delivered message as `{ok value}`.
+  - **Verify by** `cmd`: ``[] (50 task.receive-for) @spawn task.await `ok at first `err at `kind at``; `[] (1000 task.receive-for) @spawn dup task.address 7 swap task.send task.await`.
+  - **Expected**: `` `timeout ``; `{ok [{ok 7}]}`.
   - **Traces to**: Milestone 3 — `task.receive-for`.
 
 - **DoD-15 — per-sender order**
   - **Assert**: messages from one sender arrive in send order.
   - **Verify by** `cmd`: `[] (3 (task.receive) times 3 pack) @spawn dup task.address 1 over task.send 2 over task.send 3 swap task.send task.await`.
-  - **Expected**: `{'ok [[1 2 3]]}`.
+  - **Expected**: `{ok [[1 2 3]]}`.
   - **Traces to**: Milestone 3 — mailbox queue.
 
 - **DoD-16 — `receive` outside a task is refused**
-  - **Assert**: `task.receive` and `task.self` at the root are `'domain`.
+  - **Assert**: `task.receive` and `task.self` at the root are `` `domain ``.
   - **Verify by** `cmd`: `task.receive` and `task.self` as separate `-e`
     runs.
-  - **Expected**: `'kind 'domain` for both.
+  - **Expected**: `` `kind `domain `` for both.
   - **Traces to**: Milestone 3 — `src/task_prims.zig`.
 
 - **DoD-17 — agent round trip advances state**
   - **Assert**: `agent.call` applies the quotation to the agent's stack and
     the state advances between calls.
-  - **Verify by** `cmd`: `[0 0] agent.start 'g set (100 rand.int) g agent.call (100 rand.int) g agent.call pair` and, separately, the explicit-state computation `[0 0] 100 rand.int swap 100 rand.int nip pair`.
+  - **Verify by** `cmd`: ``[0 0] agent.start `g set (100 rand.int) g agent.call (100 rand.int) g agent.call pair`` and, separately, the explicit-state computation `[0 0] 100 rand.int swap 100 rand.int nip pair`.
   - **Expected**: both runs echo the same two-element list, proving the
     agent's state advanced exactly as explicit threading would.
   - **Traces to**: Milestone 4 — `src/stdlib/agent.ecl`.
@@ -697,29 +697,29 @@ echoed final stack or the error dictionary on stderr.
 - **DoD-18 — agent error leaves state unchanged**
   - **Assert**: a failing quotation re-raises in the caller and the agent's
     stack is as before.
-  - **Verify by** `cmd`: `[7 0] agent.start 'g set [] ((1 0 div) g agent.call) @attempt 'err at 'kind at (dup) g agent.call pair`.
-  - **Expected**: `('domain [7 0])`.
+  - **Verify by** `cmd`: ``[7 0] agent.start `g set [] ((1 0 div) g agent.call) @attempt `err at `kind at (dup) g agent.call pair``.
+  - **Expected**: ``(`domain [7 0])``.
   - **Traces to**: Milestone 4 — `agent.serve` applying under a unit.
 
 - **DoD-19 — `within` and `rng` are gone**
   - **Assert**: `within`, `without`, and every `rng.*` name are undefined.
   - **Verify by** `cmd`: `(1) within`; `5 rng.int`.
-  - **Expected**: `'kind 'undefined-word` for both; the second names module
+  - **Expected**: `` `kind `undefined-word `` for both; the second names module
     `rng`.
   - **Traces to**: Milestone 5 — `src/module_prims.zig`, `src/stdlib.zig`.
 
 - **DoD-20 — `@defm` rejects a leftover stack**
   - **Assert**: a construction body that leaves values on its stack is
-    `'domain` and registers nothing.
-  - **Verify by** `cmd`: `[] (1 (2) 'x def) 'm @defm m.x`.
-  - **Expected**: `'kind 'domain` from `@defm`; `m.x` alone in a second run
-    is `'undefined-word`.
+    `` `domain `` and registers nothing.
+  - **Verify by** `cmd`: ``[] (1 (2) `x def) `m @defm m.x``.
+  - **Expected**: `` `kind `domain `` from `@defm`; `m.x` alone in a second run
+    is `` `undefined-word ``.
   - **Traces to**: Milestone 5 — `@defm` completion check.
 
 - **DoD-21 — replacement keeps no state**
   - **Assert**: re-registering a module publishes new code and nothing else
     carries over.
-  - **Verify by** `cmd`: `[] ((1) 'x def) 'm @defm [] ((2) 'x def) 'm @defm m.x`.
+  - **Verify by** `cmd`: ``[] ((1) `x def) `m @defm [] ((2) `x def) `m @defm m.x``.
   - **Expected**: `2`.
   - **Traces to**: Milestone 5 — registration as name → generation.
 
@@ -733,9 +733,9 @@ echoed final stack or the error dictionary on stderr.
 
 - **DoD-23 — `rand.deal` draws distinct values and checks its domain**
   - **Assert**: `deal` returns `count` distinct ints below `pool`, and
-    `count > pool` is `'domain`.
+    `count > pool` is `` `domain ``.
   - **Verify by** `cmd`: `[42 0] 4 8 rand.deal nip distinct len` and `[42 0] 9 8 rand.deal`.
-  - **Expected**: `4`; then `'kind 'domain`.
+  - **Expected**: `4`; then `` `kind `domain ``.
   - **Traces to**: Milestone 5 — `src/stdlib/rand.zig`.
 
 - **DoD-24 — spec and models agree with the tree**
@@ -765,36 +765,36 @@ echoed final stack or the error dictionary on stderr.
   - **Traces to**: Milestone 5.
 
 - **DoD-27 — a bounded agent call times out and the agent survives**
-  - **Assert**: `agent.call-for` past its deadline raises `'timeout` in the
+  - **Assert**: `agent.call-for` past its deadline raises `` `timeout `` in the
     caller, and the agent still answers afterwards.
-  - **Verify by** `cmd`: `[7 0] agent.start 'g set [] ((100 clock.sleep 1) g 20 agent.call-for) @attempt 'err at 'kind at (dup) g agent.call pair`.
-  - **Expected**: `('timeout [7 0])`; the late quotation's `1` is popped as its
+  - **Verify by** `cmd`: ``[7 0] agent.start `g set [] ((100 clock.sleep 1) g 20 agent.call-for) @attempt `err at `kind at (dup) g agent.call pair``.
+  - **Expected**: ``(`timeout [7 0])``; the late quotation's `1` is popped as its
     unread reply, so the state is unchanged either way.
   - **Traces to**: Milestone 4 — `agent.call-for`.
 
 - **DoD-28 — a directly spawned server is cancellable through its handle**
   - **Assert**: `agent.serve` spawned with `@spawn` serves calls through its
-    address and ends with `'cancelled` when its handle is cancelled.
-  - **Verify by** `cmd`: `[[7 0]] (agent.serve) @spawn dup task.address 'g set (dup) g agent.call swap dup task.cancel task.await 'err at 'kind at`.
-  - **Expected**: `[7 0] 'cancelled`.
+    address and ends with `` `cancelled `` when its handle is cancelled.
+  - **Verify by** `cmd`: ``[[7 0]] (agent.serve) @spawn dup task.address `g set (dup) g agent.call swap dup task.cancel task.await `err at `kind at``.
+  - **Expected**: ``[7 0] `cancelled``.
   - **Traces to**: Milestone 4 — `agent.serve`.
 
 - **DoD-29 — a reload is seen through a cached qualified call site**
   - **Assert**: a word whose body is one `m.x` occurrence observes each
-    reload of `m`, and `'undefined-word` after removal.
-  - **Verify by** `cmd`: `[] ((1) 'x def) 'm @defm (m.x) 'via def via [] ((2) 'x def) 'm @defm via via 'm undefm [] ((4) 'x def) 'm @defm via`.
+    reload of `m`, and `` `undefined-word `` after removal.
+  - **Verify by** `cmd`: ``[] ((1) `x def) `m @defm (m.x) `via def via [] ((2) `x def) `m @defm via via `m undefm [] ((4) `x def) `m @defm via``.
   - **Expected**: `1 2 2 4`.
   - **Traces to**: Milestone 6 — `superseded` in `src/modules.zig`, read by
     `tryEnterCurrent` from the call-site cache in `src/machine.zig`.
 
 - **DoD-30 — a construction body knows its name**
   - **Assert**: `*module*` inside a `@defm` body is the name being built.
-  - **Verify by** `cmd`: `[] (*module* io.pp) 'named @defm`.
-  - **Expected**: stdout `'named`, exit 0.
+  - **Verify by** `cmd`: ``[] (*module* io.pp) `named @defm``.
+  - **Expected**: stdout `` `named ``, exit 0.
   - **Traces to**: Milestone 6 — named-at-birth image; pinned by `test/e2e.zig`.
 
 - **DoD-31 — `undefm` removes a module and `unmodule` is gone**
   - **Assert**: removal is spelled `undefm`.
-  - **Verify by** `cmd`: `[] ((7) 'peek def) 'm @defm 'm undefm [] (m.peek) @attempt 'err at 'kind at` and `'unmodule which`.
-  - **Expected**: `'undefined-word` for both.
+  - **Verify by** `cmd`: ``[] ((7) `peek def) `m @defm `m undefm [] (m.peek) @attempt `err at `kind at`` and `` `unmodule which ``.
+  - **Expected**: `` `undefined-word `` for both.
   - **Traces to**: Milestone 6 — `src/module_prims.zig`.

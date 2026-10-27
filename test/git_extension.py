@@ -70,24 +70,24 @@ def main():
             scratch.mkdir()
             module_map = caller / 'map'
             module_map.write_text(
-                "{'format 1 'local \"root\" 'scopes {\"root\" {'root "
+                "{format 1 local \"root\" scopes {\"root\" {root "
                 + json.dumps(str(extension.parent))
-                + " 'visible [] 'sources [] 'artifacts [{'path "
-                + json.dumps(extension.name) + " 'kind 'native 'exports [\"git\"]}]}}}"
+                + " visible [] sources [] artifacts [{path "
+                + json.dumps(extension.name) + " kind native exports [\"git\"]}]}}}"
             )
             origin = f'https://127.0.0.1:{server.server_port}'
 
             if args.application:
                 entry = args.application.resolve()
                 module_map.write_text(
-                    "{'format 1 'local \"application\" 'scopes {\"application\" {'root "
+                    "{format 1 local \"application\" scopes {\"application\" {root "
                     + json.dumps(str(entry.parents[2]))
-                    + " 'visible [\"native\"] 'sources [\"src/**/*.ecl\" "
+                    + " visible [\"native\"] sources [\"src/**/*.ecl\" "
                     + json.dumps(str(entry.relative_to(entry.parents[2])))
-                    + "] 'artifacts []} \"native\" {'root "
+                    + "] artifacts []} \"native\" {root "
                     + json.dumps(str(extension.parent))
-                    + " 'visible [] 'sources [] 'artifacts [{'path "
-                    + json.dumps(extension.name) + " 'kind 'native 'exports [\"git\"]}]}}}"
+                    + " visible [] sources [] artifacts [{path "
+                    + json.dumps(extension.name) + " kind native exports [\"git\"]}]}}}"
                 )
                 for name in ['ecl.pkg', 'ecl.lock', 'ecl.modules']:
                     (caller / name).write_text('corrupt caller state')
@@ -103,11 +103,11 @@ def main():
                 return
 
             def request(selector='commit', revision=commit, **overrides):
-                values = {'url': origin + '/repo.git', 'selector': "'" + selector,
+                values = {'url': origin + '/repo.git', 'selector': selector,
                           'revision': revision, 'ca-file': str(certs / 'ca.pem'),
                           'scratch': str(scratch), 'timeout-ms': 3000}
                 values.update(overrides)
-                return '{' + ' '.join("'" + key + ' ' + (value if key == 'selector' else json.dumps(value))
+                return '{' + ' '.join(key + ' ' + (value if key == 'selector' else json.dumps(value))
                                       for key, value in values.items()) + '}'
 
             def invoke(source, ok=True):
@@ -130,7 +130,7 @@ def main():
                     'git.snapshot [] port.open (|p| p git.fetch ' + req + ' port.begin (|x| '
                     'x git.output port.endpoint [] over 65536 port.read '
                     '(dup empty? not) (cat over 65536 port.read) while pop nip '
-                    "'cwd " + json.dumps(filename) + ' fs.create-bytes '
+                    "`cwd " + json.dumps(filename) + ' fs.create-bytes '
                     'x port.result x port.close) call p port.close) call'
                 )
 
@@ -159,7 +159,7 @@ def main():
             for overrides in [{'url': 1}, {'revision': []}, {'selector': 'branch'},
                               {'memory-bytes': -1}, {'unknown': 0}]:
                 diagnostic = invoke(fetch(request(**overrides), 'bad-request.tgz'), ok=False)
-                assert "'kind 'domain" in diagnostic, diagnostic
+                assert "kind domain" in diagnostic, diagnostic
 
             for overrides in [{'revision': 'f' * 40}, {'revision': commit[:8]},
                               {'ca-file': ''}, {'url': origin + '/auth.git'},
@@ -177,11 +177,11 @@ def main():
             run(['git', 'add', '.'], repo)
             run(['git', 'commit', '-m', 'large'], repo)
             run(['git', 'tag', 'large'], repo)
-            begin = 'git.snapshot [] port.open \'p set p git.fetch ' + request('tag', 'large') + ' port.begin \'x set '
+            begin = 'git.snapshot [] port.open `p set p git.fetch ' + request('tag', 'large') + ' port.begin `x set '
             invoke(begin + 'x git.output port.endpoint 1 port.read pop x port.cancel x port.close p port.close')
             invoke(begin + 'x git.output port.endpoint 1 port.read pop '
-                   'git.snapshot [] port.open \'q set q git.fetch ' + request() +
-                   ' port.begin \'y set y port.cancel y port.close q port.close '
+                   'git.snapshot [] port.open `q set q git.fetch ' + request() +
+                   ' port.begin `y set y port.cancel y port.close q port.close '
                    'x port.cancel x port.close p port.close')
             # Reuse a resource after successful operations and join all closes.
             for number in range(3):
@@ -189,25 +189,25 @@ def main():
             repeated = ' '.join(fetch(request(), f'same-session-{number}.tgz') for number in range(3))
             assert invoke(repeated).strip() == ' '.join([json.dumps(commit)] * 3)
             concurrent = (
-                '[] (' + fetch(request(), 'concurrent-a.tgz') + ') @spawn \'a set '
-                '[] (' + fetch(request(), 'concurrent-b.tgz') + ') @spawn \'b set '
-                "a task.await 'ok at first b task.await 'ok at first"
+                '[] (' + fetch(request(), 'concurrent-a.tgz') + ') @spawn `a set '
+                '[] (' + fetch(request(), 'concurrent-b.tgz') + ') @spawn `b set '
+                "a task.await `ok at first b task.await `ok at first"
             )
             assert invoke(concurrent).strip() == ' '.join([json.dumps(commit)] * 2)
             recovered = (
                 '[] (' + fetch(request(**{'ca-file': ''}), 'untrusted.tgz') +
-                ") @attempt 'err at 'kind at " + fetch(request(), 'trusted.tgz')
+                ") @attempt `err at `kind at " + fetch(request(), 'trusted.tgz')
             )
-            assert invoke(recovered).strip() == "'io " + json.dumps(commit)
+            assert invoke(recovered).strip() == "io " + json.dumps(commit)
             # Cancellation while a network read is stalled remains joined.
-            begin = 'git.snapshot [] port.open \'p set p git.fetch ' + request(url=origin + '/stalled-cancel.git', **{'timeout-ms': 30000}) + ' port.begin \'x set '
+            begin = 'git.snapshot [] port.open `p set p git.fetch ' + request(url=origin + '/stalled-cancel.git', **{'timeout-ms': 30000}) + ' port.begin `x set '
             # Only this request can signal cancel_stalled. EOF releases ECL from
             # io.stdin after the server enters its stalled handler. Both the
             # handler wait and request timeout exceed the child's exit budget.
             with subprocess.Popen(
                 [binary, '--module-map', str(module_map), '-e',
                  begin + "io.stdin pop x port.cancel [] (x port.result) @attempt "
-                 "'err at 'kind at x port.close p port.close"],
+                 "`err at `kind at x port.close p port.close"],
                 cwd=caller, env={**os.environ, 'ECL_WORKERS': '4'},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True,
@@ -217,7 +217,7 @@ def main():
                     assert child.poll() is None, 'snapshot exited before cancellation'
                     stdout, stderr = child.communicate(input='', timeout=15)
                     assert child.returncode == 0, (child.returncode, stdout, stderr)
-                    assert stdout.strip() == "'cancelled", (stdout, stderr)
+                    assert stdout.strip() == "cancelled", (stdout, stderr)
                     assert 'ThreadSanitizer' not in stderr, stderr
                     assert list(scratch.iterdir()) == [], 'scratch survived joined cancellation'
                 finally:

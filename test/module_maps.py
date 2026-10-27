@@ -27,15 +27,15 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
     maps.mkdir()
     (maps / "src").mkdir()
     complete = (
-        "{'format 1 'local \"local\" 'scopes {\"local\" "
-        "{'root \".\" 'visible [] 'sources [\"src/*.ecl\"] 'artifacts []}}}"
+        "{format 1 local \"local\" scopes {\"local\" "
+        "{root \".\" visible [] sources [\"src/*.ecl\"] artifacts []}}}"
     )
     (maps / "complete").write_text(complete)
     # A source with observable side effects is inspected, never executed.
     (maps / "src" / "entry.ecl").write_text(
-        "'cwd \"executed\" \"bad\" fs.create-text [] () 'localmod @defm"
+        "`cwd \"executed\" \"bad\" fs.create-text [] () `localmod @defm"
     )
-    (maps / "reference").write_text("{'format 1 'map \"complete\"}")
+    (maps / "reference").write_text("{format 1 map \"complete\"}")
     for path in ["maps/complete", "maps/reference"]:
         result = run("check-map", path)
         assert result.returncode == 0, result.stderr
@@ -43,14 +43,14 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
     assert not (root / "executed").exists()
 
     # A not-yet-published document uses its eventual path as the relative base.
-    candidate = complete.replace("'root \".\"", "'root \"..\"")
+    candidate = complete.replace("root \".\"", "root \"..\"")
     result = run("check-map", "--document", "maps/future/ecl.modules", "-", input_text=candidate)
     assert result.returncode == 0, result.stderr
     assert not (maps / "future").exists()
     assert not (root / "executed").exists()
     result = run("check-map", "--document", "maps/future/ecl.modules", "-", input_text="broken")
     assert result.returncode == 1 and "invalid module map" in result.stderr
-    reference = "{'format 1 'map \"complete\"}"
+    reference = "{format 1 map \"complete\"}"
     result = run("check-map", "--document", "maps/unpublished", "-", input_text=reference)
     assert result.returncode == 0, result.stderr
     result = run("check-map", "--document", "maps/unpublished", "-", input_text=reference.replace("complete", "reference"))
@@ -60,12 +60,12 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
 
     # Validation discovers new sources with the same rules as startup.
     duplicate = maps / "src" / "duplicate.ecl"
-    duplicate.write_text("[] () 'localmod @defm")
+    duplicate.write_text("[] () `localmod @defm")
     result = run("check-map", "maps/complete")
     assert result.returncode == 1 and "invalid module map" in result.stderr
     duplicate.unlink()
 
-    (maps / "chain").write_text("{'format 1 'map \"reference\"}")
+    (maps / "chain").write_text("{format 1 map \"reference\"}")
     for path in ["maps/chain", "ecl.modules", "missing"]:
         result = run("check-map", path)
         assert result.returncode == 1 and "invalid module map" in result.stderr

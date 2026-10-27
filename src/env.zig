@@ -115,7 +115,7 @@ pub const ValidatedEffect = struct {
         const count: usize = @intCast(effect_header.length());
         if (count != separator_index + 2) return false;
         const after = list.atUnchecked(.{ .list = effect_header }, separator_index + 1);
-        return after == .word and std.mem.eql(u8, intern.get(after.word.name), lexer.row_token);
+        return after == .symbol and std.mem.eql(u8, intern.get(after.symbol.name), lexer.row_token);
     }
     pub const ParseProgress = poll.Progress(?ValidatedEffect);
     pub const ParseCursor = struct {
@@ -136,8 +136,8 @@ pub const ValidatedEffect = struct {
                 } };
             }
             const atom = list.atUnchecked(.{ .list = self.header }, self.index);
-            if (atom != .word) return .{ .complete = null };
-            if (atom.word.name == self.separator) {
+            if (atom != .symbol) return .{ .complete = null };
+            if (atom.symbol.name == self.separator) {
                 if (self.split != null) return .{ .complete = null };
                 self.split = self.index;
             }
@@ -522,7 +522,7 @@ pub const BindingCell = struct {
     /// Any other root that changes is a module image under construction. Its
     /// constructor reads it as the session's definer does, and a task that
     /// constructor spawned reads it through counted leases
-    /// (`Scope.isUnderConstruction`), so no pin keeps its snapshots.
+    /// (Scope.isUnderConstruction), so no pin keeps its snapshots.
     fn replace(
         self: *BindingCell,
         allocator: std.mem.Allocator,
@@ -2249,7 +2249,7 @@ pub const BuildingEnv = struct {
         var tokens: [token_count]value.Value = undefined;
         for (effect.tokens, &tokens) |token, *destination| {
             const id = try intern.intern(token);
-            destination.* = .{ .word = .{ .name = id } };
+            destination.* = .{ .symbol = .{ .name = id } };
         }
         const effect_value = try list.fromValuesGeneric(core.allocator, &tokens);
         return .{

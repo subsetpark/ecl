@@ -514,7 +514,7 @@ pub fn symbolField(
     dictionary: Value,
     key: u32,
 ) error{OutOfMemory}!?Value {
-    return getWithAllocator(allocator, dictionary, .{ .symbol = key }) catch |err| switch (err) {
+    return getWithAllocator(allocator, dictionary, .{ .symbol = .{ .name = key } }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.NotADict => unreachable,
     };
@@ -539,7 +539,7 @@ pub fn valueAt(header: *DictHandle, index: usize) Value {
 fn dictHeader(dictionary: Value) error{NotADict}!*DictHandle {
     return switch (dictionary) {
         .dict => |header| header,
-        .int, .float, .char, .symbol, .word, .list, .task, .port, .address => error.NotADict,
+        .int, .float, .char, .symbol, .list, .task, .port, .address => error.NotADict,
     };
 }
 
@@ -565,8 +565,8 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.deinit();
     const releases = cleanup.domain();
     const dictionary = try fromPairs(allocator, releases, &.{
-        .{ .{ .int = 1 }, .{ .word = .{ .name = 10 } } },
-        .{ .{ .float = 2.5 }, .{ .word = .{ .name = 20 } } },
+        .{ .{ .int = 1 }, .{ .symbol = .{ .name = 10 } } },
+        .{ .{ .float = 2.5 }, .{ .symbol = .{ .name = 20 } } },
     });
     cleanup.releaseValue(dictionary);
 
@@ -584,7 +584,7 @@ fn lookupFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.releaseValue(stored_key);
     const query_key = try list.fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(query_key);
-    const dictionary = try fromPairs(allocator, releases, &.{.{ stored_key, .{ .word = .{ .name = 10 } } }});
+    const dictionary = try fromPairs(allocator, releases, &.{.{ stored_key, .{ .symbol = .{ .name = 10 } } }});
     defer cleanup.releaseValue(dictionary);
     _ = try getWithAllocator(allocator, dictionary, query_key);
 }

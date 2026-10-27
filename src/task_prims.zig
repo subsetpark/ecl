@@ -25,15 +25,15 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 pub const words = [_]env.BuiltinWord{
     .{ .name = "await", .primitive = await, .effect = "task -- result", .doc = "( task -- result ) Wait for a task and return its success or error result." },
     .{ .name = "cancel", .primitive = cancel, .effect = "task --", .doc = "( task -- ) Request cancellation of a task, doing nothing if it is already complete." },
-    .{ .name = "cancel-self", .primitive = cancelSelf, .effect = "--", .doc = "( -- ) Request cancellation of the current task, as task.cancel does with its handle; it is observed at the next safe point. 'domain outside a task." },
+    .{ .name = "cancel-self", .primitive = cancelSelf, .effect = "--", .doc = "( -- ) Request cancellation of the current task, as task.cancel does with its handle; it is observed at the next safe point. `domain outside a task." },
     .{ .name = "pending", .primitive = tasks, .effect = "-- tasks", .doc = "( -- tasks ) Return pending descendant tasks in deterministic spawn order." },
     .{ .name = "await-any", .primitive = awaitAny, .effect = "tasks -- index result", .doc = "( tasks -- index result ) Wait for any task in a nonempty list and return its index and result." },
     .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "( task milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a task result." },
     .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "( task -- address ) Return the address of a task's mailbox. Two addresses of one task match; an address never reaches the task's result." },
-    .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "( -- address ) Return the address of the executing task's own mailbox. 'domain outside a task." },
-    .{ .name = "send", .primitive = send, .effect = "value address --", .doc = "( value address -- ) Queue a value in the mailbox an address names, parking while it holds 16 messages. 'io with 'reason 'closed once the task has ended; 'type for a value containing a task handle." },
-    .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "( -- value ) Take the oldest message from the executing task's mailbox, parking until one arrives. 'domain outside a task." },
-    .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "( milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a message: {'ok value}, or {'err {'kind 'timeout}} when none arrives. 'domain outside a task." },
+    .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "( -- address ) Return the address of the executing task's own mailbox. `domain outside a task." },
+    .{ .name = "send", .primitive = send, .effect = "value address --", .doc = "( value address -- ) Queue a value in the mailbox an address names, parking while it holds 16 messages. `io with `reason `closed once the task has ended; `type for a value containing a task handle." },
+    .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "( -- value ) Take the oldest message from the executing task's mailbox, parking until one arrives. `domain outside a task." },
+    .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "( milliseconds -- result ) Wait up to a nonnegative number of milliseconds for a message: {ok value}, or {err {kind timeout}} when none arrives. `domain outside a task." },
 };
 
 fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
@@ -412,7 +412,7 @@ const SendDriver = struct {
             .closed => {
                 const reason = try intern.intern("closed");
                 const failure = evaluator.fail(.io, "task.send target has ended and its mailbox is closed");
-                evaluator.addErrorReason(.{ .symbol = reason });
+                evaluator.addErrorReason(.{ .symbol = .{ .name = reason } });
                 return failure;
             },
             .full => {

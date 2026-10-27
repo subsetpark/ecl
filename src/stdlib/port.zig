@@ -29,7 +29,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "shutdown", .doc = "( resource -- ) Perform registered graceful shutdown and join cleanup.", .primitive = shutdown },
     .{ .name = "close", .doc = "( port -- ) Abort a resource or exchange and join its cleanup. Idempotent.", .primitive = close },
     .{ .name = "await", .doc = "( exchange -- ) Observe successful exchange completion or its terminal failure without draining output.", .primitive = awaitExchange },
-    .{ .name = "result", .doc = "( exchange -- value ) Wait and claim an exchange result exactly once. Later claims raise 'contract.", .primitive = result },
+    .{ .name = "result", .doc = "( exchange -- value ) Wait and claim an exchange result exactly once. Later claims raise `contract.", .primitive = result },
 };
 
 fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {
@@ -213,8 +213,8 @@ const ReceiveDriver = struct {
         evaluator: *machine.Machine,
         pub fn prepare(self: *@This(), value: Value) Error!Value {
             return dict.fromUniquePairs(self.evaluator.allocator(), self.evaluator.releaseDomain(), &.{
-                .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("message") } },
-                .{ .{ .symbol = try intern.intern("value") }, value },
+                .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("message") } } },
+                .{ .{ .symbol = .{ .name = try intern.intern("value") } }, value },
             });
         }
         pub fn release(self: *@This(), value: Value) void {
@@ -234,7 +234,7 @@ const ReceiveDriver = struct {
         switch (delivery) {
             .pending => try evaluator.park(.{ .external = self.queue.source() }),
             .failed => |failure| return transportFailure(evaluator, failure),
-            .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern("eof") } }})),
+            .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("eof") } } }})),
             .message => |event| return output.output(event),
         }
         return evaluator.afterStep();

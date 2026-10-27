@@ -7,7 +7,6 @@ pub const Tag = enum(u8) {
     float,
     char,
     symbol,
-    word,
     list,
     dict,
     task,
@@ -95,21 +94,25 @@ pub const DictPayload = struct {
     hashes: *ListHandle,
 };
 
-/// A word occurrence: its interned name, and its name's slot in the root its
-/// text was written in. The slot rides here rather than on the enclosing
-/// quotation because a word is the unit that resolves — which is what makes
-/// splicing work, since `cat` copies `Value`s and each token keeps the slot it
-/// was linked to. It costs nothing: `Value` is pinned at 16 bytes and the
-/// `word` variant used four of its eight payload bytes.
-pub const WordRef = struct {
+/// A symbol: its interned name, and — when it was read as source — its
+/// name's slot in the root its text was written in. The slot rides here
+/// rather than on the enclosing quotation because a symbol occurrence is the
+/// unit that resolves when its list runs — which is what makes splicing work,
+/// since `cat` copies `Value`s and each token keeps the slot it was linked
+/// to. The slot is resolution metadata, never identity: equality, hashing,
+/// and printing ignore it, and a zero slot links lazily where it is run. It
+/// costs nothing: `Value` is pinned at 16 bytes and the name uses four of
+/// its eight payload bytes.
+pub const Symbol = struct {
     name: u32,
     /// `env.SlotId` as a bare integer, kept untyped here so `value.zig` stays
-    /// free of any dependency on the environment. Zero is a word linked to
-    /// nothing, which only the locals backend's reserved words are.
+    /// free of any dependency on the environment. Zero is a symbol linked to
+    /// nothing: every runtime-built symbol, and the locals backend's reserved
+    /// words.
     slot: u32 = 0,
 };
 
-/// How a producer of word occurrences links each one to its name's slot in
+/// How a producer of symbol occurrences links each one to its name's slot in
 /// the root it writes into. Carried by value through the reader so that
 /// neither the reader nor `value.zig` depends on the environment. The
 /// context is two opaque words the link function alone interprets.
@@ -130,8 +133,7 @@ pub const Value = union(Tag) {
     int: i64,
     float: f64,
     char: u32,
-    symbol: u32,
-    word: WordRef,
+    symbol: Symbol,
     list: *ListHandle,
     dict: *DictHandle,
     task: *TaskHandle,
@@ -144,7 +146,7 @@ pub const Value = union(Tag) {
 
     pub fn heapHeader(self: Value) ?*Header {
         return switch (self) {
-            .int, .float, .char, .symbol, .word => null,
+            .int, .float, .char, .symbol => null,
             .list => |header| @import("heap.zig").headerFromList(header),
             .dict => |header| @import("heap.zig").headerFromDict(header),
             .task => |header| @import("heap.zig").headerFromTask(header),

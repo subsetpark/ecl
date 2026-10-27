@@ -1209,7 +1209,7 @@ fn dictSymbol(
     const dict = @import("dict.zig");
     const key = try intern.intern(name);
     const found = (try dict.symbolField(allocator, dictionary, key)).?;
-    return intern.get(found.symbol);
+    return intern.get(found.symbol.name);
 }
 
 test "invocation effects: completion owns immediate deferred nested and failing calls" {
@@ -1381,7 +1381,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     defer sealed.deinit();
     _ = try modules.testing.register(registry, &sealed);
 
-    try Probe.runOk(&runtime, "'task.pending probe.reflect 99");
+    try Probe.runOk(&runtime, "`task.pending probe.reflect 99");
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);
     try Probe.runOk(&runtime, "pop");
 
@@ -1424,7 +1424,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     try Probe.runOk(&runtime, "[] (probe.forever) @spawn dup 0 task.await-for pop dup task.cancel task.await");
     var cancelled = try runtime.stackDisplay();
     defer cancelled.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, cancelled.bytes(), "'kind 'cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cancelled.bytes(), "kind cancelled") != null);
 }
 test "port writes share the remaining turn allowance with boxed byte encoding" {
     const Counts = struct {
@@ -1502,7 +1502,7 @@ test "failed units roll back stack while definitions survive" {
     var session = try Session.init(allocator, &.{}, runtime_inputs2.inputs(.{}), .default, .evaluate);
     defer session.deinit();
     try std.testing.expect((try session.runUnit("<test>", "10")) == .ok);
-    const failed = (try session.runUnit("<test>", "(2 *) 'double def 20 + missing")).err;
+    const failed = (try session.runUnit("<test>", "(2 *) `double def 20 + missing")).err;
     session.release(failed);
     try std.testing.expectEqual(@as(usize, 1), session.stackItems().len);
     try std.testing.expectEqual(@as(i64, 10), session.stackItems()[0].int);
@@ -1556,14 +1556,14 @@ test "source-defined failures retain provenance after their unit" {
     defer runtime_inputs5.deinit();
     var session = try Session.init(allocator, &.{}, runtime_inputs5.inputs(.{}), .default, .evaluate);
     defer session.deinit();
-    try std.testing.expect((try session.runUnit("defs.ecl", "(1 0 div) 'boom def")) == .ok);
+    try std.testing.expect((try session.runUnit("defs.ecl", "(1 0 div) `boom def")) == .ok);
     const error_value = (try session.runUnit("call.ecl", "boom")).err;
     defer session.release(error_value);
     const rendered = try printer.toOwnedString(allocator, error_value);
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"defs.ecl\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "'word 'div") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "'trace ['div 'boom]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "word div") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "trace (div boom)") != null);
     const runtime_error = (try session.runUnit(
         "assembled.ecl",
         "1 0 (div) cons cons call",
@@ -1571,7 +1571,7 @@ test "source-defined failures retain provenance after their unit" {
     defer session.release(runtime_error);
     const runtime_rendered = try printer.toOwnedString(allocator, runtime_error);
     defer allocator.free(runtime_rendered);
-    try std.testing.expect(std.mem.indexOf(u8, runtime_rendered, "'source") == null);
+    try std.testing.expect(std.mem.indexOf(u8, runtime_rendered, "source") == null);
 }
 
 test "session: invalid native port limits fail initialization" {

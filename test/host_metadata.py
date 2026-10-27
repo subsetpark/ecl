@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix="ecl-host-metadata-") as temporary:
 
     assert run("host.cwd json.emit io.prin") == json.dumps(str(caller), ensure_ascii=False)
     assert run("host.executable json.emit io.prin") == json.dumps(str(binary))
-    (caller / "map").write_text("{'format 1 'local \"local\" 'scopes {\"local\" {'root \".\" 'visible [] 'sources [] 'artifacts []}}}")
-    assert run("{'args [\"check-map\" \"map\"] 'timeout-ms 5000} 'executable host.executable put proc.run 'term at 'code at") == "0"
+    (caller / "map").write_text("{format 1 local \"local\" scopes {\"local\" {root \".\" visible [] sources [] artifacts []}}}")
+    assert run("{args [\"check-map\" \"map\"] timeout-ms 5000} `executable host.executable put proc.run `term at `code at") == "0"
 
 print("public host process metadata: passed")

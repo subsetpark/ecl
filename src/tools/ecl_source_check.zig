@@ -154,8 +154,8 @@ fn terminalWord(
     const forms = parsed.values();
     if (forms.len == 0) return null;
     const last = forms[forms.len - 1];
-    if (last != .word) return null;
-    return ecl.intern.get(last.word.name);
+    if (last != .symbol) return null;
+    return ecl.intern.get(last.symbol.name);
 }
 
 fn isEclSource(entry: std.Io.Dir.Walker.Entry) bool {

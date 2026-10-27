@@ -140,13 +140,13 @@ test "clock: a manual clock starts at zero and moves only when the host advances
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{});
-    try expectDisplay(runtime, "clock.now", "{'monotonic 0}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 0}");
     try expectDisplay(runtime, "clock.now clock.elapsed", "0");
     try advance(runtime, 1500);
-    try expectDisplay(runtime, "clock.now", "{'monotonic 1500}");
-    try expectDisplay(runtime, "{'monotonic 500} clock.elapsed", "1000");
+    try expectDisplay(runtime, "clock.now", "{monotonic 1500}");
+    try expectDisplay(runtime, "{monotonic 500} clock.elapsed", "1000");
     try advance(runtime, 0);
-    try expectDisplay(runtime, "clock.now", "{'monotonic 1500}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 1500}");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
 }
 
@@ -156,14 +156,14 @@ test "clock: a manual clock refuses any advance that would leave its range and n
     const runtime = try fixture.open(.{});
     const max: u64 = std.math.maxInt(i64);
     try std.testing.expectError(error.Overflow, runtime.advanceManualClock(max + 1));
-    try expectDisplay(runtime, "clock.now", "{'monotonic 0}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 0}");
     try advance(runtime, max);
-    try expectDisplay(runtime, "clock.now", "{'monotonic 9223372036854775807}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 9223372036854775807}");
     // Cumulative overflow is refused too, and the reading is untouched.
     try std.testing.expectError(error.Overflow, runtime.advanceManualClock(1));
-    try expectDisplay(runtime, "clock.now", "{'monotonic 9223372036854775807}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 9223372036854775807}");
     try advance(runtime, 0);
-    try expectDisplay(runtime, "clock.now", "{'monotonic 9223372036854775807}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 9223372036854775807}");
 }
 
 test "clock: a deadline the clock cannot reach is refused before parking" {
@@ -172,9 +172,9 @@ test "clock: a deadline the clock cannot reach is refused before parking" {
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     // At reading zero the maximum duration is exactly reachable: the sleep
     // registers a timer entry and is then cancelled.
-    try runOk(runtime, "[] (9223372036854775807 clock.sleep) @spawn 'sleeper set");
+    try runOk(runtime, "[] (9223372036854775807 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
-    try expectDisplay(runtime, "sleeper dup task.cancel task.await 'err at 'kind at", "'cancelled");
+    try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
     try advance(runtime, 1);
     try expectError(runtime, "9223372036854775807 clock.sleep", .{
         .name = "unreachable sleep",
@@ -196,13 +196,13 @@ test "clock: a host clock refuses manual advancement and counts from Session sta
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 }, .clock = .{ .monotonic = .host } });
     try std.testing.expectError(error.HostClock, runtime.advanceManualClock(1));
-    try expectDisplay(runtime, "clock.now 'monotonic at 0 >=", "1");
+    try expectDisplay(runtime, "clock.now `monotonic at 0 >=", "1");
     try expectDisplay(runtime, "clock.now clock.elapsed 0 >=", "1");
     // A host timestamp is i96 nanoseconds, so the maximum millisecond
     // duration is a reachable deadline: it registers before it is cancelled.
-    try runOk(runtime, "[] (9223372036854775807 clock.sleep) @spawn 'sleeper set");
+    try runOk(runtime, "[] (9223372036854775807 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
-    try expectDisplay(runtime, "sleeper dup task.cancel task.await 'err at 'kind at", "'cancelled");
+    try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
@@ -210,17 +210,17 @@ test "clock: wall time is inherited by spawned tasks and loaded modules" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .clock = .{ .monotonic = .manual, .wall = .{ .fixed = 42 } } });
-    try expectDisplay(runtime, "[] (clock.unix) @spawn task.await", "{'ok ({'unix 42})}");
-    try expectDisplay(runtime, "[] ((clock.unix) 'read def) 'wall @defm wall.read", "{'unix 42}");
+    try expectDisplay(runtime, "[] (clock.unix) @spawn task.await", "{ok ({unix 42})}");
+    try expectDisplay(runtime, "[] ((clock.unix) `read def) `wall @defm wall.read", "{unix 42}");
 }
 
 test "clock: a fixed wall clock returns the configured timestamp on every read" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .clock = .{ .monotonic = .manual, .wall = .{ .fixed = 1700000000000 } } });
-    try expectDisplay(runtime, "clock.unix", "{'unix 1700000000000}");
+    try expectDisplay(runtime, "clock.unix", "{unix 1700000000000}");
     try advance(runtime, 5000);
-    try expectDisplay(runtime, "clock.unix", "{'unix 1700000000000}");
+    try expectDisplay(runtime, "clock.unix", "{unix 1700000000000}");
     try expectDisplay(runtime, "clock.unix time.format", "\"2023-11-14T22:13:20.000Z\"");
 }
 
@@ -228,9 +228,9 @@ test "clock: an anchored wall clock advances with the manual monotonic clock" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .clock = .{ .monotonic = .manual, .wall = .{ .anchored = 1700000000000 } } });
-    try expectDisplay(runtime, "clock.unix", "{'unix 1700000000000}");
+    try expectDisplay(runtime, "clock.unix", "{unix 1700000000000}");
     try advance(runtime, 2500);
-    try expectDisplay(runtime, "clock.unix", "{'unix 1700000002500}");
+    try expectDisplay(runtime, "clock.unix", "{unix 1700000002500}");
     try expectDisplay(runtime, "clock.unix time.format", "\"2023-11-14T22:13:22.500Z\"");
     // The two domains stay distinct even when both are driven by one clock.
     try expectDisplay(runtime, "clock.now clock.unix match?", "0");
@@ -240,16 +240,16 @@ test "clock: sleep completes exactly when the manual clock reaches its deadline"
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] (100 clock.sleep clock.now) @spawn 'sleeper set");
+    try runOk(runtime, "[] (100 clock.sleep clock.now) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
     try advance(runtime, 99);
     // A zero deadline is decided at registration, so this observes the
     // sleeper's state without waiting on anything.
-    try expectDisplay(runtime, "sleeper 0 task.await-for 'err at 'kind at", "'timeout");
+    try expectDisplay(runtime, "sleeper 0 task.await-for `err at `kind at", "timeout");
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerEntryCount());
     try advance(runtime, 1);
-    try expectDisplay(runtime, "sleeper task.await", "{'ok ({'monotonic 100})}");
+    try expectDisplay(runtime, "sleeper task.await", "{ok ({monotonic 100})}");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
@@ -257,9 +257,9 @@ test "clock: a zero sleep parks and resumes without starting the timer thread" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{});
-    try expectDisplay(runtime, "0 clock.sleep 'awake", "'awake");
-    try expectDisplay(runtime, "[] (0 clock.sleep 1) @spawn task.await", "{'ok [1]}");
-    try expectDisplay(runtime, "clock.now", "{'monotonic 0}");
+    try expectDisplay(runtime, "0 clock.sleep `awake", "awake");
+    try expectDisplay(runtime, "[] (0 clock.sleep 1) @spawn task.await", "{ok [1]}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 0}");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
@@ -297,7 +297,7 @@ test "clock: cancellation before registration wakes the sleeper as cancelled" {
     // child a head start on registering its timer.
     const runtime = try fixture.open(.{});
     try runOk(runtime, "task.pending pop");
-    try expectDisplay(runtime, "[] (1000000 clock.sleep) @spawn dup task.cancel task.await 'err at 'kind at", "'cancelled");
+    try expectDisplay(runtime, "[] (1000000 clock.sleep) @spawn dup task.cancel task.await `err at `kind at", "cancelled");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
@@ -306,12 +306,12 @@ test "clock: cancellation after registration retires the timer entry" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] (1000000 clock.sleep) @spawn 'sleeper set");
+    try runOk(runtime, "[] (1000000 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
-    try expectDisplay(runtime, "sleeper dup task.cancel task.await 'err at 'msg at", "\"unit cancelled while sleeping\"");
+    try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `msg at", "\"unit cancelled while sleeping\"");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
     // The clock never moved: the wake came from cancellation alone.
-    try expectDisplay(runtime, "clock.now", "{'monotonic 0}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 0}");
 }
 
 test "clock: many sleepers wake by deadline across one advance" {
@@ -319,14 +319,14 @@ test "clock: many sleepers wake by deadline across one advance" {
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     // Seventy sleepers span more than one timer-heap chunk. Durations 1..70.
-    try runOk(runtime, "70 range (1 +) each (wrap (clock.sleep clock.now) @spawn) each 'sleepers set");
+    try runOk(runtime, "70 range (1 +) each (wrap (clock.sleep clock.now) @spawn) each `sleepers set");
     awaitTimerEntries(runtime, 70);
     try advance(runtime, 35);
-    try expectDisplay(runtime, "sleepers 35 take (task.await) each ({'ok [{'monotonic 35}]} match?) all?", "1");
-    try expectDisplay(runtime, "sleepers 35 drop (0 task.await-for 'err at 'kind at 'timeout match?) all?", "1");
+    try expectDisplay(runtime, "sleepers 35 take (task.await) each ({ok [{monotonic 35}]} match?) all?", "1");
+    try expectDisplay(runtime, "sleepers 35 drop (0 task.await-for `err at `kind at `timeout match?) all?", "1");
     try std.testing.expectEqual(@as(usize, 35), runtime.schedulerTimerEntryCount());
     try advance(runtime, 35);
-    try expectDisplay(runtime, "sleepers 35 drop (task.await) each ({'ok [{'monotonic 70}]} match?) all?", "1");
+    try expectDisplay(runtime, "sleepers 35 drop (task.await) each ({ok [{monotonic 70}]} match?) all?", "1");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
 
@@ -334,18 +334,18 @@ test "clock: a parked sleeper does not occupy the only worker" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] (1000000 clock.sleep) @spawn 'sleeper set");
+    try runOk(runtime, "[] (1000000 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
-    try expectDisplay(runtime, "[] (1 2 +) @spawn task.await", "{'ok [3]}");
-    try expectDisplay(runtime, "[] ((1) () while) @spawn dup 0 task.await-for 'err at 'kind at swap task.cancel", "'timeout");
-    try expectDisplay(runtime, "sleeper dup task.cancel task.await 'err at 'kind at", "'cancelled");
+    try expectDisplay(runtime, "[] (1 2 +) @spawn task.await", "{ok [3]}");
+    try expectDisplay(runtime, "[] ((1) () while) @spawn dup 0 task.await-for `err at `kind at swap task.cancel", "timeout");
+    try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
 }
 
 test "clock: await-for deadlines follow the same manual clock as sleep" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] ((1) () while) @spawn 'spinner set");
+    try runOk(runtime, "[] ((1) () while) @spawn `spinner set");
     // The root parks on the deadline; a helper advances the clock once the
     // timer entry exists, so the timeout fires at exactly 50 and never sooner.
     const Advancer = struct {
@@ -356,11 +356,11 @@ test "clock: await-for deadlines follow the same manual clock as sleep" {
         }
     };
     const helper = try std.Thread.spawn(.{}, Advancer.run, .{runtime});
-    try expectDisplay(runtime, "spinner 50 task.await-for 'err at 'kind at", "'timeout");
+    try expectDisplay(runtime, "spinner 50 task.await-for `err at `kind at", "timeout");
     helper.join();
-    try expectDisplay(runtime, "clock.now", "{'monotonic 50}");
+    try expectDisplay(runtime, "clock.now", "{monotonic 50}");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
-    try expectDisplay(runtime, "spinner dup task.cancel task.await 'err at 'kind at", "'cancelled");
+    try expectDisplay(runtime, "spinner dup task.cancel task.await `err at `kind at", "cancelled");
 }
 
 test "clock: a root unit sleeps through the same timer path" {
@@ -375,7 +375,7 @@ test "clock: a root unit sleeps through the same timer path" {
         }
     };
     const helper = try std.Thread.spawn(.{}, Advancer.run, .{runtime});
-    try expectDisplay(runtime, "5 clock.sleep clock.now", "{'monotonic 5}");
+    try expectDisplay(runtime, "5 clock.sleep clock.now", "{monotonic 5}");
     helper.join();
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
@@ -423,7 +423,7 @@ test "clock: calendar decomposition agrees with the standard library epoch oracl
         var source_buffer: [128]u8 = undefined;
         const source = try std.fmt.bufPrint(
             &source_buffer,
-            "{d} time.seconds time.from-unix time.to-utc ['year 'month 'day 'hour 'minute 'second] swap (swap at) partial each",
+            "{d} time.seconds time.from-unix time.to-utc [year month day hour minute second] swap (swap at) partial each",
             .{secs},
         );
         try expectDisplay(runtime, source, expected);

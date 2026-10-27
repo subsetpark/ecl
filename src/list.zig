@@ -41,8 +41,10 @@ pub const ListProfile = struct {
             .int => |integer| .{ .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int },
             .float => .{ .kind = .all_float },
             .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
-            .symbol => .{ .kind = .all_symbol },
-            .word, .list, .dict, .task, .port, .address => .{ .kind = .mixed },
+            // A linked occurrence keeps its slot, which the symbol leaf cannot
+            // hold; only unlinked symbols pack into one.
+            .symbol => |symbol| .{ .kind = if (symbol.slot == 0) .all_symbol else .mixed },
+            .list, .dict, .task, .port, .address => .{ .kind = .mixed },
         };
     }
 
@@ -513,7 +515,7 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
         .leaf_char1 => .{ .char = heap.chars8(header)[index] },
         .leaf_char2 => .{ .char = heap.chars16(header)[index] },
         .leaf_char4 => .{ .char = heap.chars32(header)[index] },
-        .leaf_symbol => .{ .symbol = heap.symbols(header)[index] },
+        .leaf_symbol => .{ .symbol = .{ .name = heap.symbols(header)[index] } },
         .dict, .task, .port, .address, .reserved_mask => unreachable,
     };
 }
@@ -532,7 +534,7 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
             => header,
             .dict, .task, .port, .address, .reserved_mask => error.NotAList,
         },
-        .int, .float, .char, .symbol, .word, .dict, .task, .port, .address => error.NotAList,
+        .int, .float, .char, .symbol, .dict, .task, .port, .address => error.NotAList,
     };
 }
 
@@ -551,7 +553,7 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.deinit();
     const child = try fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(child);
-    const parent = try fromValues(allocator, &.{ child, .{ .word = .{ .name = 7 } } });
+    const parent = try fromValues(allocator, &.{ child, .{ .symbol = .{ .name = 7 } } });
     defer cleanup.releaseValue(parent);
     const generic = try fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(generic);
@@ -583,8 +585,8 @@ test "blocking and resumable list construction share specialization behavior" {
         .{ .int = 1 },
         .{ .float = 2.5 },
         .{ .char = 'x' },
-        .{ .symbol = 7 },
-        .{ .word = .{ .name = 9 } },
+        .{ .symbol = .{ .name = 7 } },
+        .{ .symbol = .{ .name = 9 } },
     };
     const widened_ints = [_]Value{
         .{ .int = 1 },

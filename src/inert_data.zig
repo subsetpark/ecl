@@ -19,7 +19,7 @@ pub fn exactFields(item: Value, names: []const []const u8) ValidationError!*valu
         const key = dict.keyAt(header, index);
         if (key != .symbol) return error.Invalid;
         var known = false;
-        for (names) |name| known = known or std.mem.eql(u8, intern.get(key.symbol), name);
+        for (names) |name| known = known or std.mem.eql(u8, intern.get(key.symbol.name), name);
         if (!known) return error.Invalid;
     }
     for (names) |name| _ = try field(header, name);
@@ -29,7 +29,7 @@ pub fn exactFields(item: Value, names: []const []const u8) ValidationError!*valu
 pub fn field(header: *value.DictHandle, name: []const u8) ValidationError!Value {
     for (0..@as(usize, @intCast(header.length()))) |index| {
         const key = dict.keyAt(header, index);
-        if (key == .symbol and std.mem.eql(u8, intern.get(key.symbol), name))
+        if (key == .symbol and std.mem.eql(u8, intern.get(key.symbol.name), name))
             return dict.valueAt(header, index);
     }
     return error.Invalid;

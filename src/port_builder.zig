@@ -107,7 +107,7 @@ const State = struct {
                 if (symbol.cursor) |*cursor| switch (try cursor.advance()) {
                     .pending => return .pending,
                     .complete => |id| {
-                        self.pushOwned(.{ .symbol = id });
+                        self.pushOwned(.{ .symbol = .{ .name = id } });
                         if (symbol.owned) self.host.allocator().free(symbol.bytes);
                         self.phase = .idle;
                         return .complete;

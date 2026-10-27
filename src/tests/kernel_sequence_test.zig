@@ -64,7 +64,7 @@ test "sequence: len shape and ragged shape errors" {
     );
     try helper.expectError(.{
         .name = "len rejects dictionaries",
-        .source = "{'a 1} len",
+        .source = "{a 1} len",
         .kind = "type",
         .word = "len",
     });
@@ -78,7 +78,7 @@ test "sequence: len shape and ragged shape errors" {
 
 test "sequence: at gathers list string and dict indices" {
     try helper.expectStack(
-        "[10 20 30] [2 0] at \"abc\" [2 0] at {'a 7} 'a at " ++
+        "[10 20 30] [2 0] at \"abc\" [2 0] at {a 7} `a at " ++
             "[0 127 128 255] [3 1] at",
         "[30 10] \"ca\" 7 [255 127]",
     );
@@ -86,12 +86,12 @@ test "sequence: at gathers list string and dict indices" {
 
 test "sequence: flat generic gathers preserve whole cells repeats and narrowing" {
     try helper.expectStack(
-        "[\"λ😀\" [1 2] {'a 3} 7] [2 0 1 0] at " ++
+        "[\"λ😀\" [1 2] {a 3} 7] [2 0 1 0] at " ++
             "[\"unused\" 7 9] [2 1 2] at " ++
             "[\"unused\"] \"aλ\" cat [2 1] at " ++
             "[\"x\" [1]] [] at " ++
             "[\"x\" [1]] [0] 513 take at len",
-        "({'a 3} \"λ😀\" [1 2] \"λ😀\") [9 7 9] \"λa\" () 513",
+        "({a 3} \"λ😀\" [1 2] \"λ😀\") [9 7 9] \"λa\" () 513",
     );
     try helper.expectErrors(&.{
         .{ .name = "generic gather negative", .source = "[\"x\" [1]] [0 -1] at", .kind = "domain", .word = "at", .message = "at index is negative" },
@@ -119,7 +119,7 @@ test "sequence: where, in?, and find validate and search" {
         "[1 0 1 0] where [0 2 0] first-where [0 0] first-where [] first-where " ++
             "[1 -1] first-where [2 4] [1 2 3] in? [2 3 2] 2 find [2 3] 9 find " ++
             "[] 9 find [[1] [2]] [2] find \"abc\" \\b find " ++
-            "{'a 1} [{'a 1} {'b 2}] in? {'z 1} [{'a 1} {'b 2}] in?",
+            "{a 1} [{a 1} {b 2}] in? {z 1} [{a 1} {b 2}] in?",
         "[0 2] 1 2 0 0 [1 0] 0 2 0 1 1 1 0",
     );
     try helper.expectStack("[[1] [2]] [0] in?", "([0]\n [0])");
@@ -246,11 +246,11 @@ test "sequence: flip and reshape obey rectangular row-major semantics" {
     try helper.expectStack(
         "([\"a\" \"long\"] [\"bc\" \"d\"]) flip " ++
             "([\"a\" \"bc\"] [\"long\" \"d\"]) match? " ++
-            "([1 [] {'x 2}] [\"long\" [3 4] [[5] [6 7]]]) flip " ++
-            "([1 \"long\"] [[] [3 4]] [{'x 2} [[5] [6 7]]]) match? " ++
+            "([1 [] {x 2}] [\"long\" [3 4] [[5] [6 7]]]) flip " ++
+            "([1 \"long\"] [[] [3 4]] [{x 2} [[5] [6 7]]]) match? " ++
             "[\"ab\" \"cd\"] flip [\"ac\" \"bd\"] match? " ++
             "[] flip [] match? \"abc\" flip \"abc\" match? " ++
-            "[1 {'x 2}] flip [1 {'x 2}] match?",
+            "[1 {x 2}] flip [1 {x 2}] match?",
         "1 1 1 1 1 1",
     );
     try expectDisplay(
@@ -315,34 +315,34 @@ test "sequence: display indentation follows output columns and strings are not m
 }
 
 test "sequence: display expands structural dictionaries and str stays canonical" {
-    try expectRoundTripDisplay("{'type 'empty}", "{'type 'empty}");
+    try expectRoundTripDisplay("{type empty}", "{type empty}");
     try expectRoundTripDisplay(
-        "{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}}",
+        "{type concat left {type empty} right {type epsilon}}",
         "{\n" ++
-            "  'type 'concat\n" ++
-            "  'left {'type 'empty}\n" ++
-            "  'right {'type 'epsilon}\n" ++
+            "  type concat\n" ++
+            "  left {type empty}\n" ++
+            "  right {type epsilon}\n" ++
             "}",
     );
     try expectRoundTripDisplay(
-        "{'node {'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}}}",
+        "{node {type concat left {type empty} right {type epsilon}}}",
         "{\n" ++
-            "  'node {\n" ++
-            "    'type 'concat\n" ++
-            "    'left {'type 'empty}\n" ++
-            "    'right {'type 'epsilon}\n" ++
+            "  node {\n" ++
+            "    type concat\n" ++
+            "    left {type empty}\n" ++
+            "    right {type epsilon}\n" ++
             "  }\n" ++
             "}",
     );
     try expectRoundTripDisplay(
-        "{'matrix ((1 2) (3 4))}",
+        "{matrix ((1 2) (3 4))}",
         "{\n" ++
-            "  'matrix ([1 2]\n" ++
-            "           [3 4])\n" ++
+            "  matrix ([1 2]\n" ++
+            "          [3 4])\n" ++
             "}",
     );
     try helper.expectStack(
-        "{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}} str",
-        "\"{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}}\"",
+        "{type concat left {type empty} right {type epsilon}} str",
+        "\"{type concat left {type empty} right {type epsilon}}\"",
     );
 }

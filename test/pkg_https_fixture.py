@@ -46,7 +46,7 @@ def digest(payload: bytes) -> str:
 
 def requirement(version: str, url: str, hash_value: str) -> str:
     return (
-        "{'version \""
+        "{version \""
         + version
         + "\" 'source {'kind 'archive 'url \""
         + url
@@ -59,17 +59,17 @@ def requirement(version: str, url: str, hash_value: str) -> str:
 def manifest(name: str, version: str, requires: Mapping[str, str], *, source: bool = False) -> str:
     entries = " ".join(
         f'\"{key}\" '
-        + requires[key].replace("{'version", "{'package \"" + key + "\" 'version", 1)
+        + requires[key].replace("{version", "{package \"" + key + "\" 'version", 1)
         for key in sorted(requires)
     )
     return (
-        "{'format 2 'name \""
+        "{format 2 name \""
         + name
         + "\" 'version \""
         + version
         + ("\" 'sources [\"**/*\"] 'exports [\"" + name + "\"]" if source
            else "\" 'sources [] 'exports []")
-        + " 'requires {"
+        + " `requires {"
         + entries
         + "}}\n"
     )
@@ -87,8 +87,8 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
 
     c12_path = "/pkg/c-1.2.0.tgz"
     c15_path = "/pkg/c-1.5.0.tgz"
-    artifacts[c12_path] = package("c", "1.2.0", {}, {"c.ecl": "((12) 'answer def) 'c @defm\n"})
-    artifacts[c15_path] = package("c", "1.5.0", {}, {"c.ecl": "((15) 'answer def) 'c @defm\n"})
+    artifacts[c12_path] = package("c", "1.2.0", {}, {"c.ecl": "((12) `answer def) `c @defm\n"})
+    artifacts[c15_path] = package("c", "1.5.0", {}, {"c.ecl": "((15) `answer def) `c @defm\n"})
 
     a_path = "/pkg/a-1.0.0.tgz"
     b_path = "/pkg/b-1.0.0.tgz"
@@ -96,47 +96,47 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
         "a",
         "1.0.0",
         {"c": requirement("1.2.0", origin + c12_path, digest(artifacts[c12_path]))},
-        {"a.ecl": "((1) 'answer def) 'a @defm\n"},
+        {"a.ecl": "((1) `answer def) `a @defm\n"},
     )
     artifacts[b_path] = package(
         "b",
         "1.0.0",
         {"c": requirement("1.5.0", origin + c15_path, digest(artifacts[c15_path]))},
-        {"b.ecl": "((2) 'answer def) 'b @defm\n"},
+        {"b.ecl": "((2) `answer def) `b @defm\n"},
     )
 
     bad_path = "/pkg/bad-1.0.0.tgz"
-    artifacts[bad_path] = package("bad", "1.0.0", {}, {"bad.ecl": "(() 'noop def) 'bad @defm\n"})
+    artifacts[bad_path] = package("bad", "1.0.0", {}, {"bad.ecl": "(() `noop def) `bad @defm\n"})
 
     prefix_path = "/pkg/foo-1.0.0-prefix.tgz"
-    artifacts[prefix_path] = package("foo", "1.0.0", {}, {"bar.ecl": "(() 'noop def) 'bar @defm\n"})
+    artifacts[prefix_path] = package("foo", "1.0.0", {}, {"bar.ecl": "(() `noop def) `bar @defm\n"})
 
     nested_path = "/pkg/foo-1.0.0-nested.tgz"
-    artifacts[nested_path] = package("foo", "1.0.0", {}, {"nested/foo.ecl": "(() 'noop def) 'foo @defm\n"})
+    artifacts[nested_path] = package("foo", "1.0.0", {}, {"nested/foo.ecl": "(() `noop def) `foo @defm\n"})
 
     native_path = "/pkg/foo-1.0.0-native.tgz"
     artifacts[native_path] = package("foo", "1.0.0", {}, {"foo.eclmod": "fixture native payload\n"})
 
     missing_manifest_path = "/pkg/foo-1.0.0-missing-manifest.tgz"
-    artifacts[missing_manifest_path] = tgz({"foo.ecl": b"(() 'noop def) 'foo @defm\n"})
+    artifacts[missing_manifest_path] = tgz({"foo.ecl": b"(() `noop def) `foo @defm\n"})
 
     invalid_manifest_path = "/pkg/foo-1.0.0-invalid-manifest.tgz"
     artifacts[invalid_manifest_path] = tgz(
-        {"ecl.pkg": b"\xff", "foo.ecl": b"(() 'noop def) 'foo @defm\n"}
+        {"ecl.pkg": b"\xff", "foo.ecl": b"(() `noop def) `foo @defm\n"}
     )
 
     reserved_seal_path = "/pkg/foo-1.0.0-reserved-seal.tgz"
     artifacts[reserved_seal_path] = tgz(
         {
             "ecl.pkg": manifest("foo", "1.0.0", {}, source=True).encode("utf-8"),
-            "foo.ecl": b"(() 'noop def) 'foo @defm\n",
+            "foo.ecl": b"(() `noop def) `foo @defm\n",
             ".ecl-package.tgz": b"forged seal\n",
         }
     )
 
     artifacts["/pkg/foo-1.0.0-reserved-catalog.tgz"] = tgz({
         "ecl.pkg": manifest("foo", "1.0.0", {}, source=True).encode("utf-8"),
-        "foo.ecl": b"(() 'noop def) 'foo @defm\n",
+        "foo.ecl": b"(() `noop def) `foo @defm\n",
         ".ecl-package.catalog": b"forged catalog\n",
     })
 
@@ -145,7 +145,7 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
         "actual",
         "1.0.0",
         {},
-        {"expected.ecl": "(() 'noop def) 'expected @defm\n"},
+        {"expected.ecl": "(() `noop def) `expected @defm\n"},
     )
 
     root = manifest(

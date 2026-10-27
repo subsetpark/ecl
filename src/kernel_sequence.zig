@@ -41,7 +41,11 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
         .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
         .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into pieces that begin at each nondecreasing start index and end at the next; elements before the first start are dropped." },
         .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty list is returned unchanged." },
-        .reverse, .first, .rest => null,
+        // `first` is a builtin rather than a prelude word because the
+        // reader's quote expands to `(x) core.first`, so it must exist before
+        // the first quoted name in the prelude runs.
+        .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list." },
+        .reverse, .rest => null,
     };
 }
 
@@ -727,7 +731,7 @@ fn scalarMatchesElement(
             else => false,
         },
         .leaf_symbol => switch (needle) {
-            .symbol => |symbol| symbol == candidate,
+            .symbol => |symbol| symbol.name == candidate,
             else => false,
         },
         .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
@@ -739,7 +743,7 @@ fn scalarCanMatchKind(needle: Value, haystack_kind: value.HeapKind) bool {
         .int, .float => haystack_kind == .leaf_u8 or haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
         .char => haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4,
         .symbol => haystack_kind == .leaf_symbol,
-        .word, .list, .dict, .task, .port, .address => false,
+        .list, .dict, .task, .port, .address => false,
     };
 }
 
@@ -1332,10 +1336,6 @@ fn firstPrimitive(evaluator: *Machine) MachineError!void {
     defer collection.deinit();
     if (collection.borrow().list.length() == 0) return evaluator.fail(.domain, "first requires a non-empty list");
     try evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), 0));
-}
-
-pub fn firstForIdiom(evaluator: *Machine) MachineError!void {
-    return firstPrimitive(evaluator);
 }
 
 fn restPrimitive(evaluator: *Machine) MachineError!void {
@@ -2634,7 +2634,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         fn element(item: Value) Out {
             return switch (comptime out_kind) {
                 .leaf_f64 => item.float,
-                .leaf_symbol => item.symbol,
+                .leaf_symbol => item.symbol.name,
                 .leaf_char1, .leaf_char2, .leaf_char4 => @intCast(item.char),
                 else => @intCast(item.int),
             };
@@ -2698,7 +2698,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
 }
 
 /// A typed copy starts when every operand shares one leaf representation,
-/// through the kernel executor (`support.Kernel`). Each start returns false
+/// through the kernel executor (support.Kernel). Each start returns false
 /// without consuming anything when they do not, leaving a
 /// mixed-representation move to the generic path. The caller knows
 /// its copy's shape, so each shape has its own start and names exactly its

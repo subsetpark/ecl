@@ -20,9 +20,9 @@ const Value = value.Value;
 
 pub const words = [_]env.BuiltinWord{
     .{ .name = "elapsed", .doc = "( instant -- milliseconds ) Return the monotonic milliseconds since an instant from `now`.", .primitive = elapsed },
-    .{ .name = "now", .doc = "( -- instant ) Read the monotonic clock as {'monotonic milliseconds} since the Session started.", .primitive = now },
+    .{ .name = "now", .doc = "( -- instant ) Read the monotonic clock as {monotonic milliseconds} since the Session started.", .primitive = now },
     .{ .name = "sleep", .doc = "( milliseconds -- ) Park the calling unit for a nonnegative duration without holding a worker; cancellable.", .primitive = sleep },
-    .{ .name = "unix", .doc = "( -- timestamp ) Read the realtime wall clock as {'unix milliseconds}.", .primitive = unix },
+    .{ .name = "unix", .doc = "( -- timestamp ) Read the realtime wall clock as {unix milliseconds}.", .primitive = unix },
 };
 
 /// The two clock domains a tagged value can name. The tag is the dictionary's
@@ -33,7 +33,7 @@ const Domain = enum { unix, monotonic };
 fn tagged(evaluator: *Machine, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
     const key = try intern.intern(@tagName(domain));
     return dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
-        .{ .{ .symbol = key }, .{ .int = milliseconds } },
+        .{ .{ .symbol = .{ .name = key } }, .{ .int = milliseconds } },
     });
 }
 
@@ -44,7 +44,7 @@ fn untag(domain: Domain, item: Value) error{OutOfMemory}!?i64 {
     const header = item.dict;
     if (header.length() != 1) return null;
     const key = dict.keyAt(header, 0);
-    if (key != .symbol or key.symbol != try intern.intern(@tagName(domain))) return null;
+    if (key != .symbol or key.symbol.name != try intern.intern(@tagName(domain))) return null;
     const payload = dict.valueAt(header, 0);
     if (payload != .int) return null;
     return payload.int;
@@ -63,7 +63,7 @@ fn elapsed(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const start = (try untag(.monotonic, item.borrow())) orelse
-        return evaluator.typeError("a {'monotonic milliseconds} instant from clock.now");
+        return evaluator.typeError("a {monotonic milliseconds} instant from clock.now");
     const current = scheduler(evaluator).monotonicMilliseconds();
     const delta = std.math.sub(i64, current, start) catch
         return evaluator.fail(.overflow, "clock.elapsed left the millisecond range");

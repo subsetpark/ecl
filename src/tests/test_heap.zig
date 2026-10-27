@@ -64,7 +64,7 @@
 //! So this heap suits suites that only run source strings through a session
 //! (`kernel_test_support`, `combinator_test`, `machine_test`,
 //! `module_source_test`). Suites that mix host-built values into a session
-//! (`definition_test`, `module_test`) stay on `std.testing.allocator`, where
+//! (definition_test, module_test) stay on `std.testing.allocator`, where
 //! the value and the session already agree. If you move a test here and it
 //! aborts on a free, this allocator rule caused it; the code under test may be sound.
 //!

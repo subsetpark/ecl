@@ -929,7 +929,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
         .neg => switch (operand) {
             .int => |integer| .{ .int = std.math.sub(i64, 0, integer) catch return error.Overflow },
             .float => |number| .{ .float = -number },
-            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
+            .char, .symbol, .list, .dict, .task, .port, .address => error.Type,
         },
         .abs => switch (operand) {
             .int => |integer| if (integer == std.math.minInt(i64))
@@ -937,7 +937,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
             else
                 .{ .int = if (integer < 0) -integer else integer },
             .float => |number| .{ .float = @abs(number) },
-            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
+            .char, .symbol, .list, .dict, .task, .port, .address => error.Type,
         },
         .sqrt => switch (operand) {
             .int => |integer| if (integer < 0)
@@ -948,7 +948,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 error.Domain
             else
                 .{ .float = @sqrt(number) },
-            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
+            .char, .symbol, .list, .dict, .task, .port, .address => error.Type,
         },
         .floor, .ceil, .round => switch (operand) {
             .int => operand,
@@ -958,12 +958,12 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 .round => @round(number),
                 else => unreachable,
             }),
-            .char, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
+            .char, .symbol, .list, .dict, .task, .port, .address => error.Type,
         },
         .exp, .log, .sin, .cos => transcendental(operation, operand),
         .bnot => switch (operand) {
             .int => |integer| .{ .int = ~integer },
-            .char, .float, .symbol, .word, .list, .dict, .task, .port, .address => error.Type,
+            .char, .float, .symbol, .list, .dict, .task, .port, .address => error.Type,
         },
     };
 }
@@ -1153,7 +1153,7 @@ fn asFloat(operand: Value) f64 {
     return switch (operand) {
         .int => |integer| @floatFromInt(integer),
         .float => |number| number,
-        .char, .symbol, .word, .list, .dict, .task, .port, .address => unreachable,
+        .char, .symbol, .list, .dict, .task, .port, .address => unreachable,
     };
 }
 
@@ -1221,7 +1221,7 @@ fn scalarNumber(item: Value) ?Number {
     return switch (item) {
         .int => .integer,
         .float => .real,
-        .char, .symbol, .word, .list, .dict, .task, .port, .address => null,
+        .char, .symbol, .list, .dict, .task, .port, .address => null,
     };
 }
 
@@ -1702,9 +1702,9 @@ fn nextPiece(comptime vector: bool, range: flat.Chunk, offset: usize) flat.Chunk
     return flat.blockRange(range, offset);
 }
 
-/// A binary typed operation: one range loop (`runPieces`) and its replay, as
-/// a `support.Kernel` spec run at top level (`run`) or inside pervasion
-/// (`nested`).
+/// A binary typed operation: one range loop (runPieces) and its replay, as
+/// a `support.Kernel` spec run at top level (run) or inside pervasion
+/// (nested).
 fn binaryKernel(
     comptime operation: BinaryOp,
     comptime left_class: Number,
@@ -2319,7 +2319,7 @@ fn firstFlatElement(item: Value) ?Value {
         .leaf_char1 => .{ .char = heap.chars8(item.list)[0] },
         .leaf_char2 => .{ .char = heap.chars16(item.list)[0] },
         .leaf_char4 => .{ .char = @intCast(heap.chars32(item.list)[0]) },
-        .leaf_symbol => .{ .symbol = heap.symbols(item.list)[0] },
+        .leaf_symbol => .{ .symbol = .{ .name = heap.symbols(item.list)[0] } },
         .generic_spine, .dict, .task, .port, .address, .reserved_mask => null,
     };
 }
@@ -3901,7 +3901,7 @@ pub fn reduceGroups(evaluator: *Machine) MachineError!void {
     var reducer = try evaluator.popValue();
     defer reducer.deinit();
     if (reducer.borrow() != .symbol) return evaluator.typeError("a reducer symbol");
-    const operation = std.meta.stringToEnum(GroupReducer, @import("intern.zig").get(reducer.borrow().symbol)) orelse
+    const operation = std.meta.stringToEnum(GroupReducer, @import("intern.zig").get(reducer.borrow().symbol.name)) orelse
         return evaluator.fail(.domain, "unknown group reducer");
     var groups = try evaluator.popList();
     defer groups.deinit();

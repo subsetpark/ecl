@@ -100,9 +100,9 @@ const MemberDriver = struct {
                 self.state = .complete;
                 defer evaluator.releaseDomain().releaseValue(path);
                 break :result .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
-                    .{ .{ .symbol = try intern.intern("path") }, path },
-                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern(@tagName(self.metadata.kind)) } },
-                    .{ .{ .symbol = try intern.intern("size") }, .{ .int = @intCast(self.metadata.size) } },
+                    .{ .{ .symbol = .{ .name = try intern.intern("path") } }, path },
+                    .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern(@tagName(self.metadata.kind)) } } },
+                    .{ .{ .symbol = .{ .name = try intern.intern("size") } }, .{ .int = @intCast(self.metadata.size) } },
                 }) };
             },
         };
@@ -1399,8 +1399,8 @@ const UnpackDriver = struct {
         const failure = evaluator.fail(kind, message);
         const unpack = self.source.borrow().unpack;
         evaluator.addErrorFilesystem(.{
-            .operation = .{ .symbol = operation },
-            .reason = .{ .symbol = reason_symbol },
+            .operation = .{ .symbol = .{ .name = operation } },
+            .reason = .{ .symbol = .{ .name = reason_symbol } },
             .target = .{ .single = .{ .root = unpack.root.borrow(), .path = unpack.destination.borrow() } },
         });
         return failure;

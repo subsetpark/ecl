@@ -58,32 +58,32 @@ fn expectParseEquivalent(source: []const u8) !void {
 }
 
 test "formatter measures a module seed against its opening line" {
-    const source = "[] ((1) 'x def) 'stats @defm\n";
+    const source = "[] ((1) `x def) `stats @defm\n";
     try expectFormat(
         source,
-        "### module stats\n[] (\n    ### def x\n    (1) 'x def) 'stats @defm\n",
+        "### module stats\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n",
     );
     try expectParseEquivalent(source);
 
     try expectFormat(
-        "[]\n() 'empty @defm\n",
-        "### module empty\n[]\n() 'empty @defm\n",
+        "[]\n() `empty @defm\n",
+        "### module empty\n[]\n() `empty @defm\n",
     );
     try expectFormat(
-        "[] # seed details\n() 'commented @defm\n",
-        "### module commented\n[] # seed details\n() 'commented @defm\n",
+        "[] # seed details\n() `commented @defm\n",
+        "### module commented\n[] # seed details\n() `commented @defm\n",
     );
 
     const wide_seed = &@as([98]u8, @splat('a'));
     const wide_source = try std.fmt.allocPrint(
         allocator,
-        "[{s}] () 'wide @defm\n",
+        "[{s}] () `wide @defm\n",
         .{wide_seed},
     );
     defer allocator.free(wide_source);
     const wide_expected = try std.fmt.allocPrint(
         allocator,
-        "### module wide\n[{s}]\n() 'wide @defm\n",
+        "### module wide\n[{s}]\n() `wide @defm\n",
         .{wide_seed},
     );
     defer allocator.free(wide_expected);
@@ -92,24 +92,24 @@ test "formatter measures a module seed against its opening line" {
     const wide_body = &@as([89]u8, @splat('b'));
     const wide_body_source = try std.fmt.allocPrint(
         allocator,
-        "[] ({s}) 'm @defm\n",
+        "[] ({s}) `m @defm\n",
         .{wide_body},
     );
     defer allocator.free(wide_body_source);
     const wide_body_expected = try std.fmt.allocPrint(
         allocator,
-        "### module m\n[]\n({s}) 'm @defm\n",
+        "### module m\n[]\n({s}) `m @defm\n",
         .{wide_body},
     );
     defer allocator.free(wide_body_expected);
     try expectFormat(wide_body_source, wide_body_expected);
 
     const long_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const long_source = try std.fmt.allocPrint(allocator, "[] ((1) 'x def) '{s} @defm\n", .{long_name});
+    const long_source = try std.fmt.allocPrint(allocator, "[] ((1) `x def) `{s} @defm\n", .{long_name});
     defer allocator.free(long_source);
     const long_expected = try std.fmt.allocPrint(
         allocator,
-        "### module {s}\n[] (\n    ### def x\n    (1) 'x def)\n   '{s}\n   @defm\n",
+        "### module {s}\n[] (\n    ### def x\n    (1) `x def)\n   `{s}\n   @defm\n",
         .{ long_name, long_name },
     );
     defer allocator.free(long_expected);
@@ -139,17 +139,17 @@ test "multiline child does not force the following sibling to break" {
 }
 
 test "multiline modules break only their local top-level run" {
-    const source = "((1) 'x def) call dup 'stats pair wrap";
+    const source = "((1) `x def) call dup `stats pair wrap";
     try expectFormat(
         source,
-        "(\n ### def x\n (1) 'x def) call dup 'stats pair wrap\n",
+        "(\n ### def x\n (1) `x def) call dup `stats pair wrap\n",
     );
     try expectParseEquivalent(source);
 
-    const trailing_break = "((1) 'x def\n) call dup 'stats pair wrap";
+    const trailing_break = "((1) `x def\n) call dup `stats pair wrap";
     try expectFormat(
         trailing_break,
-        "(\n ### def x\n (1) 'x def\n) call dup 'stats pair wrap\n",
+        "(\n ### def x\n (1) `x def\n) call dup `stats pair wrap\n",
     );
     try expectParseEquivalent(trailing_break);
 }
@@ -186,10 +186,10 @@ test "broken nested runs refill each continuation line" {
 }
 
 test "comments break only their local structural run" {
-    const source = "(dup type 'list match? (# nested comment\n dup len dup 0 > swap 2 mod 1 = and) if)";
+    const source = "(dup type `list match? (# nested comment\n dup len dup 0 > swap 2 mod 1 = and) if)";
     try expectFormat(
         source,
-        "(dup type 'list match?\n" ++
+        "(dup type `list match?\n" ++
             " (# nested comment\n" ++
             "  dup len dup 0 > swap 2 mod 1 = and) if)\n",
     );
@@ -216,76 +216,76 @@ test "formatter owns canonical definition section comments" {
         "# ordinary lead\n" ++
         "# defp stale-public\n" ++
         "# public details\n" ++
-        "(-- n)\n(1)\n'public def\n\n\n" ++
+        "(-- n)\n(1)\n`public def\n\n\n" ++
         "# set stale-private\n" ++
-        "[-- n]\n(2)\n'private defp\n" ++
+        "[-- n]\n(2)\n`private defp\n" ++
         "# setp stale-constant\n" ++
-        "\"secret\" 'constant setp\n" ++
-        "42 'answer set\n" ++
+        "\"secret\" `constant setp\n" ++
+        "42 `answer set\n" ++
         "### overview\n" ++
-        "\"ab\" 'letters def\n";
+        "\"ab\" `letters def\n";
     try expectFormat(
         source,
         "# ordinary lead\n\n" ++
             "### def public\n" ++
             "# public details\n" ++
-            "(-- n)\n(1)\n'public def\n\n" ++
+            "(-- n)\n(1)\n`public def\n\n" ++
             "### defp private\n" ++
-            "[-- n]\n(2)\n'private defp\n" ++
+            "[-- n]\n(2)\n`private defp\n" ++
             "\n### setp constant\n" ++
-            "\"secret\" 'constant setp\n" ++
+            "\"secret\" `constant setp\n" ++
             "\n### set answer\n" ++
-            "42 'answer set\n" ++
+            "42 `answer set\n" ++
             "### overview\n\n" ++
             "### def letters\n" ++
-            "\"ab\" 'letters def\n",
+            "\"ab\" `letters def\n",
     );
     try expectParseEquivalent(source);
 
     const nested =
         "[]\n(\n" ++
-        "(-- n)\n(1)\n'visible def\n" ++
+        "(-- n)\n(1)\n`visible def\n" ++
         "# note\n# def stale\n# hidden details\n" ++
-        "(-- n)\n(2)\n'hidden defp\n" ++
-        ") 'm @defm\n";
+        "(-- n)\n(2)\n`hidden defp\n" ++
+        ") `m @defm\n";
     try expectFormat(
         nested,
         "### module m\n[]\n" ++
             "(\n" ++
             " ### def visible\n" ++
-            " (-- n)\n (1)\n 'visible def\n # note\n\n" ++
+            " (-- n)\n (1)\n `visible def\n # note\n\n" ++
             " ### defp hidden\n" ++
             " # hidden details\n" ++
-            " (-- n)\n (2)\n 'hidden defp\n) 'm @defm\n",
+            " (-- n)\n (2)\n `hidden defp\n) `m @defm\n",
     );
     try expectParseEquivalent(nested);
 
     const nested_synthesized =
         "[]\n(\n" ++
         "# attached inside the module\n" ++
-        "(-- n)\n(3)\n'generated def\n" ++
-        ") 'm @defm\n";
+        "(-- n)\n(3)\n`generated def\n" ++
+        ") `m @defm\n";
     try expectFormat(
         nested_synthesized,
         "### module m\n[]\n" ++
             "(\n" ++
             " ### def generated\n" ++
             " # attached inside the module\n" ++
-            " (-- n)\n (3)\n 'generated def\n" ++
-            ") 'm @defm\n",
+            " (-- n)\n (3)\n `generated def\n" ++
+            ") `m @defm\n",
     );
     try expectParseEquivalent(nested_synthesized);
 
     const synthesized =
         "# attached details\n" ++
         "# remain with the definition\n" ++
-        "(-- n)\n(3)\n'generated def\n";
+        "(-- n)\n(3)\n`generated def\n";
     try expectFormat(
         synthesized,
         "### def generated\n" ++
             "# attached details\n" ++
             "# remain with the definition\n" ++
-            "(-- n)\n(3)\n'generated def\n",
+            "(-- n)\n(3)\n`generated def\n",
     );
     try expectParseEquivalent(synthesized);
 
@@ -294,17 +294,17 @@ test "formatter owns canonical definition section comments" {
         "(-- n)\n" ++
         "### def generated\n" ++
         "(3)\n" ++
-        "'generated def\n";
+        "`generated def\n";
     try expectFormat(
         duplicated_between_annotation_and_body,
         "### def generated\n" ++
             "(-- n)\n" ++
             "(3)\n" ++
-            "'generated def\n",
+            "`generated def\n",
     );
     try expectParseEquivalent(duplicated_between_annotation_and_body);
 
-    const inert_dict = "{(-- n) (1) 'not-a-definition def}";
+    const inert_dict = "{(-- n) (1) not-a-definition def}";
     try expectFormat(inert_dict, inert_dict ++ "\n");
     try expectParseEquivalent(inert_dict);
 }
@@ -315,28 +315,28 @@ test "formatter reflows only structurally recognized documentation" {
         "(value -- value : \"This documentation contains enough ordinary prose to exceed the configured " ++
         "width and therefore needs to flow across several lines at clean word boundaries.\")\n" ++
         "(dup)\n" ++
-        "'explain def\n";
+        "`explain def\n";
     const expected =
         "### def explain\n" ++
         "(value -- value :\n" ++
         " \"This documentation contains enough ordinary prose to exceed the configured width and therefore\n" ++
         "  needs to flow across several lines at clean word boundaries.\")\n" ++
         "(dup)\n" ++
-        "'explain def\n";
+        "`explain def\n";
     try expectFormat(source, expected);
 
     const square_source =
         "[value -- value : \"This square-delimited annotation contains enough ordinary prose to exceed " ++
         "the configured width and must retain its original delimiters when reflowed.\"]\n" ++
         "(dup)\n" ++
-        "'square-doc def\n";
+        "`square-doc def\n";
     const square_expected =
         "### def square-doc\n" ++
         "[value -- value :\n" ++
         " \"This square-delimited annotation contains enough ordinary prose to exceed the configured width and\n" ++
         "  must retain its original delimiters when reflowed.\"]\n" ++
         "(dup)\n" ++
-        "'square-doc def\n";
+        "`square-doc def\n";
     try expectFormat(square_source, square_expected);
 
     const ordinary = "(\"This ordinary string is deliberately kept byte-for-byte, even when it is much longer " ++
@@ -352,7 +352,7 @@ test "doc-only prose keeps its prefix and preserves paragraphs and bullets" {
         "        More words for that item.\n" ++
         "      - Two.\")\n" ++
         "(1)\n" ++
-        "'documented def\n";
+        "`documented def\n";
     const formatted = try formatter.format(allocator, source);
     defer allocator.free(formatted);
     try std.testing.expect(std.mem.startsWith(u8, formatted, "### def documented\n(: \"First prose line"));
@@ -366,7 +366,7 @@ test "doc-only prose keeps its prefix and preserves paragraphs and bullets" {
     defer allocator.free(repeated);
     try std.testing.expectEqualStrings(formatted, repeated);
 
-    const executable = try std.fmt.allocPrint(allocator, "{s} 'documented doc", .{formatted});
+    const executable = try std.fmt.allocPrint(allocator, "{s} `documented doc", .{formatted});
     defer allocator.free(executable);
     try support.expectStack(
         executable,
@@ -379,13 +379,13 @@ test "doc-only prose keeps its prefix and preserves paragraphs and bullets" {
 test "formatter rejects invalid source without evaluating valid source" {
     try std.testing.expectError(error.InvalidUtf8, formatter.format(allocator, &.{0xff}));
     try std.testing.expectError(error.InvalidSource, formatter.format(allocator, "(unclosed"));
-    try expectFormat("{'kind 'user 'msg \"not raised\"} raise", "{'kind 'user 'msg \"not raised\"} raise\n");
+    try expectFormat("{kind user msg \"not raised\"} raise", "{kind user msg \"not raised\"} raise\n");
 }
 
 test "formatting preserves parsed structure across the ordinary grammar" {
     try expectParseEquivalent(
         "1, 2 (|x y| x y [1 {2 \\newline}] # keep this comment\n" ++
-            "          (3 4)) 'quoted \"literal   bytes\"",
+            "          (3 4)) quoted \"literal   bytes\"",
     );
 }
 
@@ -393,7 +393,7 @@ fn formatterAllocationProbe(failing: std.mem.Allocator) !void {
     const output = try formatter.format(
         failing,
         "[] ((value -- value : \"Documentation that exercises normalized prose.\") " ++
-            "(dup) 'x def) 'm @defm",
+            "(dup) `x def) `m @defm",
     );
     failing.free(output);
 }
@@ -419,39 +419,39 @@ test "formatter handles the reader's maximum nesting without host recursion" {
 test "formatter synthesizes and normalizes module navigation headers" {
     // A registration earns a header on the same terms a definition does, and
     // the body keeps the definition headers it already earns inside.
-    const registration = "[] ((1) 'x def) 'stats @defm\n";
-    const headed = "### module stats\n[] (\n    ### def x\n    (1) 'x def) 'stats @defm\n";
+    const registration = "[] ((1) `x def) `stats @defm\n";
+    const headed = "### module stats\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n";
     try expectFormat(registration, headed);
     // A stale header is rewritten from the registration itself, never trusted.
     try expectFormat("### module wrong\n" ++ registration, headed);
     // The seeded phrase is one form, so its values list carries the header and
     // an attached comment stays below it exactly as it does for a definition.
-    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) 'counter @defm\n";
+    const seeded = "# a seeded counter\n[[0]] ((1 +) `tick def) `counter @defm\n";
     try expectFormat(
         seeded,
         "### module counter\n# a seeded counter\n[[0]] (\n       ### def tick\n" ++
-            "       (1 +) 'tick def) 'counter @defm\n",
+            "       (1 +) `tick def) `counter @defm\n",
     );
     // `with` is ordinary composition rather than constructor metadata. Its
     // former seeded spelling therefore earns no module navigation header and
     // formats as the independent forms the program actually evaluates.
-    const composed = "[1] ((1) 'x def) with 'legacy @defm\n";
+    const composed = "[1] ((1) `x def) with `legacy @defm\n";
     try expectFormat(
         composed,
-        "[1]\n(\n ### def x\n (1) 'x def) with 'legacy @defm\n",
+        "[1]\n(\n ### def x\n (1) `x def) with `legacy @defm\n",
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(
-        "[] ((1) 'x def) chosen-name @defm\n",
-        "[]\n(\n ### def x\n (1) 'x def) chosen-name @defm\n",
+        "[] ((1) `x def) chosen-name @defm\n",
+        "[]\n(\n ### def x\n (1) `x def) chosen-name @defm\n",
     );
     // A header is synthesized and rewritten only where a registration is
     // recognized, so above any other expression the text stays an ordinary
     // comment rather than becoming a navigation header the file has no
     // definition for.
     try expectFormat(
-        "### module stats\n[] ((1) 'x def) @attempt\n",
-        "### module stats\n[]\n(\n ### def x\n (1) 'x def) @attempt\n",
+        "### module stats\n[] ((1) `x def) @attempt\n",
+        "### module stats\n[]\n(\n ### def x\n (1) `x def) @attempt\n",
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);
@@ -459,29 +459,29 @@ test "formatter synthesizes and normalizes module navigation headers" {
 }
 
 test "formatter: synthesizes and normalizes test navigation headers" {
-    const source = "[] ((1) 'works test) 'suite @defm\n";
+    const source = "[] ((1) `works test) `suite @defm\n";
     const expected =
         "### module suite\n[] (\n" ++
         "    ### test works\n" ++
-        "    (1) 'works test) 'suite @defm\n";
+        "    (1) `works test) `suite @defm\n";
     try expectFormat(source, expected);
     try expectFormat(
-        "### module stale\n[]\n(\n ### test stale\n (1) 'works test) 'suite @defm\n",
-        "### module suite\n[]\n(\n ### test works\n (1) 'works test) 'suite @defm\n",
+        "### module stale\n[]\n(\n ### test stale\n (1) `works test) `suite @defm\n",
+        "### module suite\n[]\n(\n ### test works\n (1) `works test) `suite @defm\n",
     );
     try expectFormat(
-        "# test stale\n(1) 'works test\n",
-        "### test works\n(1) 'works test\n",
+        "# test stale\n(1) `works test\n",
+        "### test works\n(1) `works test\n",
     );
     // A test-looking comment is navigation only for a test declaration. For
     // an ordinary definition it remains user text and the real definition
     // receives its own synthesized header.
     try expectFormat(
-        "### test stale\n(1) 'value def\n",
-        "### test stale\n\n### def value\n(1) 'value def\n",
+        "### test stale\n(1) `value def\n",
+        "### test stale\n\n### def value\n(1) `value def\n",
     );
     try expectFormat(
-        "[] (# test stale\n (1) 'value def) 'ordinary @defm\n",
-        "### module ordinary\n[] (\n    ### def value\n    # test stale\n    (1) 'value def) 'ordinary @defm\n",
+        "[] (# test stale\n (1) `value def) `ordinary @defm\n",
+        "### module ordinary\n[] (\n    ### def value\n    # test stale\n    (1) `value def) `ordinary @defm\n",
     );
 }

@@ -1,139 +1,139 @@
 ### module stdlib.test.dict
 []
 (
- 'stdlib.test.support
- ('equal 'raises-containing 'raises-word 'documented)
+ `stdlib.test.support
+ (equal raises-containing raises-word documented)
  import
 
  ### test observations
  (-- : "Observe dictionary entries in insertion order and by whole-value key.")
- ({'a 1 'b 2} dict.size 2 equal
-  {'a 1 'b 2} dict.keys ['a 'b] equal
-  {'a 1 'b 2} dict.vals [1 2] equal
-  {'a 1 'b 2} dict.pairs (('a 1) ('b 2)) equal
-  {'a 1} 'a dict.has? 1 equal
-  {'a 1} 'b dict.has? 0 equal
-  {'a 1 'b 2} ['b 'a] dict.keys-exactly? 1 equal
-  {'a 1} ['a 'b] dict.keys-exactly? 0 equal
+ ({a 1 b 2} dict.size 2 equal
+  {a 1 b 2} dict.keys [a b] equal
+  {a 1 b 2} dict.vals [1 2] equal
+  {a 1 b 2} dict.pairs ((a 1) (b 2)) equal
+  {a 1} `a dict.has? 1 equal
+  {a 1} `b dict.has? 0 equal
+  {a 1 b 2} [b a] dict.keys-exactly? 1 equal
+  {a 1} [a b] dict.keys-exactly? 0 equal
   {"ab" 9} "ab" dict.has? 1 equal
   {[1 2] 9} [1 2] dict.has? 1 equal
   {missing 9} (missing) first dict.has? 1 equal
-  {{'a 1} 9} {'a 1} dict.has? 1 equal
+  {{a 1} 9} {a 1} dict.has? 1 equal
   {1 9} 1.0 dict.has? 1 equal
   {"ab" 9} "a" dict.has? 0 equal
-  ({'a 1} len) 'type 'len raises-word
-  ([] dict.size) 'type 'dict.size raises-word
-  ([] 'a dict.has?) 'type 'dict.has? raises-word)
- 'observations test
+  ({a 1} len) `type `len raises-word
+  ([] dict.size) `type `dict.size raises-word
+  ([] `a dict.has?) `type `dict.has? raises-word)
+ `observations test
 
  ### test gathering
  (-- : "Gather whole keys in request order.")
- ({'a 1 'b 2 'c 3} ['c 'a 'c] dict.at [3 1 3] equal
-  {['c 'a] 7 'b 2} [['c 'a] 'b] dict.at [7 2] equal
+ ({a 1 b 2 c 3} [c a c] dict.at [3 1 3] equal
+  {[c a] 7 b 2} [[c a] b] dict.at [7 2] equal
   {"ab" 9 [1 2] 8} ["ab" [1 2] "ab"] dict.at [9 8 9] equal
   {"ab" 9 [1 2] 8} ["ab" [3] [1 2] [3]] [0] dict.at-or [9 [0] 8 [0]] equal
   {} [] 0 dict.at-or [] equal
-  {'a 1 'b 2} 'b 9 dict.get 2 equal
-  {'a 1} 'missing 9 dict.get 9 equal
-  {'a foo} 'a 9 dict.get (foo) first equal
+  {a 1 b 2} `b 9 dict.get 2 equal
+  {a 1} `missing 9 dict.get 9 equal
+  {a foo} `a 9 dict.get (foo) first equal
   {[1 2] 8} [1 2] 0 dict.get 8 equal
-  {} 'a (bar) first dict.get (bar) first equal
-  ([1 2] 0 9 dict.get) 'type 'dict.get raises-word
-  {'a 1} [] dict.at () equal
+  {} `a (bar) first dict.get (bar) first equal
+  ([1 2] 0 9 dict.get) `type `dict.get raises-word
+  {a 1} [] dict.at () equal
   {[1 2] 9} [1 2] at 9 equal
-  ({'a 1} [['a 'missing]] dict.at)
-  'domain
+  ({a 1} [[a missing]] dict.at)
+  `domain
   "could not find the dict key"
   raises-containing
-  ({'a 1} 'a dict.at) 'type 'dict.at raises-word
-  ([] [] dict.at) 'type 'dict.at raises-word)
- 'gathering test
+  ({a 1} `a dict.at) `type `dict.at raises-word
+  ([] [] dict.at) `type `dict.at raises-word)
+ `gathering test
 
  ### test updates
  (-- : "Transform whole keys without reordering dictionary keys.")
- ({'a 1 'b 2 'c 3} ['b 'a] (10 *) dict.update
-  {'a 10 'b 20 'c 3} equal
-  {['a 'b] 1 'a 2} [['a 'b] 'a] (1 +) dict.update
-  {['a 'b] 2 'a 3} equal
+ ({a 1 b 2 c 3} [b a] (10 *) dict.update
+  {a 10 b 20 c 3} equal
+  {[a b] 1 a 2} [[a b] a] (1 +) dict.update
+  {[a b] 2 a 3} equal
   {"ab" 1} ["ab" "ab"] (1 +) dict.update {"ab" 3} equal
-  {'a 1} ['a 'a] (1 +) dict.update {'a 3} equal
-  {'a 1} [] (missing) dict.update {'a 1} equal
-  ({'a 1} ['a 'b] (10 *) dict.update) 'domain 'dict.update raises-word
-  ({'a 1} 'a (10 *) dict.update) 'type 'dict.update raises-word
-  ({'a 1} ['a] (dup) dict.update) 'contract 'dict.update raises-word
-  {'a 2} 'a 9 (10 *) dict.update-or {'a 20} equal
-  {'a 2} 'b 9 (missing) dict.update-or {'a 2 'b 9} equal)
- 'updates test
+  {a 1} [a a] (1 +) dict.update {a 3} equal
+  {a 1} [] (missing) dict.update {a 1} equal
+  ({a 1} [a b] (10 *) dict.update) `domain `dict.update raises-word
+  ({a 1} `a (10 *) dict.update) `type `dict.update raises-word
+  ({a 1} [a] (dup) dict.update) `contract `dict.update raises-word
+  {a 2} `a 9 (10 *) dict.update-or {a 20} equal
+  {a 2} `b 9 (missing) dict.update-or {a 2 b 9} equal)
+ `updates test
 
  ### test assignment
  (-- : "Assign one whole key and value, retaining existing positions.")
  ({} [1 2] [3 4] dict.put {[1 2] [3 4]} equal
-  {"ab" 1 'c 2} "ab" [3 4] dict.put dup
-  {"ab" [3 4] 'c 2} equal dict.keys ["ab" 'c] equal
-  {'a 1} "ab" 2 dict.put dict.keys ['a "ab"] equal
+  {"ab" 1 c 2} "ab" [3 4] dict.put dup
+  {"ab" [3 4] c 2} equal dict.keys ["ab" c] equal
+  {a 1} "ab" 2 dict.put dict.keys [a "ab"] equal
   {1 9} 1.0 7 dict.put {1 7} equal
-  ([] 'a 1 dict.put) 'type 'dict.put raises-word)
- 'assignment test
+  ([] `a 1 dict.put) `type `dict.put raises-word)
+ `assignment test
 
  ### test construction
  (-- : "Construct dictionaries from one association, pairs, and repeated values.")
- (42 'answer dict.associate {'answer 42} equal
-  [1 2] 'args dict.associate {'args [1 2]} equal
-  [['a 1] ['b 2]] dict.from-pairs dup dict.pairs dict.from-pairs match? 1 equal
-  ['a 'b 'c] 0 dict.from-keys {'a 0 'b 0 'c 0} equal
+ (42 `answer dict.associate {answer 42} equal
+  [1 2] `args dict.associate {args [1 2]} equal
+  [[a 1] [b 2]] dict.from-pairs dup dict.pairs dict.from-pairs match? 1 equal
+  [a b c] 0 dict.from-keys {a 0 b 0 c 0} equal
   [] dict.from-pairs {} equal
   [] 0 dict.from-keys {} equal
-  ([['a 1] ['b]] dict.from-pairs)
-  'shape
+  ([[a 1] [b]] dict.from-pairs)
+  `shape
   "two-element pairs"
   raises-containing
-  ([['a 1] ['a 2]] dict.from-pairs) 'domain 'dict.from-flat raises-word)
- 'construction test
+  ([[a 1] [a 2]] dict.from-pairs) `domain `dict.from-flat raises-word)
+ `construction test
 
  ### test mapping
  (-- : "Map dictionary values while retaining their original keys.")
- ({'a 1 'b 2 'c 3} (nip 10 *) dict.map {'a 10 'b 20 'c 30} equal
+ ({a 1 b 2 c 3} (nip 10 *) dict.map {a 10 b 20 c 30} equal
   {} (missing) dict.map {} equal
-  {'a 1 'b 2} (pair) dict.map {'a ('a 1) 'b ('b 2)} equal
-  ((dict.map-values) first execute) 'undefined-word 'dict.map-values raises-word)
- 'mapping test
+  {a 1 b 2} (pair) dict.map {a (a 1) b (b 2)} equal
+  ((dict.map-values) first execute) `undefined-word `dict.map-values raises-word)
+ `mapping test
 
  ### test selection
  (-- : "Filter and select keys while preserving dictionary order.")
- ({'a 1 'b 2 'c 3} (nip 2 >) dict.filter {'c 3} equal
-  {'a 1 'b 2 'c 3} (nip 2 >) dict.reject {'a 1 'b 2} equal
-  {'a 1 'b 2 'c 3} ['c 'missing 'a] dict.take {'a 1 'c 3} equal
-  {'a 1 'b 2 'c 3} ['b 'missing] dict.del {'a 1 'c 3} equal
+ ({a 1 b 2 c 3} (nip 2 >) dict.filter {c 3} equal
+  {a 1 b 2 c 3} (nip 2 >) dict.reject {a 1 b 2} equal
+  {a 1 b 2 c 3} [c missing a] dict.take {a 1 c 3} equal
+  {a 1 b 2 c 3} [b missing] dict.del {a 1 c 3} equal
   {[1 3] "pair" 1 "one" 2 "two"} [[1 3] 1] dict.del {2 "two"} equal
-  {"ab" 1 [1 2] 2 'c 3} [[1 2] "ab" "ab"] dict.take {"ab" 1 [1 2] 2} equal
+  {"ab" 1 [1 2] 2 c 3} [[1 2] "ab" "ab"] dict.take {"ab" 1 [1 2] 2} equal
   {"ab" 1 [1 2] 2} ["ab"] dict.split {[1 2] 2} equal {"ab" 1} equal
-  {'a 1 'b 2 'c 3} ['c 'a] dict.split
-  {'b 2} equal
-  {'a 1 'c 3} equal
-  ({'a 1} 'a dict.del) 'type 'dict.del raises-word)
- 'selection test
+  {a 1 b 2 c 3} [c a] dict.split
+  {b 2} equal
+  {a 1 c 3} equal
+  ({a 1} `a dict.del) `type `dict.del raises-word)
+ `selection test
 
  ### test merging
  (-- : "Merge dictionaries in stable order and resolve collisions explicitly.")
- ({'a 1 'b 2} {'b 20 'c 30} dict.merge {'a 1 'b 20 'c 30} equal
-  {'a 1 'b 2} {'b 20 'c 30 'a 10}
+ ({a 1 b 2} {b 20 c 30} dict.merge {a 1 b 20 c 30} equal
+  {a 1 b 2} {b 20 c 30 a 10}
   (|key left right| key pop left right +)
   dict.merge-with
-  {'a 11 'b 22 'c 30} equal
-  {} {'a 1} (missing) dict.merge-with {'a 1} equal
-  ({'a 1} {'a 2} (pop pop pop) dict.merge-with)
-  'contract
-  'dict.merge-with
+  {a 11 b 22 c 30} equal
+  {} {a 1} (missing) dict.merge-with {a 1} equal
+  ({a 1} {a 2} (pop pop pop) dict.merge-with)
+  `contract
+  `dict.merge-with
   raises-word)
- 'merging test
+ `merging test
 
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
- (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at 'dict.at-or 'dict.get 'dict.put
-   'dict.merge 'dict.associate 'dict.from-flat 'dict.from-lists 'dict.from-pairs
-   'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
-   'dict.map 'dict.filter 'dict.reject 'dict.take
-   'dict.del 'dict.split 'dict.merge-with]
+ ([dict.size dict.keys dict.vals dict.pairs dict.has? dict.at dict.at-or dict.get dict.put
+   dict.merge dict.associate dict.from-flat dict.from-lists dict.from-pairs
+   dict.from-keys dict.keys-exactly? dict.update dict.update-or
+   dict.map dict.filter dict.reject dict.take
+   dict.del dict.split dict.merge-with]
   documented)
- 'documentation test
-) 'stdlib.test.dict @defm
+ `documentation test
+) `stdlib.test.dict @defm

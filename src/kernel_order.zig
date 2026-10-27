@@ -91,7 +91,7 @@ fn orderClass(item: Value) ?OrderClass {
         .int, .float => .number,
         .char => .char,
         .list => .list,
-        .symbol, .word, .dict, .task, .port, .address => null,
+        .symbol, .dict, .task, .port, .address => null,
     };
 }
 
@@ -983,7 +983,7 @@ const GroupDriver = struct {
             .leaf_u8, .leaf_i64 => .{ .int = item },
             .leaf_f64 => .{ .float = item },
             .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
-            .leaf_symbol => .{ .symbol = item },
+            .leaf_symbol => .{ .symbol = .{ .name = item } },
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }

@@ -1,23 +1,23 @@
 ### module stdlib.test.host-surfaces
 []
 (
- 'stdlib.test.support ('documented) import
+ `stdlib.test.support (documented) import
 
  ### test documentation
  (-- : "Require documentation for host-authority standard-library exports.")
- (('io.pp 'io.prin 'io.print 'io.eprint 'io.inspect 'io.debug 'io.stack 'io.stdin
-   'fs.read-bytes 'fs.read-text 'fs.create-bytes 'fs.create-text
-   'fs.replace-bytes 'fs.replace-text 'fs.stat 'fs.lstat 'fs.exists? 'fs.list
-   'fs.mkdir 'fs.copy 'fs.rename 'fs.remove-file 'fs.remove-dir
-   'path.join 'path.normalize 'path.dirname 'path.basename 'path.extension
-   'path.absolute? 'path.relative? 'path.components 'path.valid-relative?
-   'http.get 'http.get-bytes 'http.post 'http.send
-   'clock.unix
-   'net.listen 'net.local-address 'net.close
-   'net.accept 'net.read 'net.write 'net.peer-address
-   'fs.open-dir 'fs.child-dir 'fs.lock 'fs.stage-dir 'fs.commit-dir
-   'fs.publish-text 'archive.open-tgz 'source.declarations)
+ ((io.pp io.prin io.print io.eprint io.inspect io.debug io.stack io.stdin
+   fs.read-bytes fs.read-text fs.create-bytes fs.create-text
+   fs.replace-bytes fs.replace-text fs.stat fs.lstat fs.exists? fs.list
+   fs.mkdir fs.copy fs.rename fs.remove-file fs.remove-dir
+   path.join path.normalize path.dirname path.basename path.extension
+   path.absolute? path.relative? path.components path.valid-relative?
+   http.get http.get-bytes http.post http.send
+   clock.unix
+   net.listen net.local-address net.close
+   net.accept net.read net.write net.peer-address
+   fs.open-dir fs.child-dir fs.lock fs.stage-dir fs.commit-dir
+   fs.publish-text archive.open-tgz source.declarations)
   documented)
- 'documentation test
+ `documentation test
 
-) 'stdlib.test.host-surfaces @defm
+) `stdlib.test.host-surfaces @defm

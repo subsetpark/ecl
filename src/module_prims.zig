@@ -89,7 +89,7 @@ fn moduleNameWord(evaluator: *Machine) MachineError!void {
         .domain,
         "*module* is legal only in code homed in a registered module",
     );
-    try evaluator.pushOwned(.{ .symbol = intern.moduleId(home.name()) });
+    try evaluator.pushOwned(.{ .symbol = .{ .name = intern.moduleId(home.name()) } });
 }
 
 /// Returns the reader source that authored the active occurrence. Source names
@@ -243,7 +243,7 @@ const ImportDriver = struct {
                 const item = list.atUnchecked(self.requested.borrow(), self.prepare_index);
                 if (self.binding_validation == null and self.qualifier == null) {
                     const symbol = switch (item) {
-                        .symbol => |name| name,
+                        .symbol => |name| name.name,
                         else => return evaluator.typeError("a list of symbols"),
                     };
                     self.binding_validation = .init(symbol);
@@ -354,7 +354,7 @@ const ImportDriver = struct {
                 const linker = try evaluator.rootLinker(self.scope);
                 self.forwarding_body = .init(try list.fromValuesGeneric(
                     evaluator.allocator(),
-                    &.{.{ .word = .{ .name = requested.qualified, .slot = try linker.link(requested.qualified) } }},
+                    &.{.{ .symbol = .{ .name = requested.qualified, .slot = try linker.link(requested.qualified) } }},
                 ));
                 continue;
             }
@@ -499,7 +499,7 @@ const QualifyDriver = struct {
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |word| return .{ .output = .{ .word = try evaluator.linkedWord(word) } },
+                .complete => |word| return .{ .output = .{ .symbol = try evaluator.linkedWord(word) } },
             }
         }
         return .stepped;

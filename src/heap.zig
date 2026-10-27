@@ -1165,7 +1165,7 @@ pub const AnyListBuilder = union(enum) {
                 slot.* = item.char;
             },
             .symbol => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
-                slot.* = item.symbol;
+                slot.* = item.symbol.name;
             },
         }
     }
@@ -1572,7 +1572,7 @@ pub fn incRef(handle: anytype) void {
 
 pub fn retainValue(item: Value) void {
     switch (item) {
-        .int, .float, .char, .symbol, .word => {},
+        .int, .float, .char, .symbol => {},
         .list => |header| incRef(header),
         .dict => |header| incRef(header),
         .task => |header| incRef(header),

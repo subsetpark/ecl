@@ -90,7 +90,7 @@ const Runtime = struct {
     fn listen(self: *Runtime, name: []const u8) !u16 {
         const program = try std.fmt.allocPrint(
             allocator,
-            "{{'address \"127.0.0.1\" 'port 0}} net.listen '{s} set {s} net.local-address 'port at",
+            "{{address \"127.0.0.1\" port 0}} net.listen `{s} set {s} net.local-address `port at",
             .{ name, name },
         );
         defer allocator.free(program);
@@ -301,7 +301,7 @@ fn awaitTimerEntries(runtime: *Runtime, count: usize) void {
 }
 
 const ok_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
-const ok_row = "\"/ok\" (pop {'status 200 'headers {} 'body \"ok\"}) ";
+const ok_row = "\"/ok\" (pop {status 200 headers {} body \"ok\"}) ";
 const not_found_default = "(pop http.response.not-found)";
 const close_listener_request = "GET /close-listener HTTP/1.1\r\nHost: h\r\n\r\n";
 
@@ -320,11 +320,11 @@ const Server = struct {
     fn start(runtime: *Runtime, port: u16, prelude: []const u8, config: []const u8, rows: []const u8, default_row: []const u8) !*Server {
         const program = try std.fmt.allocPrint(
             allocator,
-            "{s} [] (l {s} (dup 'path at [{s}" ++
+            "{s} [] (l {s} (dup `path at [{s}" ++
                 "\"/close-listener\" (pop l net.close 204 http.response.new) " ++
                 "\"/stop\" (pop srv task.cancel 204 http.response.new) " ++
-                "{s}] case) http.server.@serve) @spawn 'srv set " ++
-                "srv task.await 'err at dup 'kind at swap 'data {{}} dict.get 'reason 'none dict.get",
+                "{s}] case) http.server.@serve) @spawn `srv set " ++
+                "srv task.await `err at dup `kind at swap `data {{}} dict.get `reason `none dict.get",
             .{ prelude, config, rows, default_row },
         );
         errdefer allocator.free(program);
@@ -345,7 +345,7 @@ const Server = struct {
     fn finish(self: *Server) !void {
         _ = try exchange(self.port, close_listener_request);
         try self.runner.join();
-        try self.runtime.run("'none match? swap dup 'io match? swap 'cancelled match? or and");
+        try self.runtime.run("`none match? swap dup `io match? swap `cancelled match? or and");
         try self.runtime.expectDisplay("1");
     }
 
@@ -376,14 +376,14 @@ test "http server: a request is materialized with method target path query lower
     const port = try runtime.listen("l");
     const server = try Server.start(&runtime, port, "", "{}",
         // Body: the request without its peer; header x-peer: the peer text.
-        "\"/a/b\" (dup 'peer at swap 'peer del str {'status 200 'headers {} 'body \"\"} 'body rolldown put " ++
-            "swap wrap \"x-peer\" swap pair dict.from-flat 'headers swap put) ", not_found_default);
+        "\"/a/b\" (dup `peer at swap `peer del str {status 200 headers {} body \"\"} `body rolldown put " ++
+            "swap wrap \"x-peer\" swap pair dict.from-flat `headers swap put) ", not_found_default);
     defer server.deinit();
     const observed = try exchange(port, "GET /a/b?x=1&y=2 HTTP/1.1\r\nHost: h\r\nX-Multi: one\r\nX-Multi: two\r\nContent-Length: 3\r\n\r\nabc");
     try expectStatus(observed, "HTTP/1.1 200 OK");
     try std.testing.expectEqualStrings(
-        "{'method \"GET\" 'target \"/a/b?x=1&y=2\" 'path \"/a/b\" 'query \"x=1&y=2\" " ++
-            "'headers {\"host\" (\"h\") \"x-multi\" (\"one\" \"two\") \"content-length\" (\"3\")} 'body [97 98 99]}",
+        "{method \"GET\" target \"/a/b?x=1&y=2\" path \"/a/b\" query \"x=1&y=2\" " ++
+            "headers {\"host\" (\"h\") \"x-multi\" (\"one\" \"two\") \"content-length\" (\"3\")} body [97 98 99]}",
         observed.body(),
     );
     var peer_line: [64]u8 = undefined;
@@ -397,8 +397,8 @@ test "http server: string and byte-list bodies are written with content-length a
     try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{}", "\"/s\" (pop {'status 200 'headers {} 'body \"ok\"}) " ++
-        "\"/b\" (pop {'status 200 'headers {} 'body [111 107]}) ", not_found_default);
+    const server = try Server.start(&runtime, port, "", "{}", "\"/s\" (pop {status 200 headers {} body \"ok\"}) " ++
+        "\"/b\" (pop {status 200 headers {} body [111 107]}) ", not_found_default);
     defer server.deinit();
     try expectResponse(try exchange(port, "GET /s HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
     try expectResponse(try exchange(port, "GET /b HTTP/1.1\r\nHost: h\r\n\r\n"), ok_response);
@@ -416,7 +416,7 @@ test "http server: repeated response headers are written once per value" {
     try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{}", "\"/c\" (pop {'status 200 'headers {\"Set-Cookie\" (\"a=1\" \"b=2\")} 'body \"\"}) ", not_found_default);
+    const server = try Server.start(&runtime, port, "", "{}", "\"/c\" (pop {status 200 headers {\"Set-Cookie\" (\"a=1\" \"b=2\")} body \"\"}) ", not_found_default);
     defer server.deinit();
     try expectResponse(
         try exchange(port, "GET /c HTTP/1.1\r\nHost: h\r\n\r\n"),
@@ -430,7 +430,7 @@ test "http server: a content-length body is delivered as an exact byte list incl
     try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{}", "\"/\" ('body at str {'status 200 'headers {} 'body \"\"} 'body rolldown put) ", not_found_default);
+    const server = try Server.start(&runtime, port, "", "{}", "\"/\" (`body at str {status 200 headers {} body \"\"} `body rolldown put) ", not_found_default);
     defer server.deinit();
     const observed = try exchange(port, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\n" ++ [_]u8{ 0, 255, 10, 13 });
     try expectStatus(observed, "HTTP/1.1 200 OK");
@@ -444,7 +444,7 @@ test "http server: malformed request lines and headers are answered 400 and clos
     defer runtime.close();
     const port = try runtime.listen("l");
     // The default row answers 200 too, so a 400 proves the handler never ran.
-    const server = try Server.start(&runtime, port, "", "{}", ok_row, "(pop {'status 200 'headers {} 'body \"ok\"})");
+    const server = try Server.start(&runtime, port, "", "{}", ok_row, "(pop {status 200 headers {} body \"ok\"})");
     defer server.deinit();
     try expectStatus(try exchange(port, "GARBAGE\r\n\r\n"), "HTTP/1.1 400 Bad Request");
     try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nNoColon\r\n\r\n"), "HTTP/1.1 400 Bad Request");
@@ -486,7 +486,7 @@ test "http server: header and body limits are answered 431 and 413" {
     try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{'max-header-bytes 64 'max-body-bytes 4}", ok_row, not_found_default);
+    const server = try Server.start(&runtime, port, "", "{max-header-bytes 64 max-body-bytes 4}", ok_row, not_found_default);
     defer server.deinit();
     const long_head = "GET /ok HTTP/1.1\r\nX: " ++ (&@as([100]u8, @splat('a'))) ++ "\r\n\r\n";
     try expectStatus(try exchange(port, long_head), "HTTP/1.1 431 Request Header Fields Too Large");
@@ -500,7 +500,7 @@ test "http server: the read deadline answers 408 and closes" {
     try runtime.open(.{}, .cooperative);
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{'read-timeout-ms 20}", ok_row, not_found_default);
+    const server = try Server.start(&runtime, port, "", "{read-timeout-ms 20}", ok_row, not_found_default);
     defer server.deinit();
     // The peer never finishes its head. Once the connection child has
     // registered the reader's deadline, the clock moves past it.
@@ -513,10 +513,10 @@ test "http server: the read deadline answers 408 and closes" {
     try server.finish();
 }
 
-const gate_prelude = "[] (l2 net.accept) @spawn 'gate set";
+const gate_prelude = "[] (l2 net.accept) @spawn `gate set";
 const gate_rows =
-    "\"/slow\" (pop gate task.await pop {'status 200 'headers {} 'body \"slow\"}) " ++
-    "\"/probe\" (pop gate 0 task.await-for 'ok dict.has? (\"terminal\") (\"active\") if {'status 200 'headers {} 'body \"\"} 'body rolldown put) ";
+    "\"/slow\" (pop gate task.await pop {status 200 headers {} body \"slow\"}) " ++
+    "\"/probe\" (pop gate 0 task.await-for `ok dict.has? (\"terminal\") (\"active\") if {status 200 headers {} body \"\"} `body rolldown put) ";
 
 test "http server: max-in-flight stops accepting until a request completes" {
     // One acceptor: the probe waits in the backlog behind the slow request and
@@ -527,7 +527,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
         defer runtime.close();
         const port = try runtime.listen("l");
         const gate_port = try runtime.listen("l2");
-        const server = try Server.start(&runtime, port, gate_prelude, "{'max-in-flight 1}", gate_rows, not_found_default);
+        const server = try Server.start(&runtime, port, gate_prelude, "{max-in-flight 1}", gate_rows, not_found_default);
         defer server.deinit();
         const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
         slow.waitFlushed();
@@ -551,7 +551,7 @@ test "http server: max-in-flight stops accepting until a request completes" {
         defer runtime.close();
         const port = try runtime.listen("l");
         const gate_port = try runtime.listen("l2");
-        const server = try Server.start(&runtime, port, gate_prelude, "{'max-in-flight 2}", gate_rows, not_found_default);
+        const server = try Server.start(&runtime, port, gate_prelude, "{max-in-flight 2}", gate_rows, not_found_default);
         defer server.deinit();
         const slow = try Peer.start(port, .{ .send = "GET /slow HTTP/1.1\r\nHost: h\r\n\r\n" });
         slow.waitFlushed();
@@ -573,10 +573,10 @@ test "http server: handler failures extra results malformed responses and reserv
     defer runtime.close();
     const port = try runtime.listen("l");
     // The hook itself fails on every report; the server must contain that too.
-    const server = try Server.start(&runtime, port, "", "{'on-failure (pop {'kind 'hook-failed} raise)}", "\"/raise\" (pop {'kind 'boom} raise) " ++
+    const server = try Server.start(&runtime, port, "", "{on-failure (pop {kind hook-failed} raise)}", "\"/raise\" (pop {kind boom} raise) " ++
         "\"/extra\" (pop 1 2) " ++
         "\"/malformed\" (pop 7) " ++
-        "\"/reserved\" (pop {'status 200 'headers {\"content-length\" \"1\"} 'body \"x\"}) " ++
+        "\"/reserved\" (pop {status 200 headers {\"content-length\" \"1\"} body \"x\"}) " ++
         ok_row, not_found_default);
     defer server.deinit();
     for ([_][]const u8{ "/raise", "/extra", "/malformed", "/reserved" }) |path| {
@@ -603,9 +603,9 @@ test "http server: cancellation cancels in-flight requests and leaves the caller
     try expectSilentClose(try exchange(port, "GET /stop HTTP/1.1\r\nHost: h\r\n\r\n"));
     try expectSilentClose(slow.join());
     try server.joinEnded();
-    try runtime.expectDisplay("'cancelled 'none");
+    try runtime.expectDisplay("cancelled none");
     var expected: [16]u8 = undefined;
-    try runtime.run("pop pop l net.local-address 'port at");
+    try runtime.run("pop pop l net.local-address `port at");
     try runtime.expectDisplay(try std.fmt.bufPrint(&expected, "{d}", .{port}));
 }
 
@@ -639,22 +639,22 @@ test "http server: configuration and listener arguments are validated before ser
     defer runtime.close();
     const port = try runtime.listen("l");
     try runtime.run(
-        "[] (5 {} (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l 5 (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l {'bogus 1} (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l {'max-in-flight 0} (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l {'read-timeout-ms -1} (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l {'max-in-flight \"8\"} (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l {'on-failure 5} (1) http.server.@serve) @attempt 'err at 'kind at " ++
-            "[] (l {} 7 http.server.@serve) @attempt 'err at 'kind at",
+        "[] (5 {} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l 5 (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l {bogus 1} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l {max-in-flight 0} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l {read-timeout-ms -1} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l {max-in-flight \"8\"} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l {on-failure 5} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "[] (l {} 7 http.server.@serve) @attempt `err at `kind at",
     );
-    try runtime.expectDisplay("'type 'type 'domain 'domain 'domain 'type 'type 'type");
+    try runtime.expectDisplay("type type domain domain domain type type type");
     // A connection is a port too, but not a listener: the acceptor's accept
     // fails 'type and the serving unit fails with it.
     const silent = try Peer.start(port, .connect_then_close);
     try expectSilentClose(silent.join());
-    try runtime.run("pop pop pop pop pop pop pop pop l net.accept 'c set [] (c {} (1) http.server.@serve) @attempt 'err at 'kind at");
-    try runtime.expectDisplay("'type");
+    try runtime.run("pop pop pop pop pop pop pop pop l net.accept `c set [] (c {} (1) http.server.@serve) @attempt `err at `kind at");
+    try runtime.expectDisplay("type");
 }
 
 test "http server: concurrent requests under the worker pool are each answered exactly once" {
@@ -662,7 +662,7 @@ test "http server: concurrent requests under the worker pool are each answered e
     try runtime.open(.{}, .{ .worker_pool = 8 });
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{}", "", "('path at {'status 200 'headers {} 'body \"\"} 'body rolldown put)");
+    const server = try Server.start(&runtime, port, "", "{}", "", "(`path at {status 200 headers {} body \"\"} `body rolldown put)");
     defer server.deinit();
     var peers: [8]*Peer = undefined;
     var requests: [8][]u8 = undefined;
@@ -684,11 +684,11 @@ test "http server: concurrent requests under the worker pool are each answered e
 
 test "http server: words cold-load through the embedded manifest and are documented" {
     try support.expectStack(
-        "'http.server.@serve doc len 0 > 'http.server.route doc len 0 > 'http.server.render-response doc len 0 > " ++
-            "'http.request.query doc len 0 > 'http.response.text doc len 0 >",
+        "`http.server.@serve doc len 0 > `http.server.route doc len 0 > `http.server.render-response doc len 0 > " ++
+            "`http.request.query doc len 0 > `http.response.text doc len 0 >",
         "1 1 1 1 1",
     );
-    try support.expectStack("'http.server ('@serve 'route) import 'http.response ('text) import 'http.request ('query) import 1", "1");
+    try support.expectStack("`http.server (@serve route) import `http.response (text) import `http.request (query) import 1", "1");
 }
 
 test "http server: HTTP client and server progress together with one worker" {
@@ -697,8 +697,8 @@ test "http server: HTTP client and server progress together with one worker" {
         try runtime.open(.{}, config);
         defer runtime.close();
         const port = try runtime.listen("l");
-        const program = try std.fmt.allocPrint(allocator, "[] (l {{'max-in-flight 1}} (pop 200 \"same Session\" http.response.text) http.server.@serve) @spawn 'srv set " ++
-            "{{'target \"http://127.0.0.1:{d}/hello\"}} http.get 'body at " ++
+        const program = try std.fmt.allocPrint(allocator, "[] (l {{max-in-flight 1}} (pop 200 \"same Session\" http.response.text) http.server.@serve) @spawn `srv set " ++
+            "{{target \"http://127.0.0.1:{d}/hello\"}} http.get `body at " ++
             "srv dup task.cancel task.await pop l net.close", .{port});
         defer allocator.free(program);
         try runtime.run(program);

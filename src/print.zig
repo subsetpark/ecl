@@ -5,6 +5,7 @@ const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
+const lexer = @import("lexer.zig");
 const list = @import("list.zig");
 const dict = @import("dict.zig");
 const poll_api = @import("poll.zig");
@@ -98,14 +99,17 @@ pub const RenderCursor = struct {
                 .float => |number| try writeFloat(self, number, writer),
                 .char => |codepoint| try writeChar(self, codepoint, writer),
                 .symbol => |id| {
-                    try self.writeByte(writer, '\'');
-                    try self.pushBytes(intern.get(id));
-                },
-                .word => |id| {
                     // A lowered locals operation shows its count or index
                     // before its name; the reader does not read this back.
                     if (env.localOperand(id.slot)) |operand| try self.writeFmt(writer, "{d} ", .{operand});
-                    try self.pushBytes(intern.get(id.name));
+                    const spelling = intern.get(id.name);
+                    if (lexer.spellingReadsBare(spelling)) {
+                        try self.pushBytes(spelling);
+                    } else {
+                        try self.writeByte(writer, '\'');
+                        try self.pushBytes("'");
+                        try self.pushBytes(spelling);
+                    }
                 },
                 .list => |header| switch (header.kind()) {
                     .leaf_char1, .leaf_char2, .leaf_char4 => {
@@ -129,12 +133,22 @@ pub const RenderCursor = struct {
                         try self.writeByte(writer, '(');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
-                    .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol => {
+                    .leaf_u8, .leaf_i64, .leaf_f64 => {
                         if (self.style == .display and header.length() > display_list_limit) {
                             try self.writeFmt(writer, "[<{d}-values-elided>]", .{header.length()});
                             return;
                         }
                         try self.writeByte(writer, '[');
+                        try self.pushSequence(render.item, render.indent + 1, false);
+                    },
+                    // A vector of symbols is a quotation's shape whatever its
+                    // storage, so it prints as one; see Printing.
+                    .leaf_symbol => {
+                        if (self.style == .display and header.length() > display_list_limit) {
+                            try self.writeFmt(writer, "(<{d}-values-elided>)", .{header.length()});
+                            return;
+                        }
+                        try self.writeByte(writer, '(');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
                     .dict, .task, .port, .address, .reserved_mask => unreachable,
@@ -159,7 +173,10 @@ pub const RenderCursor = struct {
             .sequence => |continuation| {
                 const count: usize = @intCast(continuation.collection.list.length());
                 if (continuation.index == count) {
-                    try self.writeByte(writer, if (continuation.collection.list.kind() == .generic_spine) ')' else ']');
+                    try self.writeByte(writer, switch (continuation.collection.list.kind()) {
+                        .generic_spine, .leaf_symbol => ')',
+                        else => ']',
+                    });
                     return;
                 }
                 const indent = continuation.index > 0 and continuation.multiline;
@@ -774,7 +791,7 @@ fn isDisplayStructure(item: Value) bool {
     return switch (item) {
         .dict => true,
         .list => displayListIsMatrix(item),
-        .int, .float, .char, .symbol, .word, .task, .port, .address => false,
+        .int, .float, .char, .symbol, .task, .port, .address => false,
     };
 }
 
@@ -798,7 +815,8 @@ fn displayListIsMatrix(item: Value) bool {
 fn isFlatRow(item: Value) bool {
     if (item != .list) return false;
     return switch (item.list.kind()) {
-        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol => true,
+        .leaf_u8, .leaf_i64, .leaf_f64 => true,
+        .leaf_symbol => false,
         .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
     };
 }
@@ -880,13 +898,12 @@ test "canonical printer renders the public value syntax" {
     try expectPrint("0.125", .{ .float = 0.125 });
     try expectPrint("inf", .{ .float = std.math.inf(f64) });
     try expectPrint("-inf", .{ .float = -std.math.inf(f64) });
-    try expectPrint("'sym", .{ .symbol = sym });
-    try expectPrint("sym", .{ .word = .{ .name = sym } });
+    try expectPrint("sym", .{ .symbol = .{ .name = sym } });
 
     const integers = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(integers);
     try expectPrint("[1 2]", integers);
-    const quotation = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .word = .{ .name = plus } } });
+    const quotation = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .symbol = .{ .name = plus } } });
     defer cleanup.releaseValue(quotation);
     try expectPrint("(1 +)", quotation);
     const singleton = try list.fromValues(allocator, &.{.{ .int = 3 }});
@@ -902,9 +919,9 @@ test "canonical printer renders the public value syntax" {
     try expectPrint("\"\"", empty_string);
 
     const a = try intern.intern("a");
-    const dictionary = try dict.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = a }, .{ .int = 1 } }});
+    const dictionary = try dict.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = .{ .name = a } }, .{ .int = 1 } }});
     defer cleanup.releaseValue(dictionary);
-    try expectPrint("{'a 1}", dictionary);
+    try expectPrint("{a 1}", dictionary);
 }
 
 test "float rendering covers decimal extremes and round-trips finite bits" {

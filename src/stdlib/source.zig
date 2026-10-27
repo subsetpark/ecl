@@ -35,7 +35,7 @@ const DeclarationsDriver = struct {
         while (self.index < end) : (self.index += 1) {
             if (self.scan.feed(list.atUnchecked(forms, self.index))) |name| {
                 if (self.output) |*output| {
-                    output.borrowMut().appendBorrowed(.{ .symbol = name });
+                    output.borrowMut().appendBorrowed(.{ .symbol = .{ .name = name } });
                 } else self.count += 1;
             }
         }

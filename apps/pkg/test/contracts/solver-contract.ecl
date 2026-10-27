@@ -1,114 +1,114 @@
 ### module pkg.test.mvs
 []
 (
- 'pkg.test.support
- ('equal 'raises-containing 'raises-data 'documented)
+ `pkg.test.support
+ (equal raises-containing raises-data documented)
  import
 
  ### defp requirement
  (package version url hash -- requirement : "Construct requirement fixture data.")
  (|package version url hash|
-  {} 'package package put 'version version put 'source {} 'kind 'archive put 'url url put put 'hash
-  hash put) 'requirement defp
+  {} `package package put `version version put `source {} `kind `archive put `url url put put `hash
+  hash put) `requirement defp
 
  ### defp manifest
  (name version requires -- manifest : "Construct manifest fixture data.")
  (|name version requires|
-  {} 'format 2 put
-  'name name put
-  'version version put
-  'sources ["**/*"] put
-  'exports name wrap put
-  'requires requires put)
- 'manifest defp
+  {} `format 2 put
+  `name name put
+  `version version put
+  `sources ["**/*"] put
+  `exports name wrap put
+  `requires requires put)
+ `manifest defp
 
  ### defp hash-a
  (-- hash : "Return the first valid fixture hash.")
- ("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") 'hash-a defp
+ ("sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") `hash-a defp
 
  ### defp hash-b
  (-- hash : "Return the second valid fixture hash.")
- ("sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789") 'hash-b defp
+ ("sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789") `hash-b defp
 
  ### defp req-b
  (-- requirement : "Require b 1.0.0.")
- ("b" "1.0.0" "https://e.com/b.tgz" hash-a requirement) 'req-b defp
+ ("b" "1.0.0" "https://e.com/b.tgz" hash-a requirement) `req-b defp
 
  ### defp req-c-12
  (-- requirement : "Require c 1.2.0.")
- ("c" "1.2.0" "https://e.com/c12.tgz" hash-a requirement) 'req-c-12 defp
+ ("c" "1.2.0" "https://e.com/c12.tgz" hash-a requirement) `req-c-12 defp
 
  ### defp req-c-15
  (-- requirement : "Require c 1.5.0.")
- ("c" "1.5.0" "https://e.com/c15.tgz" hash-b requirement) 'req-c-15 defp
+ ("c" "1.5.0" "https://e.com/c15.tgz" hash-b requirement) `req-c-15 defp
 
  ### defp manifest-b
  (-- manifest : "Return b's transitive fixture manifest.")
- ("b" "1.0.0" {} "c" req-c-15 put manifest) 'manifest-b defp
+ ("b" "1.0.0" {} "c" req-c-15 put manifest) `manifest-b defp
 
  ### defp manifest-c-12
  (-- manifest : "Return c 1.2.0's fixture manifest.")
- ("c" "1.2.0" {} manifest) 'manifest-c-12 defp
+ ("c" "1.2.0" {} manifest) `manifest-c-12 defp
 
  ### defp manifest-c-15
  (-- manifest : "Return c 1.5.0's fixture manifest.")
- ("c" "1.5.0" {} manifest) 'manifest-c-15 defp
+ ("c" "1.5.0" {} manifest) `manifest-c-15 defp
 
  ### defp root
  (-- manifest : "Return the root MVS fixture.")
- ("app" "0.1.0" {} "b" req-b put "c" req-c-12 put manifest) 'root defp
+ ("app" "0.1.0" {} "b" req-b put "c" req-c-12 put manifest) `root defp
 
  ### defp root-without-c
  (-- manifest : "Return the root fixture without its direct c requirement.")
- ("app" "0.1.0" {} "b" req-b put manifest) 'root-without-c defp
+ ("app" "0.1.0" {} "b" req-b put manifest) `root-without-c defp
 
  ### defp catalog
  (-- catalog : "Return the reachable MVS fixture catalog.")
  ({}
   "b" {} "1.0.0" manifest-b put put
-  "c" {} "1.2.0" manifest-c-12 put "1.5.0" manifest-c-15 put put) 'catalog defp
+  "c" {} "1.2.0" manifest-c-12 put "1.5.0" manifest-c-15 put put) `catalog defp
 
  ### defp git-requirement
  (commit -- requirement : "Require c 1.2.0 from one pinned Git source.")
  (|commit|
-  req-c-12 'source {'kind 'git 'url "https://e.com/c.git"} 'commit commit put put)
- 'git-requirement defp
+  req-c-12 `source {kind git url "https://e.com/c.git"} `commit commit put put)
+ `git-requirement defp
 
  ### defp git-graph
  (left right -- root catalog : "Build two declarations of one Git package identity.")
  (|left right|
-  root 'requires root 'requires at "c" left git-requirement put put
+  root `requires root `requires at "c" left git-requirement put put
   catalog "b" {} "1.0.0"
   "b" "1.0.0" {} "c" right git-requirement put manifest put put)
- 'git-graph defp
+ `git-graph defp
 
  ### test pinned-git
  (-- : "Preserve pinned sources and reject differing commits despite equal artifact hashes.")
  ("0123456789abcdef0123456789abcdef01234567"
   dup git-graph pkg.solver.resolve
-  ['packages "c" 'source 'commit] at-path
+  [packages "c" source commit] at-path
   "0123456789abcdef0123456789abcdef01234567" equal
   ("0123456789abcdef0123456789abcdef01234567"
    "1123456789abcdef0123456789abcdef01234567"
    git-graph pkg.solver.resolve)
-  'domain "conflicting Git commits" raises-containing)
- 'pinned-git test
+  `domain "conflicting Git commits" raises-containing)
+ `pinned-git test
 
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")
  (root catalog pkg.solver.resolve
-  dup 'packages at dup dict.size 2 equal
-  ["c" 'version] at-path "1.5.0" equal
+  dup `packages at dup dict.size 2 equal
+  ["c" version] at-path "1.5.0" equal
   root catalog pkg.solver.resolve
-  dup 'requires at dict.vals (dict.pairs) each raze
-  swap 'packages at
+  dup `requires at dict.vals (dict.pairs) each raze
+  swap `packages at
   (|entry packages|
-   packages entry 1 at 'package at 'version pair at-path
-   entry 1 at 'version at pkg.version.less? not)
+   packages entry 1 at `package at `version pair at-path
+   entry 1 at `version at pkg.version.less? not)
   partial
   all?
   1 equal)
- 'resolution test
+ `resolution test
 
  ### test deterministic-input-order
  (-- : "Ignore graph insertion order and unreachable catalog versions.")
@@ -125,14 +125,14 @@
   pkg.solver.resolve pkg.resolution.write
   match?
   1 equal
-  root-without-c catalog pkg.solver.resolve 'packages at
+  root-without-c catalog pkg.solver.resolve `packages at
   root catalog pkg.solver.resolve
   (|packages lock|
-   packages lock 'packages at match? 1 equal
-   lock ['requires "app" "c"] at-path
-   {'package "c" 'version "1.2.0"} equal)
+   packages lock `packages at match? 1 equal
+   lock [requires "app" "c"] at-path
+   {package "c" version "1.2.0"} equal)
   call)
- 'deterministic-input-order test
+ `deterministic-input-order test
 
  ### test conflicts
  (-- : "Report hash, prefix, and cycle conflicts with responsible packages.")
@@ -143,7 +143,7 @@
    manifest
    catalog
    pkg.solver.resolve)
-  'domain
+  `domain
   "conflicting hashes"
   raises-containing
   ("app" "0.1.0"
@@ -168,7 +168,7 @@
    "foo" {} "1.0.0" "foo" "1.0.0" {} manifest put put
    "foo.bar" {} "1.0.0" "foo.bar" "1.0.0" {} manifest put put
    pkg.solver.resolve)
-  'domain
+  `domain
   "overlapping prefixes"
   raises-containing
   "app" "0.1.0"
@@ -184,10 +184,10 @@
   {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
   manifest put put
   pair (pkg.solver.resolve) @attempt
-  'err at
-  dup 'kind at 'domain equal
-  'data at 'packages at ("a" "b") equal)
- 'conflicts test
+  `err at
+  dup `kind at `domain equal
+  `data at `packages at ("a" "b") equal)
+ `conflicts test
 
  ### test malformed-and-missing
  (-- : "Identify malformed requirements and absent exact manifests.")
@@ -196,19 +196,19 @@
    manifest
    {}
    pkg.solver.resolve)
-  'domain
-  'version
+  `domain
+  `version
   "not-a-version"
   raises-data
   (root-without-c {} pkg.solver.resolve)
-  'domain
-  'version
+  `domain
+  `version
   "1.0.0"
   raises-data)
- 'malformed-and-missing test
+ `malformed-and-missing test
 
  ### test documentation
  (-- : "Require documentation for package resolution.")
- (('pkg.solver.resolve) documented)
- 'documentation test
-) 'pkg.test.mvs @defm
+ ((pkg.solver.resolve) documented)
+ `documentation test
+) `pkg.test.mvs @defm

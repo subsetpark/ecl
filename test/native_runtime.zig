@@ -28,7 +28,7 @@ fn runPath(source: []const u8, path: []const u8) !cli.Result {
 
 test "native runtime: loaded artifacts behave identically at one and eight workers" {
     const source = "40 sample.increment sample.split sample.singleton " ++
-        "sample.cooperative 'sample.increment which";
+        "sample.cooperative `sample.increment which";
     var one = try run(source, "1", false);
     defer one.deinit();
     var eight = try run(source, "8", false);
@@ -53,7 +53,7 @@ test "native runtime: spawned units inherit native loading context" {
     defer one.deinit();
     var eight = try run(source, "8", false);
     defer eight.deinit();
-    try one.expect(.{ .exit_code = 0, .stdout = "{'ok [42]}\n", .stderr = "" });
+    try one.expect(.{ .exit_code = 0, .stdout = "{ok [42]}\n", .stderr = "" });
     try std.testing.expectEqual(one.term, eight.term);
     try std.testing.expectEqualStrings(one.stdout, eight.stdout);
     try std.testing.expectEqualStrings(one.stderr, eight.stderr);
@@ -75,7 +75,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
     try task_input.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{ "'kind 'type", "native words cannot observe task capabilities" },
+        .stderr_contains = &.{ "kind type", "native words cannot observe task capabilities" },
     });
 
     var duplicate = try run("sample.duplicate-dict", "1", false);
@@ -83,12 +83,12 @@ test "native runtime: inadmissible values and duplicate keys are language errors
     try duplicate.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{ "'kind 'domain", "duplicate dictionary key" },
+        .stderr_contains = &.{ "kind domain", "duplicate dictionary key" },
     });
 }
 
 test "native runtime: execute uses ordinary native dispatch" {
-    var result = try run("7 'sample 'increment qualify execute", "1", false);
+    var result = try run("7 `sample `increment qualify execute", "1", false);
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "8\n", .stderr = "" });
 }
@@ -96,7 +96,7 @@ test "native runtime: execute uses ordinary native dispatch" {
 test "native runtime: SDK char scalars enforce Unicode scalar bounds" {
     var upper = try run("1114111 sample.make-char type", "1", false);
     defer upper.deinit();
-    try upper.expect(.{ .exit_code = 0, .stdout = "'char\n", .stderr = "" });
+    try upper.expect(.{ .exit_code = 0, .stdout = "char\n", .stderr = "" });
 
     const invalid_codepoints = [_]u32{ 0xd800, 0x110000, 0x200000, std.math.maxInt(u32) };
     for (invalid_codepoints) |codepoint| {
@@ -112,7 +112,7 @@ test "native runtime: SDK char scalars enforce Unicode scalar bounds" {
             .exit_code = 1,
             .stdout = "",
             .stderr_contains = &.{
-                "'kind 'domain",
+                "kind domain",
                 "native SDK capability argument was rejected",
             },
         });
@@ -130,7 +130,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "[] (100 'increment set) 'sample @defm",
+        .data = "[] (100 `increment set) `sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -164,7 +164,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer source_root.cleanup();
     try source_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "[] (100 'increment set) 'sample @defm",
+        .data = "[] (100 `increment set) `sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,
@@ -220,14 +220,14 @@ test "native runtime: malformed artifacts are authoritative" {
         defer allocator.free(search);
         try environment.put("ECL_PATH", search);
         var result = try cli.runOptions(.{
-            .argv = &.{ build_options.ecl_exe, "-e", "'sample ('increment) import" },
+            .argv = &.{ build_options.ecl_exe, "-e", "`sample (increment) import" },
             .environ_map = &environment,
         });
         defer result.deinit();
         try result.expect(.{
             .exit_code = 1,
             .stdout = "",
-            .stderr_contains = &.{ "'kind 'io", case.message, path },
+            .stderr_contains = &.{ "kind io", case.message, path },
         });
     }
 }

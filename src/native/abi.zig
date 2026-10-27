@@ -65,7 +65,6 @@ pub const ValueKindWire = enum(u32) {
     float = 1,
     char = 2,
     symbol = 3,
-    word = 4,
     list = 5,
     dict = 6,
     port = 7,

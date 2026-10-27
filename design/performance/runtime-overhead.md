@@ -439,14 +439,14 @@ PMU percentages are not combined across CPU classes.
 The public workload is:
 
 ```ecl
-10000 ('cwd "data" fs.stat pop) times 10000
+10000 (`cwd "data" fs.stat pop) times 10000
 ```
 
 The direct control preserves native operation, result, and cleanup ownership
 while excluding public wrapper work:
 
 ```ecl
-10000 (fs.core.request ['stat 'cwd "data"] port.open
+10000 (fs.core.request [stat cwd "data"] port.open
        dup fs.core.execute-request [] port.call pop port.close) times 10000
 ```
 

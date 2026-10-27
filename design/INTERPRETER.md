@@ -329,9 +329,23 @@ character, and comment recognition.
 
 The root program and every quotation are lists. Evaluation has three cases:
 
-- a non-word value is appended to the operand stack;
-- a word occurrence is resolved and invoked; and
+- a non-symbol value is appended to the operand stack;
+- a symbol occurrence is resolved and invoked; and
 - applying a quotation evaluates its elements by the same rule.
+
+A symbol is one representation whichever position it occupies: its interned
+name plus a resolution slot. The slot is metadata the reader links for the
+root the text was written in and a runtime-built symbol leaves zero; equality,
+hashing, and printing ignore it, and a zero slot links lazily where it runs.
+Nothing else distinguishes "code" from "data": the reader's quote is the two
+forms `(x) core.first`, which is why `first` is a kernel builtin rather than a
+prelude word, and a locals declaration rewrites only its body's own top-level
+occurrences, since a symbol inside a nested list or dict is the symbol it
+spells. A symbol vector stores as a leaf only when every slot is zero, so a
+quotation keeps its links; printing chooses `(...)` for both storages. The
+same rule binds quotations the implementation assembles from values: an
+operand spliced into one is data, so a symbol operand is spliced as its quote
+expansion, never as a bare element that would resolve.
 
 Program construction produces ordinary values and never triggers compilation.
 Concatenating quotations produces another ordinary list that can execute
@@ -942,7 +956,7 @@ the live evaluator carries a compact internal `EclErr`. On failure, one
 5. unwinds frames, locals, and operands in bounded steps.
 
 `@attempt` is an explicit catch boundary that converts the result to an
-`{'ok ...}` or `{'err ...}` envelope. Without such a boundary, the Unit fails
+`{ok ...}` or `{err ...}` envelope. Without such a boundary, the Unit fails
 and the Session restores its stack checkpoint. No host exception or host stack
 frame becomes public error data.
 
@@ -1309,7 +1323,7 @@ allocation.
 Every `TaskCell` owns a `Mailbox`: a separately counted object created with
 the cell and closed in the terminal transition, before the unit's stack is
 released. The mailbox never points back at the cell or its result, and an
-`'address` value holds a mailbox reference and nothing else, so addresses
+`` `address `` value holds a mailbox reference and nothing else, so addresses
 travel through mailboxes without closing a cycle. Handles are refused on
 `task.send` by a bounded walk under the sender's work budget that enters only
 generic spines and dictionaries and accepts a flat specialized list in one
@@ -1536,7 +1550,7 @@ timestamp, past i64 milliseconds for the manual clock — so an unreachable
 deadline cannot enter the heap. A `TimerNode` carries its deadline only inside
 its `linked` membership; a detached node has no instant to misread. Both
 timed primitives ask the scheduler to check the deadline before parking and
-raise `'overflow` from the word itself; the registration path repeats the
+raise `` `overflow `` from the word itself; the registration path repeats the
 check and, should the clock cross the boundary in between, selects the
 `overflow` wake reason.
 
@@ -1547,7 +1561,7 @@ ordinary states. Park results are typed by operation: `ParkResume` has one
 family per request kind — `task_wait`, `sleep`, `external`, plus the root-only
 `scope_closed` — and `WaitSet.materializeResume` switches first on the wait
 kind and then on the wake reason, so a sleep can only produce a `SleepResume`
-(`elapsed`, `cancelled`, `io`, `overflow`, `out_of_memory`) and a task wait can
+(elapsed, cancelled, io, overflow, out_of_memory) and a task wait can
 only produce a `TaskWaitResume`. The machine's resume switch is exhaustive per
 family, which is what lets a cancelled sleep say it was sleeping and a
 cancelled readiness wait say it was awaiting host readiness rather than
@@ -1929,7 +1943,7 @@ registration rejects duplicate endpoint identities and undeclared permissions
 before publishing any binding.
 
 Resource lifecycle dispatch uses an opaque registered semantic interface
-(`port_resource.zig`). A borrowed lifecycle capability requires a retained port
+(port_resource.zig). A borrowed lifecycle capability requires a retained port
 identity throughout its use. Each adapter reports joined cleanup through the
 common controller service.
 Connection cleanup readiness is distinct from send-ring drainage: returning the
@@ -1964,7 +1978,7 @@ bounded transport during execution into fixed chunks and performs one polled,
 exact-size materialization. HTTP retains its own header normalization and ordinary
 dictionary/text/byte-list construction, with no port-message node limits.
 
-Registered byte endpoints use a shared bounded transport (`port_bytes.zig`).
+Registered byte endpoints use a shared bounded transport (port_bytes.zig).
 An exchange owns its pipes; each attenuated endpoint retains the exchange and
 exposes only its declared direction. A sealed descriptor index resolves endpoint
 permissions without scanning a module during admission. Pipe construction

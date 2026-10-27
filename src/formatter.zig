@@ -1014,7 +1014,7 @@ fn definitionFollows(sequence: Sequence, current: usize) bool {
                 else => return false,
             };
             if (stage == 0) {
-                if (bytes.len < 2 or bytes[0] != '\'' or !lexer.validSymbol(bytes[1..])) return false;
+                if (bytes.len < 2 or bytes[0] != '`' or !lexer.validSymbolSource(bytes[1..])) return false;
                 stage = 1;
             } else return Declaration.fromWord(bytes) != null;
         },
@@ -1087,7 +1087,7 @@ fn definitionDeclaration(sequence: Sequence, start: usize) ?Declaration {
 fn isLiteralValueForm(form_item: *const Form) bool {
     return switch (form_item.kind) {
         .string, .delimited => true,
-        .atom => |bytes| if (bytes.len > 0 and (bytes[0] == '\'' or bytes[0] == '\\'))
+        .atom => |bytes| if (bytes.len > 0 and (bytes[0] == '`' or bytes[0] == '\\'))
             true
         else switch (lexer.classify(bytes)) {
             .int, .float => true,
@@ -1135,7 +1135,7 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
                 .terminator = part_index,
             } else null;
             if (!body_seen) return null;
-            if (bytes.len < 2 or bytes[0] != '\'' or !lexer.validSymbol(bytes[1..])) return null;
+            if (bytes.len < 2 or bytes[0] != '`' or !lexer.validSymbolSource(bytes[1..])) return null;
             named = bytes[1..];
         },
     };
@@ -1386,17 +1386,23 @@ fn triviaEnd(source: []const u8, start: usize) ?usize {
 }
 fn atomEnd(source: []const u8, start: usize) usize {
     if (source[start] == ';' or source[start] == '|') return start + 1;
-    var index = start + @as(usize, @intFromBool(source[start] == '\'' or source[start] == '\\'));
+    var index = start + @as(usize, @intFromBool(source[start] == '`' or source[start] == '\\'));
     if (source[start] == '\\' and index < source.len) {
         const next_length = std.unicode.utf8ByteSequenceLength(source[index]) catch
             @panic("formatter received invalid UTF-8 after validation");
         const next = std.unicode.utf8Decode(source[index..][0..next_length]) catch
             @panic("formatter received invalid UTF-8 after validation");
-        if (lexer.isTokenBoundary(next) or next == ';' or next == '|' or next == '\'' or next == '\\') {
+        if (lexer.isTokenBoundary(next) or next == ';' or next == '|' or next == '\'' or next == '`' or next == '\\') {
             return index + next_length;
         }
     }
     while (index < source.len) {
+        // A `'...'` segment keeps its delimiters and whitespace; the reader
+        // has already accepted the source, so its closing quote exists.
+        if (source[index] == '\'') {
+            index = if (std.mem.indexOfScalarPos(u8, source, index + 1, '\'')) |close| close + 1 else source.len;
+            continue;
+        }
         const length = std.unicode.utf8ByteSequenceLength(source[index]) catch
             @panic("formatter received invalid UTF-8 after validation");
         const codepoint = std.unicode.utf8Decode(source[index..][0..length]) catch

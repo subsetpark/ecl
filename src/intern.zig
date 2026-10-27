@@ -584,7 +584,7 @@ pub const NamespaceCursor = struct {
     reserved_ok: bool = false,
     pub fn init(id: u32) NamespaceCursor {
         const bytes = get(id);
-        return .{ .id = id, .bytes = bytes, .lexical = .initSegment(bytes) };
+        return .{ .id = id, .bytes = bytes, .lexical = .initSpellingSegment(bytes) };
     }
     pub fn initReserved(id: u32) NamespaceCursor {
         var cursor = init(id);
@@ -613,7 +613,9 @@ pub const ModuleNameCursor = struct {
 
     pub fn init(id: u32) ModuleNameCursor {
         const bytes = get(id);
-        return .{ .id = id, .bytes = bytes, .lexical = .init(bytes) };
+        // A module name is also a registry and path component, so it keeps the
+        // bare-segment grammar rather than the open spelling grammar.
+        return .{ .id = id, .bytes = bytes, .lexical = .initSource(bytes) };
     }
 
     pub fn advance(self: *ModuleNameCursor) ModuleNameProgress {

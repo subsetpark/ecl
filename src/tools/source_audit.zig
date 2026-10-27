@@ -517,11 +517,11 @@ fn auditPreludeLayout() bool {
                 stage = if (stage == .annotation) .body else .name;
             },
             .name => {
-                if (source[index] != '\'') {
+                if (source[index] != '`') {
                     std.log.err("prelude layout: `{s}` lacks its terminal quoted name", .{expected_name});
                     return true;
                 }
-                const end = preludeTokenEnd(source, index);
+                const end = preludeTokenEnd(source, index + 1);
                 if (!std.mem.eql(u8, source[index + 1 .. end], expected_name)) {
                     std.log.err("prelude layout: header `{s}` does not match terminal `{s}`", .{
                         expected_name, source[index + 1 .. end],
@@ -599,7 +599,7 @@ fn skipPreludeString(source: []const u8, index: *usize) bool {
 fn preludeTokenEnd(source: []const u8, start: usize) usize {
     var end = start;
     while (end < source.len and !std.ascii.isWhitespace(source[end]) and
-        std.mem.indexOfScalar(u8, "(),[]{}#", source[end]) == null)
+        std.mem.indexOfScalar(u8, "(),[]{}#`", source[end]) == null)
     {
         end += 1;
     }
@@ -755,7 +755,7 @@ fn auditSourceBodies() bool {
 /// function and a word spelling is text. Among the modules that implement
 /// evaluated filesystem words, none may name the working directory; the
 /// owners that open trusted host paths once at Session construction
-/// (`filesystem_port.zig`, `directory_resource.zig`) and the CLI, map
+/// (filesystem_port.zig, directory_resource.zig) and the CLI, map
 /// discovery, and module-loading host boundaries do so by design.
 fn auditFilesystemAuthority() bool {
     var failed = false;
@@ -1330,7 +1330,7 @@ fn auditUnitConstructorSpelling() bool {
     var failed = auditBuiltinMarks(&unit_constructors, .unit);
     for (first_party_definition_sources) |source| {
         var scan: usize = 0;
-        while (std.mem.indexOfPos(u8, source, scan, "'@")) |found| {
+        while (std.mem.indexOfPos(u8, source, scan, "`@")) |found| {
             const start = found + 1;
             const end = preludeTokenEnd(source, start);
             const name = source[start..end];
@@ -1359,7 +1359,7 @@ fn auditUnitConstructorSpelling() bool {
 /// definition ends in.
 fn definesQuotedName(source: []const u8, name: []const u8) bool {
     var scan: usize = 0;
-    while (std.mem.indexOfPos(u8, source, scan, "'")) |found| {
+    while (std.mem.indexOfPos(u8, source, scan, "`")) |found| {
         const start = found + 1;
         const end = preludeTokenEnd(source, start);
         scan = if (end > start) end else start + 1;
@@ -1427,7 +1427,7 @@ fn auditDynamicContextSpelling() bool {
     var failed = auditBuiltinMarks(&dynamic_context_words, .dynamic);
     for (first_party_definition_sources) |source| {
         var scan: usize = 0;
-        while (std.mem.indexOfPos(u8, source, scan, "'*")) |found| {
+        while (std.mem.indexOfPos(u8, source, scan, "`*")) |found| {
             const start = found + 1;
             const end = preludeTokenEnd(source, start);
             const name = source[start..end];

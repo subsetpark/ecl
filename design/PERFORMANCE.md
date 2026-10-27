@@ -601,7 +601,7 @@ Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
 | `(sq) each`, `sq` a source word | 10,015 | 17 | 19,996 | 29,994 |
 | `((1 +) call dup *) each` | 30,009 | 17 | 0 | 39,992 |
 | `(\|x\| x x *) each` | 50,009 | 40,011 | 0 | 9,998 |
-| `(dup 'k set k *) each` | 170,013 | 170,013 | 0 | 19,996 |
+| ``(dup `k set k *) each`` | 170,013 | 170,013 | 0 | 19,996 |
 
 Allocations, transitions, application resumes, and handoffs are unchanged.
 At this measurement stage, the locals body kept four resumes per element for
@@ -618,7 +618,7 @@ over 100,000 floats, internal milliseconds:
 | `(dup *) each` | 731 | 283 |
 | `(1 + 1 +) each` | 741 | 327 |
 | `() each` | 173 | 171 |
-| `(dup 'k set k *) each` | 7,480 | 6,678 |
+| ``(dup `k set k *) each`` | 7,480 | 6,678 |
 
 ## Locals backend words bind without resolution — 2026-09-28
 
@@ -1054,7 +1054,7 @@ has 100,000 rows and three columns ending in a spelling-preserving text fallback
 Setup constructs the input before the measured operation. Rates are rows/s;
 all pairs again show baseline → updated. Composite baseline is `flip group`;
 updated is `group-columns`. Aggregation compares gathered `(sum)` / `(len)`
-quotations with fixed `'sum` / `'count` reducers on the same data.
+quotations with fixed `` `sum `` / `` `count `` reducers on the same data.
 
 | Workload | Rows | Setup ms | Operation ms | Rows/s | Peak MiB |
 |---|---:|---:|---:|---:|---:|

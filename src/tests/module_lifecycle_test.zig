@@ -46,11 +46,11 @@ const ConcurrentMapFixture = struct {
         try directory.dir.createDir(std.testing.io, "project/nested", .default_dir);
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.modules",
-            .data = "{'format 1 'local \"root\" 'scopes {\"root\" {'root \".\" 'visible [] 'sources [] 'artifacts [{'path \"race.ecl\" 'kind 'ecl 'exports [\"race\"]}]}}}",
+            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [{path \"race.ecl\" kind ecl exports [\"race\"]}]}}}",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/race.ecl",
-            .data = "[] ((pop 42) 'answer def) 'race @defm\n",
+            .data = "[] ((pop 42) `answer def) `race @defm\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
@@ -117,13 +117,13 @@ test "definitions: module def and defp accept all four annotation forms" {
     defer runtime.deinit();
     // All four forms register, publicly and privately, and each word runs.
     try expectOk(&runtime, "[] (" ++
-        "(1 +) 'bare def " ++
-        "( n -- n ) (2 *) 'effected def " ++
-        "( : \"Subtract three.\" ) (3 -) 'documented def " ++
-        "( n -- n : \"Divide by four.\" ) (4 div) 'complete def " ++
-        "(dup +) 'hidden defp " ++
-        "(hidden 1 +) 'via-private def" ++
-        ") 'forms @defm");
+        "(1 +) `bare def " ++
+        "( n -- n ) (2 *) `effected def " ++
+        "( : \"Subtract three.\" ) (3 -) `documented def " ++
+        "( n -- n : \"Divide by four.\" ) (4 div) `complete def " ++
+        "(dup +) `hidden defp " ++
+        "(hidden 1 +) `via-private def" ++
+        ") `forms @defm");
     try expectStack(
         &runtime,
         "10 forms.bare 10 forms.effected 10 forms.documented 12 forms.complete 10 forms.via-private",
@@ -131,8 +131,8 @@ test "definitions: module def and defp accept all four annotation forms" {
     );
     // Reflection preserves exactly which annotation portions were supplied;
     // documentation is also available separately through `doc`.
-    try expectOk(&runtime, "'forms.bare see 'forms.effected see " ++
-        "'forms.documented see 'forms.complete see");
+    try expectOk(&runtime, "`forms.bare see `forms.effected see " ++
+        "`forms.documented see `forms.complete see");
     try std.testing.expectEqualStrings(
         "(1 +)\n" ++
             "(n -- n) (2 *)\n" ++
@@ -140,21 +140,21 @@ test "definitions: module def and defp accept all four annotation forms" {
             "(n -- n : \"Divide by four.\") (4 div)\n",
         output.written(),
     );
-    try expectStack(&runtime, "'forms.documented doc", "\"Subtract three.\"");
-    try expectErrorContains(&runtime, "'forms.bare doc", &.{ "'kind 'domain", "documentation" });
+    try expectStack(&runtime, "`forms.documented doc", "\"Subtract three.\"");
+    try expectErrorContains(&runtime, "`forms.bare doc", &.{ "kind domain", "documentation" });
     // A supplied effect stays a live cross-home contract; omitting one adds
     // no inferred check, so a word leaving two values crosses unimpeded.
     try expectErrorContains(
         &runtime,
-        "[] (( -- n ) (1 2) 'two def) 'liar @defm liar.two",
-        &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },
+        "[] (( -- n ) (1 2) `two def) `liar @defm liar.two",
+        &.{ "kind contract", "word liar.two", "declared (0 -- 1)" },
     );
-    try expectStack(&runtime, "[] ((1 2) 'two def) 'quiet @defm quiet.two", "1 2");
+    try expectStack(&runtime, "[] ((1 2) `two def) `quiet @defm quiet.two", "1 2");
     // Malformed recognized annotations remain 'domain in a module root.
     try expectErrorContains(
         &runtime,
-        "[] (( : ) (3) 'bad def) 'broken @defm",
-        &.{ "'kind 'domain", "malformed definition annotation" },
+        "[] (( : ) (3) `bad def) `broken @defm",
+        &.{ "kind domain", "malformed definition annotation" },
     );
 }
 
@@ -169,23 +169,23 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     // spellings expose the same literal-capture body.
     try expectStack(
         &runtime,
-        "42 'answer set 42 literal 'spelled def answer spelled match?",
+        "42 `answer set 42 literal `spelled def answer spelled match?",
         "1",
     );
-    try expectOk(&runtime, "'answer see 'spelled see 'answer which");
+    try expectOk(&runtime, "`answer see `spelled see `answer which");
     try std.testing.expectEqualStrings(
         "[42]\n" ++
             "[42]\n" ++
             "answer -> answer def public\n",
         output.written(),
     );
-    try expectErrorContains(&runtime, "'answer doc", &.{ "'kind 'domain", "documentation" });
+    try expectErrorContains(&runtime, "`answer doc", &.{ "kind domain", "documentation" });
     // `setp` carries the same simplification into a module root, where the
     // published constant needs no effect declaration to register.
-    try expectOk(&runtime, "[] (7 'x set 8 'h setp (h) 'peek def) 'm @defm");
+    try expectOk(&runtime, "[] (7 `x set 8 `h setp (h) `peek def) `m @defm");
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
-    try expectOk(&runtime, "'m.x see");
+    try expectOk(&runtime, "`m.x see");
     try std.testing.expectEqualStrings("[7]\n", output.written());
 }
 
@@ -199,28 +199,28 @@ test "modules: *module* reports the active canonical registration" {
     // registrations of the same body report their own names.
     try expectStack(
         &runtime,
-        "[] ((*module*) 'name def) 'left @defm [] ((*module*) 'name def) 'right @defm " ++
+        "[] ((*module*) `name def) `left @defm [] ((*module*) `name def) `right @defm " ++
             "left.name right.name",
-        "'left 'right",
+        "left right",
     );
     // Aliases select their target registration and therefore report its
     // canonical name rather than the spelling used at the call site.
-    try expectStack(&runtime, "'short 'left alias short.name", "'left");
+    try expectStack(&runtime, "`short `left alias short.name", "left");
 
     // The root has no home and therefore no module name to manufacture.
     try expectErrorContains(&runtime, "*module*", &.{
-        "'kind 'domain",
+        "kind domain",
         "registered module",
     });
     // A construction body already knows the name it is being built under:
     // `*module*` answers, and the value it leaves is what the body refuses.
-    try expectErrorContains(&runtime, "[] (*module*) 'building @defm", &.{
-        "'kind 'domain",
+    try expectErrorContains(&runtime, "[] (*module*) `building @defm", &.{
+        "kind domain",
         "left 1 value",
     });
-    try expectOk(&runtime, "[] ((*module*) 'name set) 'escaped @defm");
+    try expectOk(&runtime, "[] ((*module*) `name set) `escaped @defm");
     try expectErrorContains(&runtime, "escaped.name call", &.{
-        "'kind 'domain",
+        "kind domain",
         "registered module",
     });
 }
@@ -232,12 +232,12 @@ test "modules: a reload and a removal are seen through a cached qualified call s
     defer runtime.deinit();
     // `via` is one source occurrence of `m.x`, so every call after the first
     // comes through the per-unit call-site cache. Each reload must evict it.
-    try expectOk(&runtime, "[] ((1) 'x def) 'm @defm (m.x) 'via def");
+    try expectOk(&runtime, "[] ((1) `x def) `m @defm (m.x) `via def");
     try expectStack(&runtime, "via", "1");
-    try expectStack(&runtime, "[] ((2) 'x def) 'm @defm via via", "2 2");
-    try expectStack(&runtime, "[] ((3) 'x def) 'm @defm via", "3");
-    try expectStack(&runtime, "'m undefm [] ((4) 'x def) 'm @defm via", "4");
-    try expectErrorContains(&runtime, "'m undefm via", &.{"'kind 'undefined-word"});
+    try expectStack(&runtime, "[] ((2) `x def) `m @defm via via", "2 2");
+    try expectStack(&runtime, "[] ((3) `x def) `m @defm via", "3");
+    try expectStack(&runtime, "`m undefm [] ((4) `x def) `m @defm via", "4");
+    try expectErrorContains(&runtime, "`m undefm via", &.{"kind undefined-word"});
 }
 
 test "modules: explicit seeds initialize the @defm construction stack in order" {
@@ -250,15 +250,15 @@ test "modules: explicit seeds initialize the @defm construction stack in order" 
     // needing to read the durable stack back.
     try expectStack(
         &runtime,
-        "[10 3] (div 'quotient set) 'divide @defm divide.quotient",
+        "[10 3] (div `quotient set) `divide @defm divide.quotient",
         "3",
     );
     // Whatever the body leaves behind is refused: a module keeps no state,
     // and nothing it leaves ever reaches the caller.
-    try expectErrorContains(&runtime, "[1 2 3] (+ swap 9) 'residue @defm", &.{ "'kind 'domain", "left 3 values" });
-    try expectErrorContains(&runtime, "[4 5] () 'untouched @defm", &.{ "'kind 'domain", "left 2 values" });
+    try expectErrorContains(&runtime, "[1 2 3] (+ swap 9) `residue @defm", &.{ "kind domain", "left 3 values" });
+    try expectErrorContains(&runtime, "[4 5] () `untouched @defm", &.{ "kind domain", "left 2 values" });
     // The seeded values are gone from the caller's stack in every case.
-    try expectStack(&runtime, "[6 7] (+ 'sum set) 'consumed @defm consumed.sum", "13");
+    try expectStack(&runtime, "[6 7] (+ `sum set) `consumed @defm consumed.sum", "13");
 }
 
 test "modules: dotted names qualify dynamically and split executable words at the final dot" {
@@ -266,21 +266,21 @@ test "modules: dotted names qualify dynamically and split executable words at th
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((1) 'utils def) 'base @defm");
-    try expectOk(&runtime, "[] ((41) 'f def (42) 'g def) 'base.utils @defm");
+    try expectOk(&runtime, "[] ((1) `utils def) `base @defm");
+    try expectOk(&runtime, "[] ((41) `f def (42) `g def) `base.utils @defm");
     try expectStack(&runtime, "base.utils base.utils.f", "1 41");
-    try expectStack(&runtime, "'base.utils 'f qualify dup type swap execute", "'word 41");
-    try expectStack(&runtime, "'base.utils 1 ('f) ('g) if qualify execute", "41");
-    try expectOk(&runtime, "'utils 'base.utils alias");
+    try expectStack(&runtime, "`base.utils `f qualify dup type swap execute", "symbol 41");
+    try expectStack(&runtime, "`base.utils 1 (`f) (`g) if qualify execute", "41");
+    try expectOk(&runtime, "`utils `base.utils alias");
     try expectStack(&runtime, "utils.g", "42");
-    try expectOk(&runtime, "'base.utils ('g) import");
+    try expectOk(&runtime, "`base.utils (g) import");
     try expectStack(&runtime, "g", "42");
-    try expectOk(&runtime, "[] ((43) 'f def) 'base.utils @defm");
-    try expectStack(&runtime, "base.utils.f 'base.utils 'f qualify execute", "43 43");
-    try expectOk(&runtime, "'utils undefm");
-    try expectErrorContains(&runtime, "base.utils.f", &.{ "'kind 'undefined-word", "base.utils.f" });
-    try expectErrorContains(&runtime, "utils.f", &.{ "'kind 'undefined-word", "utils.f" });
-    try expectOk(&runtime, "[] ((44) 'f def) 'base.utils @defm");
+    try expectOk(&runtime, "[] ((43) `f def) `base.utils @defm");
+    try expectStack(&runtime, "base.utils.f `base.utils `f qualify execute", "43 43");
+    try expectOk(&runtime, "`utils undefm");
+    try expectErrorContains(&runtime, "base.utils.f", &.{ "kind undefined-word", "base.utils.f" });
+    try expectErrorContains(&runtime, "utils.f", &.{ "kind undefined-word", "utils.f" });
+    try expectOk(&runtime, "[] ((44) `f def) `base.utils @defm");
     try expectStack(&runtime, "base.utils.f", "44");
 }
 
@@ -290,27 +290,27 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     try expectStack(&runtime, "1 core.dup", "1 1");
-    try expectOk(&runtime, "(2 *) 'dup def");
+    try expectOk(&runtime, "(2 *) `dup def");
     try expectStack(&runtime, "3 dup 3 core.dup", "6 3 3");
-    try expectStack(&runtime, "'core 'dup qualify 4 swap execute", "4 4");
+    try expectStack(&runtime, "`core `dup qualify 4 swap execute", "4 4");
     // A module whose own export shadows a core word reaches the original
     // through the qualifier, which is the case the standard library needs.
-    try expectOk(&runtime, "[] ((pop 'shadowed) 'where def ([0 1 1] core.where) 'indices def) 'shadow.host @defm");
+    try expectOk(&runtime, "[] ((pop `shadowed) `where def ([0 1 1] core.where) `indices def) `shadow.host @defm");
     try expectStack(&runtime, "shadow.host.indices", "[1 2]");
-    try expectStack(&runtime, "7 shadow.host.where", "'shadowed");
-    try expectErrorContains(&runtime, "core.no-such-binding", &.{ "'kind 'undefined-word", "'scope 'core" });
+    try expectStack(&runtime, "7 shadow.host.where", "shadowed");
+    try expectErrorContains(&runtime, "core.no-such-binding", &.{ "kind undefined-word", "scope core" });
     // Core is a scope, not a registration: nothing may publish under its name
     // as a module or an alias, and it is not a module to
     // alias, import from, or remove.
-    try expectErrorContains(&runtime, "[] () 'core @defm", &.{ "'kind 'domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "'core 'shadow.host alias", &.{ "'kind 'domain", "reserved for the core qualifier" });
-    try expectErrorContains(&runtime, "'short 'core alias", &.{ "'kind 'undefined-word", "undefined module `core`" });
-    try expectErrorContains(&runtime, "'core ('dup) import", &.{ "'kind 'undefined-word", "'scope 'qualified" });
-    try expectErrorContains(&runtime, "'core undefm", &.{ "'kind 'undefined-word", "undefined word `core`" });
+    try expectErrorContains(&runtime, "[] () `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
+    try expectErrorContains(&runtime, "`core `shadow.host alias", &.{ "kind domain", "reserved for the core qualifier" });
+    try expectErrorContains(&runtime, "`short `core alias", &.{ "kind undefined-word", "undefined module `core`" });
+    try expectErrorContains(&runtime, "`core (dup) import", &.{ "kind undefined-word", "scope qualified" });
+    try expectErrorContains(&runtime, "`core undefm", &.{ "kind undefined-word", "undefined word `core`" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
-    try expectOk(&runtime, "[] ((1) 'f def) 'core.utils @defm");
-    try expectStack(&runtime, "core.utils.f 'core.utils 'f qualify execute", "1 1");
+    try expectOk(&runtime, "[] ((1) `f def) `core.utils @defm");
+    try expectStack(&runtime, "core.utils.f `core.utils `f qualify execute", "1 1");
     try expectStack(&runtime, "1 core.dup", "1 1");
 }
 
@@ -319,21 +319,21 @@ test "modules: execute preserves ordinary dispatch home contracts and errors" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((3) 'secret defp (secret 4 +) 'f def) 'private.home @defm");
-    try expectStack(&runtime, "'private.home 'f qualify execute", "7");
-    try expectOk(&runtime, "[] ((5) 'five def (1 +) 'inc def) 'other.home @defm");
+    try expectOk(&runtime, "[] ((3) `secret defp (secret 4 +) `f def) `private.home @defm");
+    try expectStack(&runtime, "`private.home `f qualify execute", "7");
+    try expectOk(&runtime, "[] ((5) `five def (1 +) `inc def) `other.home @defm");
     try expectStack(
         &runtime,
-        "'other.home 'five qualify execute 'other.home 'inc qualify execute",
+        "`other.home `five qualify execute `other.home `inc qualify execute",
         "6",
     );
     try expectStack(&runtime, "3 (dup) first execute", "3 3");
-    try expectErrorContains(&runtime, "'missing.home 'f qualify execute", &.{
-        "'kind 'undefined-word",
+    try expectErrorContains(&runtime, "`missing.home `f qualify execute", &.{
+        "kind undefined-word",
         "missing.home.f",
     });
-    try expectOk(&runtime, "(n -- n) (1 +) 'annotated def");
-    try expectErrorContains(&runtime, "(annotated) first execute", &.{ "'kind 'underflow", "annotated" });
+    try expectOk(&runtime, "(n -- n) (1 +) `annotated def");
+    try expectErrorContains(&runtime, "(annotated) first execute", &.{ "kind underflow", "annotated" });
 }
 
 test "modules: removed identity builtin has no reservation and names validate by category" {
@@ -341,21 +341,21 @@ test "modules: removed identity builtin has no reservation and names validate by
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    for ([_][]const u8{ "[] () '.bad @defm", "[] () 'bad. @defm", "[] () 'bad..path @defm" }) |source|
-        try expectErrorContains(&runtime, source, &.{"'kind 'parse"});
-    try expectErrorContains(&runtime, "[] () 1 @defm", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "'x 1 import", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "1 undefm", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "[] ((1) 'bad.name def) 'core.utils @defm", &.{"'kind 'domain"});
-    try expectErrorContains(&runtime, "1 'f qualify", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "'core.utils 1 qualify", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "'core..utils 'f qualify", &.{"'kind 'parse"});
-    try expectErrorContains(&runtime, "'core.utils 'bad.name qualify", &.{"'kind 'domain"});
-    try expectErrorContains(&runtime, "'core.utils '-- qualify", &.{"'kind 'domain"});
-    try expectErrorContains(&runtime, "1 execute", &.{"'kind 'type"});
+    for ([_][]const u8{ "[] () `.bad @defm", "[] () `bad. @defm", "[] () `bad..path @defm" }) |source|
+        try expectErrorContains(&runtime, source, &.{"kind parse"});
+    try expectErrorContains(&runtime, "[] () 1 @defm", &.{"kind type"});
+    try expectErrorContains(&runtime, "`x 1 import", &.{"kind type"});
+    try expectErrorContains(&runtime, "1 undefm", &.{"kind type"});
+    try expectErrorContains(&runtime, "[] ((1) `bad.name def) `core.utils @defm", &.{"kind domain"});
+    try expectErrorContains(&runtime, "1 `f qualify", &.{"kind type"});
+    try expectErrorContains(&runtime, "`core.utils 1 qualify", &.{"kind type"});
+    try expectErrorContains(&runtime, "`core..utils `f qualify", &.{"kind parse"});
+    try expectErrorContains(&runtime, "`core.utils `bad.name qualify", &.{"kind domain"});
+    try expectErrorContains(&runtime, "`core.utils `-- qualify", &.{"kind domain"});
+    try expectErrorContains(&runtime, "1 execute", &.{"kind type"});
 }
 
-const removable_module = "[] ((1) 'tick def (7) 'peek def) 'c @defm";
+const removable_module = "[] ((1) `tick def (7) `peek def) `c @defm";
 
 test "concurrency: undefm retires a module with its names and aliases in one publish" {
     for ([_]usize{ 1, 8 }) |workers| {
@@ -364,25 +364,25 @@ test "concurrency: undefm retires a module with its names and aliases in one pub
         var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
         defer runtime.deinit();
         try expectStack(&runtime, removable_module, "");
-        try expectOk(&runtime, "'short 'c alias");
+        try expectOk(&runtime, "`short `c alias");
         // Calls racing removal either finish with a stable value or find
         // nothing; no schedule observes a half-removed entry.
         try expectStack(
             &runtime,
             "[1] 20 take (pop [] ([] (c.tick) @attempt pop) @spawn) each " ++
-                "'c undefm (task.await) each pop",
+                "`c undefm (task.await) each pop",
             "",
         );
-        try expectErrorContains(&runtime, "c.peek", &.{"'kind 'undefined-word"});
+        try expectErrorContains(&runtime, "c.peek", &.{"kind undefined-word"});
         // Every alias targeting the module goes with it in the same publish.
-        try expectErrorContains(&runtime, "short.peek", &.{"'kind 'undefined-word"});
-        try expectErrorContains(&runtime, "'short ('peek) import", &.{"'kind 'undefined-word"});
+        try expectErrorContains(&runtime, "short.peek", &.{"kind undefined-word"});
+        try expectErrorContains(&runtime, "`short (peek) import", &.{"kind undefined-word"});
         // Reusing the public name creates no way to refer to the removed module.
         try expectOk(&runtime, removable_module);
-        try expectStack(&runtime, "'c undefm " ++ removable_module ++ " c.tick c.peek", "1 7");
-        try expectStack(&runtime, "'c undefm", "");
-        try expectErrorContains(&runtime, "c.tick", &.{"'kind 'undefined-word"});
-        try expectErrorContains(&runtime, "'nowhere undefm", &.{"'kind 'undefined-word"});
+        try expectStack(&runtime, "`c undefm " ++ removable_module ++ " c.tick c.peek", "1 7");
+        try expectStack(&runtime, "`c undefm", "");
+        try expectErrorContains(&runtime, "c.tick", &.{"kind undefined-word"});
+        try expectErrorContains(&runtime, "`nowhere undefm", &.{"kind undefined-word"});
         // Re-registration racing removal of the same name: whichever edit
         // publishes second finds its snapshot stale and starts over against
         // the other's directory. Both orders leave exactly one live module.
@@ -390,18 +390,18 @@ test "concurrency: undefm retires a module with its names and aliases in one pub
             try expectOk(&runtime, removable_module);
             try expectStack(
                 &runtime,
-                "[(" ++ removable_module ++ ") ('c undefm)] ([] swap @spawn) each " ++
-                    "(task.await) each pop [] ('c undefm) @attempt pop " ++
+                "[(" ++ removable_module ++ ") (`c undefm)] ([] swap @spawn) each " ++
+                    "(task.await) each pop [] (`c undefm) @attempt pop " ++
                     removable_module ++ " c.tick c.peek",
                 "1 7",
             );
-            try expectStack(&runtime, "'c undefm", "");
+            try expectStack(&runtime, "`c undefm", "");
         }
     }
 }
 
-const churn_cycle = "[] ((\"a module string\" [1 2 3] {'k 'v}) 'peek def) 'churn @defm " ++
-    "churn.peek pop pop pop 'churn undefm";
+const churn_cycle = "[] ((\"a module string\" [1 2 3] {k v}) `peek def) `churn @defm " ++
+    "churn.peek pop pop pop `churn undefm";
 
 test "concurrency: a cancelled undefm leaves nothing stranded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
@@ -416,16 +416,16 @@ test "concurrency: a cancelled undefm leaves nothing stranded" {
         // after `undefm`, so cancellation is issued after that edge rather
         // than pre-armed. Each batch is one Unit and the source differs only
         // in its count, excluding per-Unit archive/task costs from the bound.
-        const cancellation_cycle = "[] (8192 range 'big setp " ++
-            "(1) 'alive def) 'doomed @defm" ++
-            " [] (([] ('doomed.alive execute) @attempt result.ok?) () while) @spawn 'close-watcher set" ++
-            " [] ('doomed undefm (1) () while) @spawn 'removal-task set" ++
+        const cancellation_cycle = "[] (8192 range `big setp " ++
+            "(1) `alive def) `doomed @defm" ++
+            " [] (([] (`doomed.alive execute) @attempt result.ok?) () while) @spawn `close-watcher set" ++
+            " [] (`doomed undefm (1) () while) @spawn `removal-task set" ++
             " close-watcher task.await pop removal-task task.cancel" ++
-            " removal-task task.await 'err at 'kind at 'cancelled match? pop" ++
+            " removal-task task.await `err at `kind at `cancelled match? pop" ++
             // A successful public mutation drives reuse settlement while the
             // Session remains live; shutdown is not the cleanup mechanism.
-            " [] ((1) 'peek def) 'settler @defm" ++
-            " settler.peek pop 'settler undefm";
+            " [] ((1) `peek def) `settler @defm" ++
+            " settler.peek pop `settler undefm";
         const small = "2 (" ++ cancellation_cycle ++ ") times";
         const large = "8 (" ++ cancellation_cycle ++ ") times";
         try expectStack(&runtime, small, "");
@@ -522,14 +522,14 @@ test "concurrency: applying an escaped quotation races reload and removal" {
     // this branch was not evidence about this path at all. The assertions are
     // deliberately weak: failures stay inside the envelope and the runtime keeps progressing;
     // TSan and the allocator are what should speak here.
-    try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'racer @defm racer.q 'held set");
+    try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `racer @defm racer.q `held set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (held call) @attempt) @spawn) each " ++
-        "[] ((2) 'k def ((k)) 'q def) 'racer @defm " ++
+        "[] ((2) `k def ((k)) `q def) `racer @defm " ++
         "(task.await) each pop");
     // And against removal, where acquisition must fail rather than race.
-    try expectOk(&runtime, "[] ((1) 'k def ((k)) 'q def) 'goner @defm goner.q 'gone set");
+    try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `goner @defm goner.q `gone set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
-        "'goner undefm (task.await) each pop");
+        "`goner undefm (task.await) each pop");
 }
 
 // Stubs. Implemented by the patch each one names; see
@@ -556,12 +556,12 @@ test "concurrency: a resolver racing an image's last release never dereferences 
         // and never neither.
         try expectOk(
             &runtime,
-            "[] ((1) 'k def ((k)) 'q def) 'goner @defm goner.q 'gone set",
+            "[] ((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
         );
         try expectStack(
             &runtime,
             "[1] 64 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
-                "'goner undefm (task.await) each pop",
+                "`goner undefm (task.await) each pop",
             "",
         );
     }
@@ -582,12 +582,12 @@ test "concurrency: a resolver racing environment teardown resolves without a der
         // which is the only way the waiting state is reached.
         try expectOk(
             &runtime,
-            "[] ((1) 'k def ((k)) 'q def) 'reloaded @defm reloaded.q 'held set",
+            "[] ((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
         );
         try expectStack(
             &runtime,
             "[1] 64 take (pop [] ([] (held call) @attempt) @spawn) each " ++
-                "[] ((2) 'k def) 'reloaded @defm (task.await) each pop",
+                "[] ((2) `k def) `reloaded @defm (task.await) each pop",
             "",
         );
         // The replacement is what callers now reach; the escaped quotation went

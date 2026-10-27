@@ -4,7 +4,7 @@
 //! run on the traceless `test_heap.SessionHeap` — leaks still fail, without
 //! an allocation site. That is safe only because these helpers pass nothing
 //! but source strings to the session. A helper added here that hands the
-//! session a host-built value (`define`, `pushOwned`) would free across
+//! session a host-built value (define, pushOwned) would free across
 //! allocators; put such a test in `definition_test` or `module_test`, which
 //! stay on `std.testing.allocator`. See `test_heap.zig` for the full policy
 //! and for which suite each kind of memory assertion belongs in.
@@ -156,7 +156,7 @@ fn expectSymbolField(dictionary: value.Value, name: []const u8, expected: []cons
         std.log.err("language-error field `{s}` is not a symbol", .{name});
         return error.TestUnexpectedResult;
     }
-    try std.testing.expectEqualStrings(expected, intern.get(actual.symbol));
+    try std.testing.expectEqualStrings(expected, intern.get(actual.symbol.name));
 }
 
 fn expectValue(actual: value.Value, expected: ExpectedValue) !void {
@@ -167,7 +167,7 @@ fn expectValue(actual: value.Value, expected: ExpectedValue) !void {
         },
         .symbol => |symbol| {
             if (actual != .symbol) return error.TestUnexpectedResult;
-            try std.testing.expectEqualStrings(symbol, intern.get(actual.symbol));
+            try std.testing.expectEqualStrings(symbol, intern.get(actual.symbol.name));
         },
         .string => |string| {
             const bytes = try stringBytes(actual);

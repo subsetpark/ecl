@@ -8,12 +8,12 @@ They are ordinary ECL sources, available within that application.
 Pure structural helpers shared by the package-format modules.
 
 ### assert-inert-entry
-`( pair -- )` — Discard an inert dict entry, or raise `'domain` with its key
+`( pair -- )` — Discard an inert dict entry, or raise `` `domain `` with its key
 when its value recursively contains an executable word.
 
 ### read-one
 `( text -- form )` — Parse exactly one form without evaluating it. Unreadable
-text is `'parse`; zero or multiple forms are `'shape`.
+text is `` `parse ``; zero or multiple forms are `` `shape ``.
 
 #### Examples
 
@@ -44,8 +44,8 @@ hexadecimal digits.
 ### owns?
 `( package-name module-name -- bool )` — Return 1 when a package owns a module
 name: the name itself, or a name continuing after a `.` boundary. `foo` owns
-`foo.bar` and does not own `foobar`. A non-string is `'type`; a malformed
-canonical name is `'domain`.
+`foo.bar` and does not own `foobar`. A non-string is `` `type ``; a malformed
+canonical name is `` `domain ``.
 
 #### Examples
 
@@ -62,8 +62,8 @@ canonical name is `'domain`.
 
 ### validate
 `( candidate -- parts )` — Validate a package version and return its core
-fields and prerelease identifiers. A non-string is `'type`; a spelling outside
-the supported SemVer grammar is `'domain`.
+fields and prerelease identifiers. A non-string is `` `type ``; a spelling outside
+the supported SemVer grammar is `` `domain ``.
 
 ### less?
 `( left right -- bool )` — Return 1 when the left version precedes the right
@@ -78,14 +78,14 @@ under Semantic Versioning 2.0.0 §11. Both operands are validated.
 
 ### max
 `( versions -- version )` — Return the greatest member of a nonempty list of
-version strings. The empty list is `'shape`; a non-list or non-string member is
-`'type`; every member is validated before comparison.
+version strings. The empty list is `` `shape ``; a non-list or non-string member is
+`` `type ``; every member is validated before comparison.
 
 ## pkg.manifest
 
 ### validate-source
-`( source -- source )` — Validate an exact archive source (`kind`, `url`) or
-Git source (`kind`, `url`, `commit`). URLs use HTTPS without credentials;
+`( source -- source )` — Validate an exact archive source (kind, url) or
+Git source (kind, url, commit). URLs use HTTPS without credentials;
 commits contain exactly 40 lowercase hexadecimal digits.
 
 ### write-source
@@ -97,9 +97,9 @@ package, minimum version, tagged source, and hash declaration.
 
 ### validate
 `( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
-is `'type`; an undeclared key, unsupported format, malformed name, version,
+is `` `type ``; an undeclared key, unsupported format, malformed name, version,
 hash, or URL, self-requirement, ownership collision, or executable word value
-is `'domain`. Sources are distinct safe portable glob strings. Exports are distinct,
+is `` `domain ``. Sources are distinct safe portable glob strings. Exports are distinct,
 exact, package-owned module names; exporting a parent does not export its
 children. Private module names are visible only within their defining file. Requirement keys are local
 aliases and do not rewrite module names.

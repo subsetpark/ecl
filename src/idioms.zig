@@ -38,7 +38,6 @@ pub const Context = enum {
 pub const DirectOp = enum {
     sort,
     lex_cmp_with,
-    first,
     find,
     rest,
     reverse,
@@ -182,13 +181,6 @@ const or_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "not" } },
     .{ .word = .{ .spelling = "max" } },
 };
-const first_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "len" } },
-    .{ .word = .{ .spelling = "pop" } },
-    .literal,
-    .{ .word = .{ .spelling = "at" } },
-};
 const find_pattern = [_]PatternAtom{
     .{ .quotation = &.{.{ .word = .{ .spelling = "match?" } }} },
     .{ .word = .{ .spelling = "partial", .binding = .source } },
@@ -197,7 +189,7 @@ const find_pattern = [_]PatternAtom{
 };
 const rest_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "first", .binding = .source } },
+    .{ .word = .{ .spelling = "first" } },
     .{ .word = .{ .spelling = "pop" } },
     .literal,
     .{ .word = .{ .spelling = "drop" } },
@@ -262,7 +254,7 @@ const lex_cmp_with_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 4]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 3]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -346,7 +338,6 @@ pub const registry = blk: {
         .{ .operation = .fold1, .pattern = &fold1_pattern },
         .{ .operation = .lex_cmp_with, .pattern = &lex_cmp_with_pattern },
         .{ .operation = .sort, .pattern = &sort_pattern },
-        .{ .operation = .first, .pattern = &first_pattern },
         .{ .operation = .find, .pattern = &find_pattern },
         .{ .operation = .rest, .pattern = &rest_pattern },
         .{ .operation = .reverse, .pattern = &reverse_pattern },
@@ -469,7 +460,7 @@ const WordGuard = union(enum) {
 
     fn matches(
         self: WordGuard,
-        word: value.WordRef,
+        word: value.Symbol,
         binding: BindingKind,
         primitive: ?env.PrimitiveImpl,
         origin: ExpectedOrigin,
@@ -497,7 +488,7 @@ const LiveWord = struct {
 /// one cache probe rather than a slot resolution. A word the cache does not
 /// hold is resolved in full. Either way it must be the trusted binding
 /// expected, from a slot on core or the running root.
-fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind) error{OutOfMemory}!?LiveWord {
+fn followingWord(evaluator: *Machine, word: value.Symbol, binding: BindingKind) error{OutOfMemory}!?LiveWord {
     if (!plainWord(word.slot)) return null;
     const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
     if (cached.origin != .core and cached.origin != .standard_library) return null;
@@ -518,7 +509,7 @@ fn followingWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind)
 /// run, or whose root has retired, is simply not that binding; generic
 /// execution reports any error. A frozen binding outlives the call that
 /// matched it, so what it returns stays valid for the call.
-fn liveWord(evaluator: *Machine, word: value.WordRef, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
+fn liveWord(evaluator: *Machine, word: value.Symbol, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
     if (!plainWord(word.slot)) return null;
     // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
     var resolved: machine.Resolution = undefined;
@@ -561,25 +552,25 @@ fn matchAtoms(
         const site: u32 = top orelse @intCast(atom_index);
         switch (atom) {
             .constant => {
-                if (capture.constant != null or actual == .word) return false;
+                if (capture.constant != null or actual == .symbol) return false;
                 capture.constant = actual;
             },
-            .literal => if (actual == .word) return false,
+            .literal => if (actual == .symbol) return false,
             .int => |expected| if (actual != .int or actual.int != expected) return false,
             .quotation => |inner| if (!matchAtoms(guard, actual, inner, operation, capture, site)) return false,
             .operation => {
-                if (actual != .word or !std.mem.eql(u8, intern.get(actual.word.name), operation.spelling())) return false;
+                if (actual != .symbol or !std.mem.eql(u8, intern.get(actual.symbol.name), operation.spelling())) return false;
                 const binding = operationBinding(operation);
                 const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
-                if (!guard.matches(actual.word, binding, primitive, .trusted)) return false;
-                capture.active_word = actual.word.name;
+                if (!guard.matches(actual.symbol, binding, primitive, .trusted)) return false;
+                capture.active_word = actual.symbol.name;
                 capture.active_index = site;
             },
             .word => |expected| {
-                if (actual != .word or !std.mem.eql(u8, intern.get(actual.word.name), expected.spelling)) return false;
-                if (!guard.matches(actual.word, expected.binding, null, expected.origin)) return false;
+                if (actual != .symbol or !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return false;
+                if (!guard.matches(actual.symbol, expected.binding, null, expected.origin)) return false;
                 if (expected.active) {
-                    capture.active_word = actual.word.name;
+                    capture.active_word = actual.symbol.name;
                     capture.active_index = site;
                 }
             },
@@ -592,7 +583,7 @@ fn matchAtoms(
 /// environment or core; a candidate-module word only in the frozen image.
 fn frozenBindingMatches(
     lookup: env.FrozenLookup,
-    word: value.WordRef,
+    word: value.Symbol,
     binding: BindingKind,
     primitive: ?env.PrimitiveImpl,
     origin: ExpectedOrigin,
@@ -786,8 +777,8 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         var last: ?LiveWord = null;
         const matched = for (entry.following, 0..) |expected, offset| {
             const form = forms.at(@intCast(offset));
-            if (form != .word or form.word.name != try phraseAtom(index, offset + 1)) break false;
-            last = try followingWord(evaluator, form.word, expected.binding) orelse break false;
+            if (form != .symbol or form.symbol.name != try phraseAtom(index, offset + 1)) break false;
+            last = try followingWord(evaluator, form.symbol, expected.binding) orelse break false;
         } else true;
         if (!matched) continue;
         const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
@@ -970,7 +961,7 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
     const length: usize = @intCast(phrase.list.length());
     for (0..length) |position| {
         const form = list.atUnchecked(phrase, position);
-        if (form != .word) {
+        if (form != .symbol) {
             if (form != .int and form != .float) return null;
             if (program.registers == Program.max_registers or depth == stack.len) return null;
             program.constants[program.constant_count] = .{ .register = program.registers, .value = form };
@@ -980,7 +971,7 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
             program.registers += 1;
             continue;
         }
-        const word = form.word;
+        const word = form.symbol;
         const spelling = intern.get(word.name);
         if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
             const binding: BindingKind = if (stack_word == .over) .source else .builtin;
@@ -1190,7 +1181,6 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
     try switch (operation) {
         .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
         .sort => order.sortForIdiom(evaluator),
-        .first => sequence.firstForIdiom(evaluator),
         .find => applyMatchFind(evaluator),
         .rest => sequence.restForIdiom(evaluator),
         .reverse => sequence.reverseForIdiom(evaluator),

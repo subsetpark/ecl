@@ -12,8 +12,8 @@ import tarfile
 
 ROOT = Path(__file__).parent
 MANIFEST = (
-    b"{'format 2 'name \"a\" 'version \"1.0.0\" "
-    b"'sources [\"**/*\"] 'exports [\"a\"] 'requires {}}\n"
+    b"{format 2 name \"a\" version \"1.0.0\" "
+    b"sources [\"**/*\"] exports [\"a\"] requires {}}\n"
 )
 
 
@@ -38,8 +38,8 @@ def archive(source: bytes) -> bytes:
 
 def main() -> None:
     fixtures = {
-        "valid.tgz.hex": archive(b"[] (() 'noop def) 'a @defm\n"),
-        "runtime-valid.tgz.hex": archive(b"[] ((42) 'answer def) 'a @defm\n"),
+        "valid.tgz.hex": archive(b"[] (() `noop def) `a @defm\n"),
+        "runtime-valid.tgz.hex": archive(b"[] ((42) `answer def) `a @defm\n"),
     }
     for name, payload in fixtures.items():
         (ROOT / name).write_text(payload.hex() + "\n", encoding="ascii")

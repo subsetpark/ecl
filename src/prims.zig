@@ -36,8 +36,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
             "a char as a one-element string, or a byte list decoded as UTF-8." },
         .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged." },
         .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or the already-interned symbol a string spells; " ++
-            "a spelling that was never interned is 'domain." },
-        .{ .name = "word", .primitive = wordWord, .effect = "symbol -- word", .doc = "Convert a symbol to an executable word linked to its name in the root of the activation that builds it." },
+            "a spelling that was never interned is `domain." },
         .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol or word as a symbol, or create the symbol a string spells, growing the " ++
             "process-lifetime name table when it is new." },
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
@@ -185,21 +184,20 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .float => "float",
         .char => "char",
         .symbol => "symbol",
-        .word => "word",
         .list => "list",
         .dict => "dict",
         .task => "task",
         .port => "port",
         .address => "address",
     };
-    try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
+    try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
 }
 fn execute(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const word = switch (item.borrow()) {
-        .word => |word| word,
-        else => return evaluator.typeError("a word"),
+        .symbol => |word| word,
+        else => return evaluator.typeError("a symbol"),
     };
     try evaluator.executeWord(word);
 }
@@ -240,8 +238,8 @@ const NumericParseTarget = enum { integer, float };
 //
 // Each word names its target kind and accepts the documented source kinds;
 // anything else is `'type`. Toward text one polymorphic word suffices
-// (`chars`), because every source has one text content. Away from text the
-// target must be named (`int`, `float`, `char`, `symbol`, `bytes`), because a
+// (chars), because every source has one text content. Away from text the
+// target must be named (int, float, char, symbol, bytes), because a
 // string alone does not say what it should become. `str` stays the readable
 // representation and `parse` the reader; neither is a conversion.
 
@@ -259,8 +257,7 @@ fn chars(evaluator: *Machine) MachineError!void {
                 .encoder = .init(encoder),
             });
         },
-        .symbol => |id| try startSpellingChars(evaluator, id),
-        .word => |word| try startSpellingChars(evaluator, word.name),
+        .symbol => |id| try startSpellingChars(evaluator, id.name),
         .char => |codepoint| {
             const one = [_]u32{codepoint};
             try evaluator.pushOwned(try list.fromCodepoints(evaluator.allocator(), &one));
@@ -295,7 +292,7 @@ const SpellingCharsDriver = struct {
 
 fn invalidUtf8(evaluator: *Machine, message: []const u8) MachineError {
     const failure = evaluator.fail(.domain, message);
-    evaluator.addErrorReason(.{ .symbol = intern.intern("invalid-utf8") catch return error.OutOfMemory });
+    evaluator.addErrorReason(.{ .symbol = .{ .name = intern.intern("invalid-utf8") catch return error.OutOfMemory } });
     return failure;
 }
 
@@ -399,14 +396,6 @@ const ByteListIdentityDriver = struct {
 
 const SymbolConversion = enum { lookup, insert };
 
-fn wordWord(evaluator: *Machine) MachineError!void {
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    if (item.borrow() != .symbol) return evaluator.typeError("a symbol");
-    // A word built here means what it would had it been written here.
-    try evaluator.pushOwned(.{ .word = try evaluator.linkedWord(item.borrow().symbol) });
-}
-
 fn symbolWord(evaluator: *Machine) MachineError!void {
     return startSymbolConversion(evaluator, .lookup);
 }
@@ -420,9 +409,8 @@ fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineErr
     defer item.deinit();
     switch (item.borrow()) {
         .symbol => try evaluator.pushOwned(item.take()),
-        .word => |word| try evaluator.pushOwned(.{ .symbol = word.name }),
         .list => {
-            if (!item.borrow().isString()) return evaluator.typeError("a string, symbol, or word");
+            if (!item.borrow().isString()) return evaluator.typeError("a string or symbol");
             const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), item.borrow());
             try evaluator.startDriver(SymbolConversionDriver{
                 .source_value = .init(item.take()),
@@ -430,7 +418,7 @@ fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineErr
                 .mode = mode,
             });
         },
-        else => return evaluator.typeError("a string, symbol, or word"),
+        else => return evaluator.typeError("a string or symbol"),
     }
 }
 
@@ -486,12 +474,12 @@ const SymbolConversionDriver = struct {
                 .complete => |maybe_id| {
                     const id = maybe_id orelse
                         return evaluator.fail(.domain, "symbol spelling is not interned; use intern to create it");
-                    return .{ .output = .{ .symbol = id } };
+                    return .{ .output = .{ .symbol = .{ .name = id } } };
                 },
             },
             .insert => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
-                .complete => |id| return .{ .output = .{ .symbol = id } },
+                .complete => |id| return .{ .output = .{ .symbol = .{ .name = id } } },
             },
         };
         return .stepped;
@@ -650,7 +638,7 @@ const RaiseDriver = struct {
                 if (self.lookup == null) self.lookup = .init(.initHeader(
                     evaluator.allocator(),
                     self.raised.borrow().dict,
-                    .{ .symbol = self.keys[self.field_index] },
+                    .{ .symbol = .{ .name = self.keys[self.field_index] } },
                 ));
                 switch (try self.lookup.?.borrowMut().advance(evaluator.workBudget())) {
                     .pending => return .stepped,
@@ -669,7 +657,7 @@ const RaiseDriver = struct {
                 const end = self.trace_index + evaluator.workBudget().take(count - self.trace_index);
                 while (self.trace_index != end) : (self.trace_index += 1) {
                     if (list.atUnchecked(trace, self.trace_index) != .symbol)
-                        return evaluator.typeError("an error dict with symbols at 'trace");
+                        return evaluator.typeError("an error dict with symbols at `trace");
                 }
                 if (self.trace_index == count) {
                     self.trace = null;
@@ -687,25 +675,25 @@ const RaiseDriver = struct {
     fn validateField(self: *RaiseDriver, evaluator: *Machine, found: ?Value) MachineError!void {
         switch (self.field_index) {
             0 => if (found == null or found.? != .symbol)
-                return evaluator.typeError("an error dict containing a symbol at 'kind"),
+                return evaluator.typeError("an error dict containing a symbol at `kind"),
             1 => if (found) |message| {
                 if (!message.isString())
-                    return evaluator.typeError("an error dict with a string at 'msg");
+                    return evaluator.typeError("an error dict with a string at `msg");
             },
             2 => if (found) |word| {
                 if (word != .symbol)
-                    return evaluator.typeError("an error dict with a symbol at 'word");
+                    return evaluator.typeError("an error dict with a symbol at `word");
             },
             3 => if (found) |trace| {
                 if (trace != .list)
-                    return evaluator.typeError("an error dict with symbols at 'trace");
+                    return evaluator.typeError("an error dict with symbols at `trace");
                 self.trace = trace;
                 self.trace_index = 0;
                 self.phase = .trace;
             },
             4 => if (found) |data| {
                 if (data != .dict)
-                    return evaluator.typeError("an error dict with a dict at 'data");
+                    return evaluator.typeError("an error dict with a dict at `data");
             },
             else => unreachable,
         }

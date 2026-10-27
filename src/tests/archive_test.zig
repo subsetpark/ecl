@@ -83,7 +83,7 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
 /// `[bytes] 'root "destination" archive.unpack-tgz` for a root-relative
 /// destination path.
 fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
-    return unpackSourceAt(bytes, "'root", destination);
+    return unpackSourceAt(bytes, "`root", destination);
 }
 
 fn unpackSourceAt(bytes: []const u8, root: []const u8, destination: []const u8) ![]u8 {
@@ -229,21 +229,21 @@ test "archive: open-tgz exposes metadata and bounded member contents without pac
     defer allocator.free(bytes);
     const opened = try viewSource(bytes);
     defer allocator.free(opened);
-    const source = try std.fmt.allocPrint(allocator, "{s} 'a set a archive.next-member a 2 archive.read-member " ++
+    const source = try std.fmt.allocPrint(allocator, "{s} `a set a archive.next-member a 2 archive.read-member " ++
         "a archive.next-member a 1 archive.read-member a 65536 archive.read-member a 1 archive.read-member " ++
         "a archive.next-member a 3 archive.read-member a archive.next-member a 1 archive.read-member " ++
-        "a port.close [] (a archive.next-member) @attempt 'err at 'kind at", .{opened});
+        "a port.close [] (a archive.next-member) @attempt `err at `kind at", .{opened});
     defer allocator.free(source);
-    try expectIoStack(&scratch, source, "{'path \"lib\" 'kind 'directory 'size 0} [] " ++
-        "{'path \"lib/main.ecl\" 'kind 'file 'size 3} [52] [50 10] [] " ++
-        "{'path \"README.md\" 'kind 'file 'size 8} [102 105 120] {} [] 'io");
+    try expectIoStack(&scratch, source, "{path \"lib\" kind directory size 0} [] " ++
+        "{path \"lib/main.ecl\" kind file size 3} [52] [50 10] [] " ++
+        "{path \"README.md\" kind file size 8} [102 105 120] {} [] io");
     const scoped = try std.fmt.allocPrint(allocator, "{s} type", .{opened});
     defer allocator.free(scoped);
-    try expectIoStackConfig(&scratch, .{ .worker_pool = 4 }, scoped, "'port");
-    const concurrent = try std.fmt.allocPrint(allocator, "{s} 'a set a archive.next-member pop a archive.next-member pop " ++
-        "[] (a 1 archive.read-member first) @spawn 'x set " ++
-        "[] (a 1 archive.read-member first) @spawn 'y set " ++
-        "x task.await 'ok at first y task.await 'ok at first pair sort a port.close", .{opened});
+    try expectIoStackConfig(&scratch, .{ .worker_pool = 4 }, scoped, "port");
+    const concurrent = try std.fmt.allocPrint(allocator, "{s} `a set a archive.next-member pop a archive.next-member pop " ++
+        "[] (a 1 archive.read-member first) @spawn `x set " ++
+        "[] (a 1 archive.read-member first) @spawn `y set " ++
+        "x task.await `ok at first y task.await `ok at first pair sort a port.close", .{opened});
     defer allocator.free(concurrent);
     try expectIoStackConfig(&scratch, .{ .worker_pool = 4 }, concurrent, "[50 52]");
     try scratch.expectEntryCount(0);
@@ -252,9 +252,9 @@ test "archive: open-tgz exposes metadata and bounded member contents without pac
         defer allocator.free(invalid_bytes);
         const invalid_view = try viewSource(invalid_bytes);
         defer allocator.free(invalid_view);
-        const rejected = try std.fmt.allocPrint(allocator, "[] ({s}) @attempt 'err at 'kind at", .{invalid_view});
+        const rejected = try std.fmt.allocPrint(allocator, "[] ({s}) @attempt `err at `kind at", .{invalid_view});
         defer allocator.free(rejected);
-        try expectIoStack(&scratch, rejected, "'domain");
+        try expectIoStack(&scratch, rejected, "domain");
     }
 }
 
@@ -265,12 +265,12 @@ test "archive: unpack-tgz uses directory leases inside staged generations" {
     defer allocator.free(bytes);
     const extraction = try unpackSourceAt(bytes, "stage", "contents");
     defer allocator.free(extraction);
-    const source = try std.fmt.allocPrint(allocator, "'root \"generation\" fs.stage-dir 'stage set {s} pop " ++
-        "stage fs.commit-dir 'root \"generation/contents/lib/main.ecl\" fs.read-text", .{extraction});
+    const source = try std.fmt.allocPrint(allocator, "`root \"generation\" fs.stage-dir `stage set {s} pop " ++
+        "stage fs.commit-dir `root \"generation/contents/lib/main.ecl\" fs.read-text", .{extraction});
     defer allocator.free(source);
     try expectIoStack(&scratch, source, "\"42\\n\"");
     try scratch.expectEntryCount(1);
-    const discarded = try std.fmt.allocPrint(allocator, "'root \"discarded\" fs.stage-dir 'stage set {s} pop stage port.close", .{extraction});
+    const discarded = try std.fmt.allocPrint(allocator, "`root \"discarded\" fs.stage-dir `stage set {s} pop stage port.close", .{extraction});
     defer allocator.free(discarded);
     try expectIoStack(&scratch, discarded, "");
     try scratch.expectEntryCount(1);
@@ -278,9 +278,9 @@ test "archive: unpack-tgz uses directory leases inside staged generations" {
     defer allocator.free(bad);
     const bad_extraction = try unpackSourceAt(bad, "stage", "contents");
     defer allocator.free(bad_extraction);
-    const rejected = try std.fmt.allocPrint(allocator, "'root \"rejected\" fs.stage-dir 'stage set [] ({s}) @attempt 'err at 'kind at stage port.close", .{bad_extraction});
+    const rejected = try std.fmt.allocPrint(allocator, "`root \"rejected\" fs.stage-dir `stage set [] ({s}) @attempt `err at `kind at stage port.close", .{bad_extraction});
     defer allocator.free(rejected);
-    try expectIoStack(&scratch, rejected, "'domain");
+    try expectIoStack(&scratch, rejected, "domain");
     try scratch.expectEntryCount(1);
 }
 

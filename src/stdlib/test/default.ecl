@@ -8,17 +8,17 @@
   "Run one descriptor, print its total result, and return 1 exactly on failure.")
  (|descriptor|
   descriptor @test descriptor pair
-  dup first 'ok dict.has?
+  dup first `ok dict.has?
   (1 at
-   dup 'module at swap 'name at pair (chars) each
+   dup `module at swap `name at pair (chars) each
    "ok {}.{}" str.format io.print
    0)
   (dup 1 at
-   dup 'module at swap 'name at pair (chars) each
+   dup `module at swap `name at pair (chars) each
    "{}.{}" str.format
    swap first pair "FAIL {}: {}" str.format io.print
    1)
-  if) 'report defp
+  if) `report defp
 
  ### def run
  (-- :
@@ -29,5 +29,5 @@
   dup 0 >
   (pop 1 exit)
   (pop)
-  if) 'run def
-) 'test.default @defm
+  if) `run def
+) `test.default @defm

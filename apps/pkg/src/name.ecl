@@ -9,26 +9,26 @@
  (|string characters|
   string empty? not
   string characters (in?) partial all?
-  and) 'chars-in? defp
+  and) `chars-in? defp
 
  ### setp lead-chars
  # Valid first characters for a package-name segment.
  "abcdefghijklmnopqrstuvwxyz"
- 'lead-chars setp
+ `lead-chars setp
 
  ### setp segment-chars
  # Valid later characters for a package-name segment.
  "-0123456789abcdefghijklmnopqrstuvwxyz"
- 'segment-chars setp
+ `segment-chars setp
 
  ### setp hex-chars
  # Lowercase hexadecimal digits.
  "0123456789abcdef"
- 'hex-chars setp
+ `hex-chars setp
 
  ### defp segment?
  (text -- bool : "Return 1 for a valid package-name segment.")
- (dup empty? (pop 0) ((first lead-chars in?) (segment-chars chars-in?) bi and) if) 'segment? defp
+ (dup empty? (pop 0) ((first lead-chars in?) (segment-chars chars-in?) bi and) if) `segment? defp
 
  ### def valid?
  (value -- bool :
@@ -37,19 +37,19 @@
  ([(str.str? not) (pop 0)
    (empty?) (pop 0)
    ("." split (segment?) all?)]
-  cond) 'valid? def
+  cond) `valid? def
 
  ### def hash?
  (value -- bool : "Return 1 for sha256- followed by 64 lowercase hexadecimal digits.")
  ([(str.str? not) (pop 0)
    ("sha256-" str.starts? not) (pop 0)
    (7 drop (len 64 =) ((hex-chars in?) all?) bi and)]
-  cond) 'hash? def
+  cond) `hash? def
 
  ### defp port-suffix?
  (suffix -- bool : "Accept no port or a colon followed by zero or more ASCII decimal digits.")
  (dup empty? (pop 1)
-  (dup ":" str.starts? swap 1 drop ("0123456789" in?) all? and) if) 'port-suffix? defp
+  (dup ":" str.starts? swap 1 drop ("0123456789" in?) all? and) if) `port-suffix? defp
 
  ### defp hostname?
  (authority -- bool : "Require a host before an optional port, including bracketed IPv6 hosts.")
@@ -58,7 +58,7 @@
    (|parts| parts first empty? not parts 1 at port-suffix? and) (pop 0) if)
   (dup ":" split first
    (|authority host| host empty? not authority host len drop port-suffix? and) call)
-  if) 'hostname? defp
+  if) `hostname? defp
 
  ### def url?
  (value -- bool : "Return 1 for a nonempty HTTPS URL.")
@@ -69,11 +69,11 @@
    url "\\" str.contains? not and
    url "#" str.contains? not and
    url (int 32 >) all? and
-   url 8 drop "/" split first "?" split first hostname? and) (pop 0) if) 'url? def
+   url 8 drop "/" split first "?" split first hostname? and) (pop 0) if) `url? def
 
  ### def commit?
  (value -- bool : "Return 1 for a full lowercase SHA-1 Git commit identifier.")
- (dup str.str? ((len 40 =) (hex-chars chars-in?) bi and) (pop 0) if) 'commit? def
+ (dup str.str? ((len 40 =) (hex-chars chars-in?) bi and) (pop 0) if) `commit? def
 
  ### def owns?
  (package-name module-name -- bool :
@@ -81,20 +81,20 @@
    dot.")
  (|package module|
   package str.str?
-  'type error.new "pkg.name.owns? expects two package names" error.with-message assert
+  `type error.new "pkg.name.owns? expects two package names" error.with-message assert
   module str.str?
-  'type error.new "pkg.name.owns? expects two package names" error.with-message assert
+  `type error.new "pkg.name.owns? expects two package names" error.with-message assert
   package valid?
-  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
+  `domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   module valid?
-  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
+  `domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   package module match?
   module package "." cat str.starts?
-  or) 'owns? def
+  or) `owns? def
 
  ### defp related?
  (left right -- bool : "Return 1 when either package name owns the other as a prefix.")
- (|left right| left right (owns?) (swap owns?) bi2 or) 'related? defp
+ (|left right| left right (owns?) (swap owns?) bi2 or) `related? defp
 
  ### def collides?
  (names -- bool : "Return 1 when any two package names have overlapping ownership prefixes.")
@@ -102,5 +102,5 @@
   2
   (|neighbors| neighbors first neighbors 1 at related?)
   stencil
-  (1 =) any?) 'collides? def
-) 'pkg.name @defm
+  (1 =) any?) `collides? def
+) `pkg.name @defm

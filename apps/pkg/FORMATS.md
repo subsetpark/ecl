@@ -36,25 +36,25 @@ chooses among minimum versions declared by reachable manifests.
 `ecl.pkg` has this shape:
 
 ```ecl
-{'format 2
- 'name "my.proj"
- 'version "0.1.0"
- 'sources ["src/**/*.ecl"]
- 'exports ["my.proj"]
- 'requires
- {"statistics" {'package "foo"
-                 'version "1.2.0"
-                 'source {'kind 'archive 'url "https://example.com/foo-1.2.0.tgz"}
-                 'hash "sha256-<64 lowercase hex digits>"}}}
+{format 2
+ `name "my.proj"
+ `version "0.1.0"
+ `sources ["src/**/*.ecl"]
+ `exports ["my.proj"]
+ `requires
+ {"statistics" {package "foo"
+                 `version "1.2.0"
+                 `source {kind archive url "https://example.com/foo-1.2.0.tgz"}
+                 `hash "sha256-<64 lowercase hex digits>"}}}
 ```
 
-`'format` is the integer `2`. `'name` is the package's canonical name, and
-`'version` is its version. `'sources` lists portable source-file globs, and
-`'exports` lists exact public module names. `'requires` maps consumer-local aliases to requirements.
+`` `format `` is the integer `2`. `` `name `` is the package's canonical name, and
+`` `version `` is its version. `` `sources `` lists portable source-file globs, and
+`` `exports `` lists exact public module names. `` `requires `` maps consumer-local aliases to requirements.
 
-A requirement contains exactly `'package`, `'version`, `'source`, and `'hash`.
+A requirement contains exactly `` `package ``, `` `version ``, `` `source ``, and `` `hash ``.
 The version is a minimum. Sources are tagged dictionaries: an archive has
-`'kind 'archive` and `'url`; Git has `'kind 'git`, `'url`, and `'commit`.
+`` `kind `archive `` and `` `url ``; Git has `` `kind `git ``, `` `url ``, and `` `commit ``.
 URLs use HTTPS without credentials. Git commits are full 40-character lowercase
 hexadecimal identifiers. The hash has the
 form `sha256-` followed by 64 lowercase hexadecimal digits. Aliases do not
@@ -69,8 +69,8 @@ package through multiple aliases. Selected package names cannot overlap under
 the ownership rule below.
 
 Manifest values may contain ints, floats, chars, symbols, strings, lists, and
-dictionaries. An executable word anywhere in the value raises `'domain`.
-Comments are accepted by the reader and omitted by manifest rewrites.
+dictionaries; a manifest is read, never evaluated. Comments are accepted by the
+reader and omitted by manifest rewrites.
 
 ### Package names and exports
 

@@ -26,19 +26,19 @@ with tempfile.TemporaryDirectory(prefix="ecl-installed-apps-") as temporary:
     descriptor = {"format": 1, "entry": "main.ecl", "module_map": "ecl.modules"}
     (app / "application.json").write_text(json.dumps(descriptor))
     (app / "ecl.modules").write_text(
-        "{'format 1 'local \"app\" 'scopes {\"app\" "
-        "{'root \".\" 'visible [] 'sources [\"*.ecl\"] 'artifacts []}}}"
+        "{format 1 local \"app\" scopes {\"app\" "
+        "{root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}"
     )
-    (app / "library.ecl").write_text("[] ((42) 'answer def) 'appfixture @defm")
+    (app / "library.ecl").write_text("[] ((42) `answer def) `appfixture @defm")
     (app / "main.ecl").write_text(
         "appfixture.answer str io.prin args str io.prin "
-        "'cwd \"sentinel\" fs.read-text io.prin"
+        "`cwd \"sentinel\" fs.read-text io.prin"
     )
     caller = root / "caller"
     caller.mkdir()
     (caller / "sentinel").write_text("caller directory")
     (caller / "ecl.modules").write_text("broken project map")
-    (caller / "appfixture.ecl").write_text("[] ((999) 'answer def) 'appfixture @defm")
+    (caller / "appfixture.ecl").write_text("[] ((999) `answer def) `appfixture @defm")
     result = run(binary, caller, "fixture", "one", "two")
     assert result.returncode == 0, result.stderr
     assert result.stdout == '42("one" "two")caller directory', repr(result.stdout)

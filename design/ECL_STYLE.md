@@ -16,7 +16,7 @@ because they fit within the formatter's width.
 Prefer:
 
 ```ecl
-state (['root 'name] at-path) ('root at minimum-map) bi
+state ([root name] at-path) (`root at minimum-map) bi
 pair wrap
 ```
 
@@ -24,8 +24,8 @@ over:
 
 ```ecl
 state
-(['root 'name] at-path)
-('root at minimum-map)
+([root name] at-path)
+(`root at minimum-map)
 bi
 pair
 wrap
@@ -59,9 +59,9 @@ or imply re-exports.
  ### def singleton
  (value -- list : "Return a one-element list containing the value.")
  (wrap)
- 'singleton def
+ `singleton def
  )
-'example
+`example
 @defm
 ```
 
@@ -95,10 +95,10 @@ another quotation adds no behavior:
 ```ecl
 (x -- y : "Transform x into y.")
 (foo bar)
-'transform def
+`transform def
 ```
 
-Do not write the reducible form `((foo bar) call) ... 'transform def`.
+Do not write the reducible form ``((foo bar) call) ... `transform def``.
 `call` belongs where a quotation is a runtime value selected or constructed
 by the program.
 
@@ -118,7 +118,7 @@ Use `bi` or `tri` when two or three independent quotations consume the same
 input:
 
 ```ecl
-state (['root 'name] at-path) ('root at minimum-map) bi
+state ([root name] at-path) (`root at minimum-map) bi
 pair wrap
 ```
 
@@ -173,7 +173,7 @@ boundary.
 Use `at-path` for a genuine path through nested containers:
 
 ```ecl
-state ['root 'name] at-path
+state [root name] at-path
 catalog package version 3 pack at-path
 ```
 
@@ -183,8 +183,8 @@ when it has a domain meaning:
 ```ecl
 ### defp manifest-node
 (manifest -- node : "Return a manifest's [name version] identity.")
-(['name 'version] swap (swap at) partial each)
-'manifest-node defp
+([name version] swap (swap at) partial each)
+`manifest-node defp
 ```
 
 The list argument to `at` is one dictionary key; it is not a vectorized
@@ -199,10 +199,10 @@ construction needs, bind those values inside, and collect the resulting list:
 ```ecl
 state wrap
 (|state|
- 'format 2
- 'root state ['root 'name] at-path
- 'packages state selected-packages
- 'requires state resolved-requires)
+ `format 2
+ `root state [root name] at-path
+ `packages state selected-packages
+ `requires state resolved-requires)
 infra dict.from-flat
 ```
 

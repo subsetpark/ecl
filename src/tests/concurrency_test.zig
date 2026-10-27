@@ -42,7 +42,7 @@ test "concurrency: cold sessions start no threads and @spawn starts the fixed po
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expectEqualStrings("{'ok [3]}", actual.bytes());
+    try std.testing.expectEqualStrings("{ok [3]}", actual.bytes());
 }
 
 test "concurrency: cooperative sessions preserve public task behavior without worker threads" {
@@ -54,7 +54,7 @@ test "concurrency: cooperative sessions preserve public task behavior without wo
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expectEqualStrings("{'ok [3]}", actual.bytes());
+    try std.testing.expectEqualStrings("{ok [3]}", actual.bytes());
 }
 
 test "concurrency: native shutdown releases delayed continuations and image pins" {
@@ -90,7 +90,7 @@ test "concurrency: cooperative ready work cannot starve bounded retirement" {
         counting.requested_memory_limit = counting.total_requested_bytes + 512 * 1024;
         try runOk(
             &runtime,
-            "[] ((1) () while) @spawn 'spinner set " ++
+            "[] ((1) () while) @spawn `spinner set " ++
                 "[] (0 (dup 4096 <) (1 + [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16] pop) while pop) " ++
                 "@spawn task.await pop spinner task.cancel spinner task.await pop",
         );
@@ -111,7 +111,7 @@ test "concurrency: relocating a session handle preserves live runtime links" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var original = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
-    try runOk(&original, "[] ((1) () while) @spawn 'relocated-task set");
+    try runOk(&original, "[] ((1) () while) @spawn `relocated-task set");
 
     // Session is deliberately a movable handle. The live task, root scope, and
     // environment must point only into the heap-stable core after this copy.
@@ -122,7 +122,7 @@ test "concurrency: relocating a session handle preserves live runtime links" {
     try runOk(&runtime, "relocated-task dup task.cancel task.await");
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'kind 'cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind cancelled") != null);
 }
 
 test "concurrency: task identity rendering dict keys and cached await are observable" {
@@ -138,20 +138,20 @@ test "concurrency: task identity rendering dict keys and cached await are observ
     }
     try runOk(
         &runtime,
-        "pop 'identity-task set " ++
+        "pop `identity-task set " ++
             "identity-task type identity-task dup match? " ++
             "identity-task 9 pair dict.from-flat identity-task dict.has?",
     );
     {
         var actual = try display(&runtime);
         defer actual.deinit();
-        try std.testing.expectEqualStrings("'task 1 1", actual.bytes());
+        try std.testing.expectEqualStrings("task 1 1", actual.bytes());
     }
     try runOk(&runtime, "pop pop pop [] (2 3 +) @spawn dup task.await pop task.await");
     {
         var actual = try display(&runtime);
         defer actual.deinit();
-        try std.testing.expectEqualStrings("{'ok [5]}", actual.bytes());
+        try std.testing.expectEqualStrings("{ok [5]}", actual.bytes());
     }
 }
 
@@ -162,12 +162,12 @@ test "concurrency: two parked waiters share one cached result with one worker" {
     defer runtime.deinit();
     try runOk(
         &runtime,
-        "[] (42) @spawn 'shared-task set " ++
+        "[] (42) @spawn `shared-task set " ++
             "shared-task shared-task pair [] (task.await) @each",
     );
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expectEqualStrings("({'ok [42]} {'ok [42]})", actual.bytes());
+    try std.testing.expectEqualStrings("({ok [42]} {ok [42]})", actual.bytes());
 }
 
 test "concurrency: runtime task markers cannot be parsed bare or nested" {
@@ -190,12 +190,12 @@ test "concurrency: cancellation timeout and later await remain distinct" {
     try runOk(&runtime, "[] ((1) () while) @spawn dup 1 task.await-for swap task.cancel");
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
     var actual = try display(&runtime);
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'kind 'timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind timeout") != null);
     actual.deinit();
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
     try runOk(&runtime, "pop [] ((1) () while) @spawn dup task.cancel task.await");
     actual = try display(&runtime);
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'kind 'cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind cancelled") != null);
     actual.deinit();
 }
 
@@ -209,8 +209,8 @@ test "concurrency: task module cancellation reaches a runnable child" {
     try runOk(&runtime, "[] ([] ((1) () while) @spawn dup task.cancel task.await) @spawn task.await");
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'kind 'cancelled") != null);
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'ok [1]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "ok [1]") == null);
 }
 
 test "concurrency: terminal deadline waits do not start the timer thread" {
@@ -230,7 +230,7 @@ test "concurrency: an already-expired pending deadline resolves without a timer 
     try runOk(&runtime, "[] ((1) () while) @spawn dup 0 task.await-for");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     var actual = try display(&runtime);
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'kind 'timeout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind timeout") != null);
     actual.deinit();
     try runOk(&runtime, "pop dup task.cancel task.await pop");
 }
@@ -242,7 +242,7 @@ test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
     defer runtime.deinit();
     try runOk(
         &runtime,
-        "[] ((1) () while) @spawn 'target-task set " ++
+        "[] ((1) () while) @spawn `target-task set " ++
             "[] (target-task 1000000 task.await-for) @spawn dup task.cancel task.await pop " ++
             "target-task task.cancel target-task task.await pop",
     );
@@ -256,7 +256,7 @@ test "concurrency: timer heap spans fixed chunks and drains every entry" {
     defer runtime.deinit();
     try runOk(
         &runtime,
-        "[] ((1) () while) @spawn 'timer-target set " ++
+        "[] ((1) () while) @spawn `timer-target set " ++
             "[20] 70 take [] (timer-target swap task.await-for) @each pop " ++
             "timer-target task.cancel timer-target task.await pop",
     );
@@ -272,7 +272,7 @@ test "concurrency: tasks persist across units and structured close reaches quies
     try runOk(&runtime, "task.pending first task.cancel task.await");
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "'kind 'cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual.bytes(), "kind cancelled") != null);
 }
 
 test "concurrency: tasks snapshots include pending descendants in @spawn preorder" {
@@ -300,7 +300,7 @@ test "concurrency: transitioning reductions share inputs and remain cancellable"
     defer runtime.deinit();
     // Construct once in the parent; children borrow the same float leaf.
     // Worker-count gates run this at both one and eight workers.
-    try runOk(&runtime, "131073 range 0.0 * 1.0 + 'reduction-input set " ++
+    try runOk(&runtime, "131073 range 0.0 * 1.0 + `reduction-input set " ++
         "[0 1 2 3] [] (pop reduction-input 0 (+) fold reduction-input 0 (+) scan last pair) @each " ++
         "[[131073.0 131073.0] [131073.0 131073.0] [131073.0 131073.0] [131073.0 131073.0]] match?");
     var actual = try display(&runtime);
@@ -309,10 +309,10 @@ test "concurrency: transitioning reductions share inputs and remain cancellable"
     // Repeated reductions keep the child alive independently of worker speed;
     // a peer can finish and the child can then be cancelled and joined.
     try runOk(&runtime, "pop [] ((1) (reduction-input 0 (+) fold pop reduction-input 0 (+) scan pop) while) @spawn " ++
-        "[] (7) @spawn task.await pop dup task.cancel task.await 'err at 'kind at");
+        "[] (7) @spawn task.await pop dup task.cancel task.await `err at `kind at");
     actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expectEqualStrings("'cancelled", actual.bytes());
+    try std.testing.expectEqualStrings("cancelled", actual.bytes());
 }
 
 test "concurrency: vector reductions own their accumulator across safe points" {
@@ -323,7 +323,7 @@ test "concurrency: vector reductions own their accumulator across safe points" {
     // Children share the rows; each owns only its own accumulators. Rows are
     // longer than one kernel quantum, so a step that has taken over its
     // accumulator reaches a safe point mid-row.
-    try runOk(&runtime, "3 range (pop 131073 range 0.0 * 1.0 +) each 'rows set " ++
+    try runOk(&runtime, "3 range (pop 131073 range 0.0 * 1.0 +) each `rows set " ++
         "[0 1 2 3] [] (pop rows (+) fold1 first) @each [3.0 3.0 3.0 3.0] match?");
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("1", actual.bytes());
@@ -331,10 +331,10 @@ test "concurrency: vector reductions own their accumulator across safe points" {
     // Cancellation can land while a cursor owns the handed-over accumulator;
     // the testing allocator reports a leaked or doubly released root.
     try runOk(&runtime, "pop [] ((1) (rows (+) fold1 pop) while) @spawn " ++
-        "[] (7) @spawn task.await pop dup task.cancel task.await 'err at 'kind at");
+        "[] (7) @spawn task.await pop dup task.cancel task.await `err at `kind at");
     actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expectEqualStrings("'cancelled", actual.bytes());
+    try std.testing.expectEqualStrings("cancelled", actual.bytes());
 }
 
 test "concurrency: one-worker kernel safe points let another unit progress" {
@@ -366,8 +366,8 @@ test "concurrency: a large seeded construction cannot starve a peer task" {
     try runOk(
         &runtime,
         "[] (70000 range (69999 (pop) times) @attempt pop " ++
-            "70000 range (69999 (pop) times) ((1) 'x defp ( -- n ) (x) 'go def) " ++
-            "'starve @defm starve.go) @spawn " ++
+            "70000 range (69999 (pop) times) ((1) `x defp ( -- n ) (x) `go def) " ++
+            "`starve @defm starve.go) @spawn " ++
             "[] (7) @spawn pair task.await-any pop",
     );
     var actual = try display(&runtime);
@@ -399,7 +399,7 @@ test "concurrency: large task results materialize across scheduler slices" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    try runOk(&runtime, "[] ([1] 70000 take call) @spawn task.await 'ok at len");
+    try runOk(&runtime, "[] ([1] 70000 take call) @spawn task.await `ok at len");
     var actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("70000", actual.bytes());
@@ -438,7 +438,7 @@ test "concurrency: @each seeds children without resolving capture helpers" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    try runOk(&runtime, "(x -- y) (pop 99) 'first def [1 2 3] [] () @each");
+    try runOk(&runtime, "(x -- y) (pop 99) `first def [1 2 3] [] () @each");
     var actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("[1 2 3]", actual.bytes());
@@ -453,7 +453,7 @@ test "concurrency: task results compose with each in input order" {
         try runOk(&runtime, "[(10) (20 21) ()] ([] swap @spawn) each (task.await) each");
         var actual = try display(&runtime);
         defer actual.deinit();
-        try std.testing.expectEqualStrings("({'ok [10]} {'ok [20 21]} {'ok ()})", actual.bytes());
+        try std.testing.expectEqualStrings("({ok [10]} {ok [20 21]} {ok ()})", actual.bytes());
         try runOk(&runtime, "pop [] (task.await) each");
         var empty = try display(&runtime);
         defer empty.deinit();
@@ -493,7 +493,7 @@ test "concurrency: @each is a reflective prelude definition and task-join is abs
     }
     try runOk(
         &runtime,
-        "'@each doc len 0 > '@each which '@each see words",
+        "`@each doc len 0 > `@each which `@each see words",
     );
     var reflected = try display(&runtime);
     defer reflected.deinit();
@@ -543,10 +543,10 @@ test "concurrency: a task spawned inside @attempt belongs to the enclosing scope
     // `@attempt` is a stack transaction, not a scope: it returns with the task
     // alive, and the task then completes normally. A cancelled task could never
     // yield this value, so the assertion is independent of timing.
-    try runOk(&runtime, "[] ([] (20 clock.sleep 7) @spawn) @attempt 'ok at first task.await");
+    try runOk(&runtime, "[] ([] (20 clock.sleep 7) @spawn) @attempt `ok at first task.await");
     var actual = try display(&runtime);
     defer actual.deinit();
-    try std.testing.expectEqualStrings("{'ok [7]}", actual.bytes());
+    try std.testing.expectEqualStrings("{ok [7]}", actual.bytes());
 }
 
 test "concurrency: a failing @attempt cancels no spawned task" {
@@ -554,7 +554,7 @@ test "concurrency: a failing @attempt cancels no spawned task" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    try runOk(&runtime, "[] ([] ((1) () while) @spawn pop 'domain error.new fail) @attempt pop task.pending len");
+    try runOk(&runtime, "[] ([] ((1) () while) @spawn pop `domain error.new fail) @attempt pop task.pending len");
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("1", actual.bytes());
     actual.deinit();
@@ -569,7 +569,7 @@ test "concurrency: a failing root unit cancels no spawned task" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    try runErr(&runtime, "[] ((1) () while) @spawn pop 'domain error.new fail");
+    try runErr(&runtime, "[] ((1) () while) @spawn pop `domain error.new fail");
     try runOk(&runtime, "task.pending len");
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("1", actual.bytes());

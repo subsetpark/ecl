@@ -1,20 +1,20 @@
 # DoD-30: stable equijoins with explicit missingness, over a CSV order table
 # and a JSON customer table.
-'table
-('from-header-rows 'from-records 'rename 'inner-join 'left-join-with 'height
- 'column)
+`table
+(from-header-rows from-records rename inner-join left-join-with height
+ column)
 import
 
-'cwd "test/acceptance/orders.csv" fs.read-text ['text 'text 'text] csv.parse flip from-header-rows
-'orders set
-'cwd "test/acceptance/customers.json" fs.read-text json.parse from-records 'customers set
+`cwd "test/acceptance/orders.csv" fs.read-text [text text text] csv.parse flip from-header-rows
+`orders set
+`cwd "test/acceptance/customers.json" fs.read-text json.parse from-records `customers set
 orders io.pp
 customers io.pp
 
 # Both tables carry a `region` column, so a single-key join on `customer`
-# alone collides on a non-key name. That is 'domain, resolved with rename.
+# alone collides on a non-key name. That is `domain, resolved with rename.
 [] (orders customers [["customer" "customer"]] inner-join) @attempt result.ok? io.pp
-orders customers {"region" "home"} rename 'renamed set
+orders customers {"region" "home"} rename `renamed set
 
 # A duplicate right key expands many-to-many in left-major, right-minor order:
 # order 1 pairs with gold then silver, then order 3 does the same.
@@ -31,20 +31,20 @@ orders height io.pp
 # A left join emits one row per unmatched left row, completed only from the
 # caller's fill — the value is never invented.
 orders customers [["customer" "customer"] ["region" "region"]]
-{"tier" 'null} left-join-with io.pp
+{"tier" null} left-join-with io.pp
 orders customers [["customer" "customer"] ["region" "region"]]
 {"tier" "unknown"} left-join-with "tier" column io.pp
 
 # The fill must name exactly the appended right columns: no fewer, no more.
 [] (orders customers [["customer" "customer"] ["region" "region"]] {} left-join-with)
-@attempt 'err at 'kind at io.pp
+@attempt `err at `kind at io.pp
 []
-(orders customers [["customer" "customer"] ["region" "region"]] {"tier" 'null "extra" 1}
+(orders customers [["customer" "customer"] ["region" "region"]] {"tier" null "extra" 1}
  left-join-with)
 @attempt
-'err
+`err
 at
-'kind
+`kind
 at
 io.pp
 
@@ -52,4 +52,4 @@ io.pp
 customers "tier" column io.pp
 customers "tier" column 2 at type io.pp
 orders customers [["customer" "customer"] ["region" "region"]]
-{"tier" 'null} left-join-with "tier" column 3 at io.pp
+{"tier" null} left-join-with "tier" column 3 at io.pp

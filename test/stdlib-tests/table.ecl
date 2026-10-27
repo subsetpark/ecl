@@ -1,13 +1,13 @@
 ### module stdlib.test.table
 []
 (
- 'stdlib.test.support
- ('equal 'raises-containing 'raises-word 'documented)
+ `stdlib.test.support
+ (equal raises-containing raises-word documented)
  import
 
  ### test constructors
  (-- : "Validate table conventions and construct populated and empty schemas.")
- ({"a" [1 2] "b" [3 4]} dup type 'dict equal
+ ({"a" [1 2] "b" [3 4]} dup type `dict equal
   dup table.valid? 1 equal
   dict.keys ["a" "b"] equal
   {"a" [1 2] "b" [3]} table.valid? 0 equal
@@ -24,27 +24,27 @@
   [["a" "b"]] table.from-header-rows table.height 0 equal
   {"a" 1 "b" 2} {"b" 4 "a" 3} pair table.from-records
   {"a" [1 3] "b" [2 4]} equal
-  ({} table.from-columns) 'shape "at least one column" raises-containing
-  (5 table.from-columns) 'type "must be a dict" raises-containing
+  ({} table.from-columns) `shape "at least one column" raises-containing
+  (5 table.from-columns) `type "must be a dict" raises-containing
   ({"a" [1 2] "b" [3]} table.from-columns)
-  'shape
+  `shape
   "one length"
   raises-containing
-  (["a" "a"] [] table.from-rows) 'domain "duplicate" raises-containing
-  ([""] [] table.from-rows) 'domain "must not be empty" raises-containing
+  (["a" "a"] [] table.from-rows) `domain "duplicate" raises-containing
+  ([""] [] table.from-rows) `domain "must not be empty" raises-containing
   (["a" "b"] [[1]] table.from-rows)
-  'shape
+  `shape
   "one cell per column"
   raises-containing
   ([] table.from-records)
-  'shape
+  `shape
   "cannot infer a schema"
   raises-containing
   ({"a" 1} {"a" 2 "b" 3} pair table.from-records)
-  'domain
+  `domain
   "exactly the first record's keys"
   raises-containing)
- 'constructors test
+ `constructors test
 
  ### test conversions
  (-- : "Round-trip table rows, headers, records, and zero-row schemas.")
@@ -61,7 +61,7 @@
   table.from-header-rows match? 1 equal
   {"a" [1 2] "b" [3 4]} dup table.records table.from-records match? 1 equal
   ["a"] [] table.from-rows table.records len 0 equal)
- 'conversions test
+ `conversions test
 
  ### test whole-cells
  (-- : "Transpose and gather whole heterogeneous cells, including empty schemas and string rows.")
@@ -76,9 +76,9 @@
   {"a" "ac" "b" "bd"} equal
   ["a" "b"] [] table.from-rows [] table.where
   {"a" [] "b" []} equal
-  (["a"] [1] table.from-rows) 'type "every row" raises-containing
-  (["a"] [[]] table.from-rows) 'shape "one cell per column" raises-containing)
- 'whole-cells test
+  (["a"] [1] table.from-rows) `type "every row" raises-containing
+  (["a"] [[]] table.from-rows) `shape "one cell per column" raises-containing)
+ `whole-cells test
 
  ### test transformations
  (-- : "Transform tables while preserving schema and row order by policy.")
@@ -99,56 +99,56 @@
   {"a" [1 2 3] "b" [4 5 6]} [1 0 1] table.where
   {"a" [1 3] "b" [4 6]} equal
   {"a" [1 2 3]} [0 0 0] table.where table.height 0 equal)
- 'transformations test
+ `transformations test
 
  ### test invalid-candidates
  (-- : "Reject forged and malformed table candidates with stable error kinds.")
- ({"a" [1 2]} "b" [9] put dup table.valid? 0 equal type 'dict equal
+ ({"a" [1 2]} "b" [9] put dup table.valid? 0 equal type `dict equal
   ({"a" [1 2]} "b" [9] put table.rows)
-  'shape
+  `shape
   "one length"
   raises-containing
   ({"a" [1 2]} "z" table.column)
-  'domain
+  `domain
   "existing column name"
   raises-containing
   ({"a" [1 2]} {"z" (str)} table.cast)
-  'domain
+  `domain
   "existing column names"
   raises-containing
   ({"a" [1 2]} {"a" 5} table.cast)
-  'type
+  `type
   "quotation for every named column"
   raises-containing
   ({"a" [1 2]} ["a" "a"] table.select)
-  'domain
+  `domain
   "duplicate"
   raises-containing
   ({"a" [1 2]} [] table.select)
-  'shape
+  `shape
   "at least one column"
   raises-containing
   ({"a" [1 2] "b" [3 4]} {"a" "b"} table.rename)
-  'domain
+  `domain
   "collide"
   raises-containing
   ({"a" [1 2]} {"z" "x"} table.rename)
-  'domain
+  `domain
   "existing column names"
   raises-containing
   ({"a" [1 2]} "c" [7] table.with-column)
-  'shape
+  `shape
   "row count"
   raises-containing
   ({"a" [1 2 3]} [1 0] table.where)
-  'shape
+  `shape
   "row count"
   raises-containing
   ({"a" [1 2 3]} [1 0 2] table.where)
-  'type
+  `type
   "only 0 and 1"
   raises-containing)
- 'invalid-candidates test
+ `invalid-candidates test
 
  ### test grouping-and-aggregation
  (-- : "Group stably and aggregate key and value columns by explicit policy.")
@@ -182,23 +182,23 @@
   {"r" ["e" "w" "e"] "v" [1 2 3]} ["r"] [] table.aggregate
   {"r" ("e" "w")} equal
   ({"a" [1]} ["z"] table.group-by)
-  'domain
+  `domain
   "existing column names"
   raises-containing
   ({"a" [1]} [] [] table.aggregate)
-  'domain
+  `domain
   "at least one key or aggregate output"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["r" "v" (sum)]] table.aggregate)
-  'domain
+  `domain
   "must not collide"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "zz" (sum)]] table.aggregate)
-  'domain
+  `domain
   "existing input column"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v"]] table.aggregate)
-  'type
+  `type
   "[output-name input-name reducer]"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["" "v" (sum)]] table.aggregate)
@@ -206,10 +206,10 @@
   "must not be empty"
   raises-containing
   ({"r" ["e"] "v" [1]} ["r"] [["t" "v" (dup)]] table.aggregate)
-  'contract
-  'each
+  `contract
+  `each
   raises-word)
- 'grouping-and-aggregation test
+ `grouping-and-aggregation test
 
  ### test joins
  (-- : "Join tables stably with explicit keys and caller-provided missingness.")
@@ -239,9 +239,9 @@
   {"id" [1 2] "v" ["a" "b"]}
   {"cid" [2] "name" ["y"]}
   [["id" "cid"]]
-  {"name" 'null}
+  {"name" null}
   table.left-join-with
-  {"id" [1 2] "v" ("a" "b") "name" ('null "y")} equal
+  {"id" [1 2] "v" ("a" "b") "name" (null "y")} equal
   {"id" [1 2 3]}
   {"cid" [2 2]}
   [["id" "cid"]]
@@ -250,33 +250,33 @@
   table.height
   4 equal
   ({"id" [1]} {"cid" [1] "id" [7]} [["id" "cid"]] table.inner-join)
-  'domain
+  `domain
   "collide non-key column names"
   raises-containing
   ({"id" [1 2]} {"cid" [2] "name" ["y"]} [["id" "cid"]] {}
    table.left-join-with)
-  'domain
+  `domain
   "cover every appended right column"
   raises-containing
   ({"id" [1 2]} {"cid" [2] "name" ["y"]} [["id" "cid"]]
    {"name" 1 "extra" 2}
    table.left-join-with)
-  'domain
+  `domain
   "exactly the appended right columns"
   raises-containing
   ({"id" [1]} {"cid" [1]} [] table.inner-join)
-  'domain
+  `domain
   "at least one key pair"
   raises-containing
   ({"id" [1]} {"cid" [1]} [["id"]] table.inner-join)
-  'type
+  `type
   "[left-name right-name] pairs"
   raises-containing
   ({"id" [1]} {"cid" [1]} [["id" "zz"]] table.inner-join)
-  'domain
+  `domain
   "existing right columns"
   raises-containing)
- 'joins test
+ `joins test
 
  ### test array-joins-and-groups
  (-- : "Preserve whole composite keys, stable duplicate order, fills, and empty join schemas.")
@@ -303,27 +303,27 @@
   {"k" [1 1 2 1 1] "v" [10 10 20 30 30] "label" ["a" "b" "c" "a" "b"]} equal
   {"k" [[1] [] [1]]} {"rk" [[] [1.0]] "v" [10 20]} [["k" "rk"]] table.inner-join
   {"k" [[1] [] [1]] "v" [20 10 20]} equal)
- 'array-joins-and-groups test
+ `array-joins-and-groups test
 
  ### test documentation
  (-- : "Expose documentation for every table module export.")
- (['table.valid? 'table.names 'table.height 'table.from-columns
-   'table.from-rows 'table.from-header-rows 'table.from-records 'table.rows
-   'table.header-rows 'table.records 'table.column 'table.cast 'table.select
-   'table.rename 'table.with-column 'table.where 'table.group-by
-   'table.aggregate 'table.inner-join 'table.left-join-with]
+ ([table.valid? table.names table.height table.from-columns
+   table.from-rows table.from-header-rows table.from-records table.rows
+   table.header-rows table.records table.column table.cast table.select
+   table.rename table.with-column table.where table.group-by
+   table.aggregate table.inner-join table.left-join-with]
   documented)
- 'documentation test
+ `documentation test
 
  ### test symbol-aggregates
  (-- : "Built-in reducer symbols coexist with quotations and are validated before execution.")
  ({"k" [1 2 1] "v" [10 20 30]} ["k"]
-  [["s" "v" 'sum] ["n" "v" (len)] ["lo" "v" 'min] ["hi" "v" 'max]]
+  [["s" "v" sum] ["n" "v" (len)] ["lo" "v" min] ["hi" "v" max]]
   table.aggregate {"k" [1 2] "s" [40 20] "n" [2 1] "lo" [10 20] "hi" [30 20]} equal
-  ({"v" [1]} [] [["a" "v" ('user error.new raise)] ["b" "v" 'median]] table.aggregate)
-  'type "specification" raises-containing
-  {"v" []} [] [["s" "v" 'sum] ["n" "v" 'count]] table.aggregate
+  ({"v" [1]} [] [["a" "v" (`user error.new raise)] ["b" "v" median]] table.aggregate)
+  `type "specification" raises-containing
+  {"v" []} [] [["s" "v" sum] ["n" "v" count]] table.aggregate
   {"s" [0] "n" [0]} equal)
- 'symbol-aggregates test
+ `symbol-aggregates test
 
-) 'stdlib.test.table @defm
+) `stdlib.test.table @defm

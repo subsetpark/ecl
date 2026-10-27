@@ -277,7 +277,7 @@ pub fn isRoot(item: Value) bool {
     return item == .symbol or @import("directory_resource.zig").isDirectory(item);
 }
 pub fn selectRoot(access_value: *external.FilesystemAccess, item: Value) error{ OutOfMemory, UnknownRoot, Closed, Io }!RootSelection {
-    if (item == .symbol) return .{ .named = findRoot(access_value, item.symbol) orelse return error.UnknownRoot };
+    if (item == .symbol) return .{ .named = findRoot(access_value, item.symbol.name) orelse return error.UnknownRoot };
     return .{ .resource = try @import("directory_resource.zig").acquire(item) };
 }
 

@@ -63,12 +63,12 @@ its path is relative to the caller's working directory. A malformed discovered
 or explicitly selected map fails Session construction, without falling back.
 
 ```ecl
-{'format 1 'local "project" 'scopes {
- "project" {'root "." 'visible ["library"]
-            'sources ["src/**/*.ecl"] 'artifacts []}
- "library" {'root "installed/library" 'visible [] 'sources []
-            'artifacts [{'path "library.ecl" 'kind 'ecl
-                         'exports ["library"]}]}}}
+{format 1 local "project" scopes {
+ "project" {root "." visible ["library"]
+            `sources ["src/**/*.ecl"] `artifacts []}
+ "library" {root "installed/library" visible [] sources []
+            `artifacts [{path "library.ecl" kind ecl
+                         `exports ["library"]}]}}}
 ```
 
 Every scope has exactly `root`, `visible`, `sources`, and `artifacts` fields.
@@ -92,7 +92,7 @@ enumerates ECL artifacts from the designated `local` scope.
 A reference document has exactly this shape:
 
 ```ecl
-{'format 1 'map ".ecl/generations/current/ecl.modules"}
+{format 1 map ".ecl/generations/current/ecl.modules"}
 ```
 
 The referenced document must be a complete map, never another reference.
@@ -178,7 +178,7 @@ Controller and cooperative initialization, operations, and finalizers may prepar
 `errorData()` using scalar, input-copy, list, and dictionary construction. `seal()`
 requires a capability-free dictionary with at most four symbol keys. Cooperative
 construction must advance through completion before failing. The next failure
-reports those fields in its `'data`; joined close preserves them for repeated
+reports those fields in its `` `data ``; joined close preserves them for repeated
 failure observation. Diagnostic builders share the callback construction stack;
 sealing consumes the dictionary. Finalizer commit freezes diagnostics together
 with ordinary result publication, so post-commit failures can use reserved data.
@@ -198,8 +198,8 @@ the loader provides no legacy adapter.
 
 Each native word has a declared effect and nonempty documentation. Native
 words support qualified calls, imports, `doc`, `which`, and `see`. A failing
-native call restores its operand stack. Native code may raise `'type`,
-`'shape`, `'conform`, `'overflow`, `'domain`, `'parse`, `'io`, `'user`, or `'contract`;
+native call restores its operand stack. Native code may raise `` `type ``,
+`` `shape ``, `` `conform ``, `` `overflow ``, `` `domain ``, `` `parse ``, `` `io ``, `` `user ``, or `` `contract ``;
 other error kinds remain reserved to the runtime.
 
 A loaded native module remains loaded for the session. Repeated resolution
@@ -367,7 +367,7 @@ idempotent and waits for cleanup. Scope closure also waits for cleanup, and
 `@give` transfers ownership atomically without interrupting active work.
 
 Kinds belong to a loaded module instance, not to a textual name. A mismatched
-kind raises `'type`; operations on closed ports raise `'io`. Retained closed
+kind raises `` `type ``; operations on closed ports raise `` `io ``. Retained closed
 ports remain opaque identities. Tasks and modules are unsupported native inputs.
 
 The default Session limits are 64 live native ports, 16 admitted operations per
@@ -375,16 +375,16 @@ port (including the active one), and 64 KiB for each request and response ring.
 The runtime validates native port limits at construction:
 live capacity is 1–4096, operation capacity is 1–256,
 and ring capacity is 1 byte–16 MiB. Invalid limits reject Session initialization.
-Creation beyond live capacity raises `'domain`; operations wait for admission
+Creation beyond live capacity raises `` `domain ``; operations wait for admission
 when their lane is full. The operation budget is partitioned across lanes,
-reserving at least one slot for each; creation fails with `'domain` when the
+reserving at least one slot for each; creation fails with `` `domain `` when the
 budget cannot cover the declared lanes. Idle capacity is not borrowed across
 lanes. Forced close interrupts all lanes and waits for terminal cleanup.
 A kind may register an optional `shutdown` callback. `port.shutdown` invokes it
 once on an independent control lane and waits for all callbacks and cleanup.
 It may overlap operation callbacks; `cancel` must interrupt its backend waits.
 Failure remains observable on repeated shutdown calls. Unsupported shutdown
-raises `'domain`, and abortive `port.close` remains available. Cancellation
+raises `` `domain ``, and abortive `port.close` remains available. Cancellation
 never promises to reverse external effects or accepted stream bytes.
 Native instance `port_limits` may select `callback_quantum` and
 `construction_quantum`. `NativeWorkQuantum.fromCount` accepts 1 through 65,536;
@@ -438,8 +438,8 @@ and one canonical relative path beneath it. All filesystem operations are
 available on every named root, subject to operating-system permissions and
 runtime limits. Modules within one Session share its roots.
 
-The `ecl` command uses one root, `'cwd`, for the working directory captured
-once at startup. Package commands add the `'project` root described below.
+The `ecl` command uses one root, `` `cwd ``, for the working directory captured
+once at startup. Package commands add the `` `project `` root described below.
 Session construction opens the roots once; a relative, missing, non-directory,
 duplicate, or malformed root, a zero limit, or an unsupported target is a
 construction error distinct from allocation failure.
@@ -515,7 +515,7 @@ and is independent of the listener after acceptance.
 The live-connection maximum bounds descriptors and backend controllers per
 Session: at the maximum `net.accept` waits, leaving
 the peer in the kernel backlog, and proceeds when a connection closes; a
-waiting accept holds no slot. The listener maximum is refused as `'domain`.
+waiting accept holds no slot. The listener maximum is refused as `` `domain ``.
 Controller failures use the common port error contract. Zero for any limit is a Session construction
 error. TLS and protocol framing remain outside this contract; they belong to
 the protocol modules built over a connection.
@@ -534,7 +534,7 @@ reading past the int range is refused and leaves the reading unchanged, so
 the manual clock never wraps or runs backwards. Every deadline —
 `clock.sleep`, `task.await-for`, and any future timed wait — captures its absolute
 instant on that one clock before registering any timer state; an instant the
-clock could never report is refused with `'overflow` instead of being
+clock could never report is refused with `` `overflow `` instead of being
 registered, and the timer thread reconsiders its heap on every advance. Under a manual clock no wait, wake, or `clock.now` sample
 touches host time, so a test can drive sleeping programs to exact
 instants; a sleeping unit is never woken early, and one is never woken at all
@@ -549,7 +549,7 @@ verification time or permissions; they have no CLI options.
 
 Time zones, locale-sensitive formatting, leap-second tables, timers that run
 callbacks, and periodic scheduling are outside this contract. Process
-deadlines (`'timeout-ms`) use the same scheduler clock through `task.await-for`.
+deadlines ( timeout-ms ) use the same scheduler clock through `task.await-for`.
 
 ## Host-backed data contracts
 
@@ -575,10 +575,10 @@ Every member name must be valid UTF-8, relative, and nonempty after
 normalization. A name may contain no empty, `.`, or `..` component. Absolute
 paths, platform-rooted paths, duplicate normalized paths, links, devices,
 FIFOs, unsupported member kinds, malformed gzip/tar/PAX data, checksum
-failures, and size disagreement raise `'domain`.
+failures, and size disagreement raise `` `domain ``.
 
 The uncompressed tar stream is limited to 1,073,741,824 bytes and 100,000
-regular-file or directory members. Exceeding either limit raises `'domain`.
+regular-file or directory members. Exceeding either limit raises `` `domain ``.
 
 Extraction resolves the destination's parent beneath the root through the
 confined `fs` resolver, then uses a unique `.ecl-fs-*` sibling staging
@@ -587,31 +587,31 @@ Failure and cancellation remove the staging tree through bounded reverse-order
 work. A same-parent no-clobber rename publishes the completed tree after
 validation and handle closure. The destination is never overwritten or merged.
 Concurrent extractors may stage independently; one may publish, and the others
-receive an `'io` destination-exists error.
+receive an `` `io `` destination-exists error.
 
 A non-list byte container, non-symbol root, or non-string destination raises
-`'type`. A byte outside `0..255` raises `'domain` with its zero-based
-`'index`. An unknown root or non-canonical destination raises `'domain` with the `fs` failure data. Host or
-filesystem failures raise `'io` with the relevant `'path`. Failure exposes no
+`` `type ``. A byte outside `0..255` raises `` `domain `` with its zero-based
+`` `index ``. An unknown root or non-canonical destination raises `` `domain `` with the `fs` failure data. Host or
+filesystem failures raise `` `io `` with the relevant `` `path ``. Failure exposes no
 partial destination and opens no member outside the staging root.
 
 ### Tables
 
 A table is an ordinary insertion-ordered dictionary. It has at least one
 entry, every key is a distinct nonempty string, and every value is a list of
-the same length. Zero-row tables are valid. `type` reports `'dict`, and core
+the same length. Zero-row tables are valid. `type` reports `` `dict ``, and core
 dictionary operations may produce a value that no longer satisfies the table
 convention. Each `table.*` operation validates its table inputs.
 
 Table validation uses these error kinds:
 
-- `'type` for non-dictionaries, non-string names, non-list columns, and
+- `` `type `` for non-dictionaries, non-string names, non-list columns, and
   ill-typed masks or specifications;
-- `'shape` for zero-column schemas, unequal column lengths, and row-width
+- `` `shape `` for zero-column schemas, unequal column lengths, and row-width
   mismatches;
-- `'domain` for missing, empty, or duplicate names, schema disagreement,
+- `` `domain `` for missing, empty, or duplicate names, schema disagreement,
   join or rename collisions, and incomplete join fills;
-- `'contract` when an aggregation quotation violates its declared shape.
+- `` `contract `` when an aggregation quotation violates its declared shape.
 
 Joins are stable equijoins over `[left-name right-name]` pairs. Duplicate keys
 expand to the full many-to-many product in left-row order and then right-row
@@ -623,22 +623,22 @@ right column.
 ### HTTP
 
 The HTTP module is a client with content decoding. Responses have the shape
-`{'status int, 'headers dict, 'body value}`. `http.get`, `http.post`, and
+`{status int, headers dict, body value}`. `http.get`, `http.post`, and
 `http.send` return the body as a string. `http.get-bytes` returns decoded
 response octets as a byte list. Transfer framing and compressed wire bytes are
 not exposed.
 
 Each client word consumes one partial or complete `http.request` dictionary
-with a required `'target` URL. `http.get` and `http.get-bytes` supply GET and
+with a required `` `target `` URL. `http.get` and `http.get-bytes` supply GET and
 follow redirects for bodyless requests; `http.post` supplies POST, an empty
 body, and no redirect following. `http.send` requires the request's own
-`'method` and does not follow redirects. Request fields override method,
+`` `method `` and does not follow redirects. Request fields override method,
 headers, and exact body bytes without changing the Session's network
 authority. POST, PUT, and PATCH admit bodies; a nonempty body with another
-method is `'domain`.
+method is `` `domain ``.
 
 Connection refusal, TLS failure, invalid URLs, and protocol errors raise
-`'io` with the URL in `'path`. Every HTTP status is returned as response data.
+`` `io `` with the URL in `` `path ``. Every HTTP status is returned as response data.
 
 Internal tests may supply a TLS trust override containing an absolute CA-file
 path and a fixed verification timestamp. That configuration uses only the
@@ -650,8 +650,8 @@ Requests yield during network I/O, so unrelated tasks, timers, and servers in
 the same Session progress even with one worker. A Session admits at most 16 live
 requests by default and retains admission through response construction and
 cleanup. Each request has one total 30-second monotonic deadline, including
-redirects and construction; expiry raises `'timeout`. Finite transfer and backend
-scratch limits raise `'overflow` with the target URL. These internal Session
+redirects and construction; expiry raises `` `timeout ``. Finite transfer and backend
+scratch limits raise `` `overflow `` with the target URL. These internal Session
 limits are detailed in the standard-library HTTP contract. Task cancellation
 interrupts in-flight I/O, and Session teardown joins it before releasing TLS
 configuration.
@@ -728,7 +728,7 @@ Process status is `0` on success, the status supplied to `exit`, `1` for a
 failed unit or command usage error, and `2` for out-of-memory.
 
 Every Session the command starts receives the working directory, resolved
-once at startup, as the `'cwd` filesystem root and the default child-process
+once at startup, as the `` `cwd `` filesystem root and the default child-process
 working directory. Filesystem, process, and network words are available
 without separate grants.
 
@@ -745,8 +745,8 @@ The command reads these environment variables at startup:
 `io.stdin` is available in `-e` and script-file modes. It reads the complete
 input stream once. There is no ambient file access: file words live in `fs`
 and act beneath the selected named root or directory resource. Standard input carries program source in `ecl -` and in
-non-terminal invocation with no arguments, so `io.stdin` raises `'io` in those
-modes. A second read also raises `'io`.
+non-terminal invocation with no arguments, so `io.stdin` raises `` `io `` in those
+modes. A second read also raises `` `io ``.
 
 ### REPL
 

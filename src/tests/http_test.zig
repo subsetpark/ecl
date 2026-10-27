@@ -18,8 +18,8 @@ test "http: HTTPS get-bytes preserves arbitrary response octets" {
     defer fixture.stop();
     try expectTlsStack(
         fixture.port,
-        "{{'target \"https://127.0.0.1:{d}/redirect-bytes\"}} http.get-bytes 'body at " ++
-            "{{'target \"https://127.0.0.1:{d}/gzip-bytes\"}} http.get-bytes 'body at",
+        "{{target \"https://127.0.0.1:{d}/redirect-bytes\"}} http.get-bytes `body at " ++
+            "{{target \"https://127.0.0.1:{d}/gzip-bytes\"}} http.get-bytes `body at",
         "[0 1 127 128 255 195 40] [0 1 127 128 255 195 40]",
         valid_cert_time,
     );
@@ -33,7 +33,7 @@ test "http: custom TLS trust uses fixed verification time" {
     // here proves Client used the supplied time rather than the wall clock.
     const source = try std.fmt.allocPrint(
         allocator,
-        "{{'target \"https://127.0.0.1:{d}/bytes\"}} http.get-bytes",
+        "{{target \"https://127.0.0.1:{d}/bytes\"}} http.get-bytes",
         .{fixture.port},
     );
     defer allocator.free(source);
@@ -235,13 +235,13 @@ test "http: get returns a response dict from the fixture server" {
     try expectStack(
         fixture.port,
         "\"GET\" \"http://127.0.0.1:{d}/hello\" http.request.new http.send " ++
-            "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
+            "dup `status at swap dup `body at swap `headers at \"x-fixture\" at",
         "200 \"hello, world\\n\" \"hello\"",
     );
     // A non-2xx status returns as an ordinary value without raising an error.
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/nope\"}} http.get 'status at",
+        "{{target \"http://127.0.0.1:{d}/nope\"}} http.get `status at",
         "404",
     );
 }
@@ -254,8 +254,8 @@ test "http: repeated response headers keep the last value" {
     defer fixture.stop();
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/duplicate\"}} http.get " ++
-            "'headers at \"x-repeated\" at",
+        "{{target \"http://127.0.0.1:{d}/duplicate\"}} http.get " ++
+            "`headers at \"x-repeated\" at",
         "\"last\"",
     );
 }
@@ -270,9 +270,9 @@ test "http: post sends headers and body" {
     // assertion proves both crossed the wire.
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/echo\" 'headers {{\"x-probe\" (\"probed\")}} " ++
-            "'body [112 97 121 108 111 97 100]}} http.post " ++
-            "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
+        "{{target \"http://127.0.0.1:{d}/echo\" headers {{\"x-probe\" (\"probed\")}} " ++
+            "body [112 97 121 108 111 97 100]}} http.post " ++
+            "dup `status at swap dup `body at swap `headers at \"x-fixture\" at",
         "200 \"POST|1|probed|payload\" \"echo\"",
     );
 }
@@ -285,34 +285,34 @@ test "http: request fields override get defaults and preserve repeated headers a
     defer fixture.stop();
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/echo\" 'method \"PATCH\" " ++
-            "'headers {{\"x-probe\" (\"one\" \"two\")}} 'body [112 97 121 108 111 97 100]}} " ++
-            "http.get 'body at",
+        "{{target \"http://127.0.0.1:{d}/echo\" method \"PATCH\" " ++
+            "headers {{\"x-probe\" (\"one\" \"two\")}} body [112 97 121 108 111 97 100]}} " ++
+            "http.get `body at",
         "\"PATCH|2|one,two|payload\"",
     );
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/redirect-echo\" 'method \"PATCH\" 'body [112]}} " ++
-            "http.get 'status at",
+        "{{target \"http://127.0.0.1:{d}/redirect-echo\" method \"PATCH\" body [112]}} " ++
+            "http.get `status at",
         "307",
     );
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/redirect-echo\" 'method \"PATCH\" 'body [112]}} " ++
-            "http.get-bytes 'status at",
+        "{{target \"http://127.0.0.1:{d}/redirect-echo\" method \"PATCH\" body [112]}} " ++
+            "http.get-bytes `status at",
         "307",
     );
     try expectStack(
         fixture.port,
-        "{{'target \"http://127.0.0.1:{d}/echo-bytes\" 'method \"POST\" 'body [0 1 127 128 255]}} " ++
-            "http.get-bytes 'body at",
+        "{{target \"http://127.0.0.1:{d}/echo-bytes\" method \"POST\" body [0 1 127 128 255]}} " ++
+            "http.get-bytes `body at",
         "[0 1 127 128 255]",
     );
     try expectStack(
         fixture.port,
         "\"PATCH\" \"http://127.0.0.1:{d}/echo\" http.request.new " ++
             "\"x-probe\" \"sent\" http.request.with-header " ++
-            "[115 101 110 100] http.request.with-body http.send 'body at",
+            "[115 101 110 100] http.request.with-body http.send `body at",
         "\"PATCH|1|sent|send\"",
     );
 }
@@ -347,7 +347,7 @@ test "http: refused connection is an io error" {
         .{
             // Port 1 is privileged and unbound, so refusal fails immediately.
             .name = "a refused connection",
-            .source = "{'target \"http://127.0.0.1:1/nope\"} http.get",
+            .source = "{target \"http://127.0.0.1:1/nope\"} http.get",
             .kind = "io",
             .word = "http.get",
             .message_contains = "cannot reach",
@@ -355,14 +355,14 @@ test "http: refused connection is an io error" {
         },
         .{
             .name = "a refused connection on post",
-            .source = "{'target \"http://127.0.0.1:1/nope\"} http.post",
+            .source = "{target \"http://127.0.0.1:1/nope\"} http.post",
             .kind = "io",
             .word = "http.post",
             .message_contains = "cannot reach",
         },
         .{
             .name = "an unparseable url",
-            .source = "{'target \"not a url\"} http.get",
+            .source = "{target \"not a url\"} http.get",
             .kind = "io",
             .word = "http.get",
             .message_contains = "InvalidUrl",
@@ -379,81 +379,81 @@ test "http: refused connection is an io error" {
             .source = "{} http.get",
             .kind = "type",
             .word = "http.get",
-            .message_contains = "'target URL",
+            .message_contains = "`target URL",
         },
         .{
             .name = "send requires a method",
-            .source = "{'target \"http://127.0.0.1:1/x\"} http.send",
+            .source = "{target \"http://127.0.0.1:1/x\"} http.send",
             .kind = "type",
             .word = "http.send",
-            .message_contains = "string 'method",
+            .message_contains = "string `method",
         },
         .{
             .name = "a non-string target",
-            .source = "{'target 5} http.get",
+            .source = "{target 5} http.get",
             .kind = "type",
             .word = "http.get",
-            .message_contains = "string request 'target",
+            .message_contains = "string request `target",
         },
         .{
             .name = "non-dict headers",
-            .source = "{'target \"http://x\" 'headers 5} http.get",
+            .source = "{target \"http://x\" headers 5} http.get",
             .kind = "type",
             .word = "http.get",
-            .message_contains = "'headers dict",
+            .message_contains = "`headers dict",
         },
         .{
             .name = "a non-list body",
-            .source = "{'target \"http://x\" 'body \"body\"} http.post",
+            .source = "{target \"http://x\" body \"body\"} http.post",
             .kind = "type",
             .word = "http.post",
-            .message_contains = "'body byte list",
+            .message_contains = "`body byte list",
         },
         .{
             .name = "an invalid body byte",
-            .source = "{'target \"http://x\" 'body [300]} http.post",
+            .source = "{target \"http://x\" body [300]} http.post",
             .kind = "type",
             .word = "http.post",
             .message_contains = "integers from 0 through 255",
         },
         .{
             .name = "a body on a method that does not admit one",
-            .source = "{'target \"http://x\" 'body [1]} http.get",
+            .source = "{target \"http://x\" body [1]} http.get",
             .kind = "domain",
             .word = "http.get",
             .message_contains = "does not admit a body",
         },
         .{
             .name = "non-string header names",
-            .source = "{'target \"http://127.0.0.1:1/x\" 'headers {5 (\"v\")}} http.get",
+            .source = "{target \"http://127.0.0.1:1/x\" headers {5 (\"v\")}} http.get",
             .kind = "type",
             .word = "http.get",
             .message_contains = "header names",
         },
         .{
             .name = "non-list header values",
-            .source = "{'target \"http://127.0.0.1:1/x\" 'headers {\"x\" \"v\"}} http.get",
+            .source = "{target \"http://127.0.0.1:1/x\" headers {\"x\" \"v\"}} http.get",
             .kind = "type",
             .word = "http.get",
             .message_contains = "lists of strings",
         },
         .{
             .name = "uppercase header names",
-            .source = "{'target \"http://127.0.0.1:1/x\" 'headers {\"X\" (\"v\")}} http.get",
+            .source = "{target \"http://127.0.0.1:1/x\" headers {\"X\" (\"v\")}} http.get",
             .kind = "type",
             .word = "http.get",
             .message_contains = "lowercased",
         },
         .{
             .name = "an unsupported method override",
-            .source = "{'target \"http://127.0.0.1:1/x\" 'method \"BREW\"} http.get",
+            .source = "{target \"http://127.0.0.1:1/x\" method \"BREW\"} http.get",
             .kind = "domain",
             .word = "http.get",
             .message_contains = "unsupported HTTP request method",
         },
         .{
             .name = "an unknown request field",
-            .source = "{'target \"http://127.0.0.1:1/x\" 'timeout 1} http.get",
+            .source = "{target \"http://127.0.0.1:1/x\" timeout 1} http.get",
             .kind = "type",
             .word = "http.get",
             .message_contains = "recognized fields",
@@ -501,15 +501,15 @@ test "http: transfer limits reject complete and chunked bodies without partial r
         .http_limits = .{ .decoded_bytes = 5, .encoded_bytes = 5, .live_requests = 1 },
     }), .cooperative, .evaluate);
     defer runtime.deinit();
-    const success = try std.fmt.allocPrint(allocator, "{{'target \"http://127.0.0.1:{d}/size/5\"}} http.get 'body at", .{server.port});
+    const success = try std.fmt.allocPrint(allocator, "{{target \"http://127.0.0.1:{d}/size/5\"}} http.get `body at", .{server.port});
     defer allocator.free(success);
-    const failure = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}/size/6\"}} http.get) @attempt 'err at 'kind at", .{server.port});
+    const failure = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}/size/6\"}} http.get) @attempt `err at `kind at", .{server.port});
     defer allocator.free(failure);
-    const chunked = try std.fmt.allocPrint(allocator, "{{'target \"http://127.0.0.1:{d}/chunked\"}} http.get 'body at", .{server.port});
+    const chunked = try std.fmt.allocPrint(allocator, "{{target \"http://127.0.0.1:{d}/chunked\"}} http.get `body at", .{server.port});
     defer allocator.free(chunked);
     for (0..3) |_| {
         try runHttp(&runtime, success, "\"aaaaa\"");
-        try runHttp(&runtime, failure, "'overflow");
+        try runHttp(&runtime, failure, "overflow");
         try runHttp(&runtime, chunked, "\"hello\"");
     }
 }
@@ -523,12 +523,12 @@ test "http: preparation limits count UTF-8 bytes and repeated header occurrences
     defer runtime.deinit();
     // Invalid URLs at the byte limit reach transport and fail as io; a fourth
     // UTF-8 byte is rejected by the counting pass before an exchange starts.
-    try runHttp(&runtime, "[] ({'target \"éa\"} http.get) @attempt 'err at 'kind at", "'io");
-    try runHttp(&runtime, "[] ({'target \"éé\"} http.get) @attempt 'err at 'kind at", "'overflow");
-    try runHttp(&runtime, "[] ({'target \"x\" 'body [1 2]} http.post) @attempt 'err at 'kind at", "'io");
-    try runHttp(&runtime, "[] ({'target \"x\" 'body [1 2 3]} http.post) @attempt 'err at 'kind at", "'overflow");
-    try runHttp(&runtime, "[] ({'target \"x\" 'headers {\"a\" (\"1\" \"2\")}} http.get) @attempt 'err at 'kind at", "'io");
-    try runHttp(&runtime, "[] ({'target \"x\" 'headers {\"a\" (\"1\" \"2\" \"3\")}} http.get) @attempt 'err at 'kind at", "'overflow");
+    try runHttp(&runtime, "[] ({target \"éa\"} http.get) @attempt `err at `kind at", "io");
+    try runHttp(&runtime, "[] ({target \"éé\"} http.get) @attempt `err at `kind at", "overflow");
+    try runHttp(&runtime, "[] ({target \"x\" body [1 2]} http.post) @attempt `err at `kind at", "io");
+    try runHttp(&runtime, "[] ({target \"x\" body [1 2 3]} http.post) @attempt `err at `kind at", "overflow");
+    try runHttp(&runtime, "[] ({target \"x\" headers {\"a\" (\"1\" \"2\")}} http.get) @attempt `err at `kind at", "io");
+    try runHttp(&runtime, "[] ({target \"x\" headers {\"a\" (\"1\" \"2\" \"3\")}} http.get) @attempt `err at `kind at", "overflow");
 }
 
 test "http: redirect bodies share the cumulative transfer budget" {
@@ -543,9 +543,9 @@ test "http: redirect bodies share the cumulative transfer budget" {
         .http_limits = .{ .encoded_bytes = 15, .decoded_bytes = 15 },
     }), .cooperative, .evaluate);
     defer runtime.deinit();
-    const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}/redirect-body\"}} http.get) @attempt 'err at 'kind at", .{server.port});
+    const source = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}/redirect-body\"}} http.get) @attempt `err at `kind at", .{server.port});
     defer allocator.free(source);
-    try runHttp(&runtime, source, "'overflow");
+    try runHttp(&runtime, source, "overflow");
 }
 
 const HttpRunner = struct {
@@ -577,13 +577,13 @@ test "http: manual deadlines and task cancellation interrupt blocked response so
                 }), config, .evaluate);
                 defer runtime.deinit();
                 const template = if (cancel)
-                    "[] ({{'target \"http://127.0.0.1:{d}{s}\"}} http.get) @spawn 'request set " ++
-                        "1 clock.sleep request dup task.cancel task.await 'err at 'kind at"
+                    "[] ({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @spawn `request set " ++
+                        "1 clock.sleep request dup task.cancel task.await `err at `kind at"
                 else
-                    "[] ({{'target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt 'err at 'kind at";
+                    "[] ({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt `err at `kind at";
                 const source = try std.fmt.allocPrint(allocator, template, .{ server.port, path });
                 defer allocator.free(source);
-                var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = if (cancel) "'cancelled" else "'timeout" };
+                var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = if (cancel) "cancelled" else "timeout" };
                 const thread = try std.Thread.spawn(.{}, HttpRunner.run, .{&runner});
                 // A wire-stage handshake proves cancellation reaches a real
                 // blocked socket, rather than cancelling before startup.
@@ -595,7 +595,7 @@ test "http: manual deadlines and task cancellation interrupt blocked response so
                 try runtime.advanceManualClock(if (cancel) 1 else 30_000);
                 thread.join();
                 if (runner.failure) |failure| return failure;
-                const recovery = try std.fmt.allocPrint(allocator, "{{'target \"http://127.0.0.1:{d}/hello\"}} http.get 'status at", .{server.port});
+                const recovery = try std.fmt.allocPrint(allocator, "{{target \"http://127.0.0.1:{d}/hello\"}} http.get `status at", .{server.port});
                 defer allocator.free(recovery);
                 try runHttp(&runtime, recovery, "200");
             }
@@ -613,18 +613,18 @@ test "http: compressed and repeated response header limits are enforced before n
     defer inputs.deinit();
     const Case = struct { path: []const u8, limits: @import("../http_service.zig").Limits, expected: []const u8 };
     const cases = [_]Case{
-        .{ .path = "/gzip", .limits = .{ .encoded_bytes = 23, .decoded_bytes = 5 }, .expected = "'ok" },
-        .{ .path = "/gzip", .limits = .{ .encoded_bytes = 22 }, .expected = "'overflow" },
-        .{ .path = "/gzip", .limits = .{ .decoded_bytes = 4 }, .expected = "'overflow" },
-        .{ .path = "/headers/2", .limits = .{ .header_fields = 2, .header_bytes = 12 }, .expected = "'ok" },
-        .{ .path = "/headers/3", .limits = .{ .header_fields = 2 }, .expected = "'overflow" },
-        .{ .path = "/headers/2", .limits = .{ .header_bytes = 11 }, .expected = "'overflow" },
-        .{ .path = "/gzip", .limits = .{ .scratch_bytes = 1 }, .expected = "'overflow" },
+        .{ .path = "/gzip", .limits = .{ .encoded_bytes = 23, .decoded_bytes = 5 }, .expected = "ok" },
+        .{ .path = "/gzip", .limits = .{ .encoded_bytes = 22 }, .expected = "overflow" },
+        .{ .path = "/gzip", .limits = .{ .decoded_bytes = 4 }, .expected = "overflow" },
+        .{ .path = "/headers/2", .limits = .{ .header_fields = 2, .header_bytes = 12 }, .expected = "ok" },
+        .{ .path = "/headers/3", .limits = .{ .header_fields = 2 }, .expected = "overflow" },
+        .{ .path = "/headers/2", .limits = .{ .header_bytes = 11 }, .expected = "overflow" },
+        .{ .path = "/gzip", .limits = .{ .scratch_bytes = 1 }, .expected = "overflow" },
     };
     for (cases) |case| {
         var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{ .http_limits = case.limits }), .cooperative, .evaluate);
         defer runtime.deinit();
-        const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt dup 'err dict.has? ( 'err at 'kind at ) (pop 'ok) if", .{ server.port, case.path });
+        const source = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt dup `err dict.has? ( `err at `kind at ) (pop `ok) if", .{ server.port, case.path });
         defer allocator.free(source);
         try runHttp(&runtime, source, case.expected);
     }
@@ -640,7 +640,7 @@ test "http: Session shutdown joins a request blocked in response headers" {
     defer inputs.deinit();
     var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"http://127.0.0.1:{d}/stall-head\"}} http.get) @spawn pop", .{server.port});
+    const source = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}/stall-head\"}} http.get) @spawn pop", .{server.port});
     defer allocator.free(source);
     try runHttp(&runtime, source, "");
     var buffer: [64]u8 = undefined;
@@ -701,7 +701,7 @@ test "http: a 303 redirect changes a bodyless method override to GET" {
         else => return err,
     };
     defer server.stop();
-    try expectStack(server.port, "{{'target \"http://127.0.0.1:{d}/redirect-see-other\" 'method \"DELETE\"}} http.get 'body at", "\"GET|0||\"");
+    try expectStack(server.port, "{{target \"http://127.0.0.1:{d}/redirect-see-other\" method \"DELETE\"}} http.get `body at", "\"GET|0||\"");
 }
 
 /// A real cancellable I/O executor with controlled network stage boundaries.
@@ -784,11 +784,11 @@ test "http: cancellation reaches resolution connection TLS and upload I/O tasks"
             .tls => "https://127.0.0.1/",
             .connection, .upload => "http://127.0.0.1/",
         };
-        const body = if (stage == .upload) "'method \"POST\" 'body [80 73 78 71]" else "";
-        const source = try std.fmt.allocPrint(allocator, "[] ({{'target \"{s}\" {s}}} http.get) @spawn 'request set " ++
-            "1 clock.sleep request dup task.cancel task.await 'err at 'kind at", .{ target, body });
+        const body = if (stage == .upload) "method \"POST\" body [80 73 78 71]" else "";
+        const source = try std.fmt.allocPrint(allocator, "[] ({{target \"{s}\" {s}}} http.get) @spawn `request set " ++
+            "1 clock.sleep request dup task.cancel task.await `err at `kind at", .{ target, body });
         defer allocator.free(source);
-        var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = "'cancelled" };
+        var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = "cancelled" };
         const thread = try std.Thread.spawn(.{}, HttpRunner.run, .{&runner});
         controlled.reached.waitUncancelable(std.testing.io);
         waitForHttpTimers(&runtime, 2);

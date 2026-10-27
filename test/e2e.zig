@@ -27,16 +27,16 @@ test "e2e: proc direct execution preserves argv cwd environment and policy" {
     var program = std.Io.Writer.Allocating.init(allocator);
     defer program.deinit();
     try program.writer.print(
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"inspect\" \"alpha\" \"beta\") " ++
-            "'env {{\"ECL_PROCESS_PROBE\" \"overlay\"}}}} run " ++
-            "dup 'stdout at ",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"inspect\" \"alpha\" \"beta\") " ++
+            "env {{\"ECL_PROCESS_PROBE\" \"overlay\"}}}} run " ++
+            "dup `stdout at ",
         .{process_exe},
     );
     try appendByteList(&program.writer, expected);
     try program.writer.writeAll(
-        " match? swap dup 'stderr at [] match? swap " ++
-            "'term at {'kind 'exited 'code 0} match?",
+        " match? swap dup `stderr at [] match? swap " ++
+            "`term at {kind exited code 0} match?",
     );
     var environment = std.process.Environ.Map.init(allocator);
     defer environment.deinit();
@@ -55,9 +55,9 @@ test "e2e: proc ports stream binary data with backpressure and EOF" {
     defer allocator.free(process_exe);
     const program = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"echo\") 'stdin [0 1 255 2]}} run " ++
-            "dup 'stdout at [0 1 255 2] match? swap 'stderr at [] match?",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"echo\") stdin [0 1 255 2]}} run " ++
+            "dup `stdout at [0 1 255 2] match? swap `stderr at [] match?",
         .{process_exe},
     );
     defer allocator.free(program);
@@ -67,9 +67,9 @@ test "e2e: proc ports stream binary data with backpressure and EOF" {
 
     const large = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"large\" \"100000\" \"90000\")}} run " ++
-            "dup 'stdout at len swap 'stderr at len",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"large\" \"100000\" \"90000\")}} run " ++
+            "dup `stdout at len swap `stderr at len",
         .{process_exe},
     );
     defer allocator.free(large);
@@ -81,9 +81,9 @@ test "e2e: proc ports stream binary data with backpressure and EOF" {
     // must wait on both pipes after stdin closes or this shape deadlocks.
     const stderr_first = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"large\" \"0\" \"90000\")}} run " ++
-            "dup 'stdout at len swap 'stderr at len",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"large\" \"0\" \"90000\")}} run " ++
+            "dup `stdout at len swap `stderr at len",
         .{process_exe},
     );
     defer allocator.free(stderr_first);
@@ -100,10 +100,10 @@ test "e2e: proc wait returns stable tagged termination and idempotent lifecycle"
     defer allocator.free(process_exe);
     const program = try std.fmt.allocPrint(
         allocator,
-        "'proc ('spawn 'wait 'terminate 'kill) import " ++
-            "{{'executable \"{s}\" 'args (\"exit\" \"7\")}} spawn 'p set " ++
-            "p wait {{'kind 'exited 'code 7}} match? " ++
-            "p terminate p kill p wait {{'kind 'exited 'code 7}} match?",
+        "`proc (spawn wait terminate kill) import " ++
+            "{{executable \"{s}\" args (\"exit\" \"7\")}} spawn `p set " ++
+            "p wait {{kind exited code 7}} match? " ++
+            "p terminate p kill p wait {{kind exited code 7}} match?",
         .{process_exe},
     );
     defer allocator.free(program);
@@ -117,10 +117,10 @@ test "e2e: proc run captures split output termination timeout and overflow" {
     defer allocator.free(process_exe);
     const capture = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"split\" \"abc\" \"de\")}} run " ++
-            "dup 'term at {{'kind 'exited 'code 0}} match? " ++
-            "swap dup 'stdout at [97 98 99] match? swap 'stderr at [100 101] match?",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"split\" \"abc\" \"de\")}} run " ++
+            "dup `term at {{kind exited code 0}} match? " ++
+            "swap dup `stdout at [97 98 99] match? swap `stderr at [100 101] match?",
         .{process_exe},
     );
     defer allocator.free(capture);
@@ -130,8 +130,8 @@ test "e2e: proc run captures split output termination timeout and overflow" {
 
     const deadline = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"block\") 'timeout-ms 25}} run",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"block\") timeout-ms 25}} run",
         .{process_exe},
     );
     defer allocator.free(deadline);
@@ -139,13 +139,13 @@ test "e2e: proc run captures split output termination timeout and overflow" {
     defer timed_out.deinit();
     try timed_out.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
+        .stderr_contains = &.{ "kind timeout", "process deadline expired" },
     });
 
     const immediate_deadline = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"block\") 'timeout-ms 0}} run",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"block\") timeout-ms 0}} run",
         .{process_exe},
     );
     defer allocator.free(immediate_deadline);
@@ -153,13 +153,13 @@ test "e2e: proc run captures split output termination timeout and overflow" {
     defer immediately_timed_out.deinit();
     try immediately_timed_out.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'timeout", "process deadline expired" },
+        .stderr_contains = &.{ "kind timeout", "process deadline expired" },
     });
 
     const broken_stdin = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"close-stdin\")}} 'stdin [1] 200000 take pair " ++
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"close-stdin\")}} `stdin [1] 200000 take pair " ++
             "dict.from-flat dict.merge run",
         .{process_exe},
     );
@@ -168,13 +168,13 @@ test "e2e: proc run captures split output termination timeout and overflow" {
     defer broken.deinit();
     try broken.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{"'kind 'io"},
+        .stderr_contains = &.{"kind io"},
     });
 
     const limited = try std.fmt.allocPrint(
         allocator,
-        "'proc ('run) import {{'executable \"{s}\" " ++
-            "'args (\"large\" \"16\" \"0\") 'stdout-limit 8}} run",
+        "`proc (run) import {{executable \"{s}\" " ++
+            "args (\"large\" \"16\" \"0\") stdout-limit 8}} run",
         .{process_exe},
     );
     defer allocator.free(limited);
@@ -182,7 +182,7 @@ test "e2e: proc run captures split output termination timeout and overflow" {
     defer overflowed.deinit();
     try overflowed.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'overflow", "capture limit exceeded" },
+        .stderr_contains = &.{ "kind overflow", "capture limit exceeded" },
     });
 }
 
@@ -191,10 +191,10 @@ test "e2e: proc write serializes at scheduler call arrival" {
     defer allocator.free(process_exe);
     const program = try std.fmt.allocPrint(
         allocator,
-        "'proc ('spawn 'write 'close-input 'read-stdout 'wait) import " ++
-            "{{'executable \"{s}\" 'args (\"first-byte\")}} spawn 'p set " ++
-            "[1] 200000 take 'bytes set " ++
-            "[] (p bytes write) @spawn 'first set [] () @spawn task.await pop " ++
+        "`proc (spawn write close-input read-stdout wait) import " ++
+            "{{executable \"{s}\" args (\"first-byte\")}} spawn `p set " ++
+            "[1] 200000 take `bytes set " ++
+            "[] (p bytes write) @spawn `first set [] () @spawn task.await pop " ++
             "p [2] write first task.await pop p close-input p 1 read-stdout [1] match? p wait pop",
         .{process_exe},
     );
@@ -209,8 +209,8 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
     defer allocator.free(process_exe);
     const program = try std.fmt.allocPrint(
         allocator,
-        "'proc ('spawn 'read-stdout) import 'io ('pp) import " ++
-            "{{'executable \"{s}\" 'args (\"descendant\")}} spawn " ++
+        "`proc (spawn read-stdout) import `io (pp) import " ++
+            "{{executable \"{s}\" args (\"descendant\")}} spawn " ++
             "dup 128 read-stdout pp",
         .{process_exe},
     );
@@ -231,16 +231,16 @@ test "e2e: proc scope cancellation kills and reaps the process group" {
 
 test "e2e: CLI net listen binds an ephemeral port and reports it" {
     var result = try cli.runOptions(.{
-        .argv = &.{ build_options.ecl_exe, "{'address \"127.0.0.1\" 'port 0} net.listen net.local-address io.pp" },
+        .argv = &.{ build_options.ecl_exe, "{address \"127.0.0.1\" port 0} net.listen net.local-address io.pp" },
         .timeout = .{ .duration = .{ .clock = .awake, .raw = .fromSeconds(5) } },
     });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{"{'address \"127.0.0.1\" 'port "},
+        .stdout_contains = &.{"{address \"127.0.0.1\" port "},
         .stderr = "",
     });
-    const marker = "'port ";
+    const marker = "port ";
     const start = std.mem.indexOf(u8, result.stdout, marker).? + marker.len;
     const end = std.mem.indexOfScalarPos(u8, result.stdout, start, '}').?;
     try std.testing.expect(try std.fmt.parseInt(u16, result.stdout[start..end], 10) != 0);
@@ -253,9 +253,9 @@ test "e2e: CLI net accept, read, write, and close round-trip over loopback" {
     var child = try std.process.spawn(io, .{
         .argv = &.{
             build_options.ecl_exe,
-            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+            "{address \"127.0.0.1\" port 0} net.listen `l set " ++
                 "l net.local-address io.pp " ++
-                "l net.accept 'c set c 4 net.read io.pp c \"pong\" bytes net.write c net.close",
+                "l net.accept `c set c 4 net.read io.pp c \"pong\" bytes net.write c net.close",
         },
         .stdin = .ignore,
         .stdout = .pipe,
@@ -274,7 +274,7 @@ test "e2e: CLI net accept, read, write, and close round-trip over loopback" {
     var stdout_buffer: [512]u8 = undefined;
     var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
     const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
-    const marker = "'port ";
+    const marker = "port ";
     const start = (std.mem.indexOf(u8, handshake, marker) orelse {
         std.log.err("handshake line lacks a port: {s}", .{handshake});
         return error.MalformedHandshake;
@@ -326,7 +326,7 @@ test "e2e: CLI http server answers a loopback GET" {
     var child = try std.process.spawn(io, .{
         .argv = &.{
             build_options.ecl_exe,
-            "{'address \"127.0.0.1\" 'port 0} net.listen 'l set " ++
+            "{address \"127.0.0.1\" port 0} net.listen `l set " ++
                 "l net.local-address io.pp " ++
                 "l {} (pop 200 \"ok\" http.response.text) http.server.@serve",
         },
@@ -342,7 +342,7 @@ test "e2e: CLI http server answers a loopback GET" {
     var stdout_buffer: [512]u8 = undefined;
     var stdout = child.stdout.?.readerStreaming(io, &stdout_buffer);
     const handshake = (try stdout.interface.takeDelimiter('\n')) orelse return error.MissingHandshake;
-    const marker = "'port ";
+    const marker = "port ";
     const start = (std.mem.indexOf(u8, handshake, marker) orelse {
         std.log.err("handshake line lacks a port: {s}", .{handshake});
         return error.MalformedHandshake;
@@ -421,9 +421,9 @@ test "e2e: proc leader exit cleans retained and redirected descendants" {
     for ([_][]const u8{ "retained", "redirected" }) |mode| {
         const program = try std.fmt.allocPrint(
             allocator,
-            "'proc ('run) import 'io ('pp) import " ++
-                "{{'executable \"{s}\" 'args (\"orphan-descendant\" \"{s}\")}} run " ++
-                "'stdout at pp",
+            "`proc (run) import `io (pp) import " ++
+                "{{executable \"{s}\" args (\"orphan-descendant\" \"{s}\")}} run " ++
+                "`stdout at pp",
             .{ process_exe, mode },
         );
         defer allocator.free(program);
@@ -541,7 +541,7 @@ fn writeTestProject(
     directory: std.Io.Dir,
     files: []const struct { path: []const u8, source: []const u8 },
 ) !void {
-    try directory.writeFile(io, .{ .sub_path = "ecl.modules", .data = "{'format 1 'local \"app\" 'scopes {\"app\" {'root \".\" 'visible [] 'sources [\"*.ecl\" \"z-*.ecl\"] 'artifacts []}}}" });
+    try directory.writeFile(io, .{ .sub_path = "ecl.modules", .data = "{format 1 local \"app\" scopes {\"app\" {root \".\" visible [] sources [\"*.ecl\" \"z-*.ecl\"] artifacts []}}}" });
     for (files) |file| try directory.writeFile(io, .{
         .sub_path = file.path,
         .data = file.source,
@@ -556,11 +556,11 @@ test "e2e: ecl test runs the default runner" {
         &.{.{
             .path = "suite.ecl",
             .source = "[] (" ++
-                "(1 1 = {'kind 'user} assert) 'first test " ++
-                "(2 2 = {'kind 'user} assert) 'second test " ++
-                "(missing) 'third-fails test " ++
-                "(1) 'z-after test" ++
-                ") 'app.suite @defm\n",
+                "(1 1 = {kind user} assert) `first test " ++
+                "(2 2 = {kind user} assert) `second test " ++
+                "(missing) `third-fails test " ++
+                "(1) `z-after test" ++
+                ") `app.suite @defm\n",
         }},
     );
     const exe = try absoluteExe();
@@ -575,7 +575,7 @@ test "e2e: ecl test runs the default runner" {
         .stdout_contains = &.{
             "ok app.suite.first\n",
             "ok app.suite.second\n",
-            "FAIL app.suite.third-fails: {'err ",
+            "FAIL app.suite.third-fails: {err ",
             "ok app.suite.z-after\n",
         },
         .stderr = "",
@@ -588,11 +588,11 @@ test "e2e: tests retain file-private module visibility" {
     // A helper constructed inside a quotation is not a discoverable
     // declaration, so it is never exported: the file keeps it private.
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "bar.ecl", .source = "([] ((42) 'answer def) 'baz @defm) call\n" ++
-            "[] ((baz.answer 42 = {'kind 'user} assert) 'local test) 'app.bar @defm\n" ++
-            "baz.answer 42 = {'kind 'user} assert\n" },
-        .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
-            "{'kind 'user} assert) 'isolated test) 'app.foo @defm\n" },
+        .{ .path = "bar.ecl", .source = "([] ((42) `answer def) `baz @defm) call\n" ++
+            "[] ((baz.answer 42 = {kind user} assert) `local test) `app.bar @defm\n" ++
+            "baz.answer 42 = {kind user} assert\n" },
+        .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt `err at `kind at `undefined-word match? " ++
+            "{kind user} assert) `isolated test) `app.foo @defm\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -603,11 +603,11 @@ test "e2e: tests retain file-private module visibility" {
     defer script.deinit();
     try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
     var loaded = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "\"bar.ecl\" load [] (baz.answer) @attempt 'err at 'kind at" },
+        .argv = &.{ exe, "-e", "\"bar.ecl\" load [] (baz.answer) @attempt `err at `kind at" },
         .cwd = .{ .dir = scratch.dir },
     });
     defer loaded.deinit();
-    try loaded.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
+    try loaded.expect(.{ .exit_code = 0, .stdout = "undefined-word\n", .stderr = "" });
 }
 
 test "e2e: ecl test discovers private-only sources and loads each artifact once" {
@@ -616,10 +616,10 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     try writeTestProject(scratch.dir, &.{
         // Both files construct inside quotations so nothing is discoverable:
         // each `helper` and `suite` stays private to its own source.
-        .{ .path = "private.ecl", .source = "([] ((42) 'answer def) 'helper @defm) call\n" ++
-            "([] ((helper.answer 42 = {'kind 'user} assert) 'answer test) 'suite @defm) call\n" },
-        .{ .path = "other.ecl", .source = "([] ((7) 'answer def) 'helper @defm) call\n" ++
-            "([] ((helper.answer 7 = {'kind 'user} assert) 'answer test) 'suite @defm) call\n" },
+        .{ .path = "private.ecl", .source = "([] ((42) `answer def) `helper @defm) call\n" ++
+            "([] ((helper.answer 42 = {kind user} assert) `answer test) `suite @defm) call\n" },
+        .{ .path = "other.ecl", .source = "([] ((7) `answer def) `helper @defm) call\n" ++
+            "([] ((helper.answer 7 = {kind user} assert) `answer test) `suite @defm) call\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -630,11 +630,11 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     // The first source loads the later source through an export. Preload must
     // reuse that committed artifact, including with overlapping source globs.
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {'kind 'user} assert\n" ++
-            "[] (([] (helper.answer) @attempt 'err at 'kind at 'undefined-word match? " ++
-            "{'kind 'user} assert) 'isolated test) 'consumer @defm\n" },
+        .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {kind user} assert\n" ++
+            "[] (([] (helper.answer) @attempt `err at `kind at `undefined-word match? " ++
+            "{kind user} assert) `isolated test) `consumer @defm\n" },
         .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
-            "[] ((42) 'answer def) 'app.public @defm\n" },
+            "[] ((42) `answer def) `app.public @defm\n" },
     });
     var mixed = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
     defer mixed.deinit();
@@ -649,14 +649,14 @@ test "e2e: ecl test accepts a userland runner" {
         &.{
             .{
                 .path = "suite.ecl",
-                .source = "[] ((42) 'answer test) 'app.suite @defm\n",
+                .source = "[] ((42) `answer test) `app.suite @defm\n",
             },
             .{
                 .path = "custom.ecl",
-                .source = "[] ((args [\"chosen\"] match? {'kind 'user} assert " ++
-                    "tests dup len 1 = {'kind 'user} assert " ++
-                    "first @test 'ok dict.has? {'kind 'user} assert " ++
-                    "\"custom\" io.print) 'run def) 'app.custom.runner @defm\n",
+                .source = "[] ((args [\"chosen\"] match? {kind user} assert " ++
+                    "tests dup len 1 = {kind user} assert " ++
+                    "first @test `ok dict.has? {kind user} assert " ++
+                    "\"custom\" io.print) `run def) `app.custom.runner @defm\n",
             },
         },
     );
@@ -704,7 +704,7 @@ test "e2e: ecl test reports project and runner failures" {
     defer project.cleanup();
     try writeTestProject(
         project.dir,
-        &.{.{ .path = "suite.ecl", .source = "[] ((1) 'one test) 'app.suite @defm\n" }},
+        &.{.{ .path = "suite.ecl", .source = "[] ((1) `one test) `app.suite @defm\n" }},
     );
     var unqualified = try cli.runOptions(.{
         .argv = &.{ exe, "test", "--runner", "run" },
@@ -724,7 +724,7 @@ test "e2e: ecl test reports project and runner failures" {
     try missing.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{ "missing.runner", "'kind 'undefined-word" },
+        .stderr_contains = &.{ "missing.runner", "kind undefined-word" },
     });
 }
 
@@ -835,7 +835,7 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
     var result = try runWithNativePath(&.{
         build_options.ecl_exe,
         "-e",
-        "41 sample.increment 'sample.increment which 'sample.increment see",
+        "41 sample.increment `sample.increment which `sample.increment see",
     });
     defer result.deinit();
     try result.expect(.{
@@ -870,7 +870,7 @@ test "e2e: cancellation timeout and @each agree at one and eight workers" {
         defer cancel_timeout.deinit();
         try cancel_timeout.expect(.{
             .exit_code = 0,
-            .stdout = "'cancelled\n'timeout\n",
+            .stdout = "cancelled\ntimeout\n",
             .stderr = "",
         });
 
@@ -881,7 +881,7 @@ test "e2e: cancellation timeout and @each agree at one and eight workers" {
         defer par_each.deinit();
         try par_each.expect(.{
             .exit_code = 0,
-            .stdout = "[1 4 9]\n'domain\n'left-missing\n",
+            .stdout = "[1 4 9]\ndomain\nleft-missing\n",
             .stderr = "",
         });
     }
@@ -893,26 +893,26 @@ test "runtime errors are dicts on stderr" {
     try result.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{ "'kind 'domain", "'word '/" },
+        .stderr_contains = &.{ "kind domain", "word /" },
     });
 
     var missing = try run(&.{ build_options.ecl_exe, "missing" });
     defer missing.deinit();
     try missing.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'undefined-word", "'word 'missing", "'name 'missing" },
+        .stderr_contains = &.{ "kind undefined-word", "word missing", "name missing" },
     });
 
-    var raised = try run(&.{ build_options.ecl_exe, "{'kind 'custom} raise" });
+    var raised = try run(&.{ build_options.ecl_exe, "{kind custom} raise" });
     defer raised.deinit();
     try raised.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{
-            "'kind 'custom",
-            "'msg \"raised 'custom\"",
-            "'word 'raise",
-            "'trace ['raise]",
-            "'source \"<command>\"",
+            "kind custom",
+            "msg \"raised custom\"",
+            "word raise",
+            "trace (raise)",
+            "source \"<command>\"",
         },
     });
 }
@@ -925,9 +925,9 @@ test "piped stdin is exactly one unit" {
 
 test "ecl fmt formats files and stdin without evaluating source" {
     const input = "(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb " ++
-        "cccccccccccccccccccccccccccccccccccccccc) {'kind 'user} raise";
+        "cccccccccccccccccccccccccccccccccccccccc) {kind user} raise";
     const expected = "(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" ++
-        " cccccccccccccccccccccccccccccccccccccccc) {'kind 'user} raise\n";
+        " cccccccccccccccccccccccccccccccccccccccc) {kind user} raise\n";
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -1035,14 +1035,14 @@ test "scripts print only explicitly" {
 
     try temporary.dir.writeFile(io, .{
         .sub_path = "loud.ecl",
-        .data = "\"hi\" io.prin 'visible io.pp",
+        .data = "\"hi\" io.prin `visible io.pp",
     });
     var loud = try cli.runOptions(.{
         .argv = &.{ exe, "loud.ecl" },
         .cwd = .{ .dir = temporary.dir },
     });
     defer loud.deinit();
-    try loud.expect(.{ .exit_code = 0, .stdout = "hi'visible\n", .stderr = "" });
+    try loud.expect(.{ .exit_code = 0, .stdout = "hivisible\n", .stderr = "" });
 }
 
 test "e2e: io.pp and final stack display elide huge lists while str stays canonical" {
@@ -1095,7 +1095,7 @@ test "invalid UTF-8 files surface parse dicts" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'parse", "not valid UTF-8" },
+        .stderr_contains = &.{ "kind parse", "not valid UTF-8" },
     });
 }
 
@@ -1104,14 +1104,14 @@ test "e2e: grammar negative acceptance" {
     defer mismatched.deinit();
     try mismatched.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'parse", "mismatched delimiter" },
+        .stderr_contains = &.{ "kind parse", "mismatched delimiter" },
     });
 
-    var private_at_top = try run(&.{ build_options.ecl_exe, "-e", "(1) (x) 'x defp" });
+    var private_at_top = try run(&.{ build_options.ecl_exe, "-e", "(1) (x) `x defp" });
     defer private_at_top.deinit();
     try private_at_top.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'domain", "defp/setp are legal only in a module root" },
+        .stderr_contains = &.{ "kind domain", "defp/setp are legal only in a module root" },
     });
 }
 
@@ -1120,7 +1120,7 @@ test "missing scripts and version have stable CLI behavior" {
     defer missing.deinit();
     try missing.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "does not exist" },
+        .stderr_contains = &.{ "kind io", "does not exist" },
     });
 
     var version = try run(&.{ build_options.ecl_exe, "-V" });
@@ -1146,7 +1146,7 @@ test "e2e: module privacy acceptance" {
     try privacy.expect(.{
         .exit_code = 1,
         .stdout = "42\n",
-        .stderr_contains = &.{"'word 'm.s"},
+        .stderr_contains = &.{"word m.s"},
     });
 }
 
@@ -1163,18 +1163,18 @@ test "e2e: hot reload all access paths acceptance" {
 test "e2e: module effect declaration acceptance" {
     // An omitted effect is legal and adds no inferred check: the word runs
     // across the home boundary exactly as written.
-    var missing = try run(&.{ build_options.ecl_exe, "-e", "[] ((dup +) 'fine def) 'm @defm 2 m.fine" });
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "[] ((dup +) `fine def) `m @defm 2 m.fine" });
     defer missing.deinit();
     try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
-    var lying = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b c ) (dup +) 'lies def) 'm @defm 1 m.lies" });
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b c ) (dup +) `lies def) `m @defm 1 m.lies" });
     defer lying.deinit();
     try lying.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'contract", "'word 'm.lies" },
+        .stderr_contains = &.{ "kind contract", "word m.lies" },
     });
 
-    var visible = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b ) (dup +) 'dbl def) 'm @defm 'm.dbl see" });
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b ) (dup +) `dbl def) `m @defm `m.dbl see" });
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
@@ -1187,8 +1187,8 @@ test "e2e: explicit import replacement acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 'mean set 2 'count set [] (3 'mean set 4 'count set) 'stats @defm " ++
-            "'stats ('mean 'count) import mean count",
+        "1 `mean set 2 `count set [] (3 `mean set 4 `count set) `stats @defm " ++
+            "`stats (mean count) import mean count",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1202,7 +1202,7 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm ('f) import 'm.f see 'f which words",
+        "[] (40 `s setp ( -- n ) (s 2 +) `f def) `m @defm `m (f) import `m.f see `f which words",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1217,34 +1217,34 @@ test "e2e: reflection acceptance" {
 }
 
 test "e2e: a construction body already knows the name it is built under" {
-    var named = try run(&.{ build_options.ecl_exe, "-e", "[] (*module* io.pp) 'named @defm" });
+    var named = try run(&.{ build_options.ecl_exe, "-e", "[] (*module* io.pp) `named @defm" });
     defer named.deinit();
-    try named.expect(.{ .exit_code = 0, .stdout = "'named\n", .stderr = "" });
+    try named.expect(.{ .exit_code = 0, .stdout = "named\n", .stderr = "" });
 }
 
 test "e2e: module removal acceptance" {
-    const module = "[] ((7) 'peek def) 'core.c @defm ";
+    const module = "[] ((7) `peek def) `core.c @defm ";
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'short 'core.c alias 'short undefm " ++
-            "[] (core.c.peek) @attempt 'err at 'kind at io.pp [] (short.peek) @attempt 'err at 'kind at io.pp " ++
+        module ++ "`short `core.c alias `short undefm " ++
+            "[] (core.c.peek) @attempt `err at `kind at io.pp [] (short.peek) @attempt `err at `kind at io.pp " ++
             module ++ "core.c.peek io.pp",
     });
     defer by_name.deinit();
     try by_name.expect(.{
         .exit_code = 0,
-        .stdout = "'undefined-word\n'undefined-word\n7\n",
+        .stdout = "undefined-word\nundefined-word\n7\n",
         .stderr = "",
     });
 
     var by_canonical_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'core.c undefm [] (core.c.peek) @attempt 'err at 'kind at io.pp",
+        module ++ "`core.c undefm [] (core.c.peek) @attempt `err at `kind at io.pp",
     });
     defer by_canonical_name.deinit();
-    try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
+    try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "undefined-word\n", .stderr = "" });
 }
 
 test "e2e: optional module annotation acceptance" {
@@ -1261,8 +1261,8 @@ test "e2e: optional module annotation acceptance" {
             "1\n" ++
             "(: \"The answer.\") [42]\n" ++
             "[42]\n" ++
-            "'contract\n'domain\n'domain\n" ++
-            "'domain\n",
+            "contract\ndomain\ndomain\n" ++
+            "domain\n",
         .stderr = "",
     });
 }
@@ -1276,7 +1276,7 @@ test "e2e: direct load and ECL_PATH acceptance" {
     defer environment.deinit();
     try environment.put("ECL_PATH", "test/acceptance/modules");
     var result = try cli.runOptions(.{
-        .argv = &.{ build_options.ecl_exe, "-e", "'stats ('answer) import answer" },
+        .argv = &.{ build_options.ecl_exe, "-e", "`stats (answer) import answer" },
         .environ_map = &environment,
     });
     defer result.deinit();
@@ -1289,14 +1289,14 @@ test "e2e: direct load and ECL_PATH acceptance" {
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
     var no_implicit_cwd = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "'stats ('answer) import" },
+        .argv = &.{ exe, "-e", "`stats (answer) import" },
         .cwd = .{ .dir = module_directory },
         .environ_map = &empty_environment,
     });
     defer no_implicit_cwd.deinit();
     try no_implicit_cwd.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{"'kind 'undefined-word"},
+        .stderr_contains = &.{"kind undefined-word"},
     });
 }
 
@@ -1321,7 +1321,7 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
     defer overflow.deinit();
     try overflow.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'overflow", "'index 1" },
+        .stderr_contains = &.{ "kind overflow", "index 1" },
     });
 
     var scalar = try run(&.{ build_options.ecl_exe, "-e", "inf 1 + 9007199254740993 9007199254740992.0 = \\a 1 +" });
@@ -1330,7 +1330,7 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
 
     var float_domain = try run(&.{ build_options.ecl_exe, "-e", "inf inf -" });
     defer float_domain.deinit();
-    try float_domain.expect(.{ .exit_code = 1, .stderr_contains = &.{"'kind 'domain"} });
+    try float_domain.expect(.{ .exit_code = 1, .stderr_contains = &.{"kind domain"} });
 
     var signed_zero = try run(&.{ build_options.ecl_exe, "-e", "0.0 -0.0 = 0.0 -0.0 match?" });
     defer signed_zero.deinit();
@@ -1345,7 +1345,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] ((-- value) 40 literal 'k def) 'm @defm m.k 'm.k which",
+        "[] ((-- value) 40 literal `k def) `m @defm m.k `m.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -1354,7 +1354,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
         .stderr = "",
     });
 
-    const partial_module = "[] ((a b -- ...) (pop pop 7 8) 'row def) 'm @defm ";
+    const partial_module = "[] ((a b -- ...) (pop pop 7 8) `row def) `m @defm ";
     var partial = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 2 m.row" });
     defer partial.deinit();
     try partial.expect(.{ .exit_code = 0, .stdout = "7 8\n", .stderr = "" });
@@ -1363,18 +1363,18 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     defer short.deinit();
     try short.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'contract", "'word 'm.row", "declared 2 inputs", "'seeded 1" },
+        .stderr_contains = &.{ "kind contract", "word m.row", "declared 2 inputs", "seeded 1" },
     });
 
-    var reserved = try run(&.{ build_options.ecl_exe, "-e", "(1) '... def" });
+    var reserved = try run(&.{ build_options.ecl_exe, "-e", "(1) `... def" });
     defer reserved.deinit();
-    try reserved.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'domain", "non-reserved name" } });
+    try reserved.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind domain", "non-reserved name" } });
 
-    var inert = try run(&.{ build_options.ecl_exe, "-e", "'..." });
+    var inert = try run(&.{ build_options.ecl_exe, "-e", "`..." });
     defer inert.deinit();
-    try inert.expect(.{ .exit_code = 0, .stdout = "'...\n", .stderr = "" });
+    try inert.expect(.{ .exit_code = 0, .stdout = "...\n", .stderr = "" });
 
-    var reflected = try run(&.{ build_options.ecl_exe, "-e", "'result.either see" });
+    var reflected = try run(&.{ build_options.ecl_exe, "-e", "`result.either see" });
     defer reflected.deinit();
     try reflected.expect(.{
         .exit_code = 0,
@@ -1463,12 +1463,12 @@ test "e2e: M6 combinators parse and contract payloads" {
     try contract.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{
-            "'kind 'contract",
-            "'word 'each",
-            "'expected (a -- b)",
-            "'seeded 1",
-            "'observed 2",
-            "'index 0",
+            "kind contract",
+            "word each",
+            "expected (a -- b)",
+            "seeded 1",
+            "observed 2",
+            "index 0",
         },
     });
 
@@ -1477,13 +1477,13 @@ test "e2e: M6 combinators parse and contract payloads" {
     try fold_contract.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{
-            "'kind 'contract",
-            "'word 'fold",
+            "kind contract",
+            "word fold",
             "expected final depth 1 from 2 seeded values, observed 2",
-            "'expected (acc a -- acc)",
-            "'seeded 2",
-            "'observed 2",
-            "'index 0",
+            "expected (acc a -- acc)",
+            "seeded 2",
+            "observed 2",
+            "index 0",
         },
     });
 
@@ -1491,11 +1491,11 @@ test "e2e: M6 combinators parse and contract payloads" {
     defer rebound.deinit();
     try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
-    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup 'k set k *) each" });
+    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set k *) each" });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'domain", "definitions are legal only at root level" },
+        .stderr_contains = &.{ "kind domain", "definitions are legal only at root level" },
     });
 }
 
@@ -1530,10 +1530,10 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "\"alpha\\nbeta\\n\" 'cwd \"round-trip.txt\" fs.create-text " ++
-                "'cwd \"round-trip.txt\" fs.read-text io.pp " ++
-                "'cwd \"round-trip.txt\" fs.read-text \"\\n\" split io.pp " ++
-                "'cwd \".\" fs.list ('name at \"round-trip.txt\" match?) filter io.pp",
+            "\"alpha\\nbeta\\n\" `cwd \"round-trip.txt\" fs.create-text " ++
+                "`cwd \"round-trip.txt\" fs.read-text io.pp " ++
+                "`cwd \"round-trip.txt\" fs.read-text \"\\n\" split io.pp " ++
+                "`cwd \".\" fs.list (`name at \"round-trip.txt\" match?) filter io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -1542,12 +1542,12 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     try round_trip.expect(.{
         .exit_code = 0,
         .stdout = "\"alpha\\nbeta\\n\"\n(\"alpha\" \"beta\" \"\")\n" ++
-            "({'name \"round-trip.txt\" 'kind 'file})\n",
+            "({name \"round-trip.txt\" kind file})\n",
         .stderr = "",
     });
 
     var missing_file = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "-e", "'cwd \"absent.txt\" fs.read-text" },
+        .argv = &.{ "./ecl", "-e", "`cwd \"absent.txt\" fs.read-text" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
@@ -1555,24 +1555,24 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     try missing_file.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{
-            "'kind 'io",
-            "'word 'fs.read-text",
-            "'root 'cwd",
-            "'path \"absent.txt\"",
-            "'reason 'not-found",
+            "kind io",
+            "word fs.read-text",
+            "root cwd",
+            "path \"absent.txt\"",
+            "reason not-found",
         },
     });
 
     // Only the granted root exists; a path string never widens it.
     var other_root = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "-e", "'home \"absent.txt\" fs.exists?" },
+        .argv = &.{ "./ecl", "-e", "`home \"absent.txt\" fs.exists?" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
     defer other_root.deinit();
     try other_root.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'domain", "'reason 'unknown-root" },
+        .stderr_contains = &.{ "kind domain", "reason unknown-root" },
     });
 
     var unset = try cli.runOptions(.{
@@ -1583,7 +1583,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     defer unset.deinit();
     try unset.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "'word 'getenv", "'name \"ECL_M12_ABSENT\"" },
+        .stderr_contains = &.{ "kind io", "word getenv", "name \"ECL_M12_ABSENT\"" },
     });
 
     var defaulted = try cli.runOptions(.{
@@ -1621,7 +1621,7 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
 
     // DoD-32, to the letter.
     var dod32 = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "'str ('upper) import \"hello\" upper io.pp" },
+        .argv = &.{ "./ecl", "`str (upper) import \"hello\" upper io.pp" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
@@ -1633,44 +1633,44 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     const modules = [_]struct { name: []const u8, imported: []const u8, qualified: []const u8 }{
         .{
             .name = "dict",
-            .imported = "'dict ('from-pairs) import [['a 1]] from-pairs io.pp",
-            .qualified = "[['a 1]] dict.from-pairs io.pp",
+            .imported = "`dict (from-pairs) import [[a 1]] from-pairs io.pp",
+            .qualified = "[[a 1]] dict.from-pairs io.pp",
         },
         // The moved envelope words prove the whole point of the consolidation:
         // `result.or-raise` needs no import at all under qualified-miss
         // auto-load, with no `ECL_PATH` and no readable directory.
         .{
             .name = "result",
-            .imported = "'result ('or-raise) import [] (2 3 +) @attempt or-raise io.pp",
+            .imported = "`result (or-raise) import [] (2 3 +) @attempt or-raise io.pp",
             .qualified = "[] (2 3 +) @attempt result.or-raise io.pp",
         },
-        .{ .name = "str", .imported = "'str ('upper) import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
-        .{ .name = "io", .imported = "'io ('print) import \"hi\" print", .qualified = "\"hi\" io.print" },
-        .{ .name = "csv", .imported = "'csv ('parse) import \"a,b\" [] parse flip io.pp", .qualified = "\"a,b\" [] csv.parse flip io.pp" },
-        .{ .name = "json", .imported = "'json ('parse) import \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
+        .{ .name = "str", .imported = "`str (upper) import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
+        .{ .name = "io", .imported = "`io (print) import \"hi\" print", .qualified = "\"hi\" io.print" },
+        .{ .name = "csv", .imported = "`csv (parse) import \"a,b\" [] parse flip io.pp", .qualified = "\"a,b\" [] csv.parse flip io.pp" },
+        .{ .name = "json", .imported = "`json (parse) import \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
         .{
             .name = "table",
-            .imported = "'table ('valid?) import {\"a\" [1]} valid? io.pp",
+            .imported = "`table (valid?) import {\"a\" [1]} valid? io.pp",
             .qualified = "{\"a\" [1]} table.valid? io.pp",
         },
         .{
             .name = "time",
-            .imported = "'time ('from-unix) import 0 from-unix time.format io.pp",
+            .imported = "`time (from-unix) import 0 from-unix time.format io.pp",
             .qualified = "0 time.from-unix time.format io.pp",
         },
         .{
             .name = "http",
-            .imported = "'http ('get) import 'get doc len 0 > io.pp",
-            .qualified = "'http.get doc len 0 > io.pp",
+            .imported = "`http (get) import `get doc len 0 > io.pp",
+            .qualified = "`http.get doc len 0 > io.pp",
         },
     };
     const used_output = [_][]const u8{
-        "{'a 1}\n", "[5]\n", "\"HI\"\n",                       "hi\n", "((\"a\" \"b\"))\n",
-        "[1]\n",    "1\n",   "\"1970-01-01T00:00:00.000Z\"\n", "1\n",
+        "{a 1}\n", "[5]\n", "\"HI\"\n",                       "hi\n", "((\"a\" \"b\"))\n",
+        "[1]\n",   "1\n",   "\"1970-01-01T00:00:00.000Z\"\n", "1\n",
     };
     const qualified_output = [_][]const u8{
-        "{'a 1}\n", "[5]\n", "\"HI\"\n",                       "hi\n", "((\"a\" \"b\"))\n",
-        "[1]\n",    "1\n",   "\"1970-01-01T00:00:00.000Z\"\n", "1\n",
+        "{a 1}\n", "[5]\n", "\"HI\"\n",                       "hi\n", "((\"a\" \"b\"))\n",
+        "[1]\n",   "1\n",   "\"1970-01-01T00:00:00.000Z\"\n", "1\n",
     };
     for (modules, used_output, qualified_output) |module, want, qualified_want| {
         var used = try cli.runOptions(.{
@@ -1698,14 +1698,14 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     // The network word reaches the network, and a refused connection is a
     // value-level error rather than a crash (DoD-31's non-network half).
     var refused = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "{'target \"http://127.0.0.1:1/nope\"} http.get" },
+        .argv = &.{ "./ecl", "{target \"http://127.0.0.1:1/nope\"} http.get" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "'word 'http.get", "'path \"http://127.0.0.1:1/nope\"" },
+        .stderr_contains = &.{ "kind io", "word http.get", "path \"http://127.0.0.1:1/nope\"" },
     });
 }
 
@@ -1713,18 +1713,18 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
     for ([_][]const u8{ "ok?", "or-raise", "or-else" }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
-        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
+        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
     }
     for ([_][]const u8{ "result.map-error", "result.case" }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
-        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
+        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
     }
 
     var unchanged = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (\"original\" fail) @attempt dup (result.or-raise) partial [] swap @attempt 'err at swap 'err at match?",
+        "[] (\"original\" fail) @attempt dup (result.or-raise) partial [] swap @attempt `err at swap `err at match?",
     });
     defer unchanged.deinit();
     try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -1746,14 +1746,14 @@ test "e2e: stdin is data in -e mode and refuses to be read as program source" {
     defer twice.deinit();
     try twice.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "standard input has already been read" },
+        .stderr_contains = &.{ "kind io", "standard input has already been read" },
     });
 
     var as_source = try runWithInput(&.{build_options.ecl_exe}, "io.stdin\n");
     defer as_source.deinit();
     try as_source.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "stdin is the program source" },
+        .stderr_contains = &.{ "kind io", "stdin is the program source" },
     });
 }
 
@@ -1774,7 +1774,7 @@ test "e2e: entropy is the one draw that differs between processes" {
     var seeded = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "rand.entropy dup 'k set 0 pair 100 6 rand.ints nip 'a set " ++
+        "rand.entropy dup `k set 0 pair 100 6 rand.ints nip `a set " ++
             "k 0 pair 100 6 rand.ints nip a match? io.pp",
     });
     defer seeded.deinit();
@@ -1801,7 +1801,7 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
-        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
+        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
     }
     // The trap the convention exists to make visible: the caller's value is
     // on screen and out of reach, so the error names the isolation.
@@ -1809,18 +1809,18 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "'isolation @attempt", "constructor's values operand" },
+        .stdout_contains = &.{ "isolation @attempt", "constructor's values operand" },
     });
     var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] [] (+ +) @each io.pp" });
     defer child.deinit();
     try child.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @spawn", "constructor's values operand" },
+        .stderr_contains = &.{ "isolation @spawn", "constructor's values operand" },
     });
     // And the seeding composition that fixes it.
     var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) @attempt io.pp" });
     defer seeded.deinit();
-    try seeded.expect(.{ .exit_code = 0, .stdout = "{'ok [4]}\n", .stderr = "" });
+    try seeded.expect(.{ .exit_code = 0, .stdout = "{ok [4]}\n", .stderr = "" });
 
     var seeded_each = try run(&.{
         build_options.ecl_exe,
@@ -1830,12 +1830,12 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });
 
-    var name_first = try run(&.{ build_options.ecl_exe, "-e", "'wrong [] ((1) 'x def) @defm" });
+    var name_first = try run(&.{ build_options.ecl_exe, "-e", "`wrong [] ((1) `x def) @defm" });
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
         // The name is taken first, so a misplaced name is refused before
         // anything else is examined.
-        .stderr_contains = &.{ "'kind 'type", "@defm expected a symbol name", "'trace ['@defm]" },
+        .stderr_contains = &.{ "kind type", "@defm expected a symbol name", "trace (@defm)" },
     });
 }

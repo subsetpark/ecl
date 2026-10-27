@@ -25,10 +25,10 @@ Read this guide for every source or test change. The short rules in
   part that needs no stream—the mode gate, the claim, the error kind.
 - A golden transcript asserts behavior independently of incidental source
   coordinates. `test/reference_snapshots.zig` records errors raised inside
-  `src/prelude.ecl`, whose `'data` reports a prelude line number; pinning that
+  `src/prelude.ecl`, whose `` `data `` reports a prelude line number; pinning that
   number makes every unrelated prelude edit fail the snapshot while proving
   nothing about the edit. Those positions use the transcript's one placeholder,
-  `<^\d+$>`, which stands for one or more digits (`'line <^\d+$>`); the
+  `<^\d+$>`, which stands for one or more digits (`` `line <^\d+$> ``); the
   snapshot still fails if the field goes missing or non-numeric. Keep the kind,
   message, word, trace, and source file literal; use the placeholder only for
   the coordinate.
@@ -181,8 +181,8 @@ reason before selecting the matrix.
     raise `stack_trace_frames` when you actually have a leak to chase—one edit restores
     attribution everywhere, and the leak is never in the suite you predicted.
 - A session must own every value it will free, and no compiler checks it. Building a heap
-  value with one allocator and handing it to a session backed by another (`define`,
-  `pushOwned`, `publishTop`, `publishModule`) aborts with “Invalid free” deep inside
+  value with one allocator and handing it to a session backed by another (define,
+  pushOwned, publishTop, publishModule) aborts with “Invalid free” deep inside
   `heap.freePayload`, far from the line at fault. Suites that pass only source strings to a
   session may use the shared session heap; suites that mix host-built values in stay on
   `std.testing.allocator`, where value and session already agree.

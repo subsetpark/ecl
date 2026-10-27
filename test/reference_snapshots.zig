@@ -10,7 +10,7 @@ const Case = struct {
 };
 
 const cases = [_]Case{
-    .{ .name = "str", .source = "['a 1] str" },
+    .{ .name = "str", .source = "[a 1] str" },
     .{ .name = "+", .source = "[1 2] 3 +" },
     .{ .name = "-", .source = "\\c \\a -" },
     .{ .name = "*", .source = "[[1 2] [3]] 10 *" },
@@ -53,11 +53,11 @@ const cases = [_]Case{
     .{ .name = "grade", .source = "[2 1 2 1] grade" },
     .{ .name = "sort", .source = "[2 1 2 1] sort" },
     .{ .name = "distinct", .source = "[2 1 2 1] distinct" },
-    .{ .name = "dict.keys", .source = "{'a 1 'b 2} dict.keys" },
-    .{ .name = "dict.vals", .source = "{'a 1 'b 2} dict.vals" },
-    .{ .name = "put", .source = "{'a 1} 'b 2 put" },
-    .{ .name = "del", .source = "{'a 1 'b 2} 'a del" },
-    .{ .name = "dict.merge", .source = "{'a 1 'b 2} {'b 20 'c 3} dict.merge" },
+    .{ .name = "dict.keys", .source = "{a 1 b 2} dict.keys" },
+    .{ .name = "dict.vals", .source = "{a 1 b 2} dict.vals" },
+    .{ .name = "put", .source = "{a 1} `b 2 put" },
+    .{ .name = "del", .source = "{a 1 b 2} `a del" },
+    .{ .name = "dict.merge", .source = "{a 1 b 2} {b 20 c 3} dict.merge" },
     .{ .name = "dict.has?", .source = "{\"ab\" 9} \"ab\" dict.has? {[1 2] 9} [1 2] dict.has?" },
     .{ .name = "split", .source = "\"a—b—\" \"—\" split first" },
     .{ .name = "join", .source = "[\"a\" 2] \"-\" join" },
@@ -65,11 +65,11 @@ const cases = [_]Case{
     .{ .name = "parse", .source = "\"42\" parse first" },
     .{ .name = "int", .source = "\"42\" int \"a\" first int" },
     .{ .name = "float", .source = "\"3.5\" float 3 float" },
-    .{ .name = "chars", .source = "'foo chars [104 195 169] chars" },
+    .{ .name = "chars", .source = "`foo chars [104 195 169] chars" },
     .{ .name = "bytes", .source = "\"hé\" bytes" },
-    .{ .name = "symbol", .source = "'a pop \"a\" symbol" },
+    .{ .name = "symbol", .source = "`a pop \"a\" symbol" },
     .{ .name = "char", .source = "955 char" },
-    .{ .name = "core qualifier", .source = "(2 *) 'dup def 3 dup 3 core.dup" },
+    .{ .name = "core qualifier", .source = "(2 *) `dup def 3 dup 3 core.dup" },
     .{ .name = "each", .source = "[1 2 3] (dup *) each" },
     .{ .name = "zip-with", .source = "[1 2] [3 4] (+) zip-with" },
     .{ .name = "for", .source = "[1 2] (io.pp) for" },
@@ -94,37 +94,37 @@ const cases = [_]Case{
     .{ .name = "result.or-raise", .source = "[] (2 3 +) @attempt result.or-raise" },
     .{ .name = "result.or-else", .source = "[] (2 3 +) @attempt 9 result.or-else" },
     .{ .name = "result.either", .source = "[7] result.ok (first) (pop 0) result.either" },
-    .{ .name = "result.map-err", .source = "{'kind 'io} result.err (pop {'kind 'domain}) result.map-err" },
+    .{ .name = "result.map-err", .source = "{kind io} result.err (pop {kind domain}) result.map-err" },
     // The prelude no longer carries these: the envelope interpreters live in
     // the module, and the old bare spellings resolve to nothing.
     .{ .name = "bare or-raise", .source = "[] (2 3 +) @attempt or-raise" },
     .{ .name = "bare ok?", .source = "[] (2 3 +) @attempt ok?" },
     .{ .name = "gone result.case", .source = "[7] result.ok (first) (pop 0) result.case" },
-    .{ .name = "set", .source = "3 'x set x" },
-    .{ .name = "set quotation", .source = "(dup *) 'q set q" },
-    .{ .name = "which", .source = "3 'x set 'x which" },
-    .{ .name = "see", .source = "3 'x set 'x see" },
-    .{ .name = "see set", .source = "'set see" },
-    .{ .name = "setp", .source = "1 'x setp" },
-    .{ .name = "qualify execute", .source = "[] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
+    .{ .name = "set", .source = "3 `x set x" },
+    .{ .name = "set quotation", .source = "(dup *) `q set q" },
+    .{ .name = "which", .source = "3 `x set `x which" },
+    .{ .name = "see", .source = "3 `x set `x see" },
+    .{ .name = "see set", .source = "`set see" },
+    .{ .name = "setp", .source = "1 `x setp" },
+    .{ .name = "qualify execute", .source = "[] ((41) `f def) `core.utils @defm `core.utils `f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
-    .{ .name = "doc qualify", .source = "'qualify doc" },
-    .{ .name = "undefm unknown", .source = "'nowhere undefm" },
-    .{ .name = "undefm then resolve", .source = "[] ((1) 'x def) 'gone @defm 'gone undefm gone.x" },
-    .{ .name = "doc undefm", .source = "'undefm doc" },
+    .{ .name = "doc qualify", .source = "`qualify doc" },
+    .{ .name = "undefm unknown", .source = "`nowhere undefm" },
+    .{ .name = "undefm then resolve", .source = "[] ((1) `x def) `gone @defm `gone undefm gone.x" },
+    .{ .name = "doc undefm", .source = "`undefm doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
     .{ .name = "result ok", .source = "[1 2] result.ok" },
     .{ .name = "result and-then", .source = "[2 3] result.ok (+) result.and-then" },
-    .{ .name = "result all", .source = "[1] result.ok {'kind 'io} result.err pair result.all" },
-    .{ .name = "result malformed", .source = "{'ok 5} (missing) result.and-then" },
+    .{ .name = "result all", .source = "[1] result.ok {kind io} result.err pair result.all" },
+    .{ .name = "result malformed", .source = "{ok 5} (missing) result.and-then" },
     .{ .name = "str upper", .source = "\"héllo\" str.upper" },
     .{ .name = "str index-of missing", .source = "\"abc\" \"z\" str.index-of" },
     .{ .name = "csv parse", .source = "\"a,,c\nd,,f\" [] csv.parse" },
     .{ .name = "csv emit", .source = "\"a,b\" [] csv.parse flip csv.emit" },
     .{ .name = "csv malformed", .source = "\"\\\"x\" [] csv.parse" },
     .{ .name = "json parse", .source = "\"{\\\"a\\\":[1,null,true]}\" json.parse" },
-    .{ .name = "json emit", .source = "{'a 1} json.emit" },
+    .{ .name = "json emit", .source = "{a 1} json.emit" },
     .{ .name = "json emit key", .source = "{1 2} json.emit" },
     .{ .name = "table rows", .source = "{\"a\" [1 2] \"b\" [\"x\" \"y\"]} table.rows" },
     .{ .name = "table where", .source = "{\"a\" [1 2 3]} [1 0 1] table.where" },
@@ -135,8 +135,8 @@ const cases = [_]Case{
     },
     .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
     .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
-    .{ .name = "read-text missing", .source = "'cwd \"no-such-file.ecl\" fs.read-text" },
-    .{ .name = "http dead port", .source = "{'target \"http://127.0.0.1:1/x\"} http.get" },
+    .{ .name = "read-text missing", .source = "`cwd \"no-such-file.ecl\" fs.read-text" },
+    .{ .name = "http dead port", .source = "{target \"http://127.0.0.1:1/x\"} http.get" },
     // Bit patterns and counter-based randomness. Every draw here is seeded, so
     // the transcript is as reproducible as the arithmetic above it.
     .{ .name = "band", .source = "[12 10] 6 band" },
@@ -158,10 +158,10 @@ const cases = [_]Case{
     .{ .name = "isolated substack", .source = "3 [1] (+) @attempt" },
     .{ .name = "isolated child", .source = "3 [1 2] [] (+ +) @each" },
     .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
-    .{ .name = "seeded module", .source = "[7] ('base set) 'm @defm m.base" },
+    .{ .name = "seeded module", .source = "[7] (`base set) `m @defm m.base" },
     .{ .name = "old spelling", .source = "(1) attempt" },
-    .{ .name = "row annotation", .source = "(a -- ...) (dup) 'f def 'f see" },
-    .{ .name = "row after mixing", .source = "(a -- ... b) (dup) 'f def" },
+    .{ .name = "row annotation", .source = "(a -- ...) (dup) `f def `f see" },
+    .{ .name = "row after mixing", .source = "(a -- ... b) (dup) `f def" },
 };
 
 test "promoted Zig CLI behavior matches the reference snapshot" {
@@ -189,10 +189,10 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
 
     try expectTranscript(
         \\=== str ===
-        \\source: ['a 1] str
+        \\source: [a 1] str
         \\exit: 0
         \\stdout:
-        \\"('a 1)"
+        \\"(a 1)"
         \\stderr:
         \\<empty>
         \\=== + ===
@@ -222,7 +222,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "kernel arithmetic is outside its domain" 'word '/ 'trace ['/] 'data {'source "<command>" 'line 1 'col 5}}
+        \\{kind domain msg "kernel arithmetic is outside its domain" word / trace (/) data {source "<command>" line 1 col 5}}
         \\=== div ===
         \\source: 7 3 div
         \\exit: 0
@@ -376,7 +376,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "shape requires a rectangular list" 'word 'shape 'trace ['shape] 'data {'source "<command>" 'line 1 'col 13}}
+        \\{kind shape msg "shape requires a rectangular list" word shape trace (shape) data {source "<command>" line 1 col 13}}
         \\=== first ===
         \\source: "ab" first
         \\exit: 0
@@ -490,38 +490,38 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== dict.keys ===
-        \\source: {'a 1 'b 2} dict.keys
+        \\source: {a 1 b 2} dict.keys
         \\exit: 0
         \\stdout:
-        \\['a 'b]
+        \\(a b)
         \\stderr:
         \\<empty>
         \\=== dict.vals ===
-        \\source: {'a 1 'b 2} dict.vals
+        \\source: {a 1 b 2} dict.vals
         \\exit: 0
         \\stdout:
         \\[1 2]
         \\stderr:
         \\<empty>
         \\=== put ===
-        \\source: {'a 1} 'b 2 put
+        \\source: {a 1} `b 2 put
         \\exit: 0
         \\stdout:
-        \\{'a 1 'b 2}
+        \\{a 1 b 2}
         \\stderr:
         \\<empty>
         \\=== del ===
-        \\source: {'a 1 'b 2} 'a del
+        \\source: {a 1 b 2} `a del
         \\exit: 0
         \\stdout:
-        \\{'b 2}
+        \\{b 2}
         \\stderr:
         \\<empty>
         \\=== dict.merge ===
-        \\source: {'a 1 'b 2} {'b 20 'c 3} dict.merge
+        \\source: {a 1 b 2} {b 20 c 3} dict.merge
         \\exit: 0
         \\stdout:
-        \\{'a 1 'b 20 'c 3}
+        \\{a 1 b 20 c 3}
         \\stderr:
         \\<empty>
         \\=== dict.has? ===
@@ -544,7 +544,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "join expected a list of strings" 'word 'join 'trace ['join] 'data {'index 1 'source "<command>" 'line 1 'col 13}}
+        \\{kind type msg "join expected a list of strings" word join trace (join) data {index 1 source "<command>" line 1 col 13}}
         \\=== str.format ===
         \\source: [3.14 2] "pi={} n={}" str.format
         \\exit: 0
@@ -574,7 +574,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== chars ===
-        \\source: 'foo chars [104 195 169] chars
+        \\source: `foo chars [104 195 169] chars
         \\exit: 0
         \\stdout:
         \\"foo" "hé"
@@ -588,10 +588,10 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== symbol ===
-        \\source: 'a pop "a" symbol
+        \\source: `a pop "a" symbol
         \\exit: 0
         \\stdout:
-        \\'a
+        \\a
         \\stderr:
         \\<empty>
         \\=== char ===
@@ -602,7 +602,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== core qualifier ===
-        \\source: (2 *) 'dup def 3 dup 3 core.dup
+        \\source: (2 *) `dup def 3 dup 3 core.dup
         \\exit: 0
         \\stdout:
         \\6 3 3
@@ -751,7 +751,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 54}}
+        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 273 col 51}}
         \\=== result.ok? ===
         \\source: [] (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -781,11 +781,11 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== result.map-err ===
-        \\source: {'kind 'io} result.err (pop {'kind 'domain}) result.map-err
+        \\source: {kind io} result.err (pop {kind domain}) result.map-err
         \\exit: 0
         \\stdout:
         \\{
-        \\  'err {'kind 'domain}
+        \\  err {kind domain}
         \\}
         \\stderr:
         \\<empty>
@@ -795,51 +795,51 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `or-raise`" 'word 'or-raise 'trace ['or-raise] 'data {'name 'or-raise 'scope 'session 'source "<command>" 'line 1 'col 21}}
+        \\{kind undefined-word msg "undefined word `or-raise`" word or-raise trace (or-raise) data {name or-raise scope session source "<command>" line 1 col 21}}
         \\=== bare ok? ===
         \\source: [] (2 3 +) @attempt ok?
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `ok?`" 'word 'ok? 'trace ['ok?] 'data {'name 'ok? 'scope 'session 'source "<command>" 'line 1 'col 21}}
+        \\{kind undefined-word msg "undefined word `ok?`" word ok? trace (ok?) data {name ok? scope session source "<command>" line 1 col 21}}
         \\=== gone result.case ===
         \\source: [7] result.ok (first) (pop 0) result.case
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `result.case`" 'word 'result.case 'trace ['result.case] 'data {'name 'result.case 'scope 'qualified 'source "<command>" 'line 1 'col 31}}
+        \\{kind undefined-word msg "undefined word `result.case`" word result.case trace (result.case) data {name result.case scope qualified source "<command>" line 1 col 31}}
         \\=== set ===
-        \\source: 3 'x set x
+        \\source: 3 `x set x
         \\exit: 0
         \\stdout:
         \\3
         \\stderr:
         \\<empty>
         \\=== set quotation ===
-        \\source: (dup *) 'q set q
+        \\source: (dup *) `q set q
         \\exit: 0
         \\stdout:
         \\(dup *)
         \\stderr:
         \\<empty>
         \\=== which ===
-        \\source: 3 'x set 'x which
+        \\source: 3 `x set `x which
         \\exit: 0
         \\stdout:
         \\x -> x def public
         \\stderr:
         \\<empty>
         \\=== see ===
-        \\source: 3 'x set 'x see
+        \\source: 3 `x set `x see
         \\exit: 0
         \\stdout:
         \\[3]
         \\stderr:
         \\<empty>
         \\=== see set ===
-        \\source: 'set see
+        \\source: `set see
         \\exit: 0
         \\stdout:
         \\(:
@@ -848,14 +848,14 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== setp ===
-        \\source: 1 'x setp
+        \\source: 1 `x setp
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 20}}
+        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 287 col 20}}
         \\=== qualify execute ===
-        \\source: [] ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
+        \\source: [] ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0
         \\stdout:
         \\41
@@ -867,30 +867,30 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "execute expected a word" 'word 'execute 'trace ['execute] 'data {'source "<command>" 'line 1 'col 3}}
+        \\{kind type msg "execute expected a symbol" word execute trace (execute) data {source "<command>" line 1 col 3}}
         \\=== doc qualify ===
-        \\source: 'qualify doc
+        \\source: `qualify doc
         \\exit: 0
         \\stdout:
         \\"Construct an executable qualified word without reparsing source text."
         \\stderr:
         \\<empty>
         \\=== undefm unknown ===
-        \\source: 'nowhere undefm
+        \\source: `nowhere undefm
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'scope 'qualified 'source "<command>" 'line 1 'col 10}}
+        \\{kind undefined-word msg "undefined word `nowhere`" word nowhere trace (nowhere) data {name nowhere scope qualified source "<command>" line 1 col 10}}
         \\=== undefm then resolve ===
-        \\source: [] ((1) 'x def) 'gone @defm 'gone undefm gone.x
+        \\source: [] ((1) `x def) `gone @defm `gone undefm gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 42}}
+        \\{kind undefined-word msg "undefined word `gone.x`" word gone.x trace (gone.x) data {name gone.x scope qualified source "<command>" line 1 col 42}}
         \\=== doc undefm ===
-        \\source: 'undefm doc
+        \\source: `undefm doc
         \\exit: 0
         \\stdout:
         \\"Remove the module registered under a canonical name or alias."
@@ -900,32 +900,32 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: [1 2] result.ok
         \\exit: 0
         \\stdout:
-        \\{'ok [1 2]}
+        \\{ok [1 2]}
         \\stderr:
         \\<empty>
         \\=== result and-then ===
         \\source: [2 3] result.ok (+) result.and-then
         \\exit: 0
         \\stdout:
-        \\{'ok [5]}
+        \\{ok [5]}
         \\stderr:
         \\<empty>
         \\=== result all ===
-        \\source: [1] result.ok {'kind 'io} result.err pair result.all
+        \\source: [1] result.ok {kind io} result.err pair result.all
         \\exit: 0
         \\stdout:
         \\{
-        \\  'err {'kind 'io}
+        \\  err {kind io}
         \\}
         \\stderr:
         \\<empty>
         \\=== result malformed ===
-        \\source: {'ok 5} (missing) result.and-then
+        \\source: {ok 5} (missing) result.and-then
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 14}}
+        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.and-then) data {source "prelude.ecl" line 298 col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -939,7 +939,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 14}}
+        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (raise assert str.index-of) data {source "prelude.ecl" line 298 col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d,,f" [] csv.parse
@@ -961,16 +961,16 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'parse 'msg "csv: malformed quoting or UTF-8 at record 1, column 1" 'word 'csv.parse 'trace ['csv.parse] 'data {'source "<command>" 'line 1 'col 10}}
+        \\{kind parse msg "csv: malformed quoting or UTF-8 at record 1, column 1" word csv.parse trace (csv.parse) data {source "<command>" line 1 col 10}}
         \\=== json parse ===
         \\source: "{\"a\":[1,null,true]}" json.parse
         \\exit: 0
         \\stdout:
-        \\{"a" (1 'null 'true)}
+        \\{"a" (1 null true)}
         \\stderr:
         \\<empty>
         \\=== json emit ===
-        \\source: {'a 1} json.emit
+        \\source: {a 1} json.emit
         \\exit: 0
         \\stdout:
         \\"{\"a\":1}"
@@ -982,7 +982,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "json.emit requires string or symbol dictionary keys" 'word 'json.emit 'trace ['json.emit] 'data {'source "<command>" 'line 1 'col 7}}
+        \\{kind type msg "json.emit requires string or symbol dictionary keys" word json.emit trace (json.emit) data {source "<command>" line 1 col 7}}
         \\=== table rows ===
         \\source: {"a" [1 2] "b" ["x" "y"]} table.rows
         \\exit: 0
@@ -1010,28 +1010,28 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line <^\d+$> 'col 14}}
+        \\{kind shape msg "table columns must share one length" word raise trace (raise assert table.rows) data {source "prelude.ecl" line 298 col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'io 'msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" 'word 'getenv 'trace ['getenv] 'data {'name "ECL_SNAPSHOT_ABSENT" 'source "<command>" 'line 1 'col 23}}
+        \\{kind io msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" word getenv trace (getenv) data {name "ECL_SNAPSHOT_ABSENT" source "<command>" line 1 col 23}}
         \\=== read-text missing ===
-        \\source: 'cwd "no-such-file.ecl" fs.read-text
+        \\source: `cwd "no-such-file.ecl" fs.read-text
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'io 'msg "entry does not exist" 'word 'fs.read-text 'trace ['fs.read-text] 'data {'operation 'read-text 'root 'cwd 'path "no-such-file.ecl" 'reason 'not-found 'source "<command>" 'line 1 'col 25}}
+        \\{kind io msg "entry does not exist" word fs.read-text trace (fs.read-text) data {operation read-text root cwd path "no-such-file.ecl" reason not-found source "<command>" line 1 col 25}}
         \\=== http dead port ===
-        \\source: {'target "http://127.0.0.1:1/x"} http.get
+        \\source: {target "http://127.0.0.1:1/x"} http.get
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'io 'msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" 'word 'http.get 'trace ['http.get] 'data {'path "http://127.0.0.1:1/x" 'source "<command>" 'line 1 'col 34}}
+        \\{kind io msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" word http.get trace (http.get) data {path "http://127.0.0.1:1/x" source "<command>" line 1 col 33}}
         \\=== band ===
         \\source: [12 10] 6 band
         \\exit: 0
@@ -1087,7 +1087,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "a shift count must be from 0 to 63" 'word 'bsl 'trace ['bsl] 'data {'source "<command>" 'line 1 'col 6}}
+        \\{kind domain msg "a shift count must be from 0 to 63" word bsl trace (bsl) data {source "<command>" line 1 col 6}}
         \\=== rand.int ===
         \\source: [7 0] 6 rand.int
         \\exit: 0
@@ -1115,7 +1115,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "rand.int expected a positive bound, not 0" 'word 'rand.int 'trace ['rand.int] 'data {'source "<command>" 'line 1 'col 9}}
+        \\{kind domain msg "rand.int expected a positive bound, not 0" word rand.int trace (rand.int) data {source "<command>" line 1 col 9}}
         \\=== rand.deal ===
         \\source: [7 0] 3 10 rand.deal
         \\exit: 0
@@ -1135,18 +1135,18 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\  {
-        \\    'err {
-        \\      'kind 'underflow
-        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — pass initial values in the constructor's values operand"
-        \\      'word '+
-        \\      'trace ['+]
-        \\      'data {
-        \\        'needed 2
-        \\        'available 1
-        \\        'isolation @attempt
-        \\        'source "<command>"
-        \\        'line 1
-        \\        'col 8
+        \\    err {
+        \\      kind underflow
+        \\      msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — pass initial values in the constructor's values operand"
+        \\      word +
+        \\      trace (+)
+        \\      data {
+        \\        needed 2
+        \\        available 1
+        \\        isolation @attempt
+        \\        source "<command>"
+        \\        line 1
+        \\        col 8
         \\      }
         \\    }
         \\3 }
@@ -1158,16 +1158,16 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — pass initial values in the constructor's values operand" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @spawn 'source "<command>" 'line 1 'col 13}}
+        \\{kind underflow msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — pass initial values in the constructor's values operand" word + trace (+) data {needed 2 available 1 isolation @spawn source "<command>" line 1 col 13}}
         \\=== seeded attempt ===
         \\source: [3] (1 +) @attempt
         \\exit: 0
         \\stdout:
-        \\{'ok [4]}
+        \\{ok [4]}
         \\stderr:
         \\<empty>
         \\=== seeded module ===
-        \\source: [7] ('base set) 'm @defm m.base
+        \\source: [7] (`base set) `m @defm m.base
         \\exit: 0
         \\stdout:
         \\7
@@ -1179,21 +1179,21 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `attempt`" 'word 'attempt 'trace ['attempt] 'data {'name 'attempt 'scope 'session 'source "<command>" 'line 1 'col 5}}
+        \\{kind undefined-word msg "undefined word `attempt`" word attempt trace (attempt) data {name attempt scope session source "<command>" line 1 col 5}}
         \\=== row annotation ===
-        \\source: (a -- ...) (dup) 'f def 'f see
+        \\source: (a -- ...) (dup) `f def `f see
         \\exit: 0
         \\stdout:
         \\(a -- ...) (dup)
         \\stderr:
         \\<empty>
         \\=== row after mixing ===
-        \\source: (a -- ... b) (dup) 'f def
+        \\source: (a -- ... b) (dup) `f def
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "malformed definition annotation" 'word 'def 'trace ['def] 'data {'source "<command>" 'line 1 'col 23}}
+        \\{kind domain msg "malformed definition annotation" word def trace (def) data {source "<command>" line 1 col 23}}
         \\
     , transcript.written());
 }

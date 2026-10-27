@@ -6,6 +6,7 @@
 //! the core combinator backend, while the one host helper needed by the hosted
 //! `merge-with` fold is private, so no implementation primitive leaks through
 //! qualified lookup, import, invocation, or reflection.
+const std = @import("std");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
@@ -251,22 +252,52 @@ const DictLookupDriver = struct {
 /// A word the implementation builds for itself, so it means core's binding
 /// (or the standard library's, through its qualified name) wherever it runs.
 fn word(evaluator: *Machine, name: []const u8) error{OutOfMemory}!Value {
-    return .{ .word = try evaluator.coreWord(try intern.intern(name)) };
+    return .{ .symbol = try evaluator.coreWord(try intern.intern(name)) };
 }
 
 fn symbol(name: []const u8) error{OutOfMemory}!Value {
-    return .{ .symbol = try intern.intern(name) };
+    return .{ .symbol = .{ .name = try intern.intern(name) } };
 }
 
-fn quotation(evaluator: *Machine, items: []const Value) error{OutOfMemory}!heap.OwnedValue {
-    return .init(
-        evaluator.releaseDomain(),
-        try list.fromValues(evaluator.allocator(), items),
-    );
+/// One element of a quotation the implementation builds. Code is a word to
+/// run; data is a value to push, which for a symbol means the reader's own
+/// quote expansion `(x) first`, since a bare symbol in a quotation executes.
+const Item = union(enum) { code: Value, data: Value };
+
+fn w(evaluator: *Machine, name: []const u8) error{OutOfMemory}!Item {
+    return .{ .code = try word(evaluator, name) };
 }
 
-fn call(evaluator: *Machine, items: []const Value) error{OutOfMemory}!void {
-    const body = try list.fromValues(evaluator.allocator(), items);
+fn d(item: Value) Item {
+    return .{ .data = item };
+}
+
+fn buildItems(evaluator: *Machine, items: []const Item) error{OutOfMemory}!Value {
+    const allocator = evaluator.allocator();
+    var values: std.ArrayList(Value) = .empty;
+    defer values.deinit(allocator);
+    var wrappers: std.ArrayList(heap.OwnedValue) = .empty;
+    defer {
+        for (wrappers.items) |*wrapper| wrapper.deinit();
+        wrappers.deinit(allocator);
+    }
+    for (items) |item| switch (item) {
+        .code => |code| try values.append(allocator, code),
+        .data => |data| if (data == .symbol) {
+            try wrappers.append(allocator, .init(evaluator.releaseDomain(), try list.fromValues(allocator, &.{data})));
+            try values.append(allocator, wrappers.items[wrappers.items.len - 1].borrow());
+            try values.append(allocator, try word(evaluator, "first"));
+        } else try values.append(allocator, data),
+    };
+    return list.fromValues(allocator, values.items);
+}
+
+fn quotation(evaluator: *Machine, items: []const Item) error{OutOfMemory}!heap.OwnedValue {
+    return .init(evaluator.releaseDomain(), try buildItems(evaluator, items));
+}
+
+fn call(evaluator: *Machine, items: []const Item) error{OutOfMemory}!void {
+    const body = try buildItems(evaluator, items);
     try evaluator.callOwned(body.list);
 }
 
@@ -281,12 +312,12 @@ fn failureQuotation(
     );
     defer text.deinit();
     return quotation(evaluator, &.{
-        try word(evaluator, "pop"),
-        try symbol(kind),
-        try word(evaluator, "error.new"),
-        text.borrow(),
-        try word(evaluator, "error.with-message"),
-        try word(evaluator, "raise"),
+        try w(evaluator, "pop"),
+        d(try symbol(kind)),
+        try w(evaluator, "error.new"),
+        d(text.borrow()),
+        try w(evaluator, "error.with-message"),
+        try w(evaluator, "raise"),
     });
 }
 
@@ -294,12 +325,12 @@ fn pairs(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     return call(evaluator, &.{
-        dictionary.borrow(),
-        try word(evaluator, "dup"),
-        try word(evaluator, "dict.keys"),
-        try word(evaluator, "swap"),
-        try word(evaluator, "dict.vals"),
-        try word(evaluator, "zip"),
+        d(dictionary.borrow()),
+        try w(evaluator, "dup"),
+        try w(evaluator, "dict.keys"),
+        try w(evaluator, "swap"),
+        try w(evaluator, "dict.vals"),
+        try w(evaluator, "zip"),
     });
 }
 
@@ -384,18 +415,18 @@ const FromFlatDriver = struct {
 fn fromPairs(evaluator: *Machine) MachineError!void {
     var pairs_value = try evaluator.popValue();
     defer pairs_value.deinit();
-    var pair_then = try quotation(evaluator, &.{ try word(evaluator, "len"), .{ .int = 2 }, try word(evaluator, "=") });
+    var pair_then = try quotation(evaluator, &.{ try w(evaluator, "len"), d(.{ .int = 2 }), try w(evaluator, "=") });
     defer pair_then.deinit();
-    var pair_else = try quotation(evaluator, &.{ try word(evaluator, "pop"), .{ .int = 0 } });
+    var pair_else = try quotation(evaluator, &.{ try w(evaluator, "pop"), d(.{ .int = 0 }) });
     defer pair_else.deinit();
     var pair_shaped = try quotation(evaluator, &.{
-        try word(evaluator, "dup"),
-        try word(evaluator, "type"),
-        try symbol("list"),
-        try word(evaluator, "match?"),
-        pair_then.borrow(),
-        pair_else.borrow(),
-        try word(evaluator, "if"),
+        try w(evaluator, "dup"),
+        try w(evaluator, "type"),
+        d(try symbol("list")),
+        try w(evaluator, "match?"),
+        d(pair_then.borrow()),
+        d(pair_else.borrow()),
+        try w(evaluator, "if"),
     });
     defer pair_shaped.deinit();
     var shape_failure = try failureQuotation(
@@ -404,28 +435,28 @@ fn fromPairs(evaluator: *Machine) MachineError!void {
         "dict.from-pairs expects two-element pairs",
     );
     defer shape_failure.deinit();
-    var build = try quotation(evaluator, &.{ try word(evaluator, "raze"), try word(evaluator, "dict.from-flat") });
+    var build = try quotation(evaluator, &.{ try w(evaluator, "raze"), try w(evaluator, "dict.from-flat") });
     defer build.deinit();
     var valid_list = try quotation(evaluator, &.{
-        try word(evaluator, "dup"),
-        pair_shaped.borrow(),
-        try word(evaluator, "all?"),
-        build.borrow(),
-        shape_failure.borrow(),
-        try word(evaluator, "if"),
+        try w(evaluator, "dup"),
+        d(pair_shaped.borrow()),
+        try w(evaluator, "all?"),
+        d(build.borrow()),
+        d(shape_failure.borrow()),
+        try w(evaluator, "if"),
     });
     defer valid_list.deinit();
     var type_failure = try failureQuotation(evaluator, "type", "dict.from-pairs expects a list");
     defer type_failure.deinit();
     return call(evaluator, &.{
-        pairs_value.borrow(),
-        try word(evaluator, "dup"),
-        try word(evaluator, "type"),
-        try symbol("list"),
-        try word(evaluator, "match?"),
-        valid_list.borrow(),
-        type_failure.borrow(),
-        try word(evaluator, "if"),
+        d(pairs_value.borrow()),
+        try w(evaluator, "dup"),
+        try w(evaluator, "type"),
+        d(try symbol("list")),
+        try w(evaluator, "match?"),
+        d(valid_list.borrow()),
+        d(type_failure.borrow()),
+        try w(evaluator, "if"),
     });
 }
 
@@ -435,16 +466,16 @@ fn fromKeys(evaluator: *Machine) MachineError!void {
     defer repeated.deinit();
     var keys = try evaluator.popValue();
     defer keys.deinit();
-    var discard_key = try quotation(evaluator, &.{try word(evaluator, "nip")});
+    var discard_key = try quotation(evaluator, &.{try w(evaluator, "nip")});
     defer discard_key.deinit();
     return call(evaluator, &.{
-        keys.borrow(),
-        keys.borrow(),
-        repeated.borrow(),
-        discard_key.borrow(),
-        try word(evaluator, "partial"),
-        try word(evaluator, "each"),
-        try word(evaluator, "dict.from-lists"),
+        d(keys.borrow()),
+        d(keys.borrow()),
+        d(repeated.borrow()),
+        d(discard_key.borrow()),
+        try w(evaluator, "partial"),
+        try w(evaluator, "each"),
+        try w(evaluator, "dict.from-lists"),
     });
 }
 
@@ -454,28 +485,28 @@ fn keysExactly(evaluator: *Machine) MachineError!void {
     defer declared.deinit();
     var candidate = try evaluator.popValue();
     defer candidate.deinit();
-    var membership = try quotation(evaluator, &.{ try word(evaluator, "swap"), try word(evaluator, "dict.has?") });
+    var membership = try quotation(evaluator, &.{ try w(evaluator, "swap"), try w(evaluator, "dict.has?") });
     defer membership.deinit();
     return call(evaluator, &.{
-        candidate.borrow(),
-        try word(evaluator, "dict.keys"),
-        try word(evaluator, "len"),
-        declared.borrow(),
-        try word(evaluator, "len"),
-        try word(evaluator, "="),
-        declared.borrow(),
-        try word(evaluator, "distinct"),
-        try word(evaluator, "len"),
-        declared.borrow(),
-        try word(evaluator, "len"),
-        try word(evaluator, "="),
-        try word(evaluator, "and"),
-        declared.borrow(),
-        candidate.borrow(),
-        membership.borrow(),
-        try word(evaluator, "partial"),
-        try word(evaluator, "all?"),
-        try word(evaluator, "and"),
+        d(candidate.borrow()),
+        try w(evaluator, "dict.keys"),
+        try w(evaluator, "len"),
+        d(declared.borrow()),
+        try w(evaluator, "len"),
+        try w(evaluator, "="),
+        d(declared.borrow()),
+        try w(evaluator, "distinct"),
+        try w(evaluator, "len"),
+        d(declared.borrow()),
+        try w(evaluator, "len"),
+        try w(evaluator, "="),
+        try w(evaluator, "and"),
+        d(declared.borrow()),
+        d(candidate.borrow()),
+        d(membership.borrow()),
+        try w(evaluator, "partial"),
+        try w(evaluator, "all?"),
+        try w(evaluator, "and"),
     });
 }
 
@@ -490,49 +521,49 @@ fn updateOr(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     var existing = try quotation(evaluator, &.{
-        dictionary.borrow(),
-        key.borrow(),
-        try word(evaluator, "wrap"),
-        try word(evaluator, "at-path"),
-        transform.borrow(),
-        try word(evaluator, "call"),
+        d(dictionary.borrow()),
+        d(key.borrow()),
+        try w(evaluator, "wrap"),
+        try w(evaluator, "at-path"),
+        d(transform.borrow()),
+        try w(evaluator, "call"),
     });
     defer existing.deinit();
-    var absent = try quotation(evaluator, &.{default.borrow()});
+    var absent = try quotation(evaluator, &.{d(default.borrow())});
     defer absent.deinit();
     return call(evaluator, &.{
-        dictionary.borrow(),
-        key.borrow(),
-        dictionary.borrow(),
-        key.borrow(),
-        try word(evaluator, "dict.has?"),
-        existing.borrow(),
-        absent.borrow(),
-        try word(evaluator, "if"),
-        try word(evaluator, "put"),
+        d(dictionary.borrow()),
+        d(key.borrow()),
+        d(dictionary.borrow()),
+        d(key.borrow()),
+        try w(evaluator, "dict.has?"),
+        d(existing.borrow()),
+        d(absent.borrow()),
+        try w(evaluator, "if"),
+        try w(evaluator, "put"),
     });
 }
 
 fn entryApplication(evaluator: *Machine, transform: Value, negate: bool) error{OutOfMemory}!heap.OwnedValue {
     return quotation(evaluator, if (negate) &.{
-        try word(evaluator, "dup"),
-        try word(evaluator, "first"),
-        try word(evaluator, "swap"),
-        .{ .int = 1 },
-        try word(evaluator, "wrap"),
-        try word(evaluator, "at-path"),
-        transform,
-        try word(evaluator, "call"),
-        try word(evaluator, "not"),
+        try w(evaluator, "dup"),
+        try w(evaluator, "first"),
+        try w(evaluator, "swap"),
+        d(.{ .int = 1 }),
+        try w(evaluator, "wrap"),
+        try w(evaluator, "at-path"),
+        d(transform),
+        try w(evaluator, "call"),
+        try w(evaluator, "not"),
     } else &.{
-        try word(evaluator, "dup"),
-        try word(evaluator, "first"),
-        try word(evaluator, "swap"),
-        .{ .int = 1 },
-        try word(evaluator, "wrap"),
-        try word(evaluator, "at-path"),
-        transform,
-        try word(evaluator, "call"),
+        try w(evaluator, "dup"),
+        try w(evaluator, "first"),
+        try w(evaluator, "swap"),
+        d(.{ .int = 1 }),
+        try w(evaluator, "wrap"),
+        try w(evaluator, "at-path"),
+        d(transform),
+        try w(evaluator, "call"),
     });
 }
 
@@ -545,13 +576,13 @@ fn map(evaluator: *Machine) MachineError!void {
     var apply_entry = try entryApplication(evaluator, transform.borrow(), false);
     defer apply_entry.deinit();
     return call(evaluator, &.{
-        dictionary.borrow(),
-        try word(evaluator, "dict.keys"),
-        dictionary.borrow(),
-        try word(evaluator, "dict.pairs"),
-        apply_entry.borrow(),
-        try word(evaluator, "each"),
-        try word(evaluator, "dict.from-lists"),
+        d(dictionary.borrow()),
+        try w(evaluator, "dict.keys"),
+        d(dictionary.borrow()),
+        try w(evaluator, "dict.pairs"),
+        d(apply_entry.borrow()),
+        try w(evaluator, "each"),
+        try w(evaluator, "dict.from-lists"),
     });
 }
 
@@ -564,15 +595,15 @@ fn selectEntries(evaluator: *Machine, reject_matches: bool) MachineError!void {
     var apply_entry = try entryApplication(evaluator, predicate.borrow(), reject_matches);
     defer apply_entry.deinit();
     return call(evaluator, &.{
-        dictionary.borrow(),
-        try word(evaluator, "dict.pairs"),
-        try word(evaluator, "dup"),
-        apply_entry.borrow(),
-        try word(evaluator, "each"),
-        try word(evaluator, "where"),
-        try word(evaluator, "wrap"),
-        try word(evaluator, "at-path"),
-        try word(evaluator, "dict.from-pairs"),
+        d(dictionary.borrow()),
+        try w(evaluator, "dict.pairs"),
+        try w(evaluator, "dup"),
+        d(apply_entry.borrow()),
+        try w(evaluator, "each"),
+        try w(evaluator, "where"),
+        try w(evaluator, "wrap"),
+        try w(evaluator, "at-path"),
+        try w(evaluator, "dict.from-pairs"),
     });
 }
 
@@ -713,12 +744,12 @@ fn split(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     return call(evaluator, &.{
-        dictionary.borrow(),
-        keys.borrow(),
-        try word(evaluator, "dict.take"),
-        dictionary.borrow(),
-        keys.borrow(),
-        try word(evaluator, "dict.del"),
+        d(dictionary.borrow()),
+        d(keys.borrow()),
+        try w(evaluator, "dict.take"),
+        d(dictionary.borrow()),
+        d(keys.borrow()),
+        try w(evaluator, "dict.del"),
     });
 }
 
