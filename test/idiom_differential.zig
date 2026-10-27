@@ -24,8 +24,8 @@ test "every idiom entry hits across values empties spines floats and failures" {
         inline for (std.meta.tags(Variant)) |variant| {
             const source = try sourceFor(entry, variant);
             defer allocator.free(source);
-            const comparison = if (variant != .empty and (entry.context == .fold1 or
-                (entry.operation == .direct and entry.operation.direct == .fold1)))
+            const comparison = if (entry.context == .fold1 or
+                (entry.operation == .direct and entry.operation.direct == .fold1))
                 compareReductionModes(source)
             else if (variant == .failure and entry.operation == .direct and switch (entry.operation.direct) {
                 .sum, .product, .reshape_sum, .reshape_product => true,
@@ -638,11 +638,11 @@ test "idioms: partial captures preserve generic behavior" {
 
     // A recognized capture fuses the whole `each` into one kernel run: one
     // hit for the three elements. A hand-written `((3) first +)` falls through
-    // to the generic frame machine, which runs `first` once per element —
-    // three hits from `first`'s own direct recognition.
+    // to the generic frame machine, which runs the `first` kernel per element
+    // without recognizing anything.
     try expectHits("[1 2 3] 3 (+) partial each", 1);
     try expectHits("[1 2 3] 3 (swap -) partial each", 1);
-    try expectHits("[1 2 3] ((3) first +) each", 3);
+    try expectHits("[1 2 3] ((3) first +) each", 0);
     // No `first` is written into a non-word capture, so shadowing it has
     // nothing to reach.
     try expectHits("(pop 99) `first def [1 2 3] 3 (+) partial each", 1);
