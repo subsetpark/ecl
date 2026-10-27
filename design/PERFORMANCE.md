@@ -744,6 +744,23 @@ output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
    and 491 MiB for `fs.read-bytes`. `proc.run` validates its `'stdin` with
    the native `fd.bytes?` instead of a prelude predicate per element: a 4 MB
    stdin is 26.3 G → 0.43 G.
+8. `split` of a one-byte-wide string at a one-byte-wide separator is two
+   passes with no bounds table: a vectorized count of the separators sizes
+   the spine, and a fill finds each separator again and copies the part into
+   a one-byte-wide leaf. The general kernel kept one 24-byte record per text
+   position, profiled every part's widest codepoint, and wrote parts through
+   a codepoint writer. `"\n" split` of the 254 MB input into 4.17 M lines:
+   3.57 G → 2.75 G, of which the scan is under 0.1 G; `fd.in io.lines` 10.6 G
+   → 4.06 G. What remains is about 530 instructions per part, independent
+   of its length: on macOS the system malloc behind the session heap costs
+   about 500 instructions per allocation (`sample` puts 62% of the split in
+   `_xzm_malloc_tc` and its callees). Routing blocks of 2 KB and under to
+   `std.heap.smp_allocator` took the split to 2.61 G and every suite program
+   down 0 to 8%, but revcomp's peak RSS went 3.4 GB → 5.9 GB with one worker,
+   so the heap stays on malloc; a session-owned small-object allocator that
+   returns memory is the next step for part-heavy programs. Views over a
+   parent leaf were considered and measured out: they keep the allocation,
+   which is the cost, and save only the copy, about 20 instructions.
 
 Whole programs, same input, validated against the C references:
 
