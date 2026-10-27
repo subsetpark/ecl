@@ -2003,6 +2003,12 @@ pub const Env = enum(usize) {
         name: u32,
     ) error{OutOfMemory}!SlotId {
         const backing = self.privateState();
+        // `core.x` is core's `x` in every root: link it to core's own slot
+        // rather than to a slot the root would never bind.
+        if (!root.core and environment != &backing.core) {
+            if (try intern.coreQualifiedName(name)) |unqualified|
+                return self.linkSlot(&backing.core_cell, &backing.core, unqualified);
+        }
         environment.lockBlocking();
         defer environment.unlock();
         const image = root.ownerHandle() != null;

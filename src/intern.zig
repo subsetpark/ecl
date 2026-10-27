@@ -658,6 +658,19 @@ pub fn isReservedRegistryBytes(name: []const u8) bool {
     return std.mem.eql(u8, name, "core");
 }
 
+/// The unqualified name `core.x` spells, or null for any other name. A
+/// `core.`-qualified occurrence is core's word wherever it is written, so it
+/// links to core's slot for `x` and dispatches, caches, and fuses as that
+/// plain word does; only its spelling stays qualified, for traces.
+pub fn coreQualifiedName(name: u32) error{OutOfMemory}!?u32 {
+    const spelling = get(name);
+    const prefix = "core.";
+    if (!std.mem.startsWith(u8, spelling, prefix)) return null;
+    const rest = spelling[prefix.len..];
+    if (rest.len == 0 or std.mem.indexOfScalar(u8, rest, '.') != null) return null;
+    return try intern(rest);
+}
+
 pub fn isReservedBytes(name: []const u8) bool {
     return std.mem.eql(u8, name, "--") or std.mem.eql(u8, name, ":") or
         std.mem.eql(u8, name, lexer.row_token);

@@ -1067,3 +1067,20 @@ test "module source: construction refusal reaches helper words and nested attemp
     defer after.deinit();
     try std.testing.expectEqualStrings("{ok [1]}", after.bytes());
 }
+
+test "module: core-qualified words link to core's slot wherever they are written" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // A module that shadows `first` still quotes through core's `first`,
+    // since the reader's quote expands to `core.first`.
+    try expectOk(&runtime, "[] ((pop 99) `first def (`k) `go def ((1 2) core.first) `head def) `shadow @defm");
+    try expectOk(&runtime, "shadow.go `k match? shadow.head 1 = and (7 8) shadow.first 99 = and " ++
+        "{kind user msg \"core-qualified words resolve in core\"} assert");
+    try expectOk(&runtime, "(9) `first def (`k) call `k match? {kind user msg \"a session shadow does not reach a quote\"} assert");
+    // The qualified spelling stays on the trace, and a missing core word is
+    // reported as the qualified name.
+    try expectErrorContains(&runtime, "() core.first", &.{ "word core.first", "trace (core.first)" });
+    try expectErrorContains(&runtime, "core.nope", &.{ "kind undefined-word", "word core.nope" });
+}

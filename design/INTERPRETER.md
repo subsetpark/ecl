@@ -345,7 +345,11 @@ spells. A symbol vector stores as a leaf only when every slot is zero, so a
 quotation keeps its links; printing chooses `(...)` for both storages. The
 same rule binds quotations the implementation assembles from values: an
 operand spliced into one is data, so a symbol operand is spliced as its quote
-expansion, never as a bare element that would resolve.
+expansion, never as a bare element that would resolve. A `core.`-qualified
+occurrence links to core's slot for its unqualified name in every root, so it
+dispatches, caches, and fuses exactly as the plain core word does and only its
+spelling stays qualified; the registry path serves module-qualified names
+alone.
 
 Program construction produces ordinary values and never triggers compilation.
 Concatenating quotations produces another ordinary list that can execute
