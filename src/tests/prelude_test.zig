@@ -37,7 +37,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "migrated sequence and dictionary words",
             .source = "[1 2 3] first [1 2 3] rest [1 2 3] reverse " ++
-                "[1 2 1 3 2] distinct {'a 1 'b 2} dict.vals",
+                "[1 2 1 3 2] distinct {a 1 b 2} dict.vals",
             .expected = "1 [2 3] [3 2 1] [1 2 3] [1 2]",
         },
         .{ .name = "partition", .source = "[1 2 3 4] (2 >) partition", .expected = "[3 4] [1 2]" },
@@ -56,7 +56,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "at-path",
             .source = "[[10 20] [30 40]] [1 0] at-path " ++
-                "{'users ({'name \"Ada\"} {'name \"Lin\"})} ['users 1 'name] at-path " ++
+                "{users ({name \"Ada\"} {name \"Lin\"})} [users 1 name] at-path " ++
                 "42 [] at-path",
             .expected = "30 \"Lin\" 42",
         },
@@ -68,25 +68,25 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "literal representation",
             .source = "(foo) first literal dup type",
-            .expected = "((foo) first) 'list",
+            .expected = "((foo) core.first) list",
         },
         .{
             .name = "partial application",
             .source = "3 (2 *) partial call (foo) first (type) partial call",
-            .expected = "6 'word",
+            .expected = "6 symbol",
         },
         .{
             .name = "quotation with initial values",
             .source = "[2 3] (+) with call (type) first 7 pair (pop type) with call",
-            .expected = "5 'word",
+            .expected = "5 symbol",
         },
         .{
             .name = "seeded attempts tasks and modules",
             .source = "[] (42) @attempt [2 3] (+) @attempt " ++
                 "[2 3] (+) @spawn task.await [0 0] (/) @attempt result.ok? " ++
                 "[2 3] (+) @attempt [2 3] (+) @spawn task.await match? " ++
-                "[4 5] (+ 'sum set) 'seeded @defm seeded.sum",
-            .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",
+                "[4 5] (+ `sum set) `seeded @defm seeded.sum",
+            .expected = "{ok [42]} {ok [5]} {ok [5]} 0 1 9",
         },
         .{ .name = "results", .source = "[] (2 3 +) @attempt result.ok? [] (2 3 +) @attempt result.or-raise [] (missing) @attempt 9 result.or-else", .expected = "1 [5] 9" },
         .{
@@ -112,21 +112,21 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "selection and aggregation",
-            .source = "{'a 1 'b 2} dict.pairs [1 2 3 4] (2 >) filter [0 0 1] (0 >) any? " ++
+            .source = "{a 1 b 2} dict.pairs [1 2 3 4] (2 >) filter [0 0 1] (0 >) any? " ++
                 "[1 1 0] (0 >) all? [1 2 3] mean",
-            .expected = "(('a 1) ('b 2)) [3 4] 1 0 2.0",
+            .expected = "((a 1) (b 2)) [3 4] 1 0 2.0",
         },
         .{
             .name = "exact dictionary keys",
-            .source = "{'a 1 'b 2} ['b 'a] dict.keys-exactly? " ++
-                "{'a 1} ['a 'b] dict.keys-exactly? {'a 1 'b 2} ['a] dict.keys-exactly? " ++
-                "{'a 1 'b 2} ['a 'a] dict.keys-exactly?",
+            .source = "{a 1 b 2} [b a] dict.keys-exactly? " ++
+                "{a 1} [a b] dict.keys-exactly? {a 1 b 2} [a] dict.keys-exactly? " ++
+                "{a 1 b 2} [a a] dict.keys-exactly?",
             .expected = "1 0 0 0",
         },
         .{
             .name = "custom lexicographic comparison stops at the first difference",
-            .source = "0 'lex-calls set [1 2 3] [9 0 0] " ++
-                "(lex-calls 1 + 'lex-calls set cmp) lex-cmp-with lex-calls",
+            .source = "0 `lex-calls set [1 2 3] [9 0 0] " ++
+                "(lex-calls 1 + `lex-calls set cmp) lex-cmp-with lex-calls",
             .expected = "-1 1",
         },
         .{
@@ -185,7 +185,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'{s} doc len 0 >",
+            "`{s} doc len 0 >",
             .{name},
         );
         defer std.testing.allocator.free(source);
@@ -262,14 +262,14 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         },
         .{ .name = "case shape", .source = "1 [] case", .kind = "shape" },
         .{ .name = "case type", .source = "1 2 case", .kind = "type" },
-        .{ .name = "at-path propagates lookup failure", .source = "{'a [1]} ['a 4] at-path", .kind = "domain", .word = "at" },
+        .{ .name = "at-path propagates lookup failure", .source = "{a [1]} [a 4] at-path", .kind = "domain", .word = "at" },
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },
         .{ .name = "pack underflow", .source = "1 2 pack", .kind = "underflow", .word = "cons" },
         .{ .name = "chunk size zero", .source = "[1 2] 0 chunk", .kind = "domain" },
         .{ .name = "to-digits radix zero", .source = "1 [2 0] to-digits", .kind = "domain" },
         .{ .name = "to-digits float radix", .source = "1 [2.5] to-digits", .kind = "domain" },
-        .{ .name = "to-digits symbol radix", .source = "1 ['a] to-digits", .kind = "domain" },
+        .{ .name = "to-digits symbol radix", .source = "1 [a] to-digits", .kind = "domain" },
     });
 }
 
@@ -277,31 +277,31 @@ test "embedded definitions retain core resolution under session shadowing" {
     // `wrap` is `(() cons)`. It was published against core alone, so a session
     // redefinition of `cons` shadows the name for session code without
     // rewriting what an already-evaluated definition mentioning `wrap` means.
-    try support.expectStack("(pop pop 42) 'cons def 1 wrap", "[1]");
-    try support.expectStack("(1 wrap) 'first-defined def (pop pop 42) 'cons def first-defined", "[1]");
+    try support.expectStack("(pop pop 42) `cons def 1 wrap", "[1]");
+    try support.expectStack("(1 wrap) `first-defined def (pop pop 42) `cons def first-defined", "[1]");
     // The session's own reference to the same name does see its redefinition:
     // late binding is untouched, only the chain each binding resolves in.
-    try support.expectStack("(pop pop 42) 'cons def 1 [] cons", "42");
+    try support.expectStack("(pop pop 42) `cons def 1 [] cons", "42");
     // Adopting the new behavior is redefining the prelude word itself. The new
     // body is a session definition, so it resolves in the session and shadows
     // the prelude one for session callers.
-    try support.expectStack("(pop pop 42) 'cons def (() cons) 'wrap def 1 wrap", "42");
+    try support.expectStack("(pop pop 42) `cons def (() cons) `wrap def 1 wrap", "42");
     // A quotation still resolves where its invoker runs, so a combinator sees
     // the definitions of whoever called it rather than core's.
-    try support.expectStack("(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
-    try support.expectStack("(7) 'mine def [1 2] (pop mine) each", "[7 7]");
+    try support.expectStack("(pop pop 42) `+ def [1 2 3] 0 (+) fold", "42");
+    try support.expectStack("(7) `mine def [1 2] (pop mine) each", "[7 7]");
 }
 
 test "embedded quotation literals retain core resolution under session shadowing" {
     // `all?` is `(|l q| l q each 1 (and) fold)`. Its own `(and)` was written
     // in the prelude, so a session `and` cannot reach it.
-    try support.expectStack("(pop pop 42) 'and def [1 1] (1 =) all?", "1");
+    try support.expectStack("(pop pop 42) `and def [1 1] (1 =) all?", "1");
     // `over` is `(swap dup (swap) dip)`, so a session `swap` cannot either.
-    try support.expectStack("(pop pop 99) 'swap def 1 2 over", "1 2 1");
+    try support.expectStack("(pop pop 99) `swap def 1 2 over", "1 2 1");
     // The caller's half of the same activation is untouched: `all?` hands
     // `each` the predicate the session wrote, which still resolves there.
-    try support.expectStack("(1 =) 'one? def [1 1] (one?) all?", "1");
+    try support.expectStack("(1 =) `one? def [1 1] (one?) all?", "1");
     // Redefining the prelude word is still how new behavior is adopted: the
     // replacement is a session definition and resolves in the session.
-    try support.expectStack("(pop pop 42) 'and def (|l q| l q each 1 (and) fold) 'all? def [1 1] (1 =) all?", "42");
+    try support.expectStack("(pop pop 42) `and def (|l q| l q each 1 (and) fold) `all? def [1 1] (1 =) all?", "42");
 }

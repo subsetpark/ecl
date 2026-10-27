@@ -263,9 +263,9 @@ test "hostio: stack prints the visible operand window without changing it" {
         "[0] 1\n[1] ([1 2]\n     [3 4])\n",
     );
     try expectStackWithOutput(
-        .{ .source = "{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}} io.stack" },
-        "{\n  'type 'concat\n  'left {'type 'empty}\n  'right {'type 'epsilon}\n}",
-        "[0] {\n      'type 'concat\n      'left {'type 'empty}\n      'right {'type 'epsilon}\n    }\n",
+        .{ .source = "{type concat left {type empty} right {type epsilon}} io.stack" },
+        "{\n  type concat\n  left {type empty}\n  right {type epsilon}\n}",
+        "[0] {\n      type concat\n      left {type empty}\n      right {type epsilon}\n    }\n",
     );
     try expectStackWithOutput(
         .{ .source = "[3] 10 (io.stack +) fold" },

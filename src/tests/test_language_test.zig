@@ -50,9 +50,9 @@ test "testing: declaration is legal only at a module construction root" {
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectErr(&runtime, "(1) 'outside test");
-    try expectErr(&runtime, "[] (((1) 'nested test) call) 'nested.module @defm");
-    try expectOk(&runtime, "[] ((1) 'direct test) 'direct.module @defm");
+    try expectErr(&runtime, "(1) `outside test");
+    try expectErr(&runtime, "[] (((1) `nested test) call) `nested.module @defm");
+    try expectOk(&runtime, "[] ((1) `direct test) `direct.module @defm");
 }
 
 test "testing: test names are absent from application resolution" {
@@ -65,8 +65,8 @@ test "testing: test names are absent from application resolution" {
 
     try expectOk(
         &runtime,
-        "[] ((1) 'same def (2) 'same test (3) 'hidden test) 'visibility @defm " ++
-            "visibility.same 1 = {'kind 'user} assert",
+        "[] ((1) `same def (2) `same test (3) `hidden test) `visibility @defm " ++
+            "visibility.same 1 = {kind user} assert",
     );
     try expectErr(&runtime, "visibility.hidden");
 }
@@ -81,12 +81,12 @@ test "testing: test mode discovers canonical registrations without aliases" {
 
     try expectOk(
         &runtime,
-        "[] ((1) 'z test (2) 'a test) 'suite.two @defm " ++
-            "[] ((3) 'only test) 'suite.one @defm [] ((3) 'only test) 'suite.copy @defm " ++
-            "'short 'suite.one alias " ++
-            "tests dup len 4 = {'kind 'user} assert " ++
-            "first dup 'module at 'suite.copy match? {'kind 'user} assert " ++
-            "'name at 'only match? {'kind 'user} assert",
+        "[] ((1) `z test (2) `a test) `suite.two @defm " ++
+            "[] ((3) `only test) `suite.one @defm [] ((3) `only test) `suite.copy @defm " ++
+            "`short `suite.one alias " ++
+            "tests dup len 4 = {kind user} assert " ++
+            "first dup `module at `suite.copy match? {kind user} assert " ++
+            "`name at `only match? {kind user} assert",
     );
 }
 
@@ -99,7 +99,7 @@ test "testing: application sessions reject test discovery and execution" {
     defer runtime.deinit();
 
     try expectErr(&runtime, "tests");
-    try expectErr(&runtime, "{'module 'm 'name 'x} @test");
+    try expectErr(&runtime, "{module m name x} @test");
 }
 
 test "testing: application sessions validate and discard test declarations" {
@@ -115,8 +115,8 @@ test "testing: application sessions validate and discard test declarations" {
     // meaning and incurs no retained entry or name-index work.
     try expectOk(
         &application,
-        "[] ((1) 'same test (2) 'same test (42) 'answer def) 'discarded @defm " ++
-            "discarded.answer 42 = {'kind 'user} assert",
+        "[] ((1) `same test (2) `same test (42) `answer def) `discarded @defm " ++
+            "discarded.answer 42 = {kind user} assert",
     );
 
     var test_backing: test_heap.SessionHeap = .init;
@@ -125,7 +125,7 @@ test "testing: application sessions validate and discard test declarations" {
     defer runtime_inputs5.deinit();
     var testing = try session.Session.init(test_backing.allocator(), &.{}, runtime_inputs5.inputs(.{}), .default, .language_tests);
     defer testing.deinit();
-    try expectErr(&testing, "[] ((1) 'same test (2) 'same test) 'duplicate @defm");
+    try expectErr(&testing, "[] ((1) `same test (2) `same test) `duplicate @defm");
 }
 
 test "testing: test execution reaches private definitions and reifies its isolated stack" {
@@ -138,11 +138,11 @@ test "testing: test execution reaches private definitions and reifies its isolat
 
     try expectOk(
         &runtime,
-        "[] ((42) 'secret defp (stack len secret) 'private test) 'suite @defm " ++
+        "[] ((42) `secret defp (stack len secret) `private test) `suite @defm " ++
             "99 tests first @test " ++
-            "dup 'ok dict.has? {'kind 'user} assert " ++
-            "'ok at [0 42] match? {'kind 'user} assert " ++
-            "99 = {'kind 'user} assert",
+            "dup `ok dict.has? {kind user} assert " ++
+            "`ok at [0 42] match? {kind user} assert " ++
+            "99 = {kind user} assert",
     );
 }
 
@@ -156,13 +156,13 @@ test "testing: reload and removal replace the discoverable test catalog coherent
 
     try expectOk(
         &runtime,
-        "[] ((1) 'old test) 'changing @defm " ++
-            "tests first 'stale set " ++
-            "[] ((2) 'new test) 'changing @defm " ++
-            "tests dup len 1 = {'kind 'user} assert " ++
-            "first 'name at 'new match? {'kind 'user} assert " ++
-            "stale @test 'err dict.has? {'kind 'user} assert " ++
-            "'changing undefm tests len 0 = {'kind 'user} assert",
+        "[] ((1) `old test) `changing @defm " ++
+            "tests first `stale set " ++
+            "[] ((2) `new test) `changing @defm " ++
+            "tests dup len 1 = {kind user} assert " ++
+            "first `name at `new match? {kind user} assert " ++
+            "stale @test `err dict.has? {kind user} assert " ++
+            "`changing undefm tests len 0 = {kind user} assert",
     );
 }
 
@@ -176,14 +176,14 @@ test "testing: test discovery exposes metadata but not executable bodies" {
 
     try expectOk(
         &runtime,
-        "[] ((x -- y : \"Documented test.\") (dup) 'metadata test) 'catalog @defm " ++
+        "[] ((x -- y : \"Documented test.\") (dup) `metadata test) `catalog @defm " ++
             "tests first " ++
-            "dup 'module dict.has? {'kind 'user} assert " ++
-            "dup 'name dict.has? {'kind 'user} assert " ++
-            "dup 'effect dict.has? {'kind 'user} assert " ++
-            "dup 'doc dict.has? {'kind 'user} assert " ++
-            "dup 'body dict.has? not {'kind 'user} assert " ++
-            "dict.size 4 = {'kind 'user} assert",
+            "dup `module dict.has? {kind user} assert " ++
+            "dup `name dict.has? {kind user} assert " ++
+            "dup `effect dict.has? {kind user} assert " ++
+            "dup `doc dict.has? {kind user} assert " ++
+            "dup `body dict.has? not {kind user} assert " ++
+            "dict.size 4 = {kind user} assert",
     );
 }
 
@@ -201,13 +201,13 @@ test "testing: large test catalogs remain cancellable" {
     for (0..300) |index| {
         const declaration = try std.fmt.allocPrint(
             std.testing.allocator,
-            "(1) 'case-{d} test ",
+            "(1) `case-{d} test ",
             .{index},
         );
         defer std.testing.allocator.free(declaration);
         try source.appendSlice(std.testing.allocator, declaration);
     }
-    try source.appendSlice(std.testing.allocator, ") 'large.catalog @defm");
+    try source.appendSlice(std.testing.allocator, ") `large.catalog @defm");
     try expectOk(&runtime, source.items);
 
     // Walking the catalog repeatedly crosses a kernel quantum, which is where
@@ -216,7 +216,7 @@ test "testing: large test catalogs remain cancellable" {
     try expectErrContains(&runtime, "300 (tests pop) times", "unit cancelled");
     try std.testing.expect(runtime.lastPolls() >= 1);
     runtime.clearCancellation();
-    try expectOk(&runtime, "tests len 300 = {'kind 'user} assert");
+    try expectOk(&runtime, "tests len 300 = {kind user} assert");
     try expectOk(&runtime, "300 (tests pop) times");
     try std.testing.expect(runtime.lastPolls() > 1);
 }

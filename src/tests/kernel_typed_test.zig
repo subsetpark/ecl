@@ -194,11 +194,13 @@ fn buildCodepoints(representation: Representation, codepoints: []const u32) !val
     return list.fromValuesGeneric(allocator, boxed);
 }
 
+// A symbol list has one representation, the generic spine, so both
+// representations build the same list.
 fn buildSymbols(representation: Representation, symbols: []const u32) !value.Value {
-    if (representation == .specialized) return list.fromSymbolIds(allocator, symbols);
+    _ = representation;
     var boxed = try allocator.alloc(value.Value, symbols.len);
     defer allocator.free(boxed);
-    for (symbols, 0..) |symbol, index| boxed[index] = .{ .symbol = symbol };
+    for (symbols, 0..) |symbol, index| boxed[index] = .{ .symbol = .{ .name = symbol } };
     return list.fromValuesGeneric(allocator, boxed);
 }
 
@@ -548,7 +550,7 @@ test "typed differential: sequence order text and random operation parity across
         .{ .inputs = .{ .codepoints = &ascii }, .present = "\\a swap in?", .absent = "\\z swap in?" },
         .{ .inputs = .{ .codepoints = &bmp }, .present = "\\λ swap in?", .absent = "\\β swap in?" },
         .{ .inputs = .{ .codepoints = &astral }, .present = "\\🙂 swap in?", .absent = "\\😀 swap in?" },
-        .{ .inputs = .{ .symbols = &symbol_values }, .present = "'membership-alpha swap in?", .absent = "'membership-missing swap in?" },
+        .{ .inputs = .{ .symbols = &symbol_values }, .present = "`membership-alpha swap in?", .absent = "`membership-missing swap in?" },
     };
     for (membership_cases) |case| {
         try expectParity(&runtime, case.inputs, case.present);
@@ -579,7 +581,7 @@ test "typed differential: sequence order text and random operation parity across
     try expectParity(&runtime, .{ .codepoints = &ascii }, "dup 1 \\z put swap pop");
     try expectParity(&runtime, .{ .codepoints = &bmp }, "dup 1 \\β put swap pop");
     try expectParity(&runtime, .{ .codepoints = &astral }, "dup 1 \\😀 put swap pop");
-    try expectParity(&runtime, .{ .symbols = &symbol_values }, "dup 1 'membership-missing put swap pop");
+    try expectParity(&runtime, .{ .symbols = &symbol_values }, "dup 1 `membership-missing put swap pop");
     // A changed value class or wider character deliberately returns to the
     // profiling path so the result can widen rather than corrupt a leaf.
     try expectParity(&runtime, .{ .ints = &.{ 1, 2, 3 } }, "1 9.5 put");
@@ -894,19 +896,19 @@ test "typed kernels: typed reduce-groups matches the boxed route across budget b
     defer allocator.free(numbers);
     for (numbers, 0..) |*item, index| item.* = @as(i64, @intCast((index * 7919) % 1001)) - 500;
     for ([_][]const u8{
-        "dup 7 mod group dict.vals 'sum reduce-groups",
-        "dup 7 mod group dict.vals 'count reduce-groups",
-        "dup 7 mod group dict.vals 'min reduce-groups",
-        "dup 7 mod group dict.vals 'max reduce-groups",
-        "dup len range 1 wrap 'sum reduce-groups",
-        "dup len range 5 + 1 wrap 'count reduce-groups",
+        "dup 7 mod group dict.vals `sum reduce-groups",
+        "dup 7 mod group dict.vals `count reduce-groups",
+        "dup 7 mod group dict.vals `min reduce-groups",
+        "dup 7 mod group dict.vals `max reduce-groups",
+        "dup len range 1 wrap `sum reduce-groups",
+        "dup len range 5 + 1 wrap `count reduce-groups",
     }) |source| {
         try expectParity(&runtime, .{ .ints = numbers }, source);
     }
-    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 1 5]] 'sum reduce-groups");
-    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 5 1]] 'sum reduce-groups");
-    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1] [1 0] [2 2]] 'min reduce-groups");
-    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1 2] []] 'sum reduce-groups");
+    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 1 5]] `sum reduce-groups");
+    try expectParity(&runtime, .{ .ints = &.{ 9223372036854775807, 1 } }, "[[0 5 1]] `sum reduce-groups");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1] [1 0] [2 2]] `min reduce-groups");
+    try expectParity(&runtime, .{ .floats = &.{ 0.0, -0.0, 2.5 } }, "[[0 1 2] []] `sum reduce-groups");
 }
 
 // Typed `del` marks a mask from a typed index leaf, checking each granted run
@@ -1171,12 +1173,12 @@ test "typed kernels: fault blocks report the first logical index and validate al
         const rendered = try outcome(&runtime, &.{input}, "1 +");
         defer allocator.free(rendered);
         var expected_index: [64]u8 = undefined;
-        const needle = try std.fmt.bufPrint(&expected_index, "'index {d}", .{position});
+        const needle = try std.fmt.bufPrint(&expected_index, "index {d}", .{position});
         std.testing.expect(std.mem.indexOf(u8, rendered, needle) != null) catch |err| {
             std.log.err("fault at {d} reported: {s}", .{ position, rendered });
             return err;
         };
-        try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'overflow") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "kind overflow") != null);
     }
 
     // A type fault: every element faults, and the first index is still the one
@@ -1187,8 +1189,8 @@ test "typed kernels: fault blocks report the first logical index and validate al
     const reals = try list.fromValues(allocator, floats);
     const rendered = try outcome(&runtime, &.{reals}, "1 band");
     defer allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'type") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "'index 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "kind type") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "index 0") != null);
 }
 
 test "typed kernels: explicit vector cores preserve lanes tails broadcasts aliases and first faults" {
@@ -1276,8 +1278,8 @@ fn expectFaultAt(
     defer allocator.free(rendered);
     var kind_buffer: [64]u8 = undefined;
     var index_buffer: [64]u8 = undefined;
-    const kind_needle = try std.fmt.bufPrint(&kind_buffer, "'kind '{s} ", .{kind});
-    const index_needle = try std.fmt.bufPrint(&index_buffer, "'index {d} '", .{index});
+    const kind_needle = try std.fmt.bufPrint(&kind_buffer, "kind {s} ", .{kind});
+    const index_needle = try std.fmt.bufPrint(&index_buffer, "index {d} ", .{index});
     std.testing.expect(std.mem.indexOf(u8, rendered, kind_needle) != null and
         std.mem.indexOf(u8, rendered, index_needle) != null) catch |err| {
         std.log.err("`{s}` rendered {s}; wanted kind {s} at index {d}", .{ source, rendered, kind, index });
@@ -1424,7 +1426,7 @@ test "typed kernels: adopted outputs report the first fault after storing earlie
     const length = flat.block_size * 3 + 5;
     const fault_index = flat.block_size + 7;
     var index_text: [32]u8 = undefined;
-    const index_needle = try std.fmt.bufPrint(&index_text, "'index {d} '", .{fault_index});
+    const index_needle = try std.fmt.bufPrint(&index_text, "index {d} ", .{fault_index});
 
     // `dup 0 +` makes a solely owned copy, which `swap +` takes over as its
     // output; the vectors before the overflow are stored into it first.
@@ -1436,7 +1438,7 @@ test "typed kernels: adopted outputs report the first fault after storing earlie
     {
         const rendered = try outcome(&runtime, &.{try buildInts(.specialized, numbers)}, "dup 0 + swap +");
         defer allocator.free(rendered);
-        try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'overflow") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "kind overflow") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered, index_needle) != null);
     }
     try expectFaultRetainsInput(&runtime, try buildInts(.specialized, numbers), "dup 0 + swap +");
@@ -1473,11 +1475,11 @@ test "typed kernels: adopted outputs report the first fault after storing earlie
             };
             defer for (rows) |row| runtime.release(row);
             var position_text: [32]u8 = undefined;
-            const position_needle = try std.fmt.bufPrint(&position_text, "'index {d} '", .{position});
+            const position_needle = try std.fmt.bufPrint(&position_text, "index {d} ", .{position});
             const spine = try list.fromValues(allocator, &rows);
             const rendered = try outcome(&runtime, &.{spine}, "(+) fold1");
             defer allocator.free(rendered);
-            std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'domain") != null and
+            std.testing.expect(std.mem.indexOf(u8, rendered, "kind domain") != null and
                 std.mem.indexOf(u8, rendered, position_needle) != null) catch |err| {
                 std.log.err("fold fault at {d} (carried {}) reported: {s}", .{ position, carried, rendered });
                 return err;
@@ -1532,7 +1534,7 @@ test "typed kernels: temporary bytes are bounded by output plus one kernel chunk
         limited.requested_memory_limit = std.math.maxInt(usize);
         // A failed allocation surfaces as an ecl error dict rather than a Zig
         // error, so the rendered outcome must contain the value and no failure.
-        std.testing.expect(std.mem.indexOf(u8, rendered, "'kind") == null) catch |err| {
+        std.testing.expect(std.mem.indexOf(u8, rendered, "kind") == null) catch |err| {
             std.log.err("`{s}` failed under the bound: {s}", .{ source, rendered });
             return err;
         };
@@ -1549,7 +1551,7 @@ test "typed kernels: temporary bytes are bounded by output plus one kernel chunk
     limited.requested_memory_limit = std.math.maxInt(usize);
     if (starved) |text| {
         defer allocator.free(text);
-        std.testing.expect(std.mem.indexOf(u8, text, "'kind") != null) catch |err| {
+        std.testing.expect(std.mem.indexOf(u8, text, "kind") != null) catch |err| {
             std.log.err("a starved allocation still produced: {s}", .{text});
             return err;
         };

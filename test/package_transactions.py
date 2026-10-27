@@ -10,19 +10,19 @@ import tempfile
 
 binary = str(Path(sys.argv[1]).resolve())
 app_map = str(Path("apps/pkg/ecl.modules").resolve())
-old_lock = "{'format 2 'root \"project\" 'packages {} 'requires {\"project\" {}}}\n"
-new_lock = "{'format 2 'root \"project\" 'packages {} 'requires {}}\n"
-manifest = "{'format 2 'name \"project\" 'version \"0.1.0\" 'requires {}}\n"
+old_lock = "{format 2 root \"project\" packages {} requires {\"project\" {}}}\n"
+new_lock = "{format 2 root \"project\" packages {} requires {}}\n"
+manifest = "{format 2 name \"project\" version \"0.1.0\" requires {}}\n"
 generation = "a" * 64
-reference = "{'format 1 'map \".ecl/generations/" + generation + "/ecl.modules\"}\n"
+reference = "{format 1 map \".ecl/generations/" + generation + "/ecl.modules\"}\n"
 previous_generation = "b" * 64
-old_map = "{'format 1 'map \".ecl/generations/" + previous_generation + "/ecl.modules\"}\n"
-complete_map = "{'format 1 'local \"local\" 'scopes {\"local\" {'root \".\" 'visible [] 'sources [\"*.ecl\"] 'artifacts []}}}\n"
+old_map = "{format 1 map \".ecl/generations/" + previous_generation + "/ecl.modules\"}\n"
+complete_map = "{format 1 local \"local\" scopes {\"local\" {root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}\n"
 
 
 def invoke(root, body, success=True):
     program = (
-        json.dumps(str(root)) + " fs.open-dir 'project set "
+        json.dumps(str(root)) + " fs.open-dir `project set "
         'project ".ecl/mutation.lock" fs.lock '
         + body + " port.close"
     )
@@ -58,7 +58,7 @@ def initialize(root):
         directory.mkdir(parents=True)
         (directory / "ecl.lock").write_text(lock)
         (directory / "ecl.modules").write_text(complete_map)
-        (directory / "fixture.ecl").write_text(f"[] (({answer}) 'value def) 'fixture @defm")
+        (directory / "fixture.ecl").write_text(f"[] (({answer}) `value def) `fixture @defm")
     (root / "ecl.pkg").write_text(manifest)
     (root / "ecl.lock").write_text(old_lock)
     (root / "ecl.modules").write_text(old_map)

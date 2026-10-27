@@ -757,11 +757,6 @@ fn writeView(call: *Transaction, item: Value, output: *abi.ValueView) abi.HostSt
         .char => |codepoint| .{ .kind = .char, .scalar_bits = codepoint },
         .symbol => |id| .{
             .kind = .symbol,
-            .bytes_ptr = intern.get(id).ptr,
-            .bytes_len = intern.get(id).len,
-        },
-        .word => |id| .{
-            .kind = .word,
             .bytes_ptr = intern.get(id.name).ptr,
             .bytes_len = intern.get(id.name).len,
         },
@@ -1070,7 +1065,7 @@ fn readPath(
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task, .port, .address => return .{ .status = .invalid },
+        .int, .float, .char, .symbol, .task, .port, .address => return .{ .status = .invalid },
     };
     return .{ .value = current };
 }
@@ -1122,7 +1117,7 @@ fn hostScalar(
     const call = transactionFrom(context);
     if (call.terminal != .idle or scalar.size != @sizeOf(abi.Scalar)) return .invalid;
     const units: u32 = switch (scalar.kind) {
-        .symbol, .word => @max(1, std.math.cast(u32, scalar.bytes_len) orelse return .invalid),
+        .symbol => @max(1, std.math.cast(u32, scalar.bytes_len) orelse return .invalid),
         .int, .float, .char => 0,
         .list, .dict, .port => return .invalid,
         _ => return .invalid,
@@ -1141,14 +1136,14 @@ fn hostScalar(
             .{ .char = codepoint }
         else
             return .invalid,
-        .symbol, .word => item: {
+        .symbol => item: {
             const bytes = descriptor_api.guestUtf8(
                 scalar.bytes_ptr,
                 scalar.bytes_len,
                 abi.max_guest_scalar_bytes,
             ) catch return .invalid;
             const id = intern.intern(bytes) catch return .out_of_memory;
-            break :item if (scalar.kind == .symbol) .{ .symbol = id } else .{ .word = .{ .name = id } };
+            break :item if (scalar.kind == .symbol) .{ .symbol = .{ .name = id } } else .{ .symbol = .{ .name = id } };
         },
         .list, .dict, .port => return .invalid,
         _ => return .invalid,

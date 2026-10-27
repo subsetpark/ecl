@@ -860,11 +860,11 @@ pub const SpanArchive = enum(usize) {
             item: value.Value,
         ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
             shared: switch (item) {
-                // The one rewrite: a word occurrence inside this body's text
+                // The one rewrite: a symbol occurrence inside this body's text
                 // names the image the body is becoming. A lowered locals
                 // operation names no slot and keeps its operand.
-                .word => |reference| return if (env.localOperand(reference.slot) != null) item else .{
-                    .word = .{ .name = reference.name, .slot = try self.linker.link(reference.name) },
+                .symbol => |reference| return if (env.localOperand(reference.slot) != null) item else .{
+                    .symbol = .{ .name = reference.name, .slot = try self.linker.link(reference.name) },
                 },
                 .list => |nested| {
                     if (nested.kind() != .generic_spine) break :shared;
@@ -1606,7 +1606,7 @@ fn sourceIngestAllocationProbe(allocator: std.mem.Allocator) !void {
     var diag: reader.Diag = .{};
     var ingestion = try archive.sourceIngestCursor(
         "spans-ingest-oom.ecl",
-        "(1) 'one def",
+        "(1) `one def",
         &diag,
         .unlinked,
     );
@@ -1639,7 +1639,7 @@ test "spans: public source ingestion handle relocates between advances" {
     var diag: reader.Diag = .{};
     var ingestion = try fixture.archive.sourceIngestCursor(
         "spans-relocated-ingest.ecl",
-        "(1) 'one def",
+        "(1) `one def",
         &diag,
         .unlinked,
     );
@@ -1668,7 +1668,7 @@ test "spans: public source ingestion handle relocates between advances" {
 
     var abandoned = try fixture.archive.sourceIngestCursor(
         "spans-relocated-abandon.ecl",
-        "(2) 'two def",
+        "(2) `two def",
         &diag,
         .unlinked,
     );
@@ -1700,7 +1700,7 @@ test "spans: only the reader's own text is admitted" {
     try fixture.init(std.testing.allocator);
     defer fixture.deinit();
 
-    const root = try fixture.absorbSource("(1 +) 'go def");
+    const root = try fixture.absorbSource("(1 +) `go def");
     {
         const prepared = try prepareForTest(&fixture, root);
         try std.testing.expect(prepared == .admitted);
@@ -1729,7 +1729,7 @@ test "spans: one archive never admits another archive's text" {
     try other.init(std.testing.allocator);
     defer other.deinit();
 
-    const root = try reading.absorbSource("(1 +) 'go def");
+    const root = try reading.absorbSource("(1 +) `go def");
     {
         const prepared = try prepareForTest(&reading, root);
         try std.testing.expect(prepared == .admitted);
@@ -1752,7 +1752,7 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
     defer fixture.deinit();
     const releases = heap.hostDomain(fixture.owner.cleanup());
 
-    const root = try fixture.absorbSource("(1 +) 'go def");
+    const root = try fixture.absorbSource("(1 +) `go def");
     var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
         try admittedForTest(&fixture, root, 7),
     );
@@ -1783,12 +1783,12 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
     var words: usize = 0;
     for (0..@as(usize, @intCast(copy.length()))) |index| {
         const item = list.atUnchecked(.{ .list = copy }, index);
-        if (item != .word) continue;
+        if (item != .symbol) continue;
         words += 1;
-        try std.testing.expectEqual(@as(u32, 7), item.word.slot);
+        try std.testing.expectEqual(@as(u32, 7), item.symbol.slot);
         try std.testing.expectEqual(
             @as(u32, 0),
-            list.atUnchecked(.{ .list = root }, index).word.slot,
+            list.atUnchecked(.{ .list = root }, index).symbol.slot,
         );
     }
     try std.testing.expect(words != 0);
@@ -1803,9 +1803,9 @@ test "spans: every re-scope step is one budget unit, publication included" {
     // A dict with more than `index_threshold` entries, so the copy also has an
     // index to carry: the whole point is that no single step finalizes it.
     const root = try fixture.absorbSource(
-        "{'a (dup) 'b (dup) 'c (dup) 'd (dup) 'e (dup) 'f (dup) 'g (dup) 'h (dup) " ++
-            "'i (dup) 'j (dup) 'k (dup) 'l (dup) 'm (dup) 'n (dup) 'o (dup) 'p (dup) " ++
-            "'q (dup) 'r (dup)} 'd def",
+        "{a (dup) b (dup) c (dup) d (dup) e (dup) f (dup) g (dup) h (dup) " ++
+            "i (dup) j (dup) k (dup) l (dup) m (dup) n (dup) o (dup) p (dup) " ++
+            "q (dup) r (dup)} `d def",
     );
     var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
         try admittedForTest(&fixture, root, 3),
@@ -1838,7 +1838,7 @@ test "spans: settled lineage storage tracks only live copies" {
         try fixture.init(counting.allocator());
         defer fixture.deinit();
         const releases = heap.hostDomain(fixture.owner.cleanup());
-        const root = try fixture.absorbSource("(1 +) 'go def (2 +) 'go2 def");
+        const root = try fixture.absorbSource("(1 +) `go def (2 +) `go2 def");
 
         // Each round re-scopes the same body and immediately drops the copy, so
         // no copy is ever live at the same time as another. Warm past the first
@@ -1898,7 +1898,7 @@ test "spans: an abandoned re-scope releases its partial copy" {
     defer fixture.deinit();
 
     const root = try fixture.absorbSource(
-        "(1 (2 (3 dup) dup) dup) 'go def {'a (k) 'b (j)} 'd def",
+        "(1 (2 (3 dup) dup) dup) `go def {a (k) b (j)} `d def",
     );
 
     // One unit of work, then abandon: the frames hold rewritten values, freshly

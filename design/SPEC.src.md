@@ -139,7 +139,7 @@ a second grammar.
 
 ### Source text
 
-- Source is UTF-8, mandatorily. Invalid UTF-8 is a `'parse` error.
+- Source is UTF-8, mandatorily. Invalid UTF-8 is a `` `parse `` error.
 - `#` begins a comment that runs to end of line, outside strings. Shebang
   lines are therefore comments.
 - Tokens are separated by whitespace: Unicode whitespace, plus comma —
@@ -160,7 +160,7 @@ characters. An atom is classified whole-token, in this order:
 1. **Number** — the entire token parses as a number, else it is not one
    (`2dup` and `1+` are words; `-3` is a number; `-` is a word).
    - int64: optional `+`/`-` sign, then decimal digits with optional `_`
-     separators strictly between digits (`1_000_000`), or `0x` followed by
+     separators strictly between digits (1_000_000), or `0x` followed by
      hex digits. `_` is not permitted in hex literals. A literal outside
      the int64 range is a parse error.
    - float64: `digits . digits` with an optional exponent (`e`/`E`,
@@ -172,19 +172,30 @@ characters. An atom is classified whole-token, in this order:
    - The whole tokens `inf`, `+inf`, and `-inf` are float literals (they
      are numbers, so the names leave the word namespace). NaN has no
      literal; NaN values do not exist (see Numbers).
-2. **Char** — `\` followed by exactly one character (`\a`), one of the
+2. **Char** — `\` followed by exactly one character (\a), one of the
    names `\space`, `\tab`, `\newline`, or `\u{...}` with one to six hex
    digits naming a Unicode scalar value (surrogate halves and values above
    U+10FFFF are parse errors).
-3. **Quoted symbol** — `'` followed by a symbol. `'` is reserved
-   token-initially and banned inside symbols.
-4. **Word** — anything else: a symbol, evaluated by lookup.
+3. **Quote** — `` ` `` followed by a symbol. It is reader sugar for the two
+   forms `(symbol) core.first`, so `` `foo `` and `(foo) first` push the
+   same value. The expansion is literal wherever it appears, so `` [`a `b] ``
+   is the four-element list `((a) core.first (b) core.first)`; only `{ }`
+   rejects a quote, since the expansion would break its key/value pairing.
+   `` ` `` is reserved token-initially and banned inside symbols.
+4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
+   list it occurs in is run, it is resolved by lookup and executed.
 
 **Symbols** are one or more segments joined by `.`; the dot is the module
 qualification separator and nothing else (`stats.mean`, quotable as
-`'stats.mean`). Leading, trailing, or doubled dots are parse errors.
-Segment characters are anything except whitespace, the six delimiters,
-`"`, `#`, `'`, `\`, `.`, `,`, `;`, and `|`. Unicode letters are legal.
+`` `stats.mean ``). Leading, trailing, or doubled dots are parse errors. A
+bare segment's characters are anything except whitespace, the six
+delimiters, `"`, `#`, `'`, `` ` ``, `\`, `.`, `,`, `;`, and `|`; Unicode
+letters are legal. A segment may instead be delimited as `'...'`, which
+admits every character except `'` and control characters (`'foo bar'`,
+`stats.'my mean'`). The delimiters are not part of the spelling: `'foo'`
+and `foo` are the same symbol, and `.` keeps its separator meaning inside
+them, so `'stats.my mean'` is `stats.'my mean'`. A delimited segment fills
+its whole segment; `'ab'c` is a parse error.
 
 **Strings** are `"..."` and may span newlines. Raw newlines, indentation,
 and blank lines inside the quotes are literal; there is no triple-quoted,
@@ -213,10 +224,11 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   `[1 2 3)` is a parse error. (Printing chooses brackets by
   canonical value shape; see Printing.)
 - `{ k v ... }` constructs one dict value at read time. Adjacent top-level
-  forms are paired as key and value; neither is evaluated, so bare words
-  are stored as word values — `{foo bar}` stores the word `bar` under the
-  word key `foo` without resolving either name. An odd form count and a
-  duplicate key are parse errors. `{}` is the empty dict. When entries
+  forms are paired as key and value; neither is evaluated, so a bare
+  symbol is stored as itself — `{foo bar}` stores the symbol `bar` under the
+  key `foo` without resolving either name. A quote directly inside `{ }` is
+  a parse error, since its two forms would pair as separate entries. An odd
+  form count and a duplicate key are parse errors. `{}` is the empty dict. When entries
   require computation, build a flat entry list and use `dict.from-flat`.
 - Locals name a quotation's inputs: `(|lo hi| hi lo - rand lo +)`,
   `(|x| x x *) each`. A locals declaration is legal only immediately after
@@ -256,10 +268,15 @@ Float values use IEEE 754 binary64, excluding NaN; `inf` and `-inf` are
 ordinary values. Integer overflow is an error, never wrapping or promotion.
 See Numbers.
 
-A bare word in code and a quoted symbol are distinct source atoms: `(dup)
-first` yields the word `dup`, while `'dup` yields the symbol. Words print bare
-and symbols print quoted. Resolution and provenance metadata belong to stored
-word occurrences rather than their values.
+A symbol is one kind of value whether it was written bare or built at
+runtime: `(dup) first` and `` `dup `` yield the same symbol, and `{dup 1}`
+stores it as a key. The position of a symbol in a list, not its value,
+decides what running the list does with it: `(dup) call` executes `dup`,
+while `` (`dup) call `` runs the quote's expansion `(dup) core.first` and
+pushes the symbol. Symbols print bare, delimited as `'...'` only when the
+bare spelling would not read back as the same symbol. Resolution and
+provenance metadata belong to stored symbol occurrences rather than their
+values and never distinguish two symbols.
 
 A quotation, vector, and matrix row are list roles. A homogeneous list of
 atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
@@ -284,11 +301,15 @@ provenance, resolution metadata, and reader lineage need not be reproduced by
 that round trip.
 
 Printing never exposes storage specialization. A non-string list uses `[...]`
-when its value has canonical array shape—a homogeneous flat vector or a
-rectangular nesting of such vectors—and `(...)` otherwise. Both delimiters
-read as the same list kind. Thus `(1 2 3)` prints as `[1 2 3]`, while the
-ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings use
-quoted string syntax.
+when its value has canonical array shape—a homogeneous flat vector of
+numbers or chars, or a rectangular nesting of such vectors—and `(...)`
+otherwise. A vector of symbols has a quotation's shape and prints with
+`(...)` however it was built, and a quotation prints its quote expansions,
+so `` (`x) `` prints as `((x) core.first)`. Both delimiters read as the same
+list kind.
+Thus `(1 2 3)` prints as `[1 2 3]`, `[dup swap]` prints as `(dup swap)`, and
+the ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings
+use quoted string syntax.
 
 <!-- include:printing-model -->
 
@@ -329,7 +350,7 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
 - `cmp` is a three-way total ordering (−1/0/1) on numbers, chars (by
   codepoint), and lists, which order lexicographically by their elements'
   `cmp` and then by length; strings are lists of chars. Anything else,
-  including cross-kind pairs, is a `'type` error, but two lists compare only
+  including cross-kind pairs, is a `` `type `` error, but two lists compare only
   through their first unequal element pair. `grade` orders by exactly this
   ordering.
 - Words that require a boolean reject every value outside the formally defined
@@ -360,7 +381,7 @@ unit observes it; the occurrence retains no binding, body, value, or module
 generation. A unit observes the session bindings that existed when it was
 created, together with the definitions it makes itself, and never a session
 definition made by another unit after its creation. Only top-level units
-define (definition is `'domain` inside combinator applications, `@attempt`, and
+define (definition is `` `domain `` inside combinator applications, `@attempt`, and
 tasks), so each REPL line, script, and loaded file sees every earlier
 definition, and replacing a binding affects existing code at its next execution
 in the defining unit and in every unit created afterwards. A task keeps the
@@ -376,17 +397,19 @@ its later applications. A
 module image is immutable
 after construction; replacing an image in a registration does not retarget
 words belonging to the former image. Executing a word whose root has retired is
-a `'domain` error, never a fallback to another root.
+a `` `domain `` error, never a fallback to another root.
 
-The reader links each word occurrence to the slot for its name in the root the
-source is read into: the session, the module image under construction, or core
-for the prelude. Moving, copying, concatenating, or splicing values preserves
-each occurrence's own slot, so one quotation may contain words from several
-roots, and a quotation has no single resolution root. A word built at run time
-(`word`, `qualify`, and words built by the standard library or native code)
-links to the slot for its name in the root of the activation that built it;
-words built by the implementation itself link to core. No word resolves by
-where it happens to be invoked.
+The reader links each symbol occurrence to the slot for its name in the root
+the source is read into: the session, the module image under construction, or
+core for the prelude. Moving, copying, concatenating, or splicing values
+preserves each occurrence's own slot, so one quotation may contain symbols
+from several roots, and a quotation has no single resolution root. A symbol
+that `qualify`, `symbol`, `intern`, or native code builds links to the slot
+for its name in the root of the activation that built it, so a quotation
+assembled from strings resolves where it was assembled rather than where it
+is later called. A symbol the implementation builds for itself (an error-dict
+key, a trace entry) carries no link and means core's binding wherever it
+runs.
 
 A reader-produced aggregate may separately retain **reader lineage**, which
 records that the aggregate and its reader-built descendants came from a
@@ -413,11 +436,11 @@ storage is proportional to recursion depth rather than constant.
 Errors are crash-only. There is no try/catch or handler quotation: an error
 propagates until the enclosing unit dies. `raise` initiates that propagation
 from an error value, and `fail` is sugar for raising an error whose kind is
-`'user` and whose message is the supplied string.
+`` `user `` and whose message is the supplied string.
 
 Failure is observed as data only outside an explicit boundary: `@attempt`, or
-the concurrent `@spawn`/`task.await` path, returns `{'ok (values)}` after success or
-`{'err error}` after failure. Each envelope is an ordinary dictionary and is
+the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success or
+`{err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
 a script's boundary is the process.
 
@@ -500,7 +523,7 @@ Three quotation-application behaviors exist:
 Every isolated combinator states the stack effect it requires of its
 quotation argument (given per word in the reference). The contract is
 checked dynamically at each application; a violation is an immediate
-`'contract` error naming the element and the observed effect.
+`` `contract `` error naming the element and the observed effect.
 
 ### Explicit linear recursion
 
@@ -521,9 +544,9 @@ either branch begins. On 1, `base` runs from that restored state. On 0, `pre`
 runs from it, the recursive descent begins from `pre`'s resulting stack, and
 `post` runs after that descent returns. Consequently the four applications
 share ambient stack state intentionally; none has an isolated quotation
-contract. Fewer than four operands is `'underflow`, a non-quotation parameter
-is `'type`, and a missing or non-boolean predicate result follows the ordinary
-guard `'underflow`/`'type` behavior.
+contract. Fewer than four operands is `` `underflow ``, a non-quotation parameter
+is `` `type ``, and a missing or non-boolean predicate result follows the ordinary
+guard `` `underflow ``/`` `type `` behavior.
 
 Each nonterminal descent leaves one explicit `post` continuation in the frame
 machine. General `linrec` therefore uses live continuation storage
@@ -566,10 +589,10 @@ execution context rather than consumed from the operand stack. `*file*`
 returns the source name attached to its currently executing reader-authored
 occurrence; a definition therefore keeps reporting the file that authored its
 body when another file calls it. Runtime-assembled code has no source
-provenance, so `*file*` is `'domain` there rather than falling back to its
+provenance, so `*file*` is `` `domain `` there rather than falling back to its
 caller. `*module*` returns the canonical name of the module whose code is
 running, including a construction body that has not yet published; at the
-root there is no module and it is `'domain`. The stars are ordinary word characters with no reader
+root there is no module and it is `` `domain ``. The stars are ordinary word characters with no reader
 meaning, and the convention applies to shipped vocabulary without reserving
 the spelling from user definitions.
 
@@ -581,7 +604,7 @@ Every unit constructor receives its seed values and exact body separately:
 values (q) @attempt
 values (q) @spawn
 list values (q) @each          ( element deepest in each child )
-values (body) 'name @defm
+values (body) `name @defm
 ```
 
 Both `values` and the body must be lists. The new unit's operand stack is
@@ -600,7 +623,7 @@ attribution; see Modules.
 
 Underflow against the floor of a constructed unit is reported specially:
 the message names the isolation and the constructor's values operand, and the
-error dict carries `'isolation` naming the constructor. It does not prescribe
+error dict carries `` `isolation `` naming the constructor. It does not prescribe
 `partial` or `with`: those construct a different, reusable quotation rather
 than pass arguments through this boundary. It is the one underflow
 whose cause is invisible — the values the caller meant to pass are on
@@ -621,7 +644,7 @@ module image   → core; frozen after construction
 A root holds one *name slot* per name that has been written in it or defined
 in it. A slot yields the root's own binding for that name when there is one,
 and otherwise core's binding for that name; with neither it is an
-`'undefined-word` error at execution. Defining a name in a root fills its slot
+`` `undefined-word `` error at execution. Defining a name in a root fills its slot
 and removing the name empties it, so every occurrence linked to the slot
 observes the change at its next execution in a unit that can observe it (see
 Core evaluation). A word read before its name is
@@ -636,9 +659,9 @@ namespace of their own.
 `core` is a reserved qualifier, not a registration. A qualified word whose
 module segment is exactly `core` resolves its binding segment in core alone,
 skipping the session and every module image, so a shadowed core definition
-remains reachable: after `(2 *) 'dup def`, `core.dup` is still the primitive.
+remains reachable: after ``(2 *) `dup def``, `core.dup` is still the primitive.
 Only public core bindings resolve this way; a missing or private name is
-`'undefined-word` with `'scope 'core`. `'core 'dup qualify` constructs the same
+`` `undefined-word `` with `` `scope `core ``. `` `core `dup qualify `` constructs the same
 word. `import`, `alias`, and `undefm` observe registrations only and do not
 accept `core`.
 
@@ -646,7 +669,7 @@ Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
 first use. `@defm` and `undefm` with a standard-library module
-name are `'domain`, as is `alias` with one as either the alias or its target. A
+name are `` `domain ``, as is `alias` with one as either the alias or its target. A
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
 Resolution and module home are independent parts of an activation. A word's
@@ -664,15 +687,15 @@ capturing them in bodies. Public and private definitions differ in visibility,
 not invocation semantics. Native and builtin definitions may have different
 representations but expose the same binding model.
 
-- `(body) 'name def` binds a word: reference applies the body. The body
+- ``(body) `name def`` binds a word: reference applies the body. The body
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
-- `annotation? value 'name set` binds a constant. It is sugar, defined in ecl
+- ``annotation? value `name set`` binds a constant. It is sugar, defined in ecl
   as `swap literal swap def`: the value is captured with `literal`, so the
   published body is `(value)`, or `((value) first)` when the value is a word.
   Reference applies that body and pushes exactly the captured value, quotations included — the capture is
-  inert, so nothing in it executes or resolves. `v 'name set` is therefore
-  observationally `v literal 'name def`: the sugar synthesizes no
+  inert, so nothing in it executes or resolves. ``v `name set`` is therefore
+  observationally ``v literal `name def``: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
@@ -687,7 +710,7 @@ representations but expose the same binding model.
   followed by its body through the standard source formatter. It omits the
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
   and effect metadata, and `doc` returns documentation.
-- `'name unset` and `'name undef` are exact aliases. They remove a binding
+- `` `name unset `` and `` `name undef `` are exact aliases. They remove a binding
   only from the current root and otherwise do nothing. Removing a shadow
   reveals core's binding for the name; it never mutates core. The name must be
   unqualified and non-reserved, under the same namespace validation as `def`.
@@ -698,12 +721,12 @@ representations but expose the same binding model.
   writes the root of the activation that called it. Inside a combinator
   application (`each`, `zip-with`, `for`, `fold`, `scan`, `update`, `stencil`,
   `unfold`, `infra`, and the words built on them), inside `@attempt`, and
-  inside a task, every one of these is `'domain`. Values local to a body
+  inside a task, every one of these is `` `domain ``. Values local to a body
   belong on the stack or in locals.
 - `defp`/`setp` are the private forms, legal only inside a module body
   (see Modules); at top level they are errors.
 - Because `set`/`setp` are sugar, their failures are raised by the words
-  they call: an underflowing `set` is `'underflow` from `swap`, and a
+  they call: an underflowing `set` is `` `underflow `` from `swap`, and a
   non-symbol or reserved name is raised by `def`/`defp`. The error kind is
   unchanged; the trace names `set`/`setp` as the parent.
 
@@ -712,19 +735,19 @@ representations but expose the same binding model.
 A definition may place one annotation quotation immediately before its body:
 
 ```ecl
-(body) 'name def
-(before -- after) (body) 'name def
-(: "Documentation.") (body) 'name def
-(before -- after : "Documentation.") (body) 'name def
+(body) `name def
+(before -- after) (body) `name def
+(: "Documentation.") (body) `name def
+(before -- after : "Documentation.") (body) `name def
 ```
 
 The annotation is ordinary quotation data — no special grammar — and is
 recognized only when it contains a top-level word `--` or `:`. Nested
-markers and the quoted symbols `'--`/`':` are inert. A recognized
+markers and the quoted symbols `` `-- ``/`` `: `` are inert. A recognized
 annotation is validated as a whole before the binding publishes: at most
 one marker of each kind, `--` before `:`, only words around `--`, and
 exactly one string after `:`. A malformed recognized annotation is a
-`'domain` error. The quotation adjacent to the name is unconditionally the
+`` `domain `` error. The quotation adjacent to the name is unconditionally the
 body; only the value beneath it is considered for annotation recognition.
 `set`/`setp` capture their value with `literal` before `def`/`defp` sees it,
 so marker words belonging to the captured value sit nested inside the body
@@ -736,7 +759,7 @@ four forms as top-level `def`: no annotation, effect only, documentation
 only, or both. A top-level effect is reflective metadata only; a module
 word's declared effect is a live contract, checked dynamically against the
 observed effect when application crosses a module boundary (violation:
-`'contract`). An omitted module effect means there is no such check.
+`` `contract ``). An omitted module effect means there is no such check.
 This source-language relaxation does not weaken the native ABI, whose
 `Call` effect and documentation remain mandatory; the shipped prelude
 keeps its stronger repository policy requiring meaningful documentation.
@@ -755,7 +778,7 @@ The after portion of an effect is either **all named slots** or exactly
 the token `...`:
 
 ```ecl
-(result on-ok on-err -- ...) (body) 'case def
+(result on-ok on-err -- ...) (body) `case def
 ```
 
 `...` declares a **fixed before row and a variable after row**: how many
@@ -766,17 +789,17 @@ word that would otherwise carry a documentation-only annotation regains
 input checking and honest reflection, and `which` and `see` render the effect
 with `-- ...`.
 
-The grammar is strict: no mixing (`(a -- ... b)` is `'domain`), and the
-token never appears in a before row (`(... -- b)` is `'domain`). Named row
-variables in the Factor style (`..a`, `..b`) are deferred to the static
+The grammar is strict: no mixing (`(a -- ... b)` is `` `domain ``), and the
+token never appears in a before row (`(... -- b)` is `` `domain ``). Named row
+variables in the Factor style (..a, ..b) are deferred to the static
 checker; `...` is the anonymous row that reads the same way today. The
 native ABI is deliberately excluded: a native `complete` requires the
 exact output tuple, so `...` in a `Call` effect is a compile error.
 
 The exact names `--`, `:`, and `...` are reserved against binding:
-they remain legal word and symbol values and can be built into
+they remain legal symbol values and can be built into
 annotations at runtime, but cannot be introduced as definitions, values,
-locals, module names, aliases, exports, or native entries. Binding attempts are `'domain`;
+locals, module names, aliases, exports, or native entries. Binding attempts are `` `domain ``;
 use as a local name is a parse error. Longer names containing the same punctuation
 remain legal.
 
@@ -789,12 +812,12 @@ descent:
 - An atom extends to every element of a list: `10 [1 2 3] +` is
   `[11 12 13]`.
 - Two lists pair elementwise at each level and recurse; a top-level length
-  mismatch is a `'conform` error.
+  mismatch is a `` `conform `` error.
 - Dicts pervade over their values, preserving keys. A dict with a dict
   aligns by key: matching keys combine, unmatched keys pass through
   unchanged (union with identity fill).
-- Symbols and words are not numeric: pervading into a quotation errors at
-  the first symbol or word leaf.
+- Symbols are not numeric: pervading into a quotation errors at the first
+  symbol leaf.
 - Chars enter every numeric word (arithmetic, comparison, the bitwise and
   wrapping words) as their codepoints and leave as ints: `char int +` and
   `char char -` are ints, `char int =` compares the codepoint with the int,
@@ -814,33 +837,33 @@ traverse an outer list of whole keys without descending into those keys.
 
 ## Numbers
 
-- Arithmetic on int64 that overflows is an `'overflow` error — no wrapping, no
+- Arithmetic on int64 that overflows is an `` `overflow `` error — no wrapping, no
   promotion to float or bignum. Scalar and array arithmetic behave identically.
 - `/` is float division. `div` is checked integer division; its division by
-  zero is `'domain`.
+  zero is `` `domain ``.
 - Float arithmetic follows IEEE 754, so a finite computation may produce
   `inf` or `-inf`: overflow (`1e308 10 *`), poles (`0 log` is `-inf`), and
   division of a nonzero number by zero (`1 0 /` is `inf`, `1 -0.0 /` is
-  `-inf`). Any operation whose IEEE result would be NaN is `'domain` (e.g.
+  `-inf`). Any operation whose IEEE result would be NaN is `` `domain `` (e.g.
   `-1 log`, `0 0 /`, `inf -inf +`). NaN therefore never exists, and nothing
   outside the language can introduce one: a NaN float that a native extension
   returns or puts in a port message is rejected as an invalid value.
-- `floor`, `ceil`, and `round` return int64 (`'overflow` when the result
+- `floor`, `ceil`, and `round` return int64 (`` `overflow `` when the result
   exceeds the range): their results are indices and mask material, and int-ness
   keeps integer pipelines integer. `pow` returns float.
 - `str` output for numbers round-trips (see Printing); float equality is
   numeric everywhere (see Equality).
 - The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` read an int
   as its 64-bit two's-complement pattern and a char as its codepoint; they are
-  otherwise int-only, so a float is `'type` rather than a coercion. They never
+  otherwise int-only, so a float is `` `type `` rather than a coercion. They never
   overflow — `bsl` truncates bits off the top where `*` would raise. Their `count` operand is the one place
-  they can fail on a value: a shift outside `0..63` is `'domain`. They pervade
+  they can fail on a value: a shift outside `0..63` is `` `domain ``. They pervade
   and align dicts like every other pervasive word.
 - The wrapping words `+%`, `-%`, and `*%` are the integer sum, difference, and
   product modulo 2^64 in two's complement: where `+`, `-`, and `*` raise
-  `'overflow`, they wrap, as Zig's operators of the same spelling do. They are
+  `` `overflow ``, they wrap, as Zig's operators of the same spelling do. They are
   int-only like the bitwise words (a char is its codepoint, a float is
-  `'type`), and with
+  `` `type ``), and with
   `band` they give arithmetic modulo any power of two up to 2^64.
 
 ## Randomness
@@ -858,7 +881,7 @@ accumulates between units, tasks, or module loads.
   drawn at startup, and no word silently reaches a CSPRNG.
 - `rand.shuffle` and `rand.deal` thread the same state through a permutation
   and a draw without replacement. Code that wants an ambient generator keeps
-  the state in an agent: `[0 0] agent.start 'rng set` then
+  the state in an agent: ``[0 0] agent.start `rng set`` then
   `(5 rand.int) rng agent.call` (see The standard library).
 
 ## Chars and strings
@@ -879,7 +902,7 @@ Conversion between kinds is explicit and names its target. `chars` yields a
 value's text content as a string: a string unchanged, a symbol's or word's
 spelling, a char as a one-element string, or a byte list decoded as UTF-8. A
 byte list is an integer list whose every element is 0 through 255; bytes that
-are not valid UTF-8 are `'domain` with `'reason 'invalid-utf8`. `bytes` is the
+are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``. `bytes` is the
 inverse: it encodes a string as UTF-8 and returns a byte list unchanged. `int`
 accepts an int, a string in the integer-literal grammar, or a char, whose
 codepoint it returns. `float` accepts a float, an int, or a string in the
@@ -887,24 +910,21 @@ numeric-literal grammar. A float is not accepted by `int`: `floor`, `round`,
 and `ceil` name the rounding. `char` accepts a char or a string, returned
 unchanged, an int in the Unicode scalar range, or a list of such ints and
 chars, which becomes the string they spell. A string outside the literal
-grammar is `'parse`; an int outside the scalar range is `'domain`; every
-other operand kind is `'type`. `str` remains the readable
+grammar is `` `parse ``; an int outside the scalar range is `` `domain ``; every
+other operand kind is `` `type ``. `str` remains the readable
 representation and `parse` remains the reader; neither is a conversion.
 
 Symbol conversion is split so that programs cannot grow the interned name
-space by accident. `symbol` accepts a symbol or word unchanged and converts a
-string only when that spelling is already interned, failing `'domain`
+space by accident. `symbol` accepts a symbol unchanged and converts a
+string only when that spelling is already interned, failing `` `domain ``
 otherwise; every symbol a program can meaningfully compare against was
 interned when its source was read, so lookup is the common case. `intern`
 accepts the same operands and creates the symbol when the spelling is new.
-Both reject a string that is not a valid symbol spelling as `'domain`. The
+Both reject a string that is not a valid symbol spelling as `` `domain ``. The
 interned name space grows only through reading source, `parse`, `intern`, and
 the module loaders; words that materialize values from external data produce
-strings, never symbols.
-
-`word` converts a symbol to an executable word with the same spelling, without
-resolving or executing it. The result has no captured definition scope and
-resolves where it is invoked. Non-symbol operands are `'type`.
+strings, never symbols. A symbol built from a string is the same value as
+the symbol read from source, so `"dup" symbol wrap call` executes `dup`.
 
 ## Modules
 
@@ -916,14 +936,14 @@ that name.
 
 ### Operations
 
-- `@defm` is `( values body 'module-name -- )`. It validates the name before
-  evaluating anything: a non-symbol is `'type`; a name that is not a valid
+- `@defm` is ``( values body `module-name -- )``. It validates the name before
+  evaluating anything: a non-symbol is `` `type ``; a name that is not a valid
   module path, the reserved name `core`, or a standard-library module name is
-  `'domain`, and in each case the body never runs. With a valid name it runs the
+  `` `domain ``, and in each case the body never runs. With a valid name it runs the
   body on a fresh, isolated environment, freezes the resulting image (its
   environment and its definitions), and publishes that image as the
   registration's new generation. A body that leaves one or more values on its
-  stack is `'domain` at completion and publishes nothing: a module body
+  stack is `` `domain `` at completion and publishes nothing: a module body
   defines words and keeps no state. Publication is an upsert: a missing name
   creates its registration, and an existing name installs the new image as the
   current generation and carries nothing else over; the latter is a reload,
@@ -931,7 +951,7 @@ that name.
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
-- `values (body) 'name @defm` initializes the construction. The values form the
+- ``values (body) `name @defm`` initializes the construction. The values form the
   body unit's initial stack, in list order; the body may consume, reorder, or
   extend them. The separate operands let attribution below name the body
   exactly. The body runs stack-isolated: it never sees or disturbs the
@@ -945,7 +965,7 @@ that name.
   executable names split at their final dot, so `core.utils.f` always means
   module `core.utils`, binding `f`. The exact name `core` is reserved for the
   core qualifier (see Roots and name slots): registering a module or an alias under it
-  is `'domain`, while `core.utils` stays an ordinary module name. Host
+  is `` `domain ``, while `core.utils` stays an ordinary module name. Host
   and native factories apply the reader's single scalar-level symbol-segment
   grammar; ASCII or Unicode whitespace, delimiters, malformed UTF-8, and other
   unreadable spellings do not become validated names. Reserved syntax markers
@@ -960,7 +980,7 @@ that name.
   provisional. On failure they are discarded and no
   module is registered. I/O, completed registry publications, and other
   external effects performed by the body are not rolled back. A construction
-  body starts no tasks: `@spawn`, `@give`, and `@each` are `'domain` while
+  body starts no tasks: `@spawn`, `@give`, and `@each` are `` `domain `` while
   construction is in progress, at any depth, including inside a helper word the
   body calls and inside an `@attempt` nested in the body. Registration commits atomically
   only after an image exists. A failed registration leaves the previous
@@ -978,34 +998,34 @@ that name.
   subtractive: private definitions are omitted entirely from the module's
   public face. A
   definition attempted inside a combinator application, an `@attempt`, or a
-  task is `'domain`, as it is everywhere.
+  task is `` `domain ``, as it is everywhere.
 - **Tests are a distinct module-owned namespace.**
-  `annotation? (body) 'name test` accepts the same optional effect and
+  ``annotation? (body) `name test`` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
   body of `@defm` is executing. A nested quotation, child unit,
-  or top-level use is `'domain`. Test names may equal public or private word
+  or top-level use is `` `domain ``. Test names may equal public or private word
   names because catalog entries never enter local lookup, qualified lookup,
   imports, `words`, reflection, or module invocation. Application Sessions
   still validate placement, annotations, names, and bodies, then discard the
   declaration without retaining it or checking test-name uniqueness. Test
   Sessions retain the catalog; duplicate test names in one test image are
-  `'domain`.
+  `` `domain ``.
 - A test-built module image freezes its definitions and test catalog
   together; an application-built image has an empty catalog. Registration
   publishes that image as one generation: reload replaces code and tests
   atomically; removal removes both; and aliases never create another suite.
 - **Test discovery and execution form a closed Session mode.** Ordinary
-  Sessions reject `tests` and `@test` with `'domain`. A test Session's `tests`
+  Sessions reject `tests` and `@test` with `` `domain ``. A test Session's `tests`
   returns canonical registrations once each, including root sources' private
   registrations, sorted by module, test name, and source identifier. Descriptors
-  contain symbol fields `'module` and `'name` plus any declared `'effect` and `'doc`.
-  Private registrations also carry an integer `'source` identifier local to the
+  contain symbol fields `` `module `` and `` `name `` plus any declared `` `effect `` and `` `doc ``.
+  Private registrations also carry an integer `` `source `` identifier local to the
   Session, distinguishing equal names across files. Descriptors contain no body,
   generation handle, state handle, or executable capability.
 - `descriptor @test` validates and late-binds the descriptor against the
   current canonical registration and its source when specified. A present test
   runs in a fresh isolated Unit under that generation's private home. It
-  returns exactly `{'ok (values)}` or `{'err error}`; a removed or
+  returns exactly `{ok (values)}` or `{err error}`; a removed or
   replaced-away test is a reified missing-test error. The runner's operand
   stack never seeds the test, registry changes persist between invocations in
   the Session, and Session teardown destroys them. External effects are
@@ -1045,9 +1065,9 @@ that name.
 
   ```ecl
   1 wrap                                  -- [1], reaching core's `cons`
-  (pop pop 42) 'cons def   1 wrap          -- still [1]
-  (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
-  (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
+  (pop pop 42) `cons def   1 wrap          -- still [1]
+  (pop pop 42) `cons def   1 [] cons       -- 42, the session's own `cons`
+  (pop pop 42) `cons def   (() cons) `wrap def   1 wrap    -- 42
   ```
 
   A session `def` shadows a name *for session code*. Adopting new behavior
@@ -1061,8 +1081,8 @@ that name.
   session `and` or `swap` leaves both alone:
 
   ```ecl
-  (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
-  (pop pop 99) 'swap def  1 2 over              -- 1 2 1
+  (pop pop 42) `and def   [1 1] (1 =) all?      -- 1
+  (pop pop 99) `swap def  1 2 over              -- 1 2 1
   ```
 
   Splicing or rearranging quotations preserves the
@@ -1071,20 +1091,20 @@ that name.
   activation. Re-registering a module publishes a new image under the module
   name, so a fresh call through the name runs the new code. Already-executed
   code is not re-pointed. Applying a word whose scoped image is no longer
-  available is `'domain`. Seed values passed to unit constructors are not part
+  available is `` `domain ``. Seed values passed to unit constructors are not part
   of the construction body. Runtime-built captures retain their existing
   word scopes.
-- `@defm` is parameterized by the seed operand — `values (body) 'name @defm` —
+- `@defm` is parameterized by the seed operand — ``values (body) `name @defm`` —
   and nothing else crosses the boundary. There is no ambient environment
   between a module's own definitions and core.
   A quotation parameter carries the scope it was written in, so it preserves
   its references on injection into a module. Given:
 
   ```ecl
-  10 'k set
+  10 `k set
   [(k *)] (
-           'scale def
-           ( -- n ) (4 scale) 'go def) 'm @defm
+           `scale def
+           ( -- n ) (4 scale) `go def) `m @defm
   m.go                                          -- 40
   ```
 
@@ -1110,7 +1130,7 @@ that name.
   similar operation keeps the scopes already carried by its parts, but module
   construction accepts it without traversing or re-scoping it. Reader-authored
   fragments do not make their runtime-built container reader-authored. For
-  example, `7 'k set [] ((k) 'geta) (def) cat 'm @defm` builds the module body
+  example, ``7 `k set [] ((k) `geta) (def) cat `m @defm`` builds the module body
   at runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
   the session's `k` and returns `7`.
 
@@ -1120,7 +1140,7 @@ that name.
   else: there is no per-registration operand stack, no transaction against
   one, and no operation that reads or writes a module's storage. A construction
   body must consume everything it pushed; a body that leaves values on its
-  stack fails with `'domain` and publishes nothing. State that must outlive a
+  stack fails with `` `domain `` and publishes nothing. State that must outlive a
   word lives in a task and is reached through its mailbox (see
   [Mailboxes](#mailboxes)).
 - **A generation lives as long as something can reach it.** The registry's
@@ -1133,7 +1153,7 @@ that name.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
 - `undefm` accepts a canonical name or alias. An unregistered name is
-  `'undefined-word`. An already-dispatched call may finish after removal.
+  `` `undefined-word ``. An already-dispatched call may finish after removal.
 - Modules are process-local: there is no persistence across process restart,
   and the native ABI exposes no module capability, so an `.eclmod` word
   cannot observe an internal module home.
@@ -1142,14 +1162,14 @@ that name.
   environment — which inside a module body means the image, publicly, on the
   same terms `def` binds there. It validates every symbol and resolves every
   public attribute against one pinned module generation before publishing the
-  first binding. A missing or private attribute is `'undefined-word` and
+  first binding. A missing or private attribute is `` `undefined-word `` and
   publishes none of the request; malformed operand and name domains are
-  `'type` and `'domain`, respectively. Each binding is a late-bound forwarding
+  `` `type `` and `` `domain ``, respectively. Each binding is a late-bound forwarding
   definition whose effect and documentation are copied from the original.
   Naming a binding that already exists replaces only that binding; importing
   selected names never splices an entire module or emits shadow notices.
   Dotted words split at their final dot and give qualified access with
-  no import. `qualify` validates a module-name symbol, which may be `'core`,
+  no import. `qualify` validates a module-name symbol, which may be `` `core ``,
   and an unqualified binding-name symbol and constructs the corresponding
   executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
@@ -1163,7 +1183,7 @@ that name.
   module name selects a canonical registration directly or through an alias,
   except that the reserved module segment `core` selects the core scope (see
   Roots and name slots) and never consults the registry.
-  A missing registration or public binding raises `'undefined-word`.
+  A missing registration or public binding raises `` `undefined-word ``.
   Filesystem search, embedded resources, module maps, native loading, and
   eager or on-demand acquisition are host facilities outside the language
   semantics. A host may obtain and register an image by any means, but ECL
@@ -1207,7 +1227,7 @@ one task. Sequential combinators including `each`, `for`, and `fold` execute
 left to right.
 
 `exit` is available only to the root unit outside `@attempt`. Elsewhere it
-raises `'domain`. An allowed exit first cancels and quiesces the root task
+raises `` `domain ``. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
 
 ### Mailboxes
@@ -1216,7 +1236,7 @@ Every task owns one mailbox, open while the task is active and closed when its
 attached unit becomes terminal; closing discards every queued message. An
 address is an opaque value that names a mailbox and nothing else.
 `task.address` derives a task's address from its handle; `task.self` yields the
-executing task's own address and raises `'domain` at the session root, which
+executing task's own address and raises `` `domain `` at the session root, which
 owns tasks but is not one and has no mailbox. Addresses match by mailbox
 identity, print as an unreadable marker, and are rejected by JSON, native
 views, and port messages exactly as task handles are.
@@ -1225,16 +1245,16 @@ A handle reaches a task's result; an address does not. That is why a handle can
 never travel through a mailbox while an address can be sent, stored, and
 forwarded freely: a message holding a handle could close a reference cycle
 through the result it reaches. `task.send ( value address -- )` first checks
-the value for handles, raising `'type` if it finds one, then queues it. A
+the value for handles, raising `` `type `` if it finds one, then queues it. A
 mailbox holds sixteen messages; a sender to a full mailbox parks until the
-receiver takes one. Sending to a closed mailbox raises `'io` with
-`'reason 'closed`. Messages from one sender arrive in the order sent; order
+receiver takes one. Sending to a closed mailbox raises `` `io `` with
+`` `reason `closed ``. Messages from one sender arrive in the order sent; order
 across senders is unspecified.
 
 `task.receive ( -- value )` takes the oldest queued message, parking until one
 arrives. `task.receive-for ( ms -- result )` bounds the wait and returns
-`{'ok value}` or `{'err {'kind 'timeout}}`, with the same `'overflow` rule as
-`task.await-for`. Both raise `'domain` at the root. Cancellation of a parked
+`{ok value}` or `{err {kind timeout}}`, with the same `` `overflow `` rule as
+`task.await-for`. Both raise `` `domain `` at the root. Cancellation of a parked
 sender or receiver is observed as for any wait.
 
 There is no request/reply primitive. A caller that wants an answer spawns a
@@ -1263,7 +1283,7 @@ and resumes a bounded continuation. Input and output queues are bounded, so a
 producer waits under pressure rather than causing unbounded allocation.
 
 Filesystem words select a named directory root and a canonical relative path
-beneath it. The command line provides its startup working directory as `'cwd`.
+beneath it. The command line provides its startup working directory as `` `cwd ``.
 All operations are available on named roots, subject to operating-system
 permissions. Path manipulation is pure string computation and proves nothing
 about containment; containment is enforced at the root's retained directory
@@ -1277,7 +1297,7 @@ move them. Input reads return what the host has and `[]` at stable EOF, on
 every later read as well; one reader may be pending. Output writes from
 different units are served in the order they began, and each call's bytes
 stay contiguous. When standard input is the program source there is no input
-device, and `fd.in` is `'io`. Text crosses these endpoints only through the
+device, and `fd.in` is `` `io ``. Text crosses these endpoints only through the
 `io` words, which encode and decode UTF-8 at the boundary. A file opened with
 `fs.open-reader` and a process pipe are endpoints of the same kind. A read
 may leave bytes read ahead with the endpoint value, and `fd.close` closes an
@@ -1316,7 +1336,7 @@ connection is the only listener operation that parks. The bound address and
 port are observable data; closing a listener, explicitly or through scope
 closure, is one idempotent transition after which the address is no longer
 observable, every unit parked in accept on it fails, and the same address and
-port may be bound again. A host bind failure is `'io` carrying the requested
+port may be bound again. A host bind failure is `` `io `` carrying the requested
 address, the requested port, and one reason from a closed vocabulary.
 
 A connection is a port too, distinct from a listener and from a process port.
@@ -1332,7 +1352,7 @@ connection; writes are serialized in arrival order with each call's bytes
 contiguous. Explicit close delivers the bytes already queued and then shuts
 the socket down; scope closure discards them and shuts down at once. Both
 ends' addresses are observable data while the connection is open. A peer
-failure is `'io` carrying the peer's address, the peer's port, and one reason
+failure is `` `io `` carrying the peer's address, the peer's port, and one reason
 from a closed vocabulary; a cancelled wait fails only the unit that was
 parked.
 

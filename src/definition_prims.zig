@@ -276,10 +276,10 @@ const DefineDriver = struct {
                     continue;
                 }
                 const item = list.atUnchecked(scan.candidate.borrow(), scan.index);
-                if (item == .word and item.word.name == self.separator) {
+                if (item == .symbol and item.symbol.name == self.separator) {
                     if (scan.separator_at != null) return malformed(evaluator);
                     scan.separator_at = scan.index;
-                } else if (item == .word and item.word.name == self.colon) {
+                } else if (item == .symbol and item.symbol.name == self.colon) {
                     if (scan.colon_at != null) return malformed(evaluator);
                     scan.colon_at = scan.index;
                 }
@@ -293,12 +293,12 @@ const DefineDriver = struct {
                             validation.context.source.borrow(),
                             validation.index,
                         );
-                        if (validation.index != split and slot != .word)
+                        if (validation.index != split and slot != .symbol)
                             return malformed(evaluator);
                         // The after portion is all named slots or exactly the
                         // row token; the before portion never names a row.
-                        if (slot == .word and
-                            std.mem.eql(u8, intern.get(slot.word.name), lexer.row_token) and
+                        if (slot == .symbol and
+                            std.mem.eql(u8, intern.get(slot.symbol.name), lexer.row_token) and
                             (validation.index <= split or validation.context.effect_end != split + 2))
                             return malformed(evaluator);
                         validation.index += 1;

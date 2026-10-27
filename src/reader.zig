@@ -31,16 +31,25 @@ pub const PendingUnit = implementation.PendingUnit;
 /// namespace and export validation belong to the consumer's schema.
 /// This scanner owns no values and does no evaluation or nested traversal.
 pub const DeclarationScan = struct {
-    previous_symbol: ?u32 = null,
+    /// The two forms before the current one: a registration's name arrives
+    /// as the quote expansion `(name) core.first` ahead of `@defm`.
+    quoted_name: ?u32 = null,
+    previous_first: bool = false,
 
     pub fn feed(self: *DeclarationScan, form: Value) ?u32 {
-        const previous = self.previous_symbol;
-        self.previous_symbol = if (form == .symbol) form.symbol else null;
-        if (form == .word and @import("std").mem.eql(
-            u8,
-            @import("intern.zig").get(form.word.name),
-            "@defm",
-        )) return previous;
+        const std = @import("std");
+        const intern = @import("intern.zig");
+        const list = @import("list.zig");
+        const declared = if (self.previous_first) self.quoted_name else null;
+        const is_first = form == .symbol and std.mem.eql(u8, intern.get(form.symbol.name), "core.first");
+        if (!is_first) {
+            self.quoted_name = if (form == .list and form.list.length() == 1 and !form.isString()) name: {
+                const element = list.atUnchecked(form, 0);
+                break :name if (element == .symbol) element.symbol.name else null;
+            } else null;
+        }
+        self.previous_first = is_first;
+        if (form == .symbol and std.mem.eql(u8, intern.get(form.symbol.name), "@defm")) return declared;
         return null;
     }
 };

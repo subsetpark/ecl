@@ -75,7 +75,6 @@ all value: Value,
     value-type value = float-type or
     value-type value = char-type or
     value-type value = symbol-type or
-    value-type value = word-type or
     value-type value = task-type or
     value-type value = port-type or
     value-type value = address-type |

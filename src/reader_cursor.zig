@@ -46,7 +46,7 @@ const Token = struct {
 
 const SourceProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
 const TokenizeProgress = SourceProgress;
-const Mode = enum { validate, main, comment, atom, string, character, character_unicode, complete };
+const Mode = enum { validate, main, comment, atom, atom_delimited, string, character, character_unicode, complete };
 /// The most ASCII bytes one validation transition passes.
 const ascii_run = 64;
 
@@ -190,7 +190,7 @@ const Tokenizer = struct {
                     self.mode = .string;
                     return .pending;
                 }
-                if (next == '\'') {
+                if (next == '`') {
                     self.token_source_start = self.cursor.byteIndex();
                     _ = self.bump();
                     self.startAtom(.quoted);
@@ -203,6 +203,10 @@ const Tokenizer = struct {
                     return .pending;
                 }
                 self.startAtom(.atom);
+                if (next == '\'') {
+                    _ = self.bump();
+                    self.mode = .atom_delimited;
+                }
                 return .pending;
             },
             .comment => {
@@ -217,7 +221,34 @@ const Tokenizer = struct {
                 const next = self.cursor.peek();
                 if (next == null or lexer.isTokenBoundary(next.?) or next.? == ';' or next.? == '|') {
                     try self.finishAtom();
+                } else if (next.? == '\'') {
+                    // A delimited segment opens only where a segment starts:
+                    // at the token's start (after a quote) or after a dot.
+                    const here = self.cursor.byteIndex();
+                    if (here != self.token_start and self.source[here - 1] != '.') {
+                        diag.set(self.cursor.span(), "`'` may only open a symbol segment");
+                        return error.Parse;
+                    }
+                    _ = self.bump();
+                    self.mode = .atom_delimited;
                 } else _ = self.bump();
+                return .pending;
+            },
+            // Inside `'...'` every character but the closing quote is part of
+            // the segment; the symbol grammar then rejects what cannot be
+            // spelled. The token keeps its delimiters, and the atom builder
+            // strips them from the spelling.
+            .atom_delimited => {
+                const next = self.cursor.peek() orelse {
+                    diag.set(self.token_span, "unterminated `'` symbol segment");
+                    return error.Parse;
+                };
+                if (next == '\n') {
+                    diag.set(self.token_span, "a `'` symbol segment cannot span lines");
+                    return error.Parse;
+                }
+                _ = self.bump();
+                if (next == '\'') self.mode = .atom;
                 return .pending;
             },
             .character => {
@@ -235,7 +266,7 @@ const Tokenizer = struct {
                     if (next == 'u' and self.cursor.peek() == '{') {
                         _ = self.bump();
                         self.mode = .character_unicode;
-                    } else if (lexer.isTokenBoundary(next) or next == ';' or next == '|' or next == '\'' or next == '\\') {
+                    } else if (lexer.isTokenBoundary(next) or next == ';' or next == '|' or next == '\'' or next == '`' or next == '\\') {
                         try self.finishAtom();
                     }
                     return .pending;
@@ -424,13 +455,18 @@ pub const PendingUnit = enum(usize) {
 const ScalarProgress = poll.Progress(Value);
 const AtomBuilder = struct {
     token: Token,
-    quoted: bool,
-    /// The scope the words this atom yields were written in — the reading
-    /// unit's. Zero for a quoted name, which is inert data.
+    allocator: std.mem.Allocator,
+    /// The token spells a segment as `'...'`, so it is a symbol whatever its
+    /// characters look like, and its spelling is the token without the
+    /// delimiters.
+    delimited: bool,
+    /// The scope the symbols this atom yields were written in — the reading
+    /// unit's.
     word_linker: value.WordLinker,
     classifier: ?lexer.ClassifyCursor = null,
     classification: ?lexer.Classification = null,
     symbol: ?lexer.SymbolCursor = null,
+    spelling: ?[]u8 = null,
     inserter: ?intern.InternInsertionCursor = null,
     marker_index: usize = 0,
     /// Runtime capabilities print an unreadable marker, and this is the one
@@ -439,12 +475,14 @@ const AtomBuilder = struct {
     /// which is why recognition is a cursor step rather than a comparison.
     marker: enum { none, task_digits, port_digits, address_digits },
 
-    fn init(token: Token, quoted: bool, word_linker: value.WordLinker) AtomBuilder {
+    fn init(token: Token, allocator: std.mem.Allocator, word_linker: value.WordLinker) AtomBuilder {
+        const delimited = std.mem.indexOfScalar(u8, token.bytes, '\'') != null;
         return .{
             .token = token,
+            .allocator = allocator,
             .word_linker = word_linker,
-            .quoted = quoted,
-            .marker = if (quoted)
+            .delimited = delimited,
+            .marker = if (delimited)
                 .none
             else if (std.mem.startsWith(u8, token.bytes, "<task:") and
                 token.bytes.len >= "<task:0>".len and token.bytes[token.bytes.len - 1] == '>')
@@ -475,7 +513,7 @@ const AtomBuilder = struct {
                 "address display markers are runtime-only and cannot be parsed",
             ),
         }
-        if (!self.quoted and self.classification == null) {
+        if (!self.delimited and self.classification == null) {
             if (self.classifier == null) self.classifier = .init(self.token.bytes);
             return switch (self.classifier.?.advance()) {
                 .pending => .pending,
@@ -501,47 +539,45 @@ const AtomBuilder = struct {
                         },
                         .word => {},
                     }
-                    self.symbol = .init(self.token.bytes);
+                    self.symbol = .initSource(self.token.bytes);
                     break :result .pending;
                 },
             };
         }
-        if (self.symbol == null) self.symbol = .init(self.token.bytes);
+        if (self.symbol == null) self.symbol = .initSource(self.token.bytes);
         if (self.inserter == null) switch (self.symbol.?.advance()) {
             .pending => return .pending,
             .complete => |valid| {
                 if (!valid) {
-                    if (self.quoted and self.token.bytes.len == 0)
-                        diag.set(self.token.span, "quoted symbol is missing its name")
-                    else if (self.quoted)
-                        diag.setFmt(
-                            self.token.span,
-                            "invalid quoted symbol `'{s}`",
-                            .{self.token.bytes},
-                        )
-                    else
-                        diag.setFmt(
-                            self.token.span,
-                            "invalid word `{s}`",
-                            .{self.token.bytes},
-                        );
+                    diag.setFmt(self.token.span, "invalid symbol `{s}`", .{self.token.bytes});
                     return error.Parse;
                 }
-                self.inserter = intern.insertionCursor(self.token.bytes);
+                self.inserter = intern.insertionCursor(if (self.delimited) try self.stripDelimiters() else self.token.bytes);
                 return .pending;
             },
         };
         return switch (try self.inserter.?.advance()) {
             .pending => .pending,
-            .complete => |id| .{
-                .complete = if (self.quoted)
-                    .{ .symbol = id }
-                else
-                    // The unit that read this text is the scope the word was
-                    // written in. A quoted name is inert data and stays unscoped.
-                    .{ .word = .{ .name = id, .slot = try self.word_linker.link(id) } },
-            },
+            // The unit that read this text is the scope the symbol was
+            // written in, whichever position it ends up occupying.
+            .complete => |id| .{ .complete = .{ .symbol = .{ .name = id, .slot = try self.word_linker.link(id) } } },
         };
+    }
+
+    fn stripDelimiters(self: *AtomBuilder) error{OutOfMemory}![]const u8 {
+        const spelling = try self.allocator.alloc(u8, self.token.bytes.len);
+        var len: usize = 0;
+        for (self.token.bytes) |byte| if (byte != '\'') {
+            spelling[len] = byte;
+            len += 1;
+        };
+        self.spelling = spelling;
+        return spelling[0..len];
+    }
+
+    fn deinit(self: *AtomBuilder) void {
+        if (self.spelling) |spelling| self.allocator.free(spelling);
+        self.* = undefined;
     }
 
     fn advanceMarkerDigits(
@@ -841,7 +877,8 @@ const ScalarBuilder = union(enum) {
     fn deinit(self: *ScalarBuilder, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
             .string => |*builder| builder.deinit(releases),
-            .atom, .character => {},
+            .atom => |*builder| builder.deinit(),
+            .character => {},
         }
         self.* = undefined;
     }
@@ -1294,6 +1331,10 @@ const ParserCursor = struct {
     provenance_namespace: heap.CodeProvenanceNamespace,
     word_linker: value.WordLinker,
     state: State = .reading,
+    /// The forms a quote expands to, consumed before the next source token,
+    /// last first.
+    pending: [3]Token = @splat(.{ .kind = .atom, .span = .{} }),
+    pending_len: u8 = 0,
     retirement_phase: enum { state, contexts, storage, complete } = .state,
 
     fn init(
@@ -1380,21 +1421,23 @@ const ParserCursor = struct {
     }
     fn beginScalar(self: *ParserCursor, token: Token) error{Parse}!void {
         std.debug.assert(self.state == .reading);
-        self.state = .{ .scalar = switch (token.kind) {
-            .atom => .{ .atom = .init(token, false, self.word_linker) },
-            .quoted => .{ .atom = .init(token, true, self.word_linker) },
-            .character => .{ .character = .init(token) },
-            .string => .{ .string = .init(self.allocator, token, self.provenance_namespace) },
-            .semicolon => {
-                self.diag.set(token.span, "`;` is reserved");
-                return error.Parse;
+        self.state = .{
+            .scalar = switch (token.kind) {
+                .atom => .{ .atom = .init(token, self.allocator, self.word_linker) },
+                .quoted => unreachable, // expanded by processToken
+                .character => .{ .character = .init(token) },
+                .string => .{ .string = .init(self.allocator, token, self.provenance_namespace) },
+                .semicolon => {
+                    self.diag.set(token.span, "`;` is reserved");
+                    return error.Parse;
+                },
+                .bar => {
+                    self.diag.set(token.span, "`|` is legal only around a list's leading locals declaration");
+                    return error.Parse;
+                },
+                .open_paren, .open_square, .open_dict, .close_paren, .close_square, .close_dict => unreachable,
             },
-            .bar => {
-                self.diag.set(token.span, "`|` is legal only around a list's leading locals declaration");
-                return error.Parse;
-            },
-            .open_paren, .open_square, .open_dict, .close_paren, .close_square, .close_dict => unreachable,
-        } };
+        };
     }
     fn advanceScalar(self: *ParserCursor, work: *poll.WorkBudget) (error{ OutOfMemory, Parse })!ParseProgress {
         const scalar = switch (self.state) {
@@ -1514,8 +1557,35 @@ const ParserCursor = struct {
             return;
         }
         if (closeKind(token.kind) != null) return self.closeContext(token);
+        if (token.kind == .quoted) return self.expandQuote(token);
         try self.beginScalar(token);
     }
+    /// `` `x `` is reader sugar for the two forms `(x) core.first`; see
+    /// Lexical syntax. Expanding it into tokens reuses the nesting, locals,
+    /// and linking rules of the forms it stands for.
+    fn expandQuote(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!void {
+        if (token.bytes.len == 0) {
+            self.diag.set(token.span, "quote is missing its symbol");
+            return error.Parse;
+        }
+        if (lexer.classify(token.bytes) != .word) {
+            self.diag.setFmt(token.span, "quote must name a symbol, not `{s}`", .{token.bytes});
+            return error.Parse;
+        }
+        if (self.contexts.topPtr()) |context| if (context.kind == .dictionary) {
+            self.diag.set(token.span, "a quote cannot be a dict entry; write the symbol bare");
+            return error.Parse;
+        };
+        const at = Token{ .kind = .open_paren, .span = token.span, .source_start = token.source_start, .source_end = token.source_end };
+        self.pending = .{
+            .{ .kind = .atom, .bytes = quote_word, .span = at.span, .source_start = at.source_start, .source_end = at.source_end },
+            .{ .kind = .close_paren, .span = at.span, .source_start = at.source_start, .source_end = at.source_end },
+            .{ .kind = .atom, .bytes = token.bytes, .span = at.span, .source_start = at.source_start, .source_end = at.source_end },
+        };
+        self.pending_len = 3;
+        try self.processToken(at);
+    }
+    const quote_word = "core.first";
     fn eof(self: *ParserCursor) ParseProgress {
         if (self.contexts.topPtr()) |context| {
             if (context.locals == .names) return .{ .incomplete = .{
@@ -1564,8 +1634,11 @@ const ParserCursor = struct {
                 },
             },
             .reading => result: {
-                const token = self.tokens.next() orelse break :result self.eof();
-                try self.processToken(token.*);
+                const token = if (self.pending_len != 0) pending: {
+                    self.pending_len -= 1;
+                    break :pending self.pending[self.pending_len];
+                } else (self.tokens.next() orelse break :result self.eof()).*;
+                try self.processToken(token);
                 break :result .pending;
             },
             .complete => unreachable,

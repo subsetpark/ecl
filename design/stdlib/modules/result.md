@@ -11,7 +11,7 @@ A success payload is always a list representing a stack.
 
 ```ecl
 [2 3] result.ok (+) result.and-then
-# => {'ok [5]}
+# => {ok [5]}
 ```
 
 ### either
@@ -19,8 +19,8 @@ A success payload is always a list representing a stack.
 #### Examples
 
 ```ecl
-{'kind 'io} result.err (first) ('kind at) result.either
-# => 'io
+{kind io} result.err (first) (`kind at) result.either
+# => io
 ```
 
 ### err
@@ -46,6 +46,6 @@ A success payload is always a list representing a stack.
 #### Examples
 
 ```ecl
-{'kind 'io} result.err ['io 'timeout] (pop 99 wrap) result.recover-kinds
-# => {'ok ([99])}
+{kind io} result.err [io timeout] (pop 99 wrap) result.recover-kinds
+# => {ok ([99])}
 ```

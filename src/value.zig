@@ -7,7 +7,6 @@ pub const Tag = enum(u8) {
     float,
     char,
     symbol,
-    word,
     list,
     dict,
     task,
@@ -25,7 +24,6 @@ pub const HeapKind = enum(u8) {
     leaf_char1,
     leaf_char2,
     leaf_char4,
-    leaf_symbol,
     dict,
     task,
     port,
@@ -95,21 +93,26 @@ pub const DictPayload = struct {
     hashes: *ListHandle,
 };
 
-/// A word occurrence: its interned name, and its name's slot in the root its
-/// text was written in. The slot rides here rather than on the enclosing
-/// quotation because a word is the unit that resolves — which is what makes
-/// splicing work, since `cat` copies `Value`s and each token keeps the slot it
-/// was linked to. It costs nothing: `Value` is pinned at 16 bytes and the
-/// `word` variant used four of its eight payload bytes.
-pub const WordRef = struct {
+/// A symbol: its interned name, and its name's slot in the root it was
+/// written in — by the reader, or by `symbol`, `intern`, or `qualify` on
+/// behalf of the activation that built it. The slot rides here
+/// rather than on the enclosing quotation because a symbol occurrence is the
+/// unit that resolves when its list runs — which is what makes splicing work,
+/// since `cat` copies `Value`s and each token keeps the slot it was linked
+/// to. The slot is resolution metadata, never identity: equality, hashing,
+/// and printing ignore it, and a zero slot means core's binding. It
+/// costs nothing: `Value` is pinned at 16 bytes and the name uses four of
+/// its eight payload bytes.
+pub const Symbol = struct {
     name: u32,
     /// `env.SlotId` as a bare integer, kept untyped here so `value.zig` stays
-    /// free of any dependency on the environment. Zero is a word linked to
-    /// nothing, which only the locals backend's reserved words are.
+    /// free of any dependency on the environment. Zero is a symbol the
+    /// implementation built for itself (it means core's binding when run) or
+    /// one of the locals backend's reserved words.
     slot: u32 = 0,
 };
 
-/// How a producer of word occurrences links each one to its name's slot in
+/// How a producer of symbol occurrences links each one to its name's slot in
 /// the root it writes into. Carried by value through the reader so that
 /// neither the reader nor `value.zig` depends on the environment. The
 /// context is two opaque words the link function alone interprets.
@@ -130,8 +133,7 @@ pub const Value = union(Tag) {
     int: i64,
     float: f64,
     char: u32,
-    symbol: u32,
-    word: WordRef,
+    symbol: Symbol,
     list: *ListHandle,
     dict: *DictHandle,
     task: *TaskHandle,
@@ -144,7 +146,7 @@ pub const Value = union(Tag) {
 
     pub fn heapHeader(self: Value) ?*Header {
         return switch (self) {
-            .int, .float, .char, .symbol, .word => null,
+            .int, .float, .char, .symbol => null,
             .list => |header| @import("heap.zig").headerFromList(header),
             .dict => |header| @import("heap.zig").headerFromDict(header),
             .task => |header| @import("heap.zig").headerFromTask(header),
@@ -162,7 +164,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .address, .reserved_mask => false,
+            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => false,
         };
     }
 };
@@ -176,6 +178,6 @@ pub fn unicodeScalar(codepoint: u64) ?u21 {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@typeInfo(HeapKind).@"enum".field_names.len != 13)
+    if (@typeInfo(HeapKind).@"enum".field_names.len != 12)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }

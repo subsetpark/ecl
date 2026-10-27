@@ -280,7 +280,7 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
                 .values = .init(values),
             });
         },
-        .int, .float, .char, .symbol, .word, .task, .port, .address => return evaluator.typeError("a list or dict"),
+        .int, .float, .char, .symbol, .task, .port, .address => return evaluator.typeError("a list or dict"),
     }
 }
 
@@ -399,7 +399,6 @@ const put_leaf_kinds = [_]value.HeapKind{
     .leaf_char1,
     .leaf_char2,
     .leaf_char4,
-    .leaf_symbol,
 };
 
 fn typedReplacement(comptime kind: value.HeapKind, item: Value) ?heap.LeafElement(kind) {
@@ -426,10 +425,6 @@ fn typedReplacement(comptime kind: value.HeapKind, item: Value) ?heap.LeafElemen
         },
         .leaf_char4 => switch (item) {
             .char => |codepoint| codepoint,
-            else => null,
-        },
-        .leaf_symbol => switch (item) {
-            .symbol => |symbol| symbol,
             else => null,
         },
         .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
@@ -892,7 +887,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
                 .values = .init(values),
             });
         },
-        .int, .float, .char, .symbol, .word, .task, .port, .address => return evaluator.typeError("a list or dict"),
+        .int, .float, .char, .symbol, .task, .port, .address => return evaluator.typeError("a list or dict"),
     }
 }
 

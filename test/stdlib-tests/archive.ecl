@@ -1,16 +1,16 @@
 ### module stdlib.test.archive
 []
 (
- 'stdlib.test.support ('equal 'raises-word 'documented) import
+ `stdlib.test.support (equal raises-word documented) import
 
  ### defp raises-at-index
  (quotation kind index -- : "Assert an archive byte failure identifies its item index.")
  (|quotation kind index|
   [] quotation @attempt
   dup result.err? 1 equal
-  'err at
-  dup 'kind at kind equal
-  'data at 'index at index equal) 'raises-at-index defp
+  `err at
+  dup `kind at kind equal
+  `data at `index at index equal) `raises-at-index defp
 
  ### test sha256
  (-- : "Match SHA-256 known-answer vectors, including high unsigned bytes.")
@@ -30,18 +30,18 @@
   [0 127 128 255] archive.sha256
   "89273d2f70b93285bb7ddb4bcee86a5347ca7159352e3cbdd20c23e9d1e507d3"
   equal)
- 'sha256 test
+ `sha256 test
 
  ### test invalid-bytes
  (-- : "Reject non-byte containers and identify the first invalid byte.")
- ((42 archive.sha256) 'type 'archive.sha256 raises-word
-  ([0 -1] archive.sha256) 'domain 1 raises-at-index
-  ([255 256] archive.sha256) 'domain 1 raises-at-index
-  ([0 1.5] archive.sha256) 'domain 1 raises-at-index)
- 'invalid-bytes test
+ ((42 archive.sha256) `type `archive.sha256 raises-word
+  ([0 -1] archive.sha256) `domain 1 raises-at-index
+  ([255 256] archive.sha256) `domain 1 raises-at-index
+  ([0 1.5] archive.sha256) `domain 1 raises-at-index)
+ `invalid-bytes test
 
  ### test documentation
  (-- : "Require documentation for every archive export.")
- (('archive.sha256 'archive.unpack-tgz) documented)
- 'documentation test
-) 'stdlib.test.archive @defm
+ ((archive.sha256 archive.unpack-tgz) documented)
+ `documentation test
+) `stdlib.test.archive @defm

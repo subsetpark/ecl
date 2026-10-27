@@ -63,12 +63,12 @@ test "unit inputs: every constructor requires separate seed and body lists" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectErrorContains(&runtime, "(1) @attempt", &.{"'underflow"});
-    try expectErrorContains(&runtime, "[1] 3 @attempt", &.{"'type"});
-    try expectErrorContains(&runtime, "3 (1) @attempt", &.{"'type"});
-    try expectErrorContains(&runtime, "3 (1) 'm @defm", &.{"'type"});
-    try expectErrorContains(&runtime, "[1] 3 @spawn", &.{"'type"});
-    try expectErrorContains(&runtime, "[1] [] 3 @each", &.{"'type"});
+    try expectErrorContains(&runtime, "(1) @attempt", &.{"underflow"});
+    try expectErrorContains(&runtime, "[1] 3 @attempt", &.{"type"});
+    try expectErrorContains(&runtime, "3 (1) @attempt", &.{"type"});
+    try expectErrorContains(&runtime, "3 (1) `m @defm", &.{"type"});
+    try expectErrorContains(&runtime, "[1] 3 @spawn", &.{"type"});
+    try expectErrorContains(&runtime, "[1] [] 3 @each", &.{"type"});
 }
 
 test "unit inputs: seeds reach every unit constructor in list order" {
@@ -77,14 +77,14 @@ test "unit inputs: seeds reach every unit constructor in list order" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectStack(&runtime, "[10 3] (-) @attempt", "{'ok [7]}");
-    try expectStack(&runtime, "[10 3] (-) @spawn task.await", "{'ok [7]}");
+    try expectStack(&runtime, "[10 3] (-) @attempt", "{ok [7]}");
+    try expectStack(&runtime, "[10 3] (-) @spawn task.await", "{ok [7]}");
     // The element stays deepest in each child stack, beneath the shared seeds.
     try expectStack(&runtime, "[1 2] [10] (-) @each", "[-9 -8]");
-    try expectStack(&runtime, "[4 5] (+ 'sum set) 'added @defm added.sum", "9");
+    try expectStack(&runtime, "[4 5] (+ `sum set) `added @defm added.sum", "9");
     // An empty seed list is the unseeded case spelled out.
-    try expectStack(&runtime, "[] (7) @attempt", "{'ok [7]}");
-    try expectStack(&runtime, "[] () @attempt", "{'ok ()}");
+    try expectStack(&runtime, "[] (7) @attempt", "{ok [7]}");
+    try expectStack(&runtime, "[] () @attempt", "{ok ()}");
 }
 
 test "unit inputs: isolation underflow names only the explicit values operand" {
@@ -95,7 +95,7 @@ test "unit inputs: isolation underflow names only the explicit values operand" {
 
     try expectStack(
         &runtime,
-        "9 [1] (+) @attempt nip 'err at dup 'data at 'isolation at swap 'msg at",
+        "9 [1] (+) @attempt nip `err at dup `data at `isolation at swap `msg at",
         "@attempt \"+ needs 2 stack values, but found 1; the substack is isolated from " ++
             "the caller's stack — pass initial values in the constructor's values operand\"",
     );
@@ -107,20 +107,20 @@ test "unit inputs: every constructor diagnoses its own values operand" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectErrorContains(&runtime, "9 [] (1 +) 'missing @defm", &.{
-        "'isolation @defm",
+    try expectErrorContains(&runtime, "9 [] (1 +) `missing @defm", &.{
+        "isolation @defm",
         "constructor's values operand",
-        "'trace ['+]",
+        "trace (+)",
     });
-    try expectErrorContains(&runtime, "[] (1 +) @spawn task.await 'err at raise", &.{
-        "'isolation @spawn",
+    try expectErrorContains(&runtime, "[] (1 +) @spawn task.await `err at raise", &.{
+        "isolation @spawn",
         "constructor's values operand\"",
     });
     // `@each` is prelude code over `@spawn`, which owns each child's floor.
     try expectErrorContains(&runtime, "[1] [] (+) @each", &.{
-        "'isolation @spawn",
+        "isolation @spawn",
         "constructor's values operand",
-        "'trace ['+]",
+        "trace (+)",
     });
 }
 
@@ -132,12 +132,12 @@ test "unit inputs: large seeds and bodies preserve order and postconditions" {
 
     // 512 seeds arrive in list order, so folding pairwise from the top still
     // reaches the deepest one.
-    try expectStack(&runtime, "512 range (511 (+) times) @attempt 'ok at", "[130816]");
+    try expectStack(&runtime, "512 range (511 (+) times) @attempt `ok at", "[130816]");
     // Seeds the body consumes, in order, with the construction's own
     // postcondition still enforced on what it leaves behind.
     try expectStack(
         &runtime,
-        "[1 2] (+ 'sum setp ( -- n ) (sum) 'go def) 'sized @defm sized.go",
+        "[1 2] (+ `sum setp ( -- n ) (sum) `go def) `sized @defm sized.go",
         "3",
     );
     // One seed list initializes a whole fan-out identically.
@@ -145,7 +145,7 @@ test "unit inputs: large seeds and bodies preserve order and postconditions" {
     // More seeds than one scheduler step materializes, so the list order has to
     // survive the slice boundary: popping all but the deepest leaves the first
     // element of the seed list.
-    try expectStack(&runtime, "300 range (299 (pop) times) @attempt 'ok at", "[0]");
+    try expectStack(&runtime, "300 range (299 (pop) times) @attempt `ok at", "[0]");
     // And a child's element stays deepest beneath 300 seeds delivered across
     // several of its own slices.
     try expectStack(&runtime, "[7] 300 range (300 (pop) times) @each", "[7]");
@@ -160,20 +160,20 @@ test "unit inputs: a construction body the reader wrote names its image" {
     // Top level, and through every container the reader built.
     try expectStack(
         &runtime,
-        "[] ((99) 'k defp {'a (k)} 'd setp ( -- n ) (d 'a at call) 'go def) 'literal-body @defm literal-body.go",
+        "[] ((99) `k defp {a (k)} `d setp ( -- n ) (d `a at call) `go def) `literal-body @defm literal-body.go",
         "99",
     );
     try expectStack(
         &runtime,
-        "[] ((99) 'k defp [(k)] 'l setp ( -- n ) (l first call) 'go def) 'listed @defm listed.go",
+        "[] ((99) `k defp [(k)] `l setp ( -- n ) (l first call) `go def) `listed @defm listed.go",
         "99",
     );
     // A stored reader body and a literal reader body stamp identically.
-    try expectOk(&runtime, "((2 *) 'double def ( -- n ) (4 double) 'go def) 'raw-body set");
-    try expectStack(&runtime, "[] raw-body 'from-raw @defm from-raw.go", "8");
-    try expectStack(&runtime, "[] raw-body 'from-second @defm from-second.go", "8");
+    try expectOk(&runtime, "((2 *) `double def ( -- n ) (4 double) `go def) `raw-body set");
+    try expectStack(&runtime, "[] raw-body `from-raw @defm from-raw.go", "8");
+    try expectStack(&runtime, "[] raw-body `from-second @defm from-second.go", "8");
     // And the original stays reusable after both.
-    try expectStack(&runtime, "[] raw-body 'again @defm again.go", "8");
+    try expectStack(&runtime, "[] raw-body `again @defm again.go", "8");
 }
 
 test "unit inputs: seeds are never traversed or stamped" {
@@ -185,20 +185,20 @@ test "unit inputs: seeds are never traversed or stamped" {
     // A caller-authored behavior is a seed and keeps the caller's scope.
     try expectStack(
         &runtime,
-        "10 'k set [(k *)] ('scale def ( -- n ) (4 scale) 'go def) 'scaled @defm scaled.go",
+        "10 `k set [(k *)] (`scale def ( -- n ) (4 scale) `go def) `scaled @defm scaled.go",
         "40",
     );
     // A reader-built dict seed keeps it too, container and all.
     try expectStack(
         &runtime,
-        "3 'k set [{'a (k)}] ('deps set ( -- n ) (deps 'a at call) 'go def) 'dictseed @defm dictseed.go",
+        "3 `k set [{a (k)}] (`deps set ( -- n ) (deps `a at call) `go def) `dictseed @defm dictseed.go",
         "3",
     );
     // A seed the body defines a word from is still the caller's text, so
     // running it back at the session resolves `k` there.
     try expectStack(
         &runtime,
-        "7 'k set [(k)] ('peek def) 'inert @defm inert.peek",
+        "7 `k set [(k)] (`peek def) `inert @defm inert.peek",
         "7",
     );
 }
@@ -211,17 +211,17 @@ test "unit inputs: a runtime-built body acquires no attribution" {
 
     // cat, compose, and raze all produce runtime-built values, and a reader
     // witness carried by a nested fragment grants no admission through one.
-    try expectStack(&runtime, "7 'k set [] ((k) 'geta) (def) cat 'catted @defm catted.geta", "7");
-    try expectStack(&runtime, "7 'k set [] ((k) 'getb) (def) compose 'composed @defm composed.getb", "7");
-    try expectStack(&runtime, "7 'k set [] [((k) 'getc) (def)] raze 'razed @defm razed.getc", "7");
+    try expectStack(&runtime, "7 `k set [] ((k) `geta) (def) cat `catted @defm catted.geta", "7");
+    try expectStack(&runtime, "7 `k set [] ((k) `getb) (def) compose `composed @defm composed.getb", "7");
+    try expectStack(&runtime, "7 `k set [] [((k) `getc) (def)] raze `razed @defm razed.getc", "7");
     // Supplying explicit seeds changes the initial stack and nothing else.
-    try expectStack(&runtime, "7 'k set [] ((k) 'getd) (def) cat 'seeded @defm seeded.getd", "7");
+    try expectStack(&runtime, "7 `k set [] ((k) `getd) (def) cat `seeded @defm seeded.getd", "7");
     // `with` is ordinary composition, so its flattened result is runtime-built
     // too: the superseded spelling still runs and takes no attribution.
     try expectErrorContains(
         &runtime,
-        "5 'k set [] [(k *)] ('scale def ( -- n ) (4 scale) 'go def) with 'flat @defm flat.go",
-        &.{ "'undefined-word", "scale" },
+        "5 `k set [] [(k *)] (`scale def ( -- n ) (4 scale) `go def) with `flat @defm flat.go",
+        &.{ "undefined-word", "scale" },
     );
 
     // Rejected roots must also avoid the stable image ScopeId used only to
@@ -235,9 +235,9 @@ test "unit inputs: a runtime-built body acquires no attribution" {
         defer runtime_inputs8.deinit();
         var measured = try session.Session.init(counting.allocator(), &.{}, runtime_inputs8.inputs(.{}), .cooperative, .evaluate);
         defer measured.deinit();
-        const cycle = "[] ((1) 'x def) () cat 'runtime-built @defm " ++
-            "[] ((1) 'x def) () cat 'runtime-built @defm " ++
-            "runtime-built.x pop 'runtime-built undefm";
+        const cycle = "[] ((1) `x def) () cat `runtime-built @defm " ++
+            "[] ((1) `x def) () cat `runtime-built @defm " ++
+            "runtime-built.x pop `runtime-built undefm";
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ cycle ++ ") for";
         try expectStack(&measured, small, "");
@@ -261,15 +261,15 @@ test "unit inputs: one reader body serves two images independently" {
 
     try expectOk(
         &runtime,
-        "('state set ( -- n ) (state) 'read def) 'shared set",
+        "(`state set ( -- n ) (state) `read def) `shared set",
     );
-    try expectOk(&runtime, "[10] shared 'left @defm");
-    try expectOk(&runtime, "[100] shared 'right @defm");
+    try expectOk(&runtime, "[10] shared `left @defm");
+    try expectOk(&runtime, "[100] shared `right @defm");
     // Each image stamped its own copy, so each reads its own seed.
     try expectStack(&runtime, "left.read", "10");
     try expectStack(&runtime, "right.read", "100");
     // The original body is unchanged and still constructs.
-    try expectStack(&runtime, "[7] shared 'third @defm third.read", "7");
+    try expectStack(&runtime, "[7] shared `third @defm third.read", "7");
 }
 
 test "unit inputs: a nested construction inside a stamped body still names its own image" {
@@ -284,8 +284,8 @@ test "unit inputs: a nested construction inside a stamped body still names its o
     // pointing at the enclosing one.
     try expectStack(
         &runtime,
-        "[] ((1) 'x defp ( -- n ) ([] ((2) 'x defp ( -- n ) (x) 'get def) 'nest-inner @defm nest-inner.get) " ++
-            "'outer def) 'nest @defm nest.outer",
+        "[] ((1) `x defp ( -- n ) ([] ((2) `x defp ( -- n ) (x) `get def) `nest-inner @defm nest-inner.get) " ++
+            "`outer def) `nest @defm nest.outer",
         "2",
     );
     // A body with many occurrences is copied whole, every one of them naming
@@ -293,16 +293,16 @@ test "unit inputs: a nested construction inside a stamped body still names its o
     // in `spans.zig` by advancing one element at a time.)
     try expectStack(
         &runtime,
-        "[] ((1) 'x defp ( -- n ) (x x x x x x x x x x x x x x x x x x x x pop pop pop pop " ++
-            "pop pop pop pop pop pop pop pop pop pop pop pop pop pop pop) 'go def) " ++
-            "'wide @defm wide.go",
+        "[] ((1) `x defp ( -- n ) (x x x x x x x x x x x x x x x x x x x x pop pop pop pop " ++
+            "pop pop pop pop pop pop pop pop pop pop pop pop pop pop pop) `go def) " ++
+            "`wide @defm wide.go",
         "1",
     );
     // And a nested construction with explicit empty seeds behaves the same way.
     try expectStack(
         &runtime,
-        "[] ((1) 'x defp ( -- n ) ([] ((2) 'x defp ( -- n ) (x) 'get def) 'seeded-inner @defm seeded-inner.get) " ++
-            "'outer def) 'nest-seeded @defm nest-seeded.outer",
+        "[] ((1) `x defp ( -- n ) ([] ((2) `x defp ( -- n ) (x) `get def) `seeded-inner @defm seeded-inner.get) " ++
+            "`outer def) `nest-seeded @defm nest-seeded.outer",
         "2",
     );
 }

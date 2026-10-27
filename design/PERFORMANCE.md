@@ -601,7 +601,7 @@ Counters over 10,000 float elements, one worker, instrumented ReleaseSafe:
 | `(sq) each`, `sq` a source word | 10,015 | 17 | 19,996 | 29,994 |
 | `((1 +) call dup *) each` | 30,009 | 17 | 0 | 39,992 |
 | `(\|x\| x x *) each` | 50,009 | 40,011 | 0 | 9,998 |
-| `(dup 'k set k *) each` | 170,013 | 170,013 | 0 | 19,996 |
+| ``(dup `k set k *) each`` | 170,013 | 170,013 | 0 | 19,996 |
 
 Allocations, transitions, application resumes, and handoffs are unchanged.
 At this measurement stage, the locals body kept four resumes per element for
@@ -618,7 +618,7 @@ over 100,000 floats, internal milliseconds:
 | `(dup *) each` | 731 | 283 |
 | `(1 + 1 +) each` | 741 | 327 |
 | `() each` | 173 | 171 |
-| `(dup 'k set k *) each` | 7,480 | 6,678 |
+| ``(dup `k set k *) each`` | 7,480 | 6,678 |
 
 ## Locals backend words bind without resolution — 2026-09-28
 
@@ -741,7 +741,7 @@ output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
    its read-ahead on the endpoint value. `fd.in io.lines` over the input is
    10.6 G against 41.0 G for `io.stdin "\n" split`; a streaming
    `fs.open-reader` read in 1 MiB chunks is 0.14 G and 9 MiB against 0.37 G
-   and 491 MiB for `fs.read-bytes`. `proc.run` validates its `'stdin` with
+   and 491 MiB for `fs.read-bytes`. `proc.run` validates its `` `stdin `` with
    the native `fd.bytes?` instead of a prelude predicate per element: a 4 MB
    stdin is 26.3 G → 0.43 G.
 8. `split` of a one-byte-wide string at a one-byte-wide separator is two
@@ -1127,7 +1127,7 @@ has 100,000 rows and three columns ending in a spelling-preserving text fallback
 Setup constructs the input before the measured operation. Rates are rows/s;
 all pairs again show baseline → updated. Composite baseline is `flip group`;
 updated is `group-columns`. Aggregation compares gathered `(sum)` / `(len)`
-quotations with fixed `'sum` / `'count` reducers on the same data.
+quotations with fixed `` `sum `` / `` `count `` reducers on the same data.
 
 | Workload | Rows | Setup ms | Operation ms | Rows/s | Peak MiB |
 |---|---:|---:|---:|---:|---:|

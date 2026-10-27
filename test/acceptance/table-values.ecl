@@ -1,13 +1,13 @@
 # DoD-27: a valid table stays an ordinary dict under every core interface,
 # while the table words preserve the ordered equal-length-column convention.
-'table
-('valid? 'names 'height 'from-columns 'from-rows 'from-header-rows
- 'from-records 'rows 'header-rows 'records 'column 'cast 'select 'rename
- 'with-column)
+`table
+(valid? names height from-columns from-rows from-header-rows
+ from-records rows header-rows records column cast select rename
+ with-column)
 import
 
 ### set sales
-{"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} 'sales set
+{"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} `sales set
 
 # Core reflection is honest: a table is a dict and behaves as one.
 sales type io.pp
@@ -51,4 +51,4 @@ sales "flag" [1 0 1] with-column io.pp
 sales [1 0 1] table.where io.pp
 
 # CSV emission takes text fields; parsing with a text schema preserves them.
-sales {"id" (str)} cast header-rows csv.emit ['text 'text] csv.parse flip from-header-rows io.pp
+sales {"id" (str)} cast header-rows csv.emit [text text] csv.parse flip from-header-rows io.pp

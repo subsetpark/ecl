@@ -35,10 +35,12 @@ execute 'syntax match eclCharacter /' . s:atom_start
       \ . '\\\%(space\|tab\|newline\|u{\x\{1,6}}\|u\%({\)\@!\|[^u]\)'
       \ . s:atom_end . '/'
 
-let s:symbol_segment = '[^[:space:],(){}\[\]"#''\\.;|]\+'
-execute 'syntax match eclSymbol /' . s:atom_start . "'"
+let s:symbol_segment = '\%([^[:space:],(){}\[\]"#''`\\.;|]\+\|''[^''[:cntrl:]]\+''\)'
+execute 'syntax match eclSymbol /' . s:atom_start . '`'
       \ . s:symbol_segment . '\%(\.' . s:symbol_segment . '\)*'
       \ . s:atom_end . '/'
+execute 'syntax match eclDelimitedSymbol /' . s:atom_start
+      \ . "'[^'[:cntrl:]]\\+'" . s:atom_end . '/'
 
 execute 'syntax match eclDefinition /' . s:atom_start
       \ . '\%(defp\?\|setp\?\|test\|@defm\)' . s:atom_end . '/'
@@ -51,6 +53,7 @@ highlight default link eclEscape SpecialChar
 highlight default link eclNumber Number
 highlight default link eclCharacter Character
 highlight default link eclSymbol Constant
+highlight default link eclDelimitedSymbol Identifier
 highlight default link eclDefinition Keyword
 highlight default link eclDelimiter Delimiter
 highlight default link eclLocals Operator

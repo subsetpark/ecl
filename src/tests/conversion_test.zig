@@ -71,15 +71,15 @@ test "conversion: chars yields text content for every documented source kind" {
     defer runtime.deinit();
     try expectStack(&runtime, "\"hi\" chars", "\"hi\"");
     try expectStack(&runtime, "\"\" chars", "\"\"");
-    try expectStack(&runtime, "'foo.bar chars", "\"foo.bar\"");
+    try expectStack(&runtime, "`foo.bar chars", "\"foo.bar\"");
     try expectStack(&runtime, "(dup) first chars", "\"dup\"");
     try expectStack(&runtime, "\\λ chars", "\"λ\"");
     try expectStack(&runtime, "[104 195 169] chars", "\"hé\"");
     // Idempotent on its own output, and the inverse of `bytes`.
     try expectStack(&runtime, "\"aλ\" bytes chars", "\"aλ\"");
-    try expectStack(&runtime, "'sym chars chars", "\"sym\"");
+    try expectStack(&runtime, "`sym chars chars", "\"sym\"");
     // `str` is representation; `chars` is content.
-    try expectStack(&runtime, "'foo str 'foo chars", "\"'foo\" \"foo\"");
+    try expectStack(&runtime, "`foo str `foo chars", "\"foo\" \"foo\"");
 }
 
 test "conversion: chars rejects non-UTF-8 bytes with a reason and other kinds by type" {
@@ -87,13 +87,13 @@ test "conversion: chars rejects non-UTF-8 bytes with a reason and other kinds by
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectError(&runtime, "[255] chars", &.{ "'kind 'domain", "'reason 'invalid-utf8" });
-    try expectError(&runtime, "[195] chars", &.{ "'kind 'domain", "'reason 'invalid-utf8" });
-    try expectError(&runtime, "[1 \"x\"] chars", &.{"'kind 'type"});
-    try expectError(&runtime, "[256] chars", &.{"'kind 'type"});
-    try expectError(&runtime, "[-1] chars", &.{"'kind 'type"});
-    try expectError(&runtime, "5 chars", &.{"'kind 'type"});
-    try expectError(&runtime, "{} chars", &.{"'kind 'type"});
+    try expectError(&runtime, "[255] chars", &.{ "kind domain", "reason invalid-utf8" });
+    try expectError(&runtime, "[195] chars", &.{ "kind domain", "reason invalid-utf8" });
+    try expectError(&runtime, "[1 \"x\"] chars", &.{"kind type"});
+    try expectError(&runtime, "[256] chars", &.{"kind type"});
+    try expectError(&runtime, "[-1] chars", &.{"kind type"});
+    try expectError(&runtime, "5 chars", &.{"kind type"});
+    try expectError(&runtime, "{} chars", &.{"kind type"});
     // A failed conversion is transactional: the operand is still there.
     try expectStack(&runtime, "1 [255] (chars) @attempt result.err? pop", "1");
 }
@@ -108,10 +108,10 @@ test "conversion: bytes encodes strings and passes byte lists through" {
     try expectStack(&runtime, "[104 105] bytes", "[104 105]");
     try expectStack(&runtime, "[104 105] bytes bytes chars", "\"hi\"");
     try expectStack(&runtime, "\"λ\" bytes len", "2");
-    try expectError(&runtime, "[300] bytes", &.{"'kind 'type"});
-    try expectError(&runtime, "[1 'a] bytes", &.{"'kind 'type"});
-    try expectError(&runtime, "'sym bytes", &.{"'kind 'type"});
-    try expectError(&runtime, "7 bytes", &.{"'kind 'type"});
+    try expectError(&runtime, "[300] bytes", &.{"kind type"});
+    try expectError(&runtime, "[1 a] bytes", &.{"kind type"});
+    try expectError(&runtime, "`sym bytes", &.{"kind type"});
+    try expectError(&runtime, "7 bytes", &.{"kind type"});
 }
 
 test "conversion: symbol is lookup-only and intern is the one word that creates" {
@@ -119,43 +119,26 @@ test "conversion: symbol is lookup-only and intern is the one word that creates"
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectStack(&runtime, "'x symbol", "'x");
-    try expectStack(&runtime, "(dup) first symbol", "'dup");
+    try expectStack(&runtime, "`x symbol", "x");
+    try expectStack(&runtime, "(dup) first symbol", "dup");
     // Reading this very source interned `already-here`, so lookup succeeds.
-    try expectStack(&runtime, "'already-here pop \"already-here\" symbol", "'already-here");
-    try expectStack(&runtime, "\"dup\" symbol 'dup match?", "1");
+    try expectStack(&runtime, "`already-here pop \"already-here\" symbol", "already-here");
+    try expectStack(&runtime, "\"dup\" symbol `dup match?", "1");
     // A spelling no source has read is absent until `intern` creates it.
-    try expectError(&runtime, "\"conversion-test-fresh-4d1e\" symbol", &.{ "'kind 'domain", "not interned" });
-    try expectStack(&runtime, "\"conversion-test-fresh-4d1e\" intern type", "'symbol");
+    try expectError(&runtime, "\"conversion-test-fresh-4d1e\" symbol", &.{ "kind domain", "not interned" });
+    try expectStack(&runtime, "\"conversion-test-fresh-4d1e\" intern type", "symbol");
     try expectStack(&runtime, "\"conversion-test-fresh-4d1e\" symbol chars", "\"conversion-test-fresh-4d1e\"");
     try expectStack(&runtime, "\"conversion-test-fresh-4d1e\" intern \"conversion-test-fresh-4d1e\" symbol match?", "1");
     // Both words accept the whole quoted-symbol grammar and nothing else.
-    try expectStack(&runtime, "\"a.b\" intern \"42\" intern \"--\" intern", "'a.b '42 '--");
-    try expectError(&runtime, "\"\" symbol", &.{ "'kind 'domain", "valid symbol spelling" });
-    try expectError(&runtime, "\"a b\" intern", &.{ "'kind 'domain", "valid symbol spelling" });
-    try expectError(&runtime, "\"'quoted\" intern", &.{ "'kind 'domain", "valid symbol spelling" });
-    try expectError(&runtime, "\"a..b\" intern", &.{ "'kind 'domain", "valid symbol spelling" });
-    try expectError(&runtime, "\"trailing.\" intern", &.{ "'kind 'domain", "valid symbol spelling" });
-    try expectError(&runtime, "42 symbol", &.{"'kind 'type"});
-    try expectError(&runtime, "[1 2] intern", &.{"'kind 'type"});
-}
-
-test "conversion: word converts symbols to dynamically resolved executable words" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    try expectStack(&runtime, "'dup word type", "'word");
-    try expectStack(&runtime, "'foo.bar word symbol", "'foo.bar");
-    try expectStack(&runtime, "'unbound-conversion-word word chars", "\"unbound-conversion-word\"");
-    try expectStack(&runtime, "2 3 '+ word execute", "5");
-    try expectStack(&runtime, "2 3 'core.+ word execute", "5");
-    try expectStack(&runtime, "'later-word word (42) 'later-word def execute", "42");
-    try expectStack(&runtime, "'dup word () cons 7 swap call", "7 7");
-    try expectError(&runtime, "word", &.{"'kind 'underflow"});
-    try expectError(&runtime, "42 word", &.{ "'kind 'type", "'word 'word" });
-    try expectError(&runtime, "\"dup\" word", &.{"'kind 'type"});
-    try expectError(&runtime, "(dup) first word", &.{"'kind 'type"});
+    try expectStack(&runtime, "\"a.b\" intern \"42\" intern \"--\" intern", "a.b '42' --");
+    try expectError(&runtime, "\"\" symbol", &.{ "kind domain", "valid symbol spelling" });
+    try expectStack(&runtime, "\"a b\" intern", "'a b'");
+    try expectError(&runtime, "\"a'b\" intern", &.{ "kind domain", "valid symbol spelling" });
+    try expectError(&runtime, "\"'quoted\" intern", &.{ "kind domain", "valid symbol spelling" });
+    try expectError(&runtime, "\"a..b\" intern", &.{ "kind domain", "valid symbol spelling" });
+    try expectError(&runtime, "\"trailing.\" intern", &.{ "kind domain", "valid symbol spelling" });
+    try expectError(&runtime, "42 symbol", &.{"kind type"});
+    try expectError(&runtime, "[1 2] intern", &.{"kind type"});
 }
 
 test "conversion: data-facing words never intern their input" {
@@ -166,13 +149,13 @@ test "conversion: data-facing words never intern their input" {
     // `symbol` is the oracle: a spelling is interned exactly when lookup
     // succeeds. Feeding a spelling through JSON, CSV, and string words must
     // leave it absent; only `intern` and reading source may add it.
-    try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"'kind 'domain"});
+    try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"kind domain"});
     try expectStack(&runtime, "\"{\\\"conv-json-key-91\\\": 1}\" json.parse dict.keys first", "\"conv-json-key-91\"");
-    try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"'kind 'domain"});
+    try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"kind domain"});
     try expectStack(&runtime, "\"conv-csv-h1\\n1\" [] csv.parse first first", "\"conv-csv-h1\"");
-    try expectError(&runtime, "\"conv-csv-h1\" symbol", &.{"'kind 'domain"});
+    try expectError(&runtime, "\"conv-csv-h1\" symbol", &.{"kind domain"});
     try expectStack(&runtime, "\"conv-str-92\" str.upper str.lower \"-\" split len", "3");
-    try expectError(&runtime, "\"conv-str-92\" symbol", &.{"'kind 'domain"});
+    try expectError(&runtime, "\"conv-str-92\" symbol", &.{"kind domain"});
     try expectStack(&runtime, "\"conv-json-key-91\" intern chars", "\"conv-json-key-91\"");
 }
 
@@ -186,14 +169,14 @@ test "conversion: int accepts ints, chars, and integer literals only" {
     try expectStack(&runtime, "\\λ int", "955");
     try expectStack(&runtime, "\"42\" int \"-3\" int \"0x10\" int", "42 -3 16");
     try expectStack(&runtime, "\"9223372036854775807\" int", "9223372036854775807");
-    try expectError(&runtime, "\"9223372036854775808\" int", &.{"'kind 'overflow"});
-    try expectError(&runtime, "\"3.5\" int", &.{ "'kind 'parse", "integer literal" });
-    try expectError(&runtime, "\"1 2\" int", &.{"'kind 'parse"});
-    try expectError(&runtime, "\"\" int", &.{"'kind 'parse"});
-    try expectError(&runtime, "\"λ\" int", &.{"'kind 'parse"});
-    try expectError(&runtime, "3.5 int", &.{ "'kind 'type", "floor, round, or ceil" });
-    try expectError(&runtime, "'x int", &.{"'kind 'type"});
-    try expectError(&runtime, "[1] int", &.{"'kind 'type"});
+    try expectError(&runtime, "\"9223372036854775808\" int", &.{"kind overflow"});
+    try expectError(&runtime, "\"3.5\" int", &.{ "kind parse", "integer literal" });
+    try expectError(&runtime, "\"1 2\" int", &.{"kind parse"});
+    try expectError(&runtime, "\"\" int", &.{"kind parse"});
+    try expectError(&runtime, "\"λ\" int", &.{"kind parse"});
+    try expectError(&runtime, "3.5 int", &.{ "kind type", "floor, round, or ceil" });
+    try expectError(&runtime, "`x int", &.{"kind type"});
+    try expectError(&runtime, "[1] int", &.{"kind type"});
     // A char's codepoint round-trips through `char`.
     try expectStack(&runtime, "\\λ int char", "\\λ");
 }
@@ -209,10 +192,10 @@ test "conversion: float accepts floats, ints, and numeric literals only" {
     try expectStack(&runtime, "\"0.3\" float", "0.3");
     try expectStack(&runtime, "\"5e-324\" float 0.0 >", "1");
     try expectStack(&runtime, "\"-0e999999999999999999999\" float", "-0.0");
-    try expectError(&runtime, "\"abc\" float", &.{ "'kind 'parse", "numeric literal" });
-    try expectError(&runtime, "\"\" float", &.{"'kind 'parse"});
-    try expectError(&runtime, "\\a float", &.{"'kind 'type"});
-    try expectError(&runtime, "'x float", &.{"'kind 'type"});
+    try expectError(&runtime, "\"abc\" float", &.{ "kind parse", "numeric literal" });
+    try expectError(&runtime, "\"\" float", &.{"kind parse"});
+    try expectError(&runtime, "\\a float", &.{"kind type"});
+    try expectError(&runtime, "`x float", &.{"kind type"});
 }
 
 test "conversion: char accepts chars, ints, strings, and lists of codepoints" {
@@ -225,17 +208,17 @@ test "conversion: char accepts chars, ints, strings, and lists of codepoints" {
     try expectStack(&runtime, "1114111 char int", "1114111");
     try expectStack(&runtime, "\"λ\" char \"\" char \"ab\" char", "\"λ\" \"\" \"ab\"");
     try expectStack(&runtime, "[97 98 99] char \"abc\" 1 + char [955 97] char [128512 97] char (\\a 98) char [] char", "\"abc\" \"bcd\" \"λa\" \"😀a\" \"ab\" \"\"");
-    try expectStack(&runtime, "\"abc\" 1 + char str.core.kind", "'string");
-    try expectError(&runtime, "1114112 char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "55296 char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "57343 char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "-1 char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "[1114112] char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "[97 55296] char", &.{ "'kind 'domain", "Unicode scalar" });
-    try expectError(&runtime, "2.0 char", &.{"'kind 'type"});
-    try expectError(&runtime, "'x char", &.{"'kind 'type"});
-    try expectError(&runtime, "[97 2.0] char", &.{"'kind 'type"});
-    try expectError(&runtime, "[[97]] char", &.{"'kind 'type"});
+    try expectStack(&runtime, "\"abc\" 1 + char str.core.kind", "string");
+    try expectError(&runtime, "1114112 char", &.{ "kind domain", "Unicode scalar" });
+    try expectError(&runtime, "55296 char", &.{ "kind domain", "Unicode scalar" });
+    try expectError(&runtime, "57343 char", &.{ "kind domain", "Unicode scalar" });
+    try expectError(&runtime, "-1 char", &.{ "kind domain", "Unicode scalar" });
+    try expectError(&runtime, "[1114112] char", &.{ "kind domain", "Unicode scalar" });
+    try expectError(&runtime, "[97 55296] char", &.{ "kind domain", "Unicode scalar" });
+    try expectError(&runtime, "2.0 char", &.{"kind type"});
+    try expectError(&runtime, "`x char", &.{"kind type"});
+    try expectError(&runtime, "[97 2.0] char", &.{"kind type"});
+    try expectError(&runtime, "[[97]] char", &.{"kind type"});
 }
 
 test "conversion: every conversion word reports its own name and underflows cleanly" {
@@ -246,7 +229,38 @@ test "conversion: every conversion word reports its own name and underflows clea
     const words = [_][]const u8{ "chars", "bytes", "symbol", "intern", "int", "float", "char" };
     for (words) |word| {
         var buffer: [64]u8 = undefined;
-        const expected = try std.fmt.bufPrint(&buffer, "'word '{s}", .{word});
-        try expectError(&runtime, word, &.{ "'kind 'underflow", expected });
+        const expected = try std.fmt.bufPrint(&buffer, "word {s}", .{word});
+        try expectError(&runtime, word, &.{ "kind underflow", expected });
     }
+}
+
+test "conversion: a symbol built from a string links to the root that built it" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // `q` is `(dup)` assembled at the session, so `dup` is the session's
+    // wherever the quotation is later called: at the session directly, and
+    // inside a module whose own chain never reaches the session.
+    try expectStack(
+        &runtime,
+        "(pop 99) `dup def [] ((call) `apply def) `conv-link @defm " ++
+            "\"dup\" symbol wrap `q set 1 q call 1 q conv-link.apply",
+        "99 99",
+    );
+}
+
+test "conversion: a symbol the implementation builds means core's binding" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // The failing word in an error dict is a symbol no program wrote, so
+    // running it reaches core's `at` even though the session shadows `at`.
+    try expectStack(
+        &runtime,
+        "(pop pop 55) `at def [] ([] 5 core.at) @attempt `err 0 dict.get `word 0 dict.get wrap `q set " ++
+            "[7 8] 1 q call",
+        "8",
+    );
 }

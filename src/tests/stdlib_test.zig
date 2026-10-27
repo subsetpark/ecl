@@ -41,23 +41,23 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
     defer inputs.deinit();
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "(0) 'inspection-side-effect def");
+    try expectOk(&runtime, "(0) `inspection-side-effect def");
     try expectDisplay(&runtime,
-        \\(99 'inspection-side-effect def
-        \\ [] () 'sample.one @defm
-        \\ ([] () 'nested @defm)
-        \\ [@defm 'list-only @defm]
-        \\ {'code ('dict-only @defm)}
+        \\(99 `inspection-side-effect def
+        \\ [] () `sample.one @defm
+        \\ ([] () `nested @defm)
+        \\ [@defm list-only @defm]
+        \\ {code (`dict-only @defm)}
         \\ "'string-only @defm"
         \\ # 'comment-only @defm
         \\ [] () "computed" symbol @defm
-        \\ [] () 'sample.two @defm
-        \\ [] () 'sample.one @defm) source.declarations
-    , "('sample.one 'sample.two 'sample.one)");
+        \\ [] () `sample.two @defm
+        \\ [] () `sample.one @defm) source.declarations
+    , "(sample.one sample.two sample.one)");
     try expectDisplay(&runtime, "pop inspection-side-effect", "0");
     try expectDisplay(&runtime, "pop () source.declarations", "()");
-    try expectDisplay(&runtime, "pop \"[] () 'parsed @defm\" parse source.declarations", "('parsed)");
-    try expectDisplay(&runtime, "pop (" ++ support.repeated("'many @defm ", 4097) ++ ") source.declarations len", "4097");
+    try expectDisplay(&runtime, "pop \"[] () `parsed @defm\" parse source.declarations", "(parsed)");
+    try expectDisplay(&runtime, "pop (" ++ support.repeated("`many @defm ", 4097) ++ ") source.declarations len", "4097");
     try support.expectError(.{
         .name = "source inspection rejects non-list input",
         .source = "42 source.declarations",
@@ -83,22 +83,22 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         try std.testing.expect(std.mem.startsWith(u8, qualified, name));
         const source = try std.fmt.allocPrint(
             allocator,
-            "'{s} ('{s}) import",
+            "`{s} ({s}) import",
             .{ name, qualified[name.len + 1 ..] },
         );
         defer allocator.free(source);
         try expectOk(&runtime, source);
     }
-    try support.expectStack("'result ('ok) import [1 2] ok", "{'ok [1 2]}");
+    try support.expectStack("`result (ok) import [1 2] ok", "{ok [1 2]}");
 }
 
 test "stdlib: qualified reference auto-loads an unregistered module" {
     // No import, no registration, no path: the first mention of the dotted
     // name is what loads the module.
-    try support.expectStack("[1 2] result.ok", "{'ok [1 2]}");
+    try support.expectStack("[1 2] result.ok", "{ok [1 2]}");
     // The reference is retried in place, so a value produced before it and a
     // word applied after it both see the ordinary stack.
-    try support.expectStack("7 [1 2] result.ok 'ok at len", "7 2");
+    try support.expectStack("7 [1 2] result.ok `ok at len", "7 2");
     // The retry costs one bounded search and then reads as an undefined word.
     try support.expectErrors(&.{
         .{
@@ -120,30 +120,30 @@ test "stdlib: dynamic qualified execution auto-loads every embedded transport" {
     try support.expectStacks(&.{
         .{
             .name = "embedded ECL source",
-            .source = "[1] 'result 'ok qualify execute",
-            .expected = "{'ok [1]}",
+            .source = "[1] `result `ok qualify execute",
+            .expected = "{ok [1]}",
         },
         .{
             .name = "embedded builtin table",
-            .source = "\"[1]\" 'json 'parse qualify execute",
+            .source = "\"[1]\" `json `parse qualify execute",
             .expected = "[1]",
         },
         .{
             .name = "embedded native descriptor",
-            .source = "\"a,b\" [] 'csv 'parse qualify execute flip",
+            .source = "\"a,b\" [] `csv `parse qualify execute flip",
             .expected = "((\"a\" \"b\"))",
         },
     });
     try support.expectError(.{
         .name = "cold dynamic miss retains the requested word",
-        .source = "'result 'nope qualify execute",
+        .source = "`result `nope qualify execute",
         .kind = "undefined-word",
         .word = "result.nope",
     });
 }
 
 test "stdlib: qualified reflection auto-loads every module transport" {
-    try support.expectStack("'str.upper doc len 0 > 'io.pp doc len 0 >", "1 1");
+    try support.expectStack("`str.upper doc len 0 > `io.pp doc len 0 >", "1 1");
 
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
@@ -153,9 +153,9 @@ test "stdlib: qualified reflection auto-loads every module transport" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "'csv.parse which 'result.ok see");
+    try expectOk(&runtime, "`csv.parse which `result.ok see");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "csv.parse") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(dup type 'list match?") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(dup type `list match?") != null);
 }
 
 test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling" {
@@ -164,15 +164,15 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     // A path module that would shadow a stdlib name, and one that would not.
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "result.ecl",
-        .data = "[] ((999) 'ok def) 'result @defm",
+        .data = "[] ((999) `ok def) `result @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "site-local.ecl",
-        .data = "[] ((7) 'answer def) 'site-local @defm",
+        .data = "[] ((7) `answer def) `site-local @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "cold-local.ecl",
-        .data = "[] ((8) 'answer def (9) 'also def) 'cold-local @defm",
+        .data = "[] ((8) `answer def (9) `also def) `cold-local @defm",
     });
     const search = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(search);
@@ -200,7 +200,7 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
             .ecl_path = search,
         }), .default, .evaluate);
         defer imported.deinit();
-        try expectDisplay(&imported, "'result ('ok) import [3] ok", "{'ok [3]}");
+        try expectDisplay(&imported, "`result (ok) import [3] ok", "{ok [3]}");
     }
 
     var runtime_inputs3 = try runtime_fixture.Fixture.init();
@@ -214,7 +214,7 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     defer runtime.deinit();
 
     // The embedded module also wins for a cold literal qualified reference.
-    try expectDisplay(&runtime, "[1 2] result.ok", "{'ok [1 2]}");
+    try expectDisplay(&runtime, "[1 2] result.ok", "{ok [1 2]}");
     // Completion reaches the same ECL_PATH module before any execution or
     // reflection has registered it.
     var completed = try runtime.completionCandidates("cold-local.a");
@@ -224,7 +224,7 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     try std.testing.expectEqualStrings("cold-local.answer", completed.items()[1]);
     // The same search path still serves a name the stdlib does not claim, so
     // this is precedence rather than ECL_PATH being ignored.
-    try expectDisplay(&runtime, "site-local.answer", "{'ok [1 2]} 7");
+    try expectDisplay(&runtime, "site-local.answer", "{ok [1 2]} 7");
 }
 
 test "stdlib: concurrent first references converge on one published module" {
@@ -241,11 +241,11 @@ test "stdlib: concurrent first references converge on one published module" {
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "([1] result.ok) ([2] 'result 'ok qualify execute) pair ([] swap @spawn) each (task.await) each " ++
+            "([1] result.ok) ([2] `result `ok qualify execute) pair ([] swap @spawn) each (task.await) each " ++
                 "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each",
-            "({'ok ({'ok [1]})} {'ok ({'ok [2]})}) " ++
-                "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
-                "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]})",
+            "({ok ({ok [1]})} {ok ({ok [2]})}) " ++
+                "({ok [1]} {ok [2]} {ok [3]} {ok [4]} " ++
+                "{ok [5]} {ok [6]} {ok [7]} {ok [8]})",
         );
     }
 }

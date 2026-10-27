@@ -50,19 +50,19 @@ representation.
 There are 6 core value types capable of being constructed directly from program
 text: 
 
-- `'int`: 1, 100, 1_000_000
-- `'float`: 1.0, 1e10, inf
-- `'char`: \a, \1, \u{1000}
-- `'symbol`: 'a, 'hello-world
-- `'list`: [1 2 3], (2 4 6), "hello world"
-- `'dict`: {'hello "world"}
+- `` `int ``: 1, 100, 1_000_000
+- `` `float ``: 1.0, 1e10, inf
+- `` `char ``: \a, \1, \u{1000}
+- `` `symbol ``: 'a, 'hello-world
+- `` `list ``: [1 2 3], (2 4 6), "hello world"
+- `` `dict ``: {'hello "world"}
 
 A couple things can be inferred by the above: 
 
-- There is no separate `'boolean` type; the ints `0` and `1` are used for
+- There is no separate `` `boolean `` type; the ints `0` and `1` are used for
   _false_ and _true_.
-- There is no separate `'string` type; strings are lists of `'char`s. 
-- On the other hand, there *is* a `'char` type separate from `'int`: this is
+- There is no separate `` `string `` type; strings are lists of `` `char ``s. 
+- On the other hand, there *is* a `` `char `` type separate from `` `int ``: this is
   because ECL strings are utf-8 native and thus strings are lists of
   codepoints---not just numbers.
 - Lists can be constructed with either `[]` or `()`; their respective internal
@@ -74,12 +74,12 @@ All values in ECL are immutable. An expression like `[1] 1 +` will place two
 values on the stack, then call an operator which consumes them both and
 places the value `[2]` onto the stack; it won't mutate the `[1]`.
 
-`'dict`s are the core associative data structure. They map _keys_ to _values_;
-in ECL every value is hashable and thus can be the key of a `'dict`. 
+`` `dict ``s are the core associative data structure. They map _keys_ to _values_;
+in ECL every value is hashable and thus can be the key of a `` `dict ``. 
 
-`'list`s are the other core composite data structure. They are ordered
-collections of values; like with `'dict`s, a list may contain any value.
-`'list`s are not typed and may be heterogeneous (though the representation and
+`` `list ``s are the other core composite data structure. They are ordered
+collections of values; like with `` `dict ``s, a list may contain any value.
+`` `list ``s are not typed and may be heterogeneous (though the representation and
 manipulation of a homogeneous list might be more efficient than that of a list
 that mixes multiple element types). As we've seen, strings are a special type
 of list; a list of chars is automatically displayed as a readable string:
@@ -92,13 +92,13 @@ ecl> 1 (pop 100) update
 
 ## Words, Symbols, and Quotations
 
-The first type that's not trivially constructable via literals is the `'word`.
+The first type that's not trivially constructable via literals is the `` `word ``.
 If the values we've covered are effectively values which evaluate to
 themselves, then a word is effectively a value which, when evaluated (by being
 placed on the _operand stack_), are treated as a binding to be looked up in the
 current environment.
 
-Thus the `'word` is the core primitive out of which ECL programs are composed.
+Thus the `` `word `` is the core primitive out of which ECL programs are composed.
 This includes built-in words that are implemented directly in the ECL
 interpreter:
 
@@ -110,7 +110,7 @@ ecl> 3 5 swap 1 +
 As well as words which are introduced by ECL programs:
 
 ```
-ecl> 10 'my-constant set
+ecl> 10 `my-constant set
 ecl> my-constant
 10
 ```
@@ -119,14 +119,14 @@ A word which is not bound in the current environment results in an error:
 
 ```
 ecl> hotdogs
-{'kind 'undefined-word 
- 'msg "undefined word `hotdogs`" 
- 'word 'hotdogs 
- 'trace ['hotdogs] 
- 'data {'name 'hotdogs 'scope 'session 'source "<repl>" 'line 1 'col 1}}
+{kind undefined-word 
+ `msg "undefined word `hotdogs`" 
+ `word `hotdogs 
+ `trace [hotdogs] 
+ `data {name hotdogs scope session source "<repl>" line 1 col 1}}
 ```
 
-This is why we needed to say `'my-constant` (note the `'`) when defining a new
+This is why we needed to say `` `my-constant `` (note the `'`) when defining a new
 word; simply invoking the word directly would have caused the interpreter to
 try to look it up.
 
@@ -155,7 +155,7 @@ the binding word `def` will create a binding which automatically unwraps the
 quotation it binds when invoked:
 
 ```
-ecl> (1 +) 'inc def
+ecl> (1 +) `inc def
 ecl> 4 inc
 5
 ```
@@ -208,7 +208,7 @@ observe unit behaviour is through the REPL, where every line forms a unit:
 ecl> 4 5
 4 5
 ecl> 6 7 0 div
-{'kind 'domain 'msg "kernel arithmetic is outside its domain" 'word 'div 'trace ['div] 'data {'source "<repl>" 'line 1 'col 7}}
+{kind domain msg "kernel arithmetic is outside its domain" word div trace [div] data {source "<repl>" line 1 col 7}}
 ecl>
 4 5
 ecl>
@@ -231,16 +231,16 @@ value to the calling stack. The simplest way to construct a unit is with
 ```
 ecl> [] (7 0 div) @attempt
 {
-  'err {
-    'kind 'domain
-    'msg "kernel arithmetic is outside its domain"
-    'word 'div
-    'trace ['div]
-    'data {'source "<repl>" 'line 1 'col 9}
+  `err {
+    `kind `domain
+    `msg "kernel arithmetic is outside its domain"
+    `word `div
+    `trace [div]
+    `data {source "<repl>" line 1 col 9}
   }
 }
 ecl> type
-'dict
+`dict
 ```
 
 This is the simplest form of error-handling in ECL: `@attempt` evaluates its
@@ -262,12 +262,12 @@ seeded stack:
 7
 ecl> wrap (0 div) @attempt
 {
-  'err {
-    'kind 'domain
-    'msg "kernel arithmetic is outside its domain"
-    'word 'div
-    'trace ['div]
-    'data {'source "<repl>" 'line 1 'col 9}
+  `err {
+    `kind `domain
+    `msg "kernel arithmetic is outside its domain"
+    `word `div
+    `trace [div]
+    `data {source "<repl>" line 1 col 9}
   }
 }
 ```
@@ -290,9 +290,9 @@ module image bodies are quotations, and @defm (as its name suggests) is a unit
 constructor that consumes a seed and a quotation:
 
 ```
-ecl> [] ( 10 'scale setp
-..        (scale *) 'scale-up def
-..        (scale /) 'scale-down def ) 'scaling @defm
+ecl> [] ( 10 `scale setp
+..        (scale *) `scale-up def
+..        (scale /) `scale-down def ) `scaling @defm
 ecl> 5 scaling.scale-up
 50
 ecl> 5 scaling.scale-down
@@ -311,14 +311,14 @@ The word @defm performs two actions:
 ## Concurrency
 
 The execution unit is also the basic unit of concurrency. The unit constructor
-`@spawn` executes its quotation and immediately hands back a `'task` value,
+`@spawn` executes its quotation and immediately hands back a `` `task `` value,
 which can be evaluated with `task.await`:
 
 ```
 ecl> [] (1 2 /) @spawn
 <task:7>
 ecl> task.await
-{'ok [0.5]}
+{ok [0.5]}
 ecl>
 ```
 

@@ -27,23 +27,23 @@ pub const words = [_]env.BuiltinWord{
         .name = "get",
         .doc = "( request -- response ) Fetch a partial or complete http.request with GET defaults, following " ++
             "redirects for bodyless requests, and return " ++
-            "{'status int 'headers dict 'body string}.\n\n" ++
-            "request is a dictionary under the http.request contract and must carry a string 'target URL. Its " ++
-            "optional 'method overrides GET; optional 'headers maps lowercased string names to lists of string " ++
-            "values, each sent in order; and optional 'body is an exact byte list for POST, PUT, or PATCH. A " ++
-            "nonempty body with another method is 'domain. Other request fields are " ++
-            "validated but do not affect the outbound exchange. A malformed request is 'type, and an unsupported " ++
-            "method is 'domain. In the response, 'headers maps each header name the server " ++
-            "sent to its value, keeping the last value of a repeated header, and 'body is the decoded text. A " ++
+            "{status int headers dict body string}.\n\n" ++
+            "request is a dictionary under the http.request contract and must carry a string `target URL. Its " ++
+            "optional `method overrides GET; optional `headers maps lowercased string names to lists of string " ++
+            "values, each sent in order; and optional `body is an exact byte list for POST, PUT, or PATCH. A " ++
+            "nonempty body with another method is `domain. Other request fields are " ++
+            "validated but do not affect the outbound exchange. A malformed request is `type, and an unsupported " ++
+            "method is `domain. In the response, `headers maps each header name the server " ++
+            "sent to its value, keeping the last value of a repeated header, and `body is the decoded text. A " ++
             "non-2xx status is an ordinary response, not an error.\n\n" ++
-            "A transport or protocol failure, and a Session without network access, is 'io carrying the url in " ++
-            "'path. Requests yield to other tasks and have a total 30-second deadline ('timeout). " ++
-            "Finite Session transfer and admission limits fail with 'overflow; no partial response is returned.",
+            "A transport or protocol failure, and a Session without network access, is `io carrying the url in " ++
+            "`path. Requests yield to other tasks and have a total 30-second deadline (`timeout). " ++
+            "Finite Session transfer and admission limits fail with `overflow; no partial response is returned.",
         .primitive = get,
     },
     .{
         .name = "get-bytes",
-        .doc = "( request -- response ) Fetch a request exactly as get does, but return 'body as the exact response " ++
+        .doc = "( request -- response ) Fetch a request exactly as get does, but return `body as the exact response " ++
             "octets in a byte list of ints in 0...255 instead of decoded text.\n\n" ++
             "Arguments, redirects, response headers, and failures are those of get. Use this for archives and other " ++
             "binary content, and chars to decode a body known to be UTF-8.",
@@ -52,18 +52,18 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "post",
         .doc = "( request -- response ) Fetch a partial or complete http.request with POST defaults and " ++
-            "return {'status int 'headers dict 'body string}.\n\n" ++
-            "request has the same contract as for get. Its optional 'method overrides POST, and POST supplies an " ++
-            "empty request body when 'body is absent. Redirects are not followed: a 3xx status is returned as an " ++
-            "ordinary response. Response headers, body decoding, validation, and 'io failures are those of get.",
+            "return {status int headers dict body string}.\n\n" ++
+            "request has the same contract as for get. Its optional `method overrides POST, and POST supplies an " ++
+            "empty request body when `body is absent. Redirects are not followed: a 3xx status is returned as an " ++
+            "ordinary response. Response headers, body decoding, validation, and `io failures are those of get.",
         .primitive = post,
     },
     .{
         .name = "send",
         .doc = "( request -- response ) Send a complete http.request and return " ++
-            "{'status int 'headers dict 'body string}.\n\n" ++
-            "Unlike get and post, send supplies no method default: request must carry string 'method and 'target " ++
-            "fields. Headers, body bytes, response decoding, validation, and 'io failures are those of get. " ++
+            "{status int headers dict body string}.\n\n" ++
+            "Unlike get and post, send supplies no method default: request must carry string `method and `target " ++
+            "fields. Headers, body bytes, response decoding, validation, and `io failures are those of get. " ++
             "Redirects are not followed, so send preserves the request method across exactly one exchange.",
         .primitive = send,
     },
@@ -111,13 +111,13 @@ fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: Response
         return evaluator.fail(.domain, "unsupported HTTP request method");
     const method = defaults.method orelse required_method: {
         if (fields.method == null)
-            return evaluator.typeError("a request with a string 'method");
+            return evaluator.typeError("a request with a string `method");
         // The request driver parses and replaces this placeholder before it
         // opens the URL. Requiring the field here keeps a missing method from
         // silently acquiring a transport-level default.
         break :required_method .GET;
     };
-    _ = fields.target orelse return evaluator.typeError("a request with a string 'target URL");
+    _ = fields.target orelse return evaluator.typeError("a request with a string `target URL");
     const admitted = access.admit() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Overflow => {
@@ -150,26 +150,26 @@ fn requestFields(evaluator: *Machine, request: Value) MachineError!RequestFields
         const key = dict.keyAt(request.dict, index);
         if (key != .symbol) return evaluator.typeError("symbol request field names");
         const item = dict.valueAt(request.dict, index);
-        const name = intern.get(key.symbol);
+        const name = intern.get(key.symbol.name);
         if (std.mem.eql(u8, name, "method")) {
-            if (!item.isString()) return evaluator.typeError("a string request 'method");
+            if (!item.isString()) return evaluator.typeError("a string request `method");
             fields.method = item;
         } else if (std.mem.eql(u8, name, "target")) {
-            if (!item.isString()) return evaluator.typeError("a string request 'target");
+            if (!item.isString()) return evaluator.typeError("a string request `target");
             fields.target = item;
         } else if (std.mem.eql(u8, name, "path") or
             std.mem.eql(u8, name, "query") or
             std.mem.eql(u8, name, "peer"))
         {
-            if (!item.isString()) return evaluator.typeError("string request 'path, 'query, and 'peer fields");
+            if (!item.isString()) return evaluator.typeError("string request `path, `query, and `peer fields");
         } else if (std.mem.eql(u8, name, "headers")) {
-            if (item != .dict) return evaluator.typeError("a request 'headers dict");
+            if (item != .dict) return evaluator.typeError("a request `headers dict");
             fields.headers = item;
         } else if (std.mem.eql(u8, name, "body")) {
-            if (item != .list or item.isString()) return evaluator.typeError("a request 'body byte list");
+            if (item != .list or item.isString()) return evaluator.typeError("a request `body byte list");
             fields.body = item;
         } else if (std.mem.eql(u8, name, "params")) {
-            if (item != .dict) return evaluator.typeError("a request 'params dict");
+            if (item != .dict) return evaluator.typeError("a request `params dict");
             fields.params = item;
         } else return evaluator.typeError("a request dict with only recognized fields");
     }
@@ -305,7 +305,7 @@ const RequestDriver = struct {
                 } else {
                     if (!dict.keyAt(params, index.*).isString() or
                         !dict.valueAt(params, index.*).isString())
-                        return evaluator.typeError("request 'params string names and values");
+                        return evaluator.typeError("request `params string names and values");
                     index.* += 1;
                 }
             },
@@ -441,7 +441,7 @@ const RequestDriver = struct {
                 while (body.index < end) : (body.index += 1) {
                     const item = list.atUnchecked(self.fields.body.?, body.index);
                     if (item != .int or item.int < 0 or item.int > 255)
-                        return evaluator.typeError("request 'body values to be integers from 0 through 255");
+                        return evaluator.typeError("request `body values to be integers from 0 through 255");
                     output[body.index] = @intCast(item.int);
                 }
                 if (body.index == output.len) {
@@ -629,9 +629,9 @@ const RequestDriver = struct {
                 const headers_key = try intern.intern("headers");
                 const body_key = try intern.intern("body");
                 const slots = [_]dict.Pair{
-                    .{ .{ .symbol = status_key }, .{ .int = @intCast(results.exchange.status) } },
-                    .{ .{ .symbol = headers_key }, results.headers },
-                    .{ .{ .symbol = body_key }, results.body },
+                    .{ .{ .symbol = .{ .name = status_key } }, .{ .int = @intCast(results.exchange.status) } },
+                    .{ .{ .symbol = .{ .name = headers_key } }, results.headers },
+                    .{ .{ .symbol = .{ .name = body_key } }, results.body },
                 };
                 const dictionary = try dict.Materializer.init(self.allocator, &slots, true);
                 const moved = results.*;

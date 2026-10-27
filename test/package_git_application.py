@@ -33,8 +33,8 @@ def main():
         shutil.copy2(extension, installed / 'git.eclmod')
         app_map = root / 'acceptance.modules'
         app_map.write_text(
-            "{'format 1 'local \"tests\" 'scopes {\"tests\" {'root " + json.dumps(str(sources))
-            + " 'visible [] 'sources [\"src/**/*.ecl\" \"test/acceptance/git-commands.ecl\"] 'artifacts []}}}"
+            "{format 1 local \"tests\" scopes {\"tests\" {root " + json.dumps(str(sources))
+            + " visible [] sources [\"src/**/*.ecl\" \"test/acceptance/git-commands.ecl\"] artifacts []}}}"
         )
         repo = root / 'repo.git'
         repo.mkdir()
@@ -46,12 +46,12 @@ def main():
 
         def commit(version, answer):
             (repo / 'ecl.pkg').write_text(
-                "{'format 2 'name \"alpha\" 'version " + json.dumps(version)
-                + " 'sources [\"src/*.ecl\"] 'exports [\"alpha\"] 'requires {\"sample\" "
-                + "{'package \"sample\" 'version \"1.0.0\" 'source {'kind 'archive 'url \"https://fixture.invalid/sample.tgz\"} 'hash "
+                "{format 2 name \"alpha\" version " + json.dumps(version)
+                + " sources [\"src/*.ecl\"] exports [\"alpha\"] requires {\"sample\" "
+                + "{package \"sample\" version \"1.0.0\" source {kind archive url \"https://fixture.invalid/sample.tgz\"} hash "
                 + json.dumps(archive_hash) + "}}}"
             )
-            (repo / 'src/alpha.ecl').write_text("[] ((" + str(answer) + ") 'answer def) 'alpha @defm\n")
+            (repo / 'src/alpha.ecl').write_text("[] ((" + str(answer) + ") `answer def) `alpha @defm\n")
             run(['git', 'add', '.'], repo)
             run(['git', 'commit', '-m', version], repo)
             return run(['git', 'rev-parse', 'HEAD'], repo).strip()

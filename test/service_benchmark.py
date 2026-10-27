@@ -29,12 +29,12 @@ if a.repetitions < 1:
     p.error('--repetitions must be positive')
 binary = a.binary.resolve()
 workloads = {
-    'filesystem-directory-resources': (4096, "16 (256 range (pop 'cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096"),
-    'filesystem-stat': (10000, "10000 ('cwd \"data\" fs.stat pop) times 10000"),
-    'filesystem-read': (64 * 65536, "64 ('cwd \"data\" fs.read-bytes len 65536 = assert) times 4194304"),
-    'filesystem-staging-cleanup': (1024, "8 ('cwd \"published\" fs.stage-dir 's set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024"),
-    'network-connections': (32, "{'address \"127.0.0.1\" 'port 0} net.listen 'l set l net.local-address 'port at str io.print 32 range (pop l net.accept) each 'clients set l net.close clients (dup 1 net.read [65] match? assert net.close 0) each pop 32"),
-    'process-duplex': (32, "4096 range 256 mod 'payload set 32 range (pop [] ({'executable \"/bin/cat\"} 'stdin payload dict.put proc.run 'stdout at len) @spawn) each (task.await 'ok at first) each sum 131072 = assert 32"),
+    'filesystem-directory-resources': (4096, "16 (256 range (pop `cwd \".\" fs.child-dir) each (port.close 0) each pop) times 4096"),
+    'filesystem-stat': (10000, "10000 (`cwd \"data\" fs.stat pop) times 10000"),
+    'filesystem-read': (64 * 65536, "64 (`cwd \"data\" fs.read-bytes len 65536 = assert) times 4194304"),
+    'filesystem-staging-cleanup': (1024, "8 (`cwd \"published\" fs.stage-dir `s set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024"),
+    'network-connections': (32, "{address \"127.0.0.1\" port 0} net.listen `l set l net.local-address `port at str io.print 32 range (pop l net.accept) each `clients set l net.close clients (dup 1 net.read [65] match? assert net.close 0) each pop 32"),
+    'process-duplex': (32, "4096 range 256 mod `payload set 32 range (pop [] ({executable \"/bin/cat\"} `stdin payload dict.put proc.run `stdout at len) @spawn) each (task.await `ok at first) each sum 131072 = assert 32"),
 }
 
 def run(name, units, source, directory):
@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix='ecl-service-perf-', dir=a.output.parent
     for name, (units, source) in workloads.items():
         if a.workload is not None and name != a.workload:
             continue
-        source = source.replace(" assert", " {'kind 'user 'msg \"benchmark result\"} assert")
+        source = source.replace(" assert", " {kind user msg \"benchmark result\"} assert")
         run(name, units, source, directory)
         measurements = [run(name, units, source, directory) for _ in range(a.repetitions)]
         report['workloads'][name] = {'units': units, 'source': source, 'measurements': measurements}

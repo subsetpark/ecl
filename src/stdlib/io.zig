@@ -110,8 +110,8 @@ fn writeDiagnosticsLine(evaluator: *Machine, bytes: []const u8) MachineError!voi
 
 fn inspect(evaluator: *Machine) MachineError!void {
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try evaluator.coreWord(try intern.intern("dup")) },
-        .{ .word = try evaluator.coreWord(try intern.intern("io.core.pp")) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern("dup")) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.pp")) },
     });
     try evaluator.callOwned(quotation.list);
 }
@@ -123,10 +123,10 @@ fn debug(evaluator: *Machine) MachineError!void {
     );
     defer separator.deinit();
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try evaluator.coreWord(try intern.intern("io.core.prin")) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.prin")) },
         separator.borrow(),
-        .{ .word = try evaluator.coreWord(try intern.intern("io.core.prin")) },
-        .{ .word = try evaluator.coreWord(try intern.intern("io.core.inspect")) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.prin")) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.inspect")) },
     });
     try evaluator.callOwned(quotation.list);
 }
@@ -145,9 +145,9 @@ fn callWithNewline(
     );
     defer newline.deinit();
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try evaluator.coreWord(try intern.intern(first)) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern(first)) },
         newline.borrow(),
-        .{ .word = try evaluator.coreWord(try intern.intern(last)) },
+        .{ .symbol = try evaluator.coreWord(try intern.intern(last)) },
     });
     try evaluator.callOwned(quotation.list);
 }

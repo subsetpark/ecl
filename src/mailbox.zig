@@ -188,7 +188,7 @@ pub const HandleCheck = struct {
     fn visit(self: *HandleCheck, item: Value) error{ Handle, OutOfMemory }!void {
         switch (item) {
             .task => return error.Handle,
-            .int, .float, .char, .symbol, .word, .port, .address => {},
+            .int, .float, .char, .symbol, .port, .address => {},
             .list => |header| {
                 if (header.kind() != .generic_spine) return;
                 const count: usize = @intCast(header.length());

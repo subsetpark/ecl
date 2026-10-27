@@ -1527,7 +1527,7 @@ const StencilBootstrapDriver = struct {
         const control = self.control.borrow();
         const input = control.input.borrow().list;
         switch (input.kind()) {
-            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (self.typed_window == null) self.typed_window = .init(.{
                     .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, control.width, control.width),
                 });
@@ -2224,7 +2224,7 @@ fn pushGenericEmpty(evaluator: *Machine) error{OutOfMemory}!void {
 fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{OutOfMemory}!Value {
     const forms = try allocator.alloc(Value, names.len);
     defer allocator.free(forms);
-    for (names, 0..) |name, index| forms[index] = .{ .word = .{ .name = try intern.intern(name) } };
+    for (names, 0..) |name, index| forms[index] = .{ .symbol = .{ .name = try intern.intern(name) } };
     return list.fromValuesGeneric(allocator, forms);
 }
 
@@ -2235,6 +2235,6 @@ fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!boo
             1 => true,
             else => evaluator.typeError("a 0/1 bool"),
         },
-        .float, .char, .symbol, .word, .list, .dict, .task, .port, .address => evaluator.typeError("a 0/1 bool"),
+        .float, .char, .symbol, .list, .dict, .task, .port, .address => evaluator.typeError("a 0/1 bool"),
     };
 }

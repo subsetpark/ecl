@@ -5,18 +5,18 @@ from pathlib import Path
 import tarfile
 
 root = Path(__file__).parent
-manifest = b'''{'format 2 'name "sample" 'version "1.0.0" 'sources ["src/**/*.ecl"] 'exports ["sample.api"] 'requires {}}'''
-source = b'''"BAD" 'cwd "package-source-executed" fs.create-text [] ((7) 'value def) 'sample.api @defm [] () 'private.literal @defm ([] () 'nested @defm)'''
+manifest = b'''{format 2 name "sample" version "1.0.0" sources ["src/**/*.ecl"] exports ["sample.api"] requires {}}'''
+source = b'''"BAD" `cwd "package-source-executed" fs.create-text [] ((7) `value def) `sample.api @defm [] () `private.literal @defm ([] () `nested @defm)'''
 base = {"ecl.pkg": manifest, "src/api.ecl": source, "README.md": b"ordinary data\x00\xff"}
 fixtures = {
     "valid": base,
     "missing-manifest": {"src/api.ecl": source},
     "missing-export": {**base, "src/api.ecl": b"[] () \"sample.api\" symbol @defm"},
-    "duplicate-export": {**base, "src/again.ecl": b"[] () 'sample.api @defm"},
+    "duplicate-export": {**base, "src/again.ecl": b"[] () `sample.api @defm"},
     "native": {**base, "lib/native.eclmod": b"arbitrary native payload"},
     "malformed-source": {**base, "src/api.ecl": b"("},
     "reserved": {**base, ".ecl-package.tgz": b"reserved"},
-    "private-duplicates": {**base, "src/again.ecl": b"[] () 'private.literal @defm"},
+    "private-duplicates": {**base, "src/again.ecl": b"[] () `private.literal @defm"},
     "symlink": base,
     "traversal": base,
 }

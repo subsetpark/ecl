@@ -1,1 +1,1 @@
-{'format 2 'name "example.pkg-smoke" 'version "0.1.0" 'sources [] 'exports [] 'requires {"smoke" {'package "a" 'version "1.0.0" 'source {'kind 'archive 'url "https://example.invalid/a-1.0.0.tgz"} 'hash "sha256-50e119dd9bfcff3d9eacc68977d5792f4bd3448d3b23e654838b2add0c5a48e0"}}}
+{format 2 name "example.pkg-smoke" version "0.1.0" sources [] exports [] requires {"smoke" {package "a" version "1.0.0" source {kind archive url "https://example.invalid/a-1.0.0.tgz"} hash "sha256-50e119dd9bfcff3d9eacc68977d5792f4bd3448d3b23e654838b2add0c5a48e0"}}}

@@ -130,9 +130,9 @@ const ParseDriver = struct {
                 .object_begin => try self.frames.append(self.allocator, .{ .kind = .object }),
                 .array_begin => try self.frames.append(self.allocator, .{ .kind = .array }),
                 .object_end, .array_end => try self.closeFrame(evaluator.releaseDomain()),
-                .null => try self.place(evaluator, .{ .symbol = try intern.intern("null") }),
-                .true => try self.place(evaluator, .{ .symbol = try intern.intern("true") }),
-                .false => try self.place(evaluator, .{ .symbol = try intern.intern("false") }),
+                .null => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("null") } }),
+                .true => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("true") } }),
+                .false => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("false") } }),
                 .number, .allocated_number => |text| try self.place(
                     evaluator,
                     try numberValue(evaluator, text),
@@ -479,7 +479,7 @@ const EmitDriver = struct {
                 try self.out.appendSlice(self.allocator, text);
             },
             .symbol => |id| {
-                const bytes = intern.get(id);
+                const bytes = intern.get(id.name);
                 // The three JSON literals round-trip through symbols; every
                 // other symbol has no JSON form.
                 if (std.mem.eql(u8, bytes, "null") or std.mem.eql(u8, bytes, "true") or
@@ -507,7 +507,7 @@ const EmitDriver = struct {
                 try self.out.append(self.allocator, '{');
                 try self.frames.append(self.allocator, .{ .object = .{ .item = item, .index = 0 } });
             },
-            .char, .word, .task, .port, .address => return evaluator.fail(
+            .char, .task, .port, .address => return evaluator.fail(
                 .type,
                 "json.emit expects numbers, strings, lists, dicts, and the JSON literal symbols",
             ),
@@ -523,7 +523,7 @@ const EmitDriver = struct {
         }
         if (key == .symbol) {
             try self.out.append(self.allocator, '"');
-            try self.frames.append(self.allocator, .{ .name = .{ .id = key.symbol, .index = 0 } });
+            try self.frames.append(self.allocator, .{ .name = .{ .id = key.symbol.name, .index = 0 } });
             return;
         }
         return evaluator.fail(.type, "json.emit requires string or symbol dictionary keys");

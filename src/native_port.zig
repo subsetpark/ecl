@@ -1024,11 +1024,11 @@ fn viewMessage(root: ?Value, path: [*]const u64, depth: u32, output: *abi.ValueV
         .int => |number| .{ .kind = .int, .scalar_bits = @bitCast(number) },
         .float => |number| .{ .kind = .float, .scalar_bits = @bitCast(number) },
         .char => |codepoint| .{ .kind = .char, .scalar_bits = codepoint },
-        .symbol => |id| .{ .kind = .symbol, .bytes_ptr = @import("intern.zig").get(id).ptr, .bytes_len = @import("intern.zig").get(id).len },
+        .symbol => |id| .{ .kind = .symbol, .bytes_ptr = @import("intern.zig").get(id.name).ptr, .bytes_len = @import("intern.zig").get(id.name).len },
         .list => |header| .{ .kind = .list, .aggregate_len = header.length(), .text = if (item.isString()) .string else .none },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
         .port => .{ .kind = .port },
-        .word, .task, .address => return false,
+        .task, .address => return false,
     };
     return true;
 }

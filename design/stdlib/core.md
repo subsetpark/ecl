@@ -2,13 +2,13 @@
 
 ### *
 `( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
-`'overflow`.
+`` `overflow ``.
 
 
 ### *%
 `( x y -- z )` — **Pervasive.** Multiply integers modulo 2^64 in two's
-complement, wrapping where `*` raises `'overflow`. Int-only: a float or a char
-is `'type`. With `band`, arithmetic modulo any power of two.
+complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char
+is `` `type ``. With `band`, arithmetic modulo any power of two.
 
 #### Examples
 
@@ -23,22 +23,22 @@ is `'type`. With `band`, arithmetic modulo any power of two.
 ### \*file\*
 `( -- string )` — Return the source name attached to the currently executing
 reader-authored occurrence. A definition reports the file that authored its
-body even when another file calls it. `'domain` in runtime-assembled code with
+body even when another file calls it. `` `domain `` in runtime-assembled code with
 no source provenance; there is no fallback to the caller's file.
 
 
 ### \*module\*
-`( -- 'module-name )` — Return the canonical registration name selected by
+``( -- `module-name )`` — Return the canonical registration name selected by
 the current module activation. The same image registered under different names
 reports the name through which it was called; an alias reports its target's
-canonical name. `'domain` at top level, during module construction, or through
+canonical name. `` `domain `` at top level, during module construction, or through
 an escaped quotation whose image has no invoking registration.
 
 
 ### +
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
-`char int +` (either order) is a char; `char char +` is `'type`. Integer
-overflow is `'overflow`.
+`char int +` (either order) is a char; `char char +` is `` `type ``. Integer
+overflow is `` `overflow ``.
 
 #### Examples
 
@@ -50,7 +50,7 @@ overflow is `'overflow`.
 
 ### +%
 `( x y -- z )` — **Pervasive.** Add integers modulo 2^64 in two's complement,
-wrapping where `+` raises `'overflow`. Int-only: a float or a char is `'type`.
+wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
 
 #### Examples
 
@@ -62,20 +62,20 @@ wrapping where `+` raises `'overflow`. Int-only: a float or a char is `'type`.
 
 ### -
 `( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
-`char char -` is an int, `char int -` is a char, `int char -` is `'type`.
-Integer overflow is `'overflow`.
+`char char -` is an int, `char int -` is a char, `int char -` is `` `type ``.
+Integer overflow is `` `overflow ``.
 
 
 ### -%
 `( x y -- z )` — **Pervasive.** Subtract integers modulo 2^64 in two's
-complement, wrapping where `-` raises `'overflow`. Int-only: a float or a char
-is `'type`.
+complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char
+is `` `type ``.
 
 
 ### /
 `( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero
 number over zero is an infinity signed by both operands, and `0 0 /` is
-`'domain` (NaN).
+`` `domain `` (NaN).
 
 
 ### <
@@ -103,8 +103,8 @@ masks.
 `( values quotation -- result )` — *Unit constructor.* Initialize an isolated
 substack from the explicit values list, then run the quotation as a new unit.
 Use `[]` for no initial values. Always pushes exactly one result:
-`{'ok (values)}` with the successful stack values as a list, or
-`{'err <error dict>}`.
+`{ok (values)}` with the successful stack values as a list, or
+`{err <error dict>}`.
 
 Observationally `@spawn task.await` — same result shape, same error protocol,
 same self-contained-quotation contract — differing only in scheduling.
@@ -116,21 +116,21 @@ Errors.
 
 ```ecl
 [1 2] (3 +) @attempt
-# => {'ok [1 5]}
+# => {ok [1 5]}
 ```
 
 
 ### @defm
-`( values body 'module-name -- )` — *Unit constructor.* The one module
-constructor. Validate the name first: a non-symbol is `'type`; an invalid
+``( values body `module-name -- )`` — *Unit constructor.* The one module
+constructor. Validate the name first: a non-symbol is `` `type ``; an invalid
 module path, the reserved name `core`, or a standard-library module name is
-`'domain`, and the body never runs. Then run the body on a fresh environment
+`` `domain ``, and the body never runs. Then run the body on a fresh environment
 and publish the resulting image under the name. A body failure publishes
 nothing; a registry change during construction may still refuse publication
 after the body has run.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
-the defining word. Registration is therefore `values (body) 'name @defm`. See
+the defining word. Registration is therefore ``values (body) `name @defm``. See
 Modules.
 
 
@@ -141,19 +141,19 @@ them from before it starts running: the child's end closes them and the
 calling unit's end no longer does. The child stack is the given ports,
 deepest, then the explicit values. Use `[]` for no ports, which is exactly
 `@spawn`. Inside a module construction body, at any depth, this constructor
-is `'domain`: a module body defines words and starts no tasks (see Modules).
+is `` `domain ``: a module body defines words and starts no tasks (see Modules).
 
 Every kind of port can be given: listeners, connections, and process ports
 alike. A port may only be given by the unit that owns it, so a unit holding a
-port another unit owns cannot give it away; that is `'domain`, as is giving a
+port another unit owns cannot give it away; that is `` `domain ``, as is giving a
 closed port or the same port twice. The move and the child's construction are
 one step: the port is never unowned, and the child never runs before it owns
 the port.
 
-At most 16 ports may be given at once; more is `'domain`. That limit is
+At most 16 ports may be given at once; more is `` `domain ``. That limit is
 checked before the list's elements are examined, so an oversized list of
 non-ports reports the limit rather than the element type. The ports list is
-otherwise validated in order, and a list holding a non-port is `'type`.
+otherwise validated in order, and a list holding a non-port is `` `type ``.
 
 Giving does not restrict use. The caller may still name a given port and read
 or write it, exactly as a child may use a port its parent owns; what changed
@@ -162,9 +162,9 @@ is which unit's end closes it. See [Concurrency](SPEC.md#concurrency).
 #### Examples
 
 ```ecl
-{'address "127.0.0.1" 'port 0} net.listen
-wrap [] (net.local-address 'port at 0 >) @give task.await
-# => {'ok [1]}
+{address "127.0.0.1" port 0} net.listen
+wrap [] (net.local-address `port at 0 >) @give task.await
+# => {ok [1]}
 ```
 
 
@@ -172,7 +172,7 @@ wrap [] (net.local-address 'port at 0 >) @give task.await
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack
 from the explicit values list and run the quotation concurrently. Use `[]` for
 no initial values; the ambient stack never crosses the boundary. Inside a
-module construction body, at any depth, this constructor is `'domain`: a module
+module construction body, at any depth, this constructor is `` `domain ``: a module
 body defines words and starts no tasks (see Modules). See
 [Concurrency](SPEC.md#concurrency).
 
@@ -180,7 +180,7 @@ body defines words and starts no tasks (see Modules). See
 
 ```ecl
 [] (40 2 +) @spawn task.await
-# => {'ok [42]}
+# => {ok [42]}
 ```
 
 
@@ -190,12 +190,12 @@ a pure descriptor returned by `tests`, late-bind its module/name and optional
 source identifier to
 the current catalog, and run the body as a fresh isolated Unit under that
 registration's private home and durable state. Return exactly
-`{'ok (values)}` or `{'err error}`; a missing current test is a reified error.
-Ordinary Sessions receive `'domain`.
+`{ok (values)}` or `{err error}`; a missing current test is a reified error.
+Ordinary Sessions receive `` `domain ``.
 
 
 ### alias
-`( 'short 'module-name -- )` — Register an unqualified short registry name
+``( `short `module-name -- )`` — Register an unqualified short registry name
 for a canonical, possibly dotted module name.
 Aliases and module names may not collide in either direction.
 
@@ -230,7 +230,7 @@ key is an error.
 
 ### band
 `( x y -- z )` — **Pervasive.** Bitwise and over the two's-complement bit
-patterns of ints. Non-int leaves are `'type`.
+patterns of ints. Non-int leaves are `` `type ``.
 
 
 ### bi2
@@ -249,15 +249,15 @@ patterns of ints. Non-int leaves are `'type`.
 ### bsl
 `( x count -- y )` — **Pervasive.** Shift the bit pattern left by `count`
 places, truncating bits shifted off the top rather than raising
-`'overflow`: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is
-`'domain`.
+`` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is
+`` `domain ``.
 
 
 ### bsr
 `( x count -- y )` — **Pervasive.** Shift the bit pattern right by
 `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr`
 produce `maxint`. A `count` outside `0..63`
-is `'domain`.
+is `` `domain ``.
 
 
 ### bxor
@@ -268,7 +268,7 @@ does the same job on any leaf type; `bxor` is for whole patterns.
 ### bytes
 `( value -- bytes )` — Encode a string as UTF-8 into a byte list: an integer
 list whose elements are 0 through 255. A byte list is returned unchanged, so
-the word is idempotent. Any other value is `'type`. Inverse of `chars`; see
+the word is idempotent. Any other value is `` `type ``. Inverse of `chars`; see
 [Conversions](SPEC.md#conversions).
 
 #### Examples
@@ -290,13 +290,13 @@ list pushes its elements.
 
 ### ceil
 `( x -- integer )` — **Pervasive.** Round up; the result is int64,
-`'overflow` outside its range.
+`` `overflow `` outside its range.
 
 
 ### char
 `( value -- char )` — Return a char unchanged, the char with an int's codepoint,
 or the single char of a one-char string. An int outside the Unicode scalar
-range or a string of any other length is `'domain`; any other value is `'type`.
+range or a string of any other length is `` `domain ``; any other value is `` `type ``.
 
 #### Examples
 
@@ -308,17 +308,17 @@ range or a string of any other length is `'domain`; any other value is `'type`.
 
 ### chars
 `( value -- string )` — Return a value's text content as a string: a string
-unchanged, the spelling of a symbol or word, a char as a one-element string,
-or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `'domain`
-with `'reason 'invalid-utf8`; a list that is neither a string nor a byte list,
-or any other kind, is `'type`. Unlike `str`, the result is content rather than
-representation: `'foo chars` is `"foo"`, not `"'foo"`. See
+unchanged, the spelling of a symbol, a char as a one-element string,
+or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain ``
+with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list,
+or any other kind, is `` `type ``. Unlike `str`, the result is content rather than
+representation: `` `foo chars `` is `"foo"`, not `"'foo"`. See
 [Conversions](SPEC.md#conversions).
 
 #### Examples
 
 ```ecl
-'foo chars [104 195 169] chars
+`foo chars [104 195 169] chars
 # => "foo" "hé"
 ```
 
@@ -329,7 +329,7 @@ representation: `'foo chars` is `"foo"`, not `"'foo"`. See
 numbers (exact across int/float), chars by codepoint, and lists, which
 compare lexicographically: corresponding elements by `cmp` until the first
 nonzero result, then by length. Strings are char lists, so they order by
-codepoint. Anything else, including cross-kind pairs, is `'type`; elements
+codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements
 after the first difference are never compared. Equivalent on two lists to
 `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe
 for ordering: `-` errors on int64 overflow where an ordering must be total.
@@ -354,8 +354,8 @@ for ordering: `-` errors on int64 overflow where an ordering must be total.
 ### cond
 `( clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
 odd: `[test action … else]`, all quotations. The whole list is validated
-before the first test runs (empty or even lists are `'shape`; a non-list
-or non-quotation member is `'type`). Every test runs against the operand
+before the first test runs (empty or even lists are `` `shape ``; a non-list
+or non-quotation member is `` `type ``). Every test runs against the operand
 stack checkpoint taken after the clause list is consumed. Tests may inspect
 that stack destructively; only their top result is interpreted, and it must
 be a 0/1 boolean. The complete test result is then discarded. The first true
@@ -388,7 +388,7 @@ Each piece runs from its start up to the next start, and the last runs to
 the end of the list; elements before the first start belong to no piece.
 Starts must be integers from zero through the length, in nondecreasing
 order, so equal starts give empty pieces. A start out of range or below its
-predecessor fails with `'domain` at that start's position. Strings cut into
+predecessor fails with `` `domain `` at that start's position. Strings cut into
 strings.
 
 #### Examples
@@ -402,7 +402,7 @@ strings.
 
 
 ### def
-`( annotation? body 'name -- )` — Bind a quotation to a public word, with
+``( annotation? body `name -- )`` — Bind a quotation to a public word, with
 optional effect and documentation metadata. See
 [Definition annotations](SPEC.md#definition-annotations) for the annotation
 forms and validation; see [Modules](SPEC.md#modules) for module-context
@@ -410,7 +410,7 @@ requirements.
 
 
 ### defp
-`( annotation? body 'name -- )` — Bind a private module word, with
+``( annotation? body `name -- )`` — Bind a private module word, with
 optional effect and documentation metadata. A top-level `defp` is an
 error.
 
@@ -432,12 +432,12 @@ order. Equivalent to `group dict.keys`.
 
 ### div
 `( x y -- z )` — **Pervasive.** Checked integer division. Division by
-zero is `'domain`.
+zero is `` `domain ``.
 
 
 ### doc
-`( 'name -- string )` — Return the canonical documentation string of a
-resolved binding. Missing documentation is `'domain`.
+``( `name -- string )`` — Return the canonical documentation string of a
+resolved binding. Missing documentation is `` `domain ``.
 
 
 ### drop
@@ -457,7 +457,7 @@ its values in insertion order while preserving its keys. Depth composes by
 nesting: `((q) each) each`. There is no collect-all map whose output length
 follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and
 flat-map is `each raze`. Derived verbs come free from homoiconicity:
-`((1 +) each) 'inc-all def`.
+``((1 +) each) `inc-all def``.
 
 #### Examples
 
@@ -465,8 +465,8 @@ flat-map is `each raze`. Derived verbs come free from homoiconicity:
 [1 2 3] (dup *) each
 # => [1 4 9]
 
-{'a 1 'b 2} (1 +) each
-# => {'a 2 'b 3}
+{a 1 b 2} (1 +) each
+# => {a 2 b 3}
 ```
 
 
@@ -475,15 +475,15 @@ flat-map is `each raze`. Derived verbs come free from homoiconicity:
 ### empty?
 
 ### execute
-`( word -- ... )` — Resolve and apply a word value late through the ordinary
-word-dispatch path, exactly as if that word appeared in executable position.
-Non-words are `'type`; missing words are `'undefined-word`. Module homes,
+`( symbol -- ... )` — Resolve and apply a symbol late through the ordinary
+word-dispatch path, exactly as if that symbol appeared in executable position.
+Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes,
 private resolution, annotations, tracing, builtins, native calls, and
 cancellation are preserved.
 
 
 ### exit
-`( status -- )` — Root-only outside `@attempt` (`'domain` otherwise):
+`( status -- )` — Root-only outside `@attempt` (`` `domain `` otherwise):
 cancel and quiesce all descendants, then terminate the process with the
 given status.
 
@@ -491,8 +491,16 @@ given status.
 ### exp
 `( x -- y )` — **Pervasive.** Natural exponential; float transcendental.
 
-
 ### first
+`( list -- value )` — Return the first element of a nonempty list; an empty
+list is `` `domain ``. A kernel builtin rather than a prelude word, because the
+reader's quote `` `x `` expands to `(x) core.first` and the prelude's own first
+quote runs before any prelude word exists.
+
+```ecl
+(dup swap) first
+# => dup
+```
 
 ### flip
 `( list -- list )` — Exchange the first two axes of a list of equally
@@ -502,8 +510,8 @@ lengths must agree. Strings used as rows transpose their characters.
 
 An empty list or a list containing no list items is unchanged. Mixing list
 rows with non-list items, unequal row lengths, or nonempty collections of
-zero-width rows raises `'shape`; the last case cannot retain the other axis
-after transposition. A non-list argument raises `'type`.
+zero-width rows raises `` `shape ``; the last case cannot retain the other axis
+after transposition. A non-list argument raises `` `type ``.
 
 ```ecl
 (["a" "long"] ["bc" "d"]) flip
@@ -516,7 +524,7 @@ after transposition. A non-list argument raises `'type`.
 ### float
 `( value -- float )` — Return a float unchanged, an int as a float, or the
 value of a string in the numeric-literal grammar. A string outside that grammar
-is `'parse`; any other value is `'type`.
+is `` `parse ``; any other value is `` `type ``.
 
 #### Examples
 
@@ -528,7 +536,7 @@ is `'parse`; any other value is `'type`.
 
 ### floor
 `( x -- integer )` — **Pervasive.** Round down; the result is int64,
-`'overflow` outside its range.
+`` `overflow `` outside its range.
 
 
 ### fold
@@ -553,7 +561,7 @@ nothing.
 `( name -- string )` — The value of an environment variable, read from an
 immutable snapshot taken once at session start. An unset variable is an
 error, never a blank: absence is absence, and `@attempt`/`or-else` is the
-defaulting idiom. Absent host IO is `'io`.
+defaulting idiom. Absent host IO is `` `io ``.
 
 
 ### grade
@@ -576,8 +584,8 @@ names the later element of a pair that is not.
 #### Examples
 
 ```ecl
-['a 'b 'a] group
-# => {'a [0 2] 'b [1]}
+[a b a] group
+# => {a [0 2] b [1]}
 ```
 
 
@@ -585,21 +593,21 @@ names the later element of a pair that is not.
 `( columns -- groups )` — Group rows from a nonempty list of equal-length
 columns. Keys are whole composite lists, in first-occurrence order; row indices
 within each group are ascending. Zero rows produces an empty dictionary.
-An empty column list or ragged columns raises `'shape`; non-list columns raise `'type`.
+An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``.
 
 
 ### if
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1,
-`else` when it is 0; any other condition value is `'type`.
+`else` when it is 0; any other condition value is `` `type ``.
 
 
 ### import
 `( module-name q -- )` — Import the public attributes named by the symbol list
-`q` under their own unqualified names: `'str ('upper 'lower) import` binds
+`q` under their own unqualified names: `` `str (upper lower) import `` binds
 `upper` and `lower`. Every requested name is validated against one module
 generation before any binding is published; a missing or private attribute is
-`'undefined-word` and publishes none of the request. A non-list `q` or a
-non-symbol item is `'type`; an invalid module or attribute name is `'domain`.
+`` `undefined-word `` and publishes none of the request. A non-list `q` or a
+non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``.
 Each imported binding dispatches through the module, preserves the original's
 effect and documentation, and may replace an existing local binding. `see`
 renders its one-word forwarding quotation.
@@ -640,8 +648,8 @@ substack that remains is the result list.
 ### int
 `( value -- int )` — Return an int unchanged, a char's codepoint, or the value
 of a string in the integer-literal grammar. A string outside that grammar is
-`'parse`. A float is `'type`: choose `floor`, `round`, or `ceil` instead. Any
-other value is also `'type`.
+`` `parse ``. A float is `` `type ``: choose `floor`, `round`, or `ceil` instead. Any
+other value is also `` `type ``.
 
 #### Examples
 
@@ -652,18 +660,19 @@ other value is also `'type`.
 
 
 ### intern
-`( value -- symbol )` — Return a symbol or word as a symbol, or create the
-symbol for a string, interning the spelling when it is new. A string that is
-not a valid symbol spelling is `'domain`; any other value is `'type`. Interned
-names live for the whole process and are never reclaimed, so never apply this
-to unbounded external input; `symbol` is the lookup-only form. See
+`( value -- symbol )` — Return a symbol unchanged, or create the symbol for
+a string, interning the spelling when it is new. A string that is not a valid
+symbol spelling is `` `domain ``; any other value is `` `type ``. Interned names
+live for the whole process and are never reclaimed, so never apply this to
+unbounded external input; `symbol` is the lookup-only form. The symbol links
+to the root of the activation that built it. See
 [Conversions](SPEC.md#conversions).
 
 #### Examples
 
 ```ecl
 "fresh-name" intern
-# => 'fresh-name
+# => fresh-name
 ```
 
 
@@ -700,7 +709,7 @@ in the calling session.
 
 ### log
 `( x -- y )` — **Pervasive.** Natural logarithm; float transcendental.
-Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `'domain`
+Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain ``
 (NaN).
 
 
@@ -782,12 +791,12 @@ the selector is always one whole-value key, including a list key.
 
 
 ### qualify
-`( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
-module path, or the reserved qualifier `'core`, and one unqualified,
+``( `module-name `binding-name -- qualified-word )`` — Validate a canonical
+module path, or the reserved qualifier `` `core ``, and one unqualified,
 non-reserved binding segment, then construct their qualified executable word
 directly from the interned components. It does not parse source, intern
 anything new, or grant lifecycle authority; use `execute` to
-invoke the result dynamically. `'core 'dup qualify` reaches the primitive even
+invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even
 where `dup` is shadowed.
 
 
@@ -814,12 +823,12 @@ nonnegative int.
 ### reduce-groups
 `( values groups reducer -- results )` — Reduce each top-level index list,
 preserving group and index order, including repeated indices. Reducer symbols
-are `'sum`, `'count`, `'min`, and `'max`. Sum uses checked numeric
+are `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Sum uses checked numeric
 addition from zero, left to right; count accepts any selected value. Min/max
 use whole-value comparison and preserve the first value on ties. Empty groups
-yield zero for sum/count and raise `'domain` for min/max. Noninteger selectors
-raise `'type`; negative or out-of-range indices and unknown symbols raise
-`'domain`. Built-in reducer meanings do not depend on word bindings.
+yield zero for sum/count and raise `` `domain `` for min/max. Noninteger selectors
+raise `` `type ``; negative or out-of-range indices and unknown symbols raise
+`` `domain ``. Built-in reducer meanings do not depend on word bindings.
 
 
 ### reshape
@@ -853,7 +862,7 @@ composes it from an index permutation). The count must be an int.
 
 ### round
 `( x -- integer )` — **Pervasive.** Round to nearest; the result is
-int64, `'overflow` outside its range.
+int64, `` `overflow `` outside its range.
 
 
 ### scan
@@ -870,7 +879,7 @@ accumulator; same length as the input.
 
 
 ### see
-`( 'name -- )` — Print the binding's combined annotation, when present,
+``( `name -- )`` — Print the binding's combined annotation, when present,
 followed by its body through the standard source formatter, with its
 width-aware layout and no navigation header, name, or `def`/`defp` terminator.
 What prints is what is stored: a name bound by `set` prints its annotation and
@@ -883,7 +892,7 @@ displayed in native body descriptors.
 
 
 ### shape
-`( list -- shape )` — The dimensions of rectangular data; `'shape` error
+`( list -- shape )` — The dimensions of rectangular data; `` `shape `` error
 on ragged data (`len` is the word that works on anything).
 
 
@@ -917,7 +926,7 @@ parts; splitting an empty string this way returns an empty list.
 
 
 ### sqrt
-`( x -- y )` — **Pervasive.** Square root. `'domain` on negative inputs
+`( x -- y )` — **Pervasive.** Square root. `` `domain `` on negative inputs
 (the result would be NaN).
 
 
@@ -925,7 +934,7 @@ parts; splitting an empty string this way returns an empty list.
 `( list width quotation -- list )` — *Isolated*, contract
 `( window -- result )`. Apply to each overlapping window of a positive int
 width, left-to-right. A width larger than the input returns `()` without
-applying the quotation; zero and negative widths are `'domain`. The result
+applying the quotation; zero and negative widths are `` `domain ``. The result
 has `max(len-width+1, 0)` elements.
 
 #### Examples
@@ -956,18 +965,20 @@ readable value.
 
 
 ### symbol
-`( value -- symbol )` — Return a symbol unchanged, a word as a symbol, or the
-already-interned symbol whose spelling a string names. A spelling that is not
-yet interned is `'domain`, as is a string that is not a valid symbol spelling;
-any other value is `'type`. Every symbol written in loaded source is interned,
-so this succeeds for any key a program compares against and never grows the
-interned name space; use `intern` to create one. See
+`( value -- symbol )` — Return a symbol unchanged, or the already-interned
+symbol whose spelling a string names. A spelling that is not yet interned is
+`` `domain ``, as is a string that is not a valid symbol spelling; any other
+value is `` `type ``. Every symbol written in loaded source is interned, so this
+succeeds for any key a program compares against and never grows the interned
+name space; use `intern` to create one. The symbol links to the root of the
+activation that built it, so `"dup" symbol wrap` executes the same `dup` as
+`(dup)` written there. See
 [Conversions](SPEC.md#conversions).
 
 #### Examples
 
 ```ecl
-"foo" symbol 'foo match?
+"foo" symbol `foo match?
 # => 1
 ```
 
@@ -986,12 +997,12 @@ cycles.
 
 
 ### test
-`( annotation? body 'name -- )` — Declare a first-class test in the separate
+``( annotation? body `name -- )`` — Declare a first-class test in the separate
 catalog of the exact direct module construction body. Accepts the same optional
 effect and documentation annotation forms as `def`. Tests may share names with
 words and are absent from application lookup, exports, imports, reflection,
 and module invocation. Top-level, nested-quotation, and child-Unit use is
-`'domain`. Application Sessions validate and discard declarations without
+`` `domain ``. Application Sessions validate and discard declarations without
 retaining bodies or checking duplicate test names; Test Sessions retain them
 and reject duplicate names.
 
@@ -1000,11 +1011,11 @@ and reject duplicate names.
 `( -- descriptors )` — Test-Session-only discovery of current canonical
 registrations, including root sources' private registrations, sorted by module
 then test name and source identifier. Each dictionary contains
-symbol fields `'module` and `'name` plus optional declared `'effect` and
-`'doc`. File-private registrations also include an integer `'source` identifier
+symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and
+`` `doc ``. File-private registrations also include an integer `` `source `` identifier
 local to the test Session, distinguishing equal names in different files.
 Descriptors never contain executable bodies or authority handles. Aliases do
-not duplicate entries. Ordinary Sessions receive `'domain`.
+not duplicate entries. Ordinary Sessions receive `` `domain ``.
 
 
 ### times
@@ -1015,14 +1026,14 @@ nonnegative int. Tail-call optimized.
 ### tri2
 
 ### type
-`( value -- type )` — Return the value's kind as a symbol: one of `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`, `'port`, or `'address`.
+`( value -- type )` — Return the value's kind as a symbol: one of `int`,
+`float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`.
 
 #### Examples
 
 ```ecl
 "abc" type
-# => 'list
+# => list
 ```
 
 
@@ -1033,9 +1044,9 @@ local shadow may reveal a parent or core binding.
 
 
 ### undefm
-`( 'module-name -- )` — Remove the module currently registered under a
+``( `module-name -- )`` — Remove the module currently registered under a
 canonical name or unqualified alias, resolved exactly as ordinary registry
-lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
+lookup resolves it. An unregistered name is `` `undefined-word ``. Removal strips
 every alias targeting the module in the same publish; an already-dispatched
 call finishes under the generation it resolved. See
 [Modules](SPEC.md#modules).
@@ -1095,7 +1106,7 @@ the positions of 1s: `[0 1 1 0] where` is `[1 2]`.
 
 
 ### which
-`( 'name -- )` — Print where a name resolves (module home, shadowing),
+``( `name -- )`` — Print where a name resolves (module home, shadowing),
 its kind (`def`, `primitive`, or `native`), visibility, and declared
 effect when one was supplied. Constants report `def` with no effect, like
 every other unannotated ecl definition.
@@ -1119,18 +1130,6 @@ optimized.
 [1 2 3 4] 3 windows
 # => [[1 2 3] [2 3 4]]
 ```
-
-### word
-`( symbol -- word )` — Convert a symbol to an executable word with the same
-spelling. Conversion does not resolve the name or execute it. The result
-resolves where it is invoked, without a captured definition scope. Any
-non-symbol operand is `'type`.
-
-```ecl
-2 3 '+ word execute
-# => 5
-```
-
 
 ### words
 `( -- )` — Print the visible dictionary in sorted order.

@@ -119,8 +119,16 @@ pub fn classify(token: []const u8) Classification {
 /// token, which declares a fixed before row and a variable after row.
 pub const row_token = "...";
 
+/// Whether `token` is a valid symbol spelling: the grammar `intern` and the
+/// binding validators apply to a name that never passed through the reader.
 pub fn validSymbol(token: []const u8) bool {
     var cursor = SymbolCursor.init(token);
+    return poll.drive(bool, &cursor, .{});
+}
+
+/// Whether `token` spells a symbol as source does, bare or delimited.
+pub fn validSymbolSource(token: []const u8) bool {
+    var cursor = SymbolCursor.initSource(token);
     return poll.drive(bool, &cursor, .{});
 }
 
@@ -129,27 +137,55 @@ pub fn validSymbolSegment(token: []const u8) bool {
     return poll.drive(bool, &cursor, .{});
 }
 
+/// Whether a spelling reads back as the same symbol when printed bare. A
+/// spelling that would lex as a number, a display marker, or anything but
+/// one bare symbol token must print delimited as `'...'`.
+pub fn spellingReadsBare(spelling: []const u8) bool {
+    var cursor = SymbolCursor.initSource(spelling);
+    if (!poll.drive(bool, &cursor, .{})) return false;
+    if (std.mem.indexOfScalar(u8, spelling, '\'') != null) return false;
+    if (spelling.len >= 2 and spelling[0] == '<' and spelling[spelling.len - 1] == '>') return false;
+    return classify(spelling) == .word;
+}
+
 pub const SymbolProgress = poll.Progress(bool);
+
+/// The two symbol grammars. A *spelling* is the name itself: segments joined
+/// by `.`, each nonempty, free of `'` and control characters, and otherwise
+/// unrestricted. *Source* is how a token spells one: a bare segment uses the
+/// scalar symbol class, and a segment may instead be delimited as `'...'`,
+/// inside which only `'`, `.`, and control characters keep a meaning.
+pub const SymbolGrammar = enum { spelling, source };
+
 pub const SymbolCursor = struct {
     token: []const u8,
-    index: usize = 0,
-    previous_dot: bool = false,
+    grammar: SymbolGrammar,
     allow_dots: bool = true,
+    index: usize = 0,
+    segment_len: usize = 0,
+    delimited: bool = false,
+    /// A delimiting `'` just closed a segment; only `.` or the end may follow.
+    closed: bool = false,
+
     pub fn init(token: []const u8) SymbolCursor {
-        return .{ .token = token };
+        return .{ .token = token, .grammar = .spelling };
+    }
+    pub fn initSource(token: []const u8) SymbolCursor {
+        return .{ .token = token, .grammar = .source };
     }
     pub fn initSegment(token: []const u8) SymbolCursor {
-        return .{ .token = token, .allow_dots = false };
+        return .{ .token = token, .grammar = .source, .allow_dots = false };
+    }
+    /// One segment of a spelling: what a binding name may be.
+    pub fn initSpellingSegment(token: []const u8) SymbolCursor {
+        return .{ .token = token, .grammar = .spelling, .allow_dots = false };
     }
     pub fn advance(self: *SymbolCursor) SymbolProgress {
         // The one dotted name the language spells for itself: the anonymous
         // after row of a stack effect. It lexes as an ordinary word so an
         // annotation needs no reader mode, and is reserved as a binding name.
         if (std.mem.eql(u8, self.token, row_token)) return .{ .complete = self.allow_dots };
-        if (self.token.len == 0 or self.token[0] == '\'' or self.token[0] == '\\' or
-            self.token[0] == '.' or self.token[self.token.len - 1] == '.')
-            return .{ .complete = false };
-        if (self.index == self.token.len) return .{ .complete = true };
+        if (self.index == self.token.len) return .{ .complete = !self.delimited and self.segment_len != 0 };
         const byte = self.token[self.index];
         const codepoint: u21 = if (byte < 0x80) codepoint: {
             self.index += 1;
@@ -165,18 +201,35 @@ pub const SymbolCursor = struct {
             break :codepoint decoded;
         };
         if (codepoint == '.') {
-            if (!self.allow_dots) return .{ .complete = false };
-            if (self.previous_dot) return .{ .complete = false };
-            self.previous_dot = true;
+            if (!self.allow_dots or self.segment_len == 0) return .{ .complete = false };
+            self.segment_len = 0;
+            self.closed = false;
             return .pending;
         }
-        self.previous_dot = false;
-        return if (classifyScalar(codepoint) == .symbol)
-            .pending
-        else
-            .{ .complete = false };
+        if (self.closed) return .{ .complete = false };
+        if (codepoint == '\'') {
+            if (self.grammar == .spelling) return .{ .complete = false };
+            if (self.delimited) {
+                if (self.segment_len == 0) return .{ .complete = false };
+                self.delimited = false;
+                self.closed = true;
+                return .pending;
+            }
+            if (self.segment_len != 0) return .{ .complete = false };
+            self.delimited = true;
+            return .pending;
+        }
+        if (isControl(codepoint)) return .{ .complete = false };
+        if (!self.delimited and self.grammar == .source and classifyScalar(codepoint) != .symbol)
+            return .{ .complete = false };
+        self.segment_len += 1;
+        return .pending;
     }
 };
+
+fn isControl(codepoint: u21) bool {
+    return codepoint < 0x20 or codepoint == 0x7f;
+}
 
 pub const ClassifyProgress = poll.Progress(Classification);
 pub const ClassifyCursor = struct {
@@ -374,7 +427,7 @@ pub fn classifyScalar(codepoint: u21) ScalarClass {
         ',' => .separator,
         '(', ')', '[', ']', '{', '}', '"', '#' => .delimiter,
         ';', '|' => .terminator,
-        '\'', '\\' => .dispatch,
+        '\'', '\\', '`' => .dispatch,
         else => .symbol,
     };
 }

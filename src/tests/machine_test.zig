@@ -26,7 +26,7 @@ fn execute(runtime: *session.Session, source: []const u8) !?Value {
 }
 
 fn errorKind(allocator: std.mem.Allocator, error_value: Value) ![]const u8 {
-    return intern.get((try field(allocator, error_value, "kind")).symbol);
+    return intern.get((try field(allocator, error_value, "kind")).symbol.name);
 }
 
 fn expectContractCore(
@@ -39,11 +39,11 @@ fn expectContractCore(
     try std.testing.expectEqualStrings("contract", try errorKind(allocator, error_value));
     try std.testing.expectEqualStrings(
         expected_word,
-        intern.get((try field(allocator, error_value, "word")).symbol),
+        intern.get((try field(allocator, error_value, "word")).symbol.name),
     );
     const trace = try field(allocator, error_value, "trace");
     try std.testing.expectEqual(@as(u64, 1), trace.list.length());
-    try std.testing.expectEqualStrings(expected_word, intern.get(list.atUnchecked(trace, 0).symbol));
+    try std.testing.expectEqualStrings(expected_word, intern.get(list.atUnchecked(trace, 0).symbol.name));
     const data = try field(allocator, error_value, "data");
     try std.testing.expectEqual(seeded, (try field(allocator, data, "seeded")).int);
     try std.testing.expectEqual(observed, (try field(allocator, data, "observed")).int);
@@ -80,7 +80,7 @@ test "twenty-thousand-deep named recursion remains flat" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        "(dup 0 > (1 - countdown) (pop) if) 'countdown def " ++
+        "(dup 0 > (1 - countdown) (pop) if) `countdown def " ++
         "20000 countdown";
     try std.testing.expect((try runtime.runUnit("countdown.ecl", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
@@ -105,7 +105,7 @@ test "machine: boundary truncation is exact through nested attempts" {
         "err",
     );
     const kind = try field(allocator, outer_error, "kind");
-    try std.testing.expectEqualStrings("undefined-word", intern.get(kind.symbol));
+    try std.testing.expectEqualStrings("undefined-word", intern.get(kind.symbol.name));
 }
 
 test "errors: contract depths are relative to the isolated substack" {
@@ -125,7 +125,7 @@ test "errors: contract depths are relative to the isolated substack" {
         "err",
     );
     const kind = try field(allocator, contract_error, "kind");
-    try std.testing.expectEqualStrings("contract", intern.get(kind.symbol));
+    try std.testing.expectEqualStrings("contract", intern.get(kind.symbol.name));
     const data = try field(allocator, contract_error, "data");
     try std.testing.expectEqual(@as(i64, 1), (try field(allocator, data, "seeded")).int);
     try std.testing.expectEqual(@as(i64, 2), (try field(allocator, data, "observed")).int);
@@ -140,14 +140,14 @@ test "errors: lazy trace is innermost-first and retains recursive activations" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        "(dup 0 > (1 - f pop) (pop missing) if) 'f def 1 f";
+        "(dup 0 > (1 - f pop) (pop missing) if) `f def 1 f";
     const failure = (try runtime.runUnit("recursive.ecl", source)).err;
     defer runtime.release(failure);
     const trace = try field(allocator, failure, "trace");
     try std.testing.expectEqual(@as(u64, 3), trace.list.length());
-    try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol));
-    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 1).symbol));
-    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 2).symbol));
+    try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol.name));
+    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 1).symbol.name));
+    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 2).symbol.name));
 }
 
 test "errors: tail-position application continuations retain their enclosing word" {
@@ -160,33 +160,33 @@ test "errors: tail-position application continuations retain their enclosing wor
     defer runtime.deinit();
     const failure = (try runtime.runUnit(
         "application-trace.ecl",
-        "((missing) () while) 'f def f",
+        "((missing) () while) `f def f",
     )).err;
     defer runtime.release(failure);
     const trace = try field(allocator, failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), trace.list.length());
-    try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol));
-    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 1).symbol));
+    try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol.name));
+    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 1).symbol.name));
 
     const callback_failure = (try runtime.runUnit(
         "application-callback-trace.ecl",
-        "((2) () while) 'g def g",
+        "((2) () while) `g def g",
     )).err;
     defer runtime.release(callback_failure);
     const callback_trace = try field(allocator, callback_failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), callback_trace.list.length());
-    try std.testing.expectEqualStrings("while", intern.get(list.atUnchecked(callback_trace, 0).symbol));
-    try std.testing.expectEqualStrings("g", intern.get(list.atUnchecked(callback_trace, 1).symbol));
+    try std.testing.expectEqualStrings("while", intern.get(list.atUnchecked(callback_trace, 0).symbol.name));
+    try std.testing.expectEqualStrings("g", intern.get(list.atUnchecked(callback_trace, 1).symbol.name));
 
     const contract_failure = (try runtime.runUnit(
         "application-contract-trace.ecl",
-        "([1] (dup) each) 'h def h",
+        "([1] (dup) each) `h def h",
     )).err;
     defer runtime.release(contract_failure);
     const contract_trace = try field(allocator, contract_failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), contract_trace.list.length());
-    try std.testing.expectEqualStrings("each", intern.get(list.atUnchecked(contract_trace, 0).symbol));
-    try std.testing.expectEqualStrings("h", intern.get(list.atUnchecked(contract_trace, 1).symbol));
+    try std.testing.expectEqualStrings("each", intern.get(list.atUnchecked(contract_trace, 0).symbol.name));
+    try std.testing.expectEqualStrings("h", intern.get(list.atUnchecked(contract_trace, 1).symbol.name));
 }
 
 test "errors: source effect contract identifies the deepest tail-selected quotation" {
@@ -206,8 +206,8 @@ test "errors: source effect contract identifies the deepest tail-selected quotat
         \\   (pop 1 2)
         \\   ()]
         \\  case)
-        \\ 'pick def)
-        \\'arm @defm
+        \\ `pick def)
+        \\`arm @defm
         \\0 arm.pick
     ;
     const failure = (try runtime.runUnit("fixture.ecl", source)).err;
@@ -233,8 +233,8 @@ test "errors: source effect contract locates an empty selected quotation" {
         \\   (pop)
         \\   ()]
         \\  case)
-        \\ 'pick def)
-        \\'empty @defm
+        \\ `pick def)
+        \\`empty @defm
         \\1 empty.pick
     ;
     const failure = (try runtime.runUnit("fixture.ecl", source)).err;
@@ -255,8 +255,8 @@ test "errors: nested effect checks restore outer tail provenance" {
         \\[] (
         \\ (x -- x)
         \\ ()
-        \\ 'ok def)
-        \\'inner @defm
+        \\ `ok def)
+        \\`inner @defm
         \\[] (
         \\ (x -- y)
         \\ (
@@ -266,8 +266,8 @@ test "errors: nested effect checks restore outer tail provenance" {
         \\   (pop 1 2)
         \\   ()]
         \\  case)
-        \\ 'pick def)
-        \\'outer @defm
+        \\ `pick def)
+        \\`outer @defm
         \\0 outer.pick
     ;
     const failure = (try runtime.runUnit("fixture.ecl", source)).err;
@@ -288,8 +288,8 @@ test "errors: source effect contract preserves absence for runtime-built code" {
         \\[] (
         \\ (-- )
         \\ (1 () cons call)
-        \\ 'run def)
-        \\'runtime @defm
+        \\ `run def)
+        \\`runtime @defm
         \\runtime.run
     ;
     const failure = (try runtime.runUnit("fixture.ecl", source)).err;
@@ -310,8 +310,8 @@ test "errors: iterative applications do not replace source effect provenance" {
         \\[] (
         \\ (-- )
         \\ ([1 2] (1 +) each pop 1)
-        \\ 'run def)
-        \\'iter @defm
+        \\ `run def)
+        \\`iter @defm
         \\iter.run
     ;
     const failure = (try runtime.runUnit("fixture.ecl", source)).err;
@@ -329,8 +329,8 @@ test "errors: iterative applications do not replace source effect provenance" {
         \\    ()]
         \\   case)
         \\  fold)
-        \\ 'run def)
-        \\'foldsite @defm
+        \\ `run def)
+        \\`foldsite @defm
         \\foldsite.run
     ;
     const application_failure = (try runtime.runUnit("fixture.ecl", application_source)).err;
@@ -338,12 +338,12 @@ test "errors: iterative applications do not replace source effect provenance" {
     try std.testing.expectEqualStrings("contract", try errorKind(allocator, application_failure));
     try std.testing.expectEqualStrings(
         "fold",
-        intern.get((try field(allocator, application_failure, "word")).symbol),
+        intern.get((try field(allocator, application_failure, "word")).symbol.name),
     );
     const trace = try field(allocator, application_failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), trace.list.length());
-    try std.testing.expectEqualStrings("fold", intern.get(list.atUnchecked(trace, 0).symbol));
-    try std.testing.expectEqualStrings("foldsite.run", intern.get(list.atUnchecked(trace, 1).symbol));
+    try std.testing.expectEqualStrings("fold", intern.get(list.atUnchecked(trace, 0).symbol.name));
+    try std.testing.expectEqualStrings("foldsite.run", intern.get(list.atUnchecked(trace, 1).symbol.name));
     const application_data = try field(allocator, application_failure, "data");
     try std.testing.expectEqual(@as(i64, 2), (try field(allocator, application_data, "seeded")).int);
     try std.testing.expectEqual(@as(i64, 2), (try field(allocator, application_data, "observed")).int);
@@ -372,8 +372,8 @@ test "errors: guard restoration preserves the enclosing application selection" {
             \\([0] 0
             \\ (dup [((1) call) (pop pop 1 2) ()] cond)
             \\ fold)
-            \\'run def)
-            \\'guardcond @defm
+            \\`run def)
+            \\`guardcond @defm
             \\guardcond.run
             ,
             .column = 19,
@@ -386,8 +386,8 @@ test "errors: guard restoration preserves the enclosing application selection" {
             \\([0] 0
             \\ (dup ((dup 0 =) call) (pop pop 1 2) while)
             \\ fold)
-            \\'run def)
-            \\'guardwhile @defm
+            \\`run def)
+            \\`guardwhile @defm
             \\guardwhile.run
             ,
             .column = 24,
@@ -399,7 +399,7 @@ test "errors: guard restoration preserves the enclosing application selection" {
         try std.testing.expectEqualStrings("contract", try errorKind(allocator, failure));
         try std.testing.expectEqualStrings(
             "fold",
-            intern.get((try field(allocator, failure, "word")).symbol),
+            intern.get((try field(allocator, failure, "word")).symbol.name),
         );
         const data = try field(allocator, failure, "data");
         try std.testing.expectEqual(@as(i64, 0), (try field(allocator, data, "index")).int);
@@ -423,8 +423,8 @@ test "errors: archived contract locations remain attached after later sources" {
         \\ (dup [0
         \\  (pop 1 2)
         \\  ()] case)
-        \\ 'pick def)
-        \\'early @defm
+        \\ `pick def)
+        \\`early @defm
     ;
     try std.testing.expect((try runtime.runUnit("early.ecl", source)) == .ok);
     var later: usize = 0;
@@ -446,22 +446,22 @@ test "machine_test: late binding redefinition heals existing callers" {
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "(1 +) 'step def (step) 'caller def 2 caller",
+        "(1 +) `step def (step) `caller def 2 caller",
     )) == .ok);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "pop (10 +) 'step def 2 caller",
+        "pop (10 +) `step def 2 caller",
     )) == .ok);
     try std.testing.expectEqual(@as(i64, 12), runtime.stackItems()[0].int);
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "pop 40 'step set caller",
+        "pop 40 `step set caller",
     )) == .ok);
     try std.testing.expectEqual(@as(i64, 40), runtime.stackItems()[0].int);
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "pop (1 +) 'quoted set quoted",
+        "pop (1 +) `quoted set quoted",
     )) == .ok);
     try std.testing.expect(runtime.stackItems()[0] == .list);
 }
@@ -502,7 +502,7 @@ test "dynamic context: *file* follows authored source provenance" {
     // source name never replaces the file that authored the definition.
     try std.testing.expect((try runtime.runUnit(
         "definition.ecl",
-        "pop (*file*) 'where-defined def",
+        "pop (*file*) `where-defined def",
     )) == .ok);
     try std.testing.expect((try runtime.runUnit("caller.ecl", "where-defined")) == .ok);
     {
@@ -515,7 +515,7 @@ test "dynamic context: *file* follows authored source provenance" {
     // provenance, so qualified dispatch observes the module source too.
     try std.testing.expect((try runtime.runUnit(
         "module-definition.ecl",
-        "pop [] ((*file*) 'where-defined def) 'located @defm",
+        "pop [] ((*file*) `where-defined def) `located @defm",
     )) == .ok);
     try std.testing.expect((try runtime.runUnit("module-caller.ecl", "located.where-defined")) == .ok);
     {
@@ -598,7 +598,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
         ok_key,
     )).?;
     try std.testing.expectEqual(@as(i64, 5), list.atUnchecked(ok_results, 0).int);
-    const failure = (try execute(&runtime, "1 'x def")).?;
+    const failure = (try execute(&runtime, "1 `x def")).?;
     defer runtime.release(failure);
     try std.testing.expectEqualStrings("type", try errorKind(allocator, failure));
 }
@@ -611,37 +611,37 @@ test "raise preserves valid user dicts and validates optional fields" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    const raised = (try execute(&runtime, "{'kind 'custom 'msg \"hello\"} raise")).?;
+    const raised = (try execute(&runtime, "{kind custom msg \"hello\"} raise")).?;
     defer runtime.release(raised);
     const rendered = try printer.toOwnedString(allocator, raised);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings(
-        "{'kind 'custom 'msg \"hello\" 'word 'raise 'trace ['raise] " ++
-            "'data {'source \"fixture.ecl\" 'line 1 'col 30}}",
+        "{kind custom msg \"hello\" word raise trace (raise) " ++
+            "data {source \"fixture.ecl\" line 1 col 27}}",
         rendered,
     );
 
-    const defaulted = (try execute(&runtime, "{'kind 'custom} raise")).?;
+    const defaulted = (try execute(&runtime, "{kind custom} raise")).?;
     defer runtime.release(defaulted);
     const defaulted_rendered = try printer.toOwnedString(allocator, defaulted);
     defer allocator.free(defaulted_rendered);
     try std.testing.expectEqualStrings(
-        "{'kind 'custom 'msg \"raised 'custom\" 'word 'raise 'trace ['raise] " ++
-            "'data {'source \"fixture.ecl\" 'line 1 'col 17}}",
+        "{kind custom msg \"raised custom\" word raise trace (raise) " ++
+            "data {source \"fixture.ecl\" line 1 col 15}}",
         defaulted_rendered,
     );
 
-    const merged = (try execute(&runtime, "{'kind 'custom 'data {'detail 7}} raise")).?;
+    const merged = (try execute(&runtime, "{kind custom data {detail 7}} raise")).?;
     defer runtime.release(merged);
     try std.testing.expectEqualStrings(
         "raise",
-        intern.get((try field(allocator, merged, "word")).symbol),
+        intern.get((try field(allocator, merged, "word")).symbol.name),
     );
     const merged_trace = try field(allocator, merged, "trace");
     try std.testing.expectEqual(@as(u64, 1), merged_trace.list.length());
     try std.testing.expectEqualStrings(
         "raise",
-        intern.get(list.atUnchecked(merged_trace, 0).symbol),
+        intern.get(list.atUnchecked(merged_trace, 0).symbol.name),
     );
     const merged_data = try field(allocator, merged, "data");
     try std.testing.expectEqual(@as(i64, 7), (try field(allocator, merged_data, "detail")).int);
@@ -651,19 +651,19 @@ test "raise preserves valid user dicts and validates optional fields" {
 
     const complete = (try execute(
         &runtime,
-        "{'kind 'custom 'msg \"old\" 'word 'origin 'trace ['origin] " ++
-            "'data {'source \"old.ecl\" 'line 9 'col 8} 'detail 7} raise",
+        "{kind custom msg \"old\" word origin trace (origin) " ++
+            "data {source \"old.ecl\" line 9 col 8} detail 7} raise",
     )).?;
     defer runtime.release(complete);
     const complete_rendered = try printer.toOwnedString(allocator, complete);
     defer allocator.free(complete_rendered);
     try std.testing.expectEqualStrings(
-        "{'kind 'custom 'msg \"old\" 'word 'origin 'trace ['origin] " ++
-            "'data {'source \"old.ecl\" 'line 9 'col 8} 'detail 7}",
+        "{kind custom msg \"old\" word origin trace (origin) " ++
+            "data {source \"old.ecl\" line 9 col 8} detail 7}",
         complete_rendered,
     );
 
-    const malformed = (try execute(&runtime, "{'kind 1} raise")).?;
+    const malformed = (try execute(&runtime, "{kind 1} raise")).?;
     defer runtime.release(malformed);
     try std.testing.expectEqualStrings("type", try errorKind(allocator, malformed));
 }
@@ -720,8 +720,8 @@ test "io.pp and io.prin write through and writer failures become io errors" {
     defer runtime_inputs20.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs20.inputs(.{ .output = &captured.writer }), .default, .evaluate);
     defer runtime.deinit();
-    try std.testing.expect((try execute(&runtime, "\"hi\" io.prin 'visible io.pp")) == null);
-    try std.testing.expectEqualStrings("hi'visible\n", captured.written());
+    try std.testing.expect((try execute(&runtime, "\"hi\" io.prin `visible io.pp")) == null);
+    try std.testing.expectEqualStrings("hivisible\n", captured.written());
 
     var failing: std.Io.Writer = .failing;
     var broken_heap: test_heap.SessionHeap = .init;
@@ -730,7 +730,7 @@ test "io.pp and io.prin write through and writer failures become io errors" {
     defer runtime_inputs21.deinit();
     var broken = try session.Session.init(broken_heap.allocator(), &.{}, runtime_inputs21.inputs(.{ .output = &failing }), .default, .evaluate);
     defer broken.deinit();
-    const failure = (try execute(&broken, "'broken io.pp")).?;
+    const failure = (try execute(&broken, "`broken io.pp")).?;
     defer broken.release(failure);
     try std.testing.expectEqualStrings("io", try errorKind(allocator, failure));
 }
@@ -801,7 +801,7 @@ test "int and float accept ECL literals without general source parsing" {
             .name = "integer and floating literals become floats",
             .source = "\"1\" float \"-3.5\" float \"2e3\" float " ++
                 "\"+inf\" float dup type",
-            .expected = "1.0 -3.5 2000.0 inf 'float",
+            .expected = "1.0 -3.5 2000.0 inf float",
         },
         .{
             .name = "each collects parsed integers into a numeric list",
@@ -810,8 +810,8 @@ test "int and float accept ECL literals without general source parsing" {
         },
     });
     try support.expectErrors(&.{
-        .{ .name = "int type", .source = "'x int", .kind = "type", .word = "int" },
-        .{ .name = "float type", .source = "'x float", .kind = "type", .word = "float" },
+        .{ .name = "int type", .source = "`x int", .kind = "type", .word = "int" },
+        .{ .name = "float type", .source = "`x float", .kind = "type", .word = "float" },
         .{
             .name = "int rejects a float",
             .source = "\"1.0\" int",

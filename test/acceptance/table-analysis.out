@@ -5,14 +5,14 @@
   "quantity" ("2" "1" "4" "3" "1")
 }
 ("120.50" "80.00" "19.50" "200.00" "10.00")
-'list
+list
 {
   "region" ("north" "south" "north" "south" "north")
   "rep" ("ada" "lin" "mo" "ada" "lin")
   "amount" [120.5 80.0 19.5 200.0 10.0]
   "quantity" [2 1 4 3 1]
 }
-'float
+float
 {
   "region" ("north" "south" "north" "south" "north")
   "rep" ("ada" "lin" "mo" "ada" "lin")

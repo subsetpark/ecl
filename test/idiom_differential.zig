@@ -24,8 +24,8 @@ test "every idiom entry hits across values empties spines floats and failures" {
         inline for (std.meta.tags(Variant)) |variant| {
             const source = try sourceFor(entry, variant);
             defer allocator.free(source);
-            const comparison = if (variant != .empty and (entry.context == .fold1 or
-                (entry.operation == .direct and entry.operation.direct == .fold1)))
+            const comparison = if (entry.context == .fold1 or
+                (entry.operation == .direct and entry.operation.direct == .fold1))
                 compareReductionModes(source)
             else if (variant == .failure and entry.operation == .direct and switch (entry.operation.direct) {
                 .sum, .product, .reshape_sum, .reshape_product, .where_at => true,
@@ -132,14 +132,14 @@ fn compareTotalFailure(source: []const u8) !void {
     const automatic_failure = automatic.failure orelse return error.TestUnexpectedResult;
     const generic_failure = generic.failure orelse return error.TestUnexpectedResult;
     for ([_][]const u8{ "kind", "msg", "word" }) |name| {
-        const key: ecl.value.Value = .{ .symbol = try ecl.intern.intern(name) };
+        const key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern(name) } };
         try expectValueEquivalent(
             (try ecl.dict.get(generic_failure, key)).?,
             (try ecl.dict.get(automatic_failure, key)).?,
         );
     }
-    const data_key: ecl.value.Value = .{ .symbol = try ecl.intern.intern("data") };
-    const index_key: ecl.value.Value = .{ .symbol = try ecl.intern.intern("index") };
+    const data_key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern("data") } };
+    const index_key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern("index") } };
     const generic_data = (try ecl.dict.get(generic_failure, data_key)).?;
     const automatic_data = (try ecl.dict.get(automatic_failure, data_key)).?;
     const generic_index = try ecl.dict.get(generic_data, index_key);
@@ -277,7 +277,7 @@ fn matchInput(variant: Variant) []const u8 {
         .empty => "[]",
         .spine => "[[1] [2] [1]]",
         .float => "[1.0 2.0]",
-        .failure => "[{} {'a 1}]",
+        .failure => "[{} {a 1}]",
     };
 }
 
@@ -285,7 +285,7 @@ fn matchConstant(variant: Variant) []const u8 {
     return switch (variant) {
         .atom, .empty, .float => "1",
         .spine => "[1]",
-        .failure => "{'a 1}",
+        .failure => "{a 1}",
     };
 }
 
@@ -430,7 +430,7 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .empty => "[] (+)",
             .spine => "[[1] [2]] (+)",
             .float => "[0.1 -0.0 0.2] (+)",
-            .failure => "[1 'bad] (+)",
+            .failure => "[1 bad] (+)",
         },
         .sort => sortInput(variant),
         .lex_cmp_with => switch (variant) {
@@ -470,16 +470,16 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .empty => "[]",
             .spine => "[[1 2] [3 4] [5 6]]",
             .float => "[0.1 -0.0 0.2]",
-            .failure => "[[1 2] [3 'bad]]",
+            .failure => "[[1 2] [3 bad]]",
         },
         .find => switch (variant) {
             .atom => "[1 2 1] 2",
             .empty => "[] 1",
             .spine => "[[1] [2]] [2]",
             .float => "[1.0 2.0] 2.0",
-            .failure => "[{}] {'a 1}",
+            .failure => "[{}] {a 1}",
         },
-        .first, .rest, .reverse => switch (variant) {
+        .rest, .reverse => switch (variant) {
             .atom => "[1 2 3]",
             .empty => "[]",
             .spine => "[[1] [2]]",
@@ -497,12 +497,12 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .empty => "[] 9 (len)",
             .spine => "[[1] [2]] 9 (len)",
             .float => "0.5 9 (1 +)",
-            .failure => "'sym 9 (1 +)",
+            .failure => "`sym 9 (1 +)",
         },
         .str_format => switch (variant) {
             .atom => "[\"Ada\" 2] \"name={} n={}\"",
             .empty => "[] \"\"",
-            .spine => "[[1] {'a 2}] \"{} {}\"",
+            .spine => "[[1] {a 2}] \"{} {}\"",
             .float => "[0.1] \"{}\"",
             .failure => "[] \"{\"",
         },
@@ -538,7 +538,6 @@ fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
         .float => |item| try std.testing.expectEqual(@as(u64, @bitCast(item)), @as(u64, @bitCast(right.float))),
         .char => |item| try std.testing.expectEqual(item, right.char),
         .symbol => |item| try std.testing.expectEqual(item, right.symbol),
-        .word => |item| try std.testing.expectEqual(item, right.word),
         .task => |header| try std.testing.expectEqual(header, right.task),
         .port => |header| try std.testing.expectEqual(header, right.port),
         .address => |header| try std.testing.expectEqual(header, right.address),
@@ -587,7 +586,7 @@ fn compareModes(source: []const u8, exact_errors: bool) !void {
     if (automatic.failure) |automatic_failure| {
         if (!exact_errors) {
             for ([_][]const u8{ "kind", "msg" }) |name| {
-                const key: ecl.value.Value = .{ .symbol = try ecl.intern.intern(name) };
+                const key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern(name) } };
                 try expectValueEquivalent(
                     (try ecl.dict.get(generic.failure.?, key)).?,
                     (try ecl.dict.get(automatic_failure, key)).?,
@@ -649,20 +648,20 @@ test "idioms: partial captures preserve generic behavior" {
 
     // A recognized capture fuses the whole `each` into one kernel run: one
     // hit for the three elements. A hand-written `((3) first +)` falls through
-    // to the generic frame machine, which runs `first` once per element —
-    // three hits from `first`'s own direct recognition.
+    // to the generic frame machine, which runs the `first` kernel per element
+    // without recognizing anything.
     try expectHits("[1 2 3] 3 (+) partial each", 1);
     try expectHits("[1 2 3] 3 (swap -) partial each", 1);
-    try expectHits("[1 2 3] ((3) first +) each", 3);
+    try expectHits("[1 2 3] ((3) first +) each", 0);
     // No `first` is written into a non-word capture, so shadowing it has
     // nothing to reach.
-    try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 1);
+    try expectHits("(pop 99) `first def [1 2 3] 3 (+) partial each", 1);
 }
 
 test "idioms: an ordinary module with stdlib's shape cannot inherit its recognition" {
     const source =
-        "[] ((pop pop \"ordinary\") 'format-valid defp " ++
-        "(format-valid) 'format def) 'lookalike @defm " ++
+        "[] ((pop pop \"ordinary\") `format-valid defp " ++
+        "(format-valid) `format def) `lookalike @defm " ++
         "[] \"\" lookalike.format";
     var heap: SessionHeap = .init;
     defer retireHeap(&heap);
@@ -707,7 +706,6 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
         "\"abc\" [2 0 0 0 0] where at",
         "[1 2 3 4] [1 1 0 1] where at",
         "[1.5 2.5] [0 1] where at",
-        "['a 'b 'c] [1 0 1] where at",
         "\"\u{2713}x\u{2713}\" [1 0 1] where at",
         "[1 2 3] [0 0 0] where at",
         "[1 2 3] [1 0 1] 0 = where at",
@@ -724,12 +722,14 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
     }
     // A user `at` in scope is not the trusted word: the phrase declines and
     // the words run as written, through that definition.
-    try expectPhraseHits("(pop pop \"shadowed\") 'at def \"abc\" [1 0 1] where at", 0);
+    try expectPhraseHits("(pop pop \"shadowed\") `at def \"abc\" [1 0 1] where at", 0);
     try expectPhraseHits("[1 2 3] [1 0 1] where", 0);
     // A mask that is not bytes, or a generic source, keeps the two words,
     // whose own gather handles them.
     try expectPhraseHits("[1 2 3] [1 0 1000] where at", 0);
     try expectPhraseHits("([1] \"a\" [2]) [1 0 3] where at", 0);
+    // Symbols have no typed leaf, so a symbol list is a generic source too.
+    try expectPhraseHits("[a b c] [1 0 1] where at", 0);
 }
 
 test "idioms: a caller's quotation is recognized inside prelude definitions" {
@@ -741,9 +741,9 @@ test "idioms: a caller's quotation is recognized inside prelude definitions" {
         "[1 -2 3] (0 >=) all?",
         "[1 2 3 4 5 6] (3 mod) filter",
         "[1 2 9223372036854775807] (1 +) all?",
-        "[1 'a] (1 +) filter",
+        "[1 a] (1 +) filter",
         // A caller that shadows the word keeps its own definition.
-        "(pop 1) 'neg def [5 6] (neg) all?",
+        "(pop 1) `neg def [5 6] (neg) all?",
     };
     for (sources) |source| {
         compareModesExactly(source) catch |err| {
@@ -756,7 +756,7 @@ test "idioms: a caller's quotation is recognized inside prelude definitions" {
     // `each`, and the `dip` inside `filter`'s own `over`.
     try expectHits("[1 2 3 4 5 6] (3 mod) filter", 2);
     // The shadowed `neg` declines; only the fold is recognized.
-    try expectHits("(pop 1) 'neg def [5 6] (neg) all?", 1);
+    try expectHits("(pop 1) `neg def [5 6] (neg) all?", 1);
     // A `(cmp)` comparator offered by `lex-cmp-with`.
     try expectHits("[1 2 3] [1 2 4] (cmp) lex-cmp-with", 1);
     try expectHits("\"abc\" \"abd\" (cmp) lex-cmp-with", 1);
@@ -791,15 +791,15 @@ test "idioms: scalar programs preserve generic behavior" {
         "[1 9223372036854775807] (dup * pop 1) each",
         "[1 9223372036854775807] [1 1] (+ 2 *) zip-with",
         // Shapes a program declines still agree with the generic path.
-        "[1 2] ('a + 1 +) each",
+        "[1 2] (`a + 1 +) each",
         "[1 2] ([1 2] + 1 +) each",
         "(1 2 3) (1 + 2 *) each",
         "\"abc\" (1 + 2 *) each",
         "[[1 2] [3]] (1 + 2 *) each",
         "[1 2 3] [4 5] (+ 2 *) zip-with",
         "[1 2] (dup) each",
-        "(pop 9) 'dup def [1 2] (dup *) each",
-        "(pop 9) 'over def [1 2] (10 over -) each",
+        "(pop 9) `dup def [1 2] (dup *) each",
+        "(pop 9) `over def [1 2] (10 over -) each",
     };
     for (sources) |source| {
         compareModesExactly(source) catch |err| {
@@ -816,7 +816,7 @@ test "idioms: scalar programs preserve generic behavior" {
     try expectHits("[1 2 3] (dup *) each", 1);
     try expectHits("[1 2 3] [4 5 6] (+ 2 *) zip-with", 1);
     // A shadowed stack word declines.
-    try expectHits("(pop 9) 'dup def [1 2] (dup *) each", 0);
+    try expectHits("(pop 9) `dup def [1 2] (dup *) each", 0);
 }
 
 test "idioms: reductions run two-input programs in order" {
@@ -843,11 +843,11 @@ test "idioms: reductions run two-input programs in order" {
         "[1 2 0 4] (1 + div) fold1",
         "[9223372036854775807 1] 0 (+ 1 +) fold",
         // Shapes a program declines.
-        "[1 2 3] 'a (2 * +) fold",
-        "[1 'b 3] 0 (2 * +) fold",
+        "[1 2 3] `a (2 * +) fold",
+        "[1 b 3] 0 (2 * +) fold",
         "[1 2 3] [0] (2 * +) fold",
         "\"abc\" 0 (2 * +) fold",
-        "(pop 1) 'neg def [1 2 3] 0 (neg +) scan",
+        "(pop 1) `neg def [1 2 3] 0 (neg +) scan",
     };
     for (sources) |source| {
         compareModesExactly(source) catch |err| {
@@ -860,7 +860,7 @@ test "idioms: reductions run two-input programs in order" {
     try expectHits("[1 2 3] 0 (dup * +) fold", 1);
     try expectHits("[1 2 3] 0 (2 * -) scan", 1);
     try expectHits("[1 2 3] (-) fold1", 1);
-    try expectHits("(pop 1) 'neg def [1 2 3] 0 (neg +) scan", 0);
+    try expectHits("(pop 1) `neg def [1 2 3] 0 (neg +) scan", 0);
 }
 
 test "idioms: scalar programs run a block at a time and fault as per element" {
@@ -907,19 +907,19 @@ test "idioms: length each preserves errors dictionaries shadowing and generated 
         "{\"a\" [1 2] [3] []} (len) each",
         "{\"a\" [1] \"b\" 2} (len) each",
         "{} (len) each",
-        "(pop 99) 'len def [[1] []] (len) each",
-        "(len) 'q set (pop 99) 'len def [[1] []] q each",
+        "(pop 99) `len def [[1] []] (len) each",
+        "(len) `q set (pop 99) `len def [[1] []] q each",
         "[[1] []] (len) () cat each",
     };
     for (cases) |source| try compareModesExactly(source);
     try expectHits("[[1] []] (len) each", 1);
-    try expectHits("(pop 99) 'len def [[1] []] (len) each", 0);
+    try expectHits("(pop 99) `len def [[1] []] (len) each", 0);
 }
 
 test "idioms: transitioning reduction seeds preserve exact scalar semantics" {
     for ([_][]const u8{
         // No reducer invocation for empty inputs or singleton fold1.
-        "[] 0 (+) fold",                                               "[] 0 (+) scan",                                         "[] 'seed (+) fold",
+        "[] 0 (+) fold",                                               "[] 0 (+) scan",                                         "[] `seed (+) fold",
         "[7] (/) fold1",                                               "[0] (/) fold1",                                         "[1.5] (+) fold1",
         // Promotion, first scan slot, non-associativity and signed zero.
         "[1.5] 0 (+) fold",                                            "[1.5] 0 (+) scan",                                      "[1.5 2.5 3.5] 0 (+) fold",
@@ -946,13 +946,13 @@ test "idioms: transitioning reduction seeds preserve exact scalar semantics" {
         // Vector reductions take over each owned accumulator; seeds, scan
         // outputs, nested rows, and dict rows are never written in place.
                                  "[[1.0 2.0] [3.0 4.0] [5.0 6.0]] (+) fold1",             "[[1 2] [3 4] [0.5 0.5] [1 1]] (+) fold1",
-        "[[1.0 2.0] [3.0 4.0] [1e308 1e308] [1e308 1e308]] (+) fold1", "[1 2 [3]] (+) fold1",                                   "[0.0 0.0] 'seed set [[1.0 2.0] [3.0 4.0]] seed (+) fold seed",
-        "[[1.0 2.0] [3.0 4.0]] [0.0 0.0] (+) scan",                    "[[[1 2] [3 4]] [[5 6] [7 8]] [[1 1] [1 1]]] (+) fold1", "[{'a 1} {'a 2} {'a 3}] (+) fold1",
+        "[[1.0 2.0] [3.0 4.0] [1e308 1e308] [1e308 1e308]] (+) fold1", "[1 2 [3]] (+) fold1",                                   "[0.0 0.0] `seed set [[1.0 2.0] [3.0 4.0]] seed (+) fold seed",
+        "[[1.0 2.0] [3.0 4.0]] [0.0 0.0] (+) scan",                    "[[[1 2] [3 4]] [[5 6] [7 8]] [[1 1] [1 1]]] (+) fold1", "[{a 1} {a 2} {a 3}] (+) fold1",
         "[[2.0 3.0] [0.5 0.5] [4.0 4.0]] (*) fold1",                   "[[1.0 5.0] [3.0 2.0] [2.0 4.0]] (max) fold1",
         // Non-fixpoint or non-leaf shapes and overridden bindings stay generic.
                   "[1.0 2.0] 0 (min) scan",
         "[1.0 -2.0] 0 (max) scan",                                     "[1 2.0 3] 0 (+) scan",                                  "[[1.0] [2.0]] 0 (+) scan",
-        "[1.0 'bad] 0 (+) fold",                                       "[1.0 2.0] 0 (+ dup pop) scan",                          "(pop pop 7) '+ def [1.0 2.0] 0 (+) scan",
+        "[1.0 bad] 0 (+) fold",                                        "[1.0 2.0] 0 (+ dup pop) scan",                          "(pop pop 7) `+ def [1.0 2.0] 0 (+) scan",
     }) |source| compareModesExactly(source) catch |err| {
         std.log.err("transitioning reduction differential failed for `{s}`", .{source});
         return err;
@@ -970,14 +970,14 @@ test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
     for ([_][]const u8{
         "[1 0 1] 1 (and) fold",                   "[0 0 1] 0 (or) fold",
         "[1 0 1] (and) fold1",                    "[0 0 1] (or) fold1",
-        "[] 'seed (and) fold",                    "[7] (and) fold1",
+        "[] `seed (and) fold",                    "[7] (and) fold1",
         "[1 2] (and) fold1",                      "[0 2] (or) fold1",
-        "[[1 0] [0 1]] (or) fold1",               "[1 'bad] 0 (and) fold",
-        "[1 'bad] 1 (or) fold",                   "[1.0 0.0] (and) fold1",
+        "[[1 0] [0 1]] (or) fold1",               "[1 bad] 0 (and) fold",
+        "[1 bad] 1 (or) fold",                    "[1.0 0.0] (and) fold1",
         "[9223372036854775807 1] (+) fold1",      "[1 2 3] (-) fold1",
         "[1 2] (pop pop) fold1",                  "[1 2] (pair) fold1",
-        "(pop pop 9) 'and def [1 0] (and) fold1", "(pop pop 9) 'or def [0 0] 0 (or) fold",
-        "(pop 1) 'not def [1 0] 1 (and) fold",    "(pop pop 7) 'fold1 def [1 0] (and) fold1",
+        "(pop pop 9) `and def [1 0] (and) fold1", "(pop pop 9) `or def [0 0] 0 (or) fold",
+        "(pop 1) `not def [1 0] 1 (and) fold",    "(pop pop 7) `fold1 def [1 0] (and) fold1",
     }) |source| compareReductionModes(source) catch |err| {
         std.log.err("reduction comparison failed for {s}", .{source});
         return err;
@@ -999,7 +999,7 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         "[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each",
         "([1 2 3 4 5 6] [2 3] reshape sum) call",
         "[2 3] ([1 2 3 4 5 6] swap reshape sum) partial call",
-        "([2 3] reshape sum) 'columns def [1 2 3 4 5 6] columns",
+        "([2 3] reshape sum) `columns def [1 2 3 4 5 6] columns",
         // Past one turn's budget the fold continues as a driver.
         "300000 range 1.5 + [3 100000] reshape sum",
         "300000 range 0 * 1 + [100000 3] reshape product",
@@ -1019,11 +1019,11 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
     // axes, a generic list) or a phrase split across a definition reaches
     // `sum` itself, which is recognized on its own.
     const declined = [_][]const u8{
-        "(pop 99) 'sum def [1 2 3 4] [2 2] reshape sum",
+        "(pop 99) `sum def [1 2 3 4] [2 2] reshape sum",
         "[1 2 3] [2 2] reshape sum",
         "[1 2 3 4 5 6 7 8] [2 2 2] reshape sum",
         "[1 2.5 3 4] [2 2] reshape sum",
-        "([2 2] reshape) 'rows def [1 2 3 4] rows sum",
+        "([2 2] reshape) `rows def [1 2 3 4] rows sum",
     };
     for (declined) |source| {
         compareModesExactly(source) catch |err| {
@@ -1032,7 +1032,7 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         };
     }
     for (declined) |source| try expectPhraseHits(source, 0);
-    try expectHits("(pop 99) 'sum def [1 2 3 4] [2 2] reshape sum", 0);
+    try expectHits("(pop 99) `sum def [1 2 3 4] [2 2] reshape sum", 0);
     try expectHits("[1 2 3] [2 2] reshape sum", 1);
-    try expectHits("([2 2] reshape) 'rows def [1 2 3 4] rows sum", 1);
+    try expectHits("([2 2] reshape) `rows def [1 2 3 4] rows sum", 1);
 }

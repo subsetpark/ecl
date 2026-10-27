@@ -184,7 +184,7 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
             if (!safePath(artifact_path)) return error.Invalid;
             const kind_value = try data.field(record, "kind");
             if (kind_value != .symbol) return error.Invalid;
-            const kind = std.meta.stringToEnum(Kind, intern.get(kind_value.symbol)) orelse return error.Invalid;
+            const kind = std.meta.stringToEnum(Kind, intern.get(kind_value.symbol.name)) orelse return error.Invalid;
             const exports = try sequence(try data.field(record, "exports"));
             if (kind == .native and exports.list.length() != 1) return error.Invalid;
             const names = try allocator.alloc(intern.ModuleName, @intCast(exports.list.length()));

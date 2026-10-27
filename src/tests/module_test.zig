@@ -155,7 +155,7 @@ const TestEffect = struct {
 
     fn init(allocator: std.mem.Allocator) !TestEffect {
         const marker = try intern.intern("--");
-        const source = try list.fromValuesGeneric(allocator, &.{.{ .word = .{ .name = marker } }});
+        const source = try list.fromValuesGeneric(allocator, &.{.{ .symbol = .{ .name = marker } }});
         return .{ .source = source, .effect = env.ValidatedEffect.parse(source.list, marker).? };
     }
     fn release(self: TestEffect, releases: *heap.ReleaseDomain) void {
@@ -172,7 +172,10 @@ fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void
 }
 
 test "module names: branded factories enforce the reader symbol grammar" {
-    const invalid_segments = [_][]const u8{
+    // A binding name is any symbol spelling: a segment free of `'` and
+    // control characters. A module name is also a path and registry
+    // component, so it keeps the bare-segment grammar.
+    const spelling_only = [_][]const u8{
         "bad name",
         "bad,name",
         "bad(name",
@@ -180,13 +183,20 @@ test "module names: branded factories enforce the reader symbol grammar" {
         "bad{name",
         "bad\"name",
         "bad#name",
-        "bad'name",
         "bad\\name",
         "bad;name",
         "bad|name",
         "bad\u{00a0}name",
         "bad\u{2000}name",
         "bad\u{3000}name",
+    };
+    for (spelling_only) |spelling| {
+        _ = try intern.internNamespace(spelling);
+        try std.testing.expectError(error.InvalidName, intern.internModuleName(spelling));
+    }
+    const invalid_segments = [_][]const u8{
+        "bad'name",
+        "bad\tname",
         &.{ 0xff, 'x' },
         &.{ 0xe2, 0x82 },
     };
@@ -243,7 +253,7 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     // Measured window: delays from one to two quanta cancel mid-interning;
     // three let the target finish.
     const source =
-        "wrap (execute) @spawn dup 'target set " ++
+        "wrap (execute) @spawn dup `target set " ++
         "wrap (1536 () times task.cancel) @spawn task.await pop target task.await";
 
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -251,7 +261,7 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "task.pending pop");
-    try runtime.pushOwned(.{ .word = .{ .name = qualified } });
+    try runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
     try expectOk(&runtime, source);
 
     var lookup = intern.lookupCursor(prefix);
@@ -262,7 +272,7 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     var rendered = try runtime.stackDisplay();
     defer rendered.deinit();
     try std.testing.expect(interned != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "'kind 'cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "kind cancelled") != null);
 }
 
 test "env: rebinding keeps a name and removing it hides it from enumeration" {
@@ -310,7 +320,7 @@ test "module: long definition names stay within the cancellation bound" {
     defer name_runtime.deinit();
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
-    try name_runtime.pushOwned(.{ .symbol = intern.namespaceId(long_name) });
+    try name_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(long_name) } });
     name_runtime.requestCancellation();
     try expectErrorContains(&name_runtime, "@defm", &.{"unit cancelled"});
     try std.testing.expect(name_runtime.lastPolls() >= 1);
@@ -330,8 +340,8 @@ test "reflection: words is sorted unique and private-safe" {
         .ecl_path = null,
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm " ++
-        "'m ('alpha 'zebra) import 4 'zebra set words");
+    try expectOk(&runtime, "[] (1 `hidden setp 2 `zebra set 3 `alpha set) `m @defm " ++
+        "`m (alpha zebra) import 4 `zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
@@ -387,7 +397,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     var which_runtime = try session.Session.init(allocator, &.{}, runtime_inputs6.inputs(.{ .output = &which_output.writer }), .default, .evaluate);
     defer which_runtime.deinit();
     try which_runtime.define(first, binding.top());
-    try which_runtime.pushOwned(.{ .symbol = intern.namespaceId(first) });
+    try which_runtime.pushOwned(.{ .symbol = .{ .name = intern.namespaceId(first) } });
     which_runtime.requestCancellation();
     const which_failure = (try which_runtime.runUnit("reflection-poll.ecl", "which")).err;
     defer which_runtime.release(which_failure);
@@ -410,12 +420,12 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_runtime.deinit();
     const module_source = try std.fmt.allocPrint(
         allocator,
-        "[] (1 '{s} set) 'poll-module @defm",
+        "[] (1 `{s} set) `poll-module @defm",
         .{first_bytes},
     );
     defer allocator.free(module_source);
     try expectOk(&qualified_runtime, module_source);
-    try qualified_runtime.pushOwned(.{ .symbol = qualified });
+    try qualified_runtime.pushOwned(.{ .symbol = .{ .name = qualified } });
     qualified_runtime.requestCancellation();
     const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "which")).err;
     defer qualified_runtime.release(qualified_failure);
@@ -431,8 +441,8 @@ test "reflection failures are total" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "5 which", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "'missing which", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "5 which", &.{"kind type"});
+    try expectErrorContains(&runtime, "`missing which", &.{"kind undefined-word"});
 }
 
 const EnvThreadContext = struct {
@@ -917,17 +927,17 @@ test "session: a module body's redefinitions are not kept for the image's life" 
         defer runtime.deinit();
         // An unrelated task runs throughout; its pin must not keep what a
         // module body replaces.
-        try expectOk(&runtime, "[] ((1) () while) @spawn 'background set");
+        try expectOk(&runtime, "[] ((1) () while) @spawn `background set");
         // A module word may define while its body runs, so recursion through
         // one redefines `x` once per level.
-        const body = "((1) 'x def (dup 0 = (pop) (1 - (2) 'x def r) if) 'r def ";
-        try expectOk(&runtime, "[] " ++ body ++ "64 r) 'redefined-warm @defm");
+        const body = "((1) `x def (dup 0 = (pop) (1 - (2) `x def r) if) `r def ";
+        try expectOk(&runtime, "[] " ++ body ++ "64 r) `redefined-warm @defm");
         const before = counting.total_requested_bytes;
-        try expectOk(&runtime, "[] " ++ body ++ "64 r) 'redefined-few @defm");
+        try expectOk(&runtime, "[] " ++ body ++ "64 r) `redefined-few @defm");
         const few = counting.total_requested_bytes - before;
-        try expectOk(&runtime, "[] " ++ body ++ "4096 r) 'redefined-many @defm");
+        try expectOk(&runtime, "[] " ++ body ++ "4096 r) `redefined-many @defm");
         const many = counting.total_requested_bytes - before - few;
-        try expectOk(&runtime, "[] " ++ body ++ "4096 r) 'redefined-many-again @defm");
+        try expectOk(&runtime, "[] " ++ body ++ "4096 r) `redefined-many-again @defm");
         const many_again = counting.total_requested_bytes - before - few - many;
         // Replaced snapshots retire as they go: the image holds its final
         // bindings, whatever it redefined on the way. Every construction also
@@ -950,7 +960,7 @@ test "env: a replaced interior remains valid only through its binding lease" {
     var scope = environment.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
     const separator = try intern.intern("--");
-    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = .{ .name = separator } }});
+    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .symbol = .{ .name = separator } }});
     defer releases.releaseValue(body);
     const document = try list.fromCodepoints(std.testing.allocator, &.{ 'd', 'o', 'c' });
     defer releases.releaseValue(document);
@@ -1193,15 +1203,15 @@ test "loader: failures and cycles are total" {
         .ecl_path = "test/acceptance/modules",
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "'missing-module ('x) import", &.{ "'kind 'undefined-word", "'name 'missing-module.x" });
-    try expectErrorContains(&runtime, "'cycle ('x) import", &.{ "'kind 'domain", "recursive auto-load" });
-    try expectErrorContains(&runtime, "'orphan ('x) import", &.{
-        "'kind 'io",
+    try expectErrorContains(&runtime, "`missing-module (x) import", &.{ "kind undefined-word", "name missing-module.x" });
+    try expectErrorContains(&runtime, "`cycle (x) import", &.{ "kind domain", "recursive auto-load" });
+    try expectErrorContains(&runtime, "`orphan (x) import", &.{
+        "kind io",
         "registered nothing under that name",
-        "'path \"test/acceptance/modules/orphan.ecl\"",
+        "path \"test/acceptance/modules/orphan.ecl\"",
     });
-    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" load", &.{ "'kind 'parse", "'source \"test/acceptance/load-parse-error.ecl\"" });
-    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" load", &.{ "'kind 'io", "'path \"test/acceptance/does-not-exist.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" load", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" load", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -1212,7 +1222,7 @@ test "loader: failures and cycles are total" {
         defer std.testing.allocator.free(path);
         const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" load", .{path});
         defer std.testing.allocator.free(source);
-        try expectErrorContains(&runtime, source, &.{ "'kind 'parse", path });
+        try expectErrorContains(&runtime, source, &.{ "kind parse", path });
     }
 }
 
@@ -1255,8 +1265,8 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     const effect_value = try list.fromValuesGeneric(allocator, &.{
-        .{ .word = .{ .name = try intern.intern("--") } },
-        .{ .word = .{ .name = try intern.intern("n") } },
+        .{ .symbol = .{ .name = try intern.intern("--") } },
+        .{ .symbol = .{ .name = try intern.intern("n") } },
     });
     defer releases.releaseValue(effect_value);
     const separator = try intern.intern("--");
@@ -1320,22 +1330,22 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
 
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
-    try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) 'has? def) 'dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
-    try expectOk(&runtime, "{'a 1} 'a dict.has? {'kind 'user 'msg \"dict did not load\"} assert");
+    try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
+    try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
+    try expectErrorContains(&runtime, "`dict undefm", &.{reserved});
+    try expectOk(&runtime, "{a 1} `a dict.has? {kind user msg \"dict did not load\"} assert");
     // Loaded, it is refused the same way, and an alias cannot claim the name.
-    try expectErrorContains(&runtime, "[] () 'dict @defm", &.{reserved});
-    try expectErrorContains(&runtime, "'d 'dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "[] () 'm @defm 'dict 'm alias", &.{reserved});
-    try expectErrorContains(&runtime, "'dict undefm", &.{reserved});
-    try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") 'new def) 'error @defm", &.{"module name `error` is reserved"});
+    try expectErrorContains(&runtime, "[] () `dict @defm", &.{reserved});
+    try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
+    try expectErrorContains(&runtime, "[] () `m @defm `dict `m alias", &.{reserved});
+    try expectErrorContains(&runtime, "`dict undefm", &.{reserved});
+    try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
-    try expectOk(&runtime, "{'a 1} 'a 7 dict.get 1 = {'kind 'user 'msg \"dict.get lost dict\"} assert");
-    try expectOk(&runtime, "[] (\"abc\" \"z\" str.index-of) @attempt 'err at 'kind at 'domain match? " ++
-        "{'kind 'user 'msg \"str lost error\"} assert");
+    try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
+    try expectOk(&runtime, "[] (\"abc\" \"z\" str.index-of) @attempt `err at `kind at `domain match? " ++
+        "{kind user msg \"str lost error\"} assert");
     // A dotted name under a stdlib prefix is an ordinary module.
-    try expectOk(&runtime, "[] ((1) 'one def) 'dict.extra @defm dict.extra.one 1 = {'kind 'user} assert");
+    try expectOk(&runtime, "[] ((1) `one def) `dict.extra @defm dict.extra.one 1 = {kind user} assert");
 }
 
 test "stdlib: a quotation a stdlib word applies does not inherit its reservation exemption" {
@@ -1349,9 +1359,9 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     const reserved = "module name `dict` is reserved for the standard library";
     // `and-then` applies the caller's quotation under `@attempt`, `either`
     // inline; neither runs it as standard-library code.
-    try expectOk(&runtime, "[] result.ok ('d 'dict alias []) result.and-then 'err at 'kind at 'domain match? " ++
-        "{'kind 'user 'msg \"alias escaped\"} assert");
-    try expectErrorContains(&runtime, "[] result.ok ('dict undefm) () result.either", &.{reserved});
-    try expectErrorContains(&runtime, "[] result.ok ([] () 'dict @defm) () result.either", &.{reserved});
-    try expectOk(&runtime, "{'a 1} 'a 7 dict.get 1 = {'kind 'user 'msg \"dict.get lost dict\"} assert");
+    try expectOk(&runtime, "[] result.ok (`d `dict alias []) result.and-then `err at `kind at `domain match? " ++
+        "{kind user msg \"alias escaped\"} assert");
+    try expectErrorContains(&runtime, "[] result.ok (`dict undefm) () result.either", &.{reserved});
+    try expectErrorContains(&runtime, "[] result.ok ([] () `dict @defm) () result.either", &.{reserved});
+    try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
 }

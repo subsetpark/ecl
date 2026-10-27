@@ -59,9 +59,9 @@ fn expectCancelledAfterSetup(
 test "combinators: isolated iteration broadcast reduction and infra" {
     try support.expectStacks(&.{
         .{ .name = "each", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
-        .{ .name = "each dict values", .source = "{'a 1 'b 2} (1 +) each", .expected = "{'a 2 'b 3}" },
+        .{ .name = "each dict values", .source = "{a 1 b 2} (1 +) each", .expected = "{a 2 b 3}" },
         .{ .name = "each empty dict", .source = "{} (missing) each", .expected = "{}" },
-        .{ .name = "for dict values", .source = "{'a 1 'b 2} (1 + pop) for 42", .expected = "42" },
+        .{ .name = "for dict values", .source = "{a 1 b 2} (1 + pop) for 42", .expected = "42" },
         .{ .name = "for empty dict", .source = "{} (missing) for 42", .expected = "42" },
         .{ .name = "zip-with right broadcast", .source = "[1 2 3] 10 (pair) zip-with", .expected = "([1 10]\n [2 10]\n [3 10])" },
         .{ .name = "zip-with left broadcast", .source = "10 [1 2 3] (pair) zip-with", .expected = "([10 1]\n [10 2]\n [10 3])" },
@@ -155,7 +155,7 @@ test "combinators: stencil and unfold isolate applications and preserve order" {
         .{ .name = "stencil zero width", .source = "[1] 0 () stencil", .kind = "domain", .word = "stencil" },
         .{ .name = "stencil input type", .source = "1 1 () stencil", .kind = "type", .word = "stencil" },
         .{ .name = "unfold predicate result", .source = "0 (dup) () unfold", .kind = "contract", .word = "unfold" },
-        .{ .name = "unfold predicate bool", .source = "0 (pop 'no) () unfold", .kind = "type", .word = "unfold" },
+        .{ .name = "unfold predicate bool", .source = "0 (pop `no) () unfold", .kind = "type", .word = "unfold" },
         .{ .name = "unfold step no result", .source = "0 (pop 1) (pop) unfold", .kind = "contract", .word = "unfold" },
         .{ .name = "unfold step extra result", .source = "0 (pop 1) (dup dup) unfold", .kind = "contract", .word = "unfold" },
     });
@@ -175,12 +175,12 @@ test "combinators: contracts and conformability are structural errors" {
             },
         },
         .{ .name = "each no result", .source = "[10] (pop) each", .kind = "contract", .word = "each" },
-        .{ .name = "dict each no result", .source = "{'a 10} (pop) each", .kind = "contract", .word = "each" },
+        .{ .name = "dict each no result", .source = "{a 10} (pop) each", .kind = "contract", .word = "each" },
         .{ .name = "for result", .source = "[10] (dup) for", .kind = "contract", .word = "for" },
-        .{ .name = "dict for result", .source = "{'a 10} (dup) for", .kind = "contract", .word = "for" },
+        .{ .name = "dict for result", .source = "{a 10} (dup) for", .kind = "contract", .word = "for" },
         .{
             .name = "dict for follows insertion order",
-            .source = "{'first 10 'second 20} (dup 20 = (pop 1) (pop) if) for",
+            .source = "{first 10 second 20} (dup 20 = (pop 1) (pop) if) for",
             .kind = "contract",
             .word = "for",
             .data = &.{
@@ -220,12 +220,12 @@ test "combinators: finite iterations keep their words' bindings and still check 
     // rest of the call. What depends on an application's operands is still
     // decided per application.
     try support.expectStacks(&.{
-        .{ .name = "source and builtin", .source = "(dup *) 'sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
+        .{ .name = "source and builtin", .source = "(dup *) `sq def [1 2 3 4 5] (sq 1 +) each", .expected = "[2 5 10 17 26]" },
         .{ .name = "zip-with fold scan", .source = "[1 2] [3 4] (+ 1 +) zip-with [1 2 3] 0 (+) fold [1 2 3] 0 (+) scan", .expected = "[5 7] 6 [1 3 6]" },
-        .{ .name = "for and infra", .source = "(dup *) 'sq def [1 2 3] (sq pop) for [1 2 3] (sq swap sq) infra", .expected = "[1 9 4]" },
+        .{ .name = "for and infra", .source = "(dup *) `sq def [1 2 3] (sq pop) for [1 2 3] (sq swap sq) infra", .expected = "[1 9 4]" },
         // The binding a call keeps is the one in effect when the call began.
-        .{ .name = "next call", .source = "(1) 'k def [1 2] (pop k) each (2) 'k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
-        .{ .name = "next infra call", .source = "(1) 'k def [1 2] (pop k) infra (2) 'k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
+        .{ .name = "next call", .source = "(1) `k def [1 2] (pop k) each (2) `k def [1 2] (pop k) each", .expected = "[1 1] [2 2]" },
+        .{ .name = "next infra call", .source = "(1) `k def [1 2] (pop k) infra (2) `k def [1 2] (pop k) infra", .expected = "[1 1] [1 2]" },
         // A kept match still meets each row's operand classes.
         .{ .name = "kept match across classes", .source = "[[1 2 3] [4.5 5.5] [7]] ((+) fold1) each", .expected = "(6 10.0 7)" },
         // A body longer than one page of plan entries is planned throughout.
@@ -239,8 +239,8 @@ test "combinators: finite iterations keep their words' bindings and still check 
     });
     try support.expectErrors(&.{
         // A call that fails after keeping bindings releases them with the call.
-        .{ .name = "failure after kept bindings", .source = "(dup *) 'sq def [1 2 'x] (sq 1 +) each", .kind = "type", .word = "*" },
-        .{ .name = "for failure after kept bindings", .source = "(dup *) 'sq def [1 2 'x] (sq pop) for", .kind = "type", .word = "*" },
+        .{ .name = "failure after kept bindings", .source = "(dup *) `sq def [1 2 x] (sq 1 +) each", .kind = "type", .word = "*" },
+        .{ .name = "for failure after kept bindings", .source = "(dup *) `sq def [1 2 x] (sq pop) for", .kind = "type", .word = "*" },
         // An application whose operands the kept match does not admit declines
         // to the generic definition, which reports its own error.
         .{ .name = "kept match declined", .source = "[[1 2 3] [] [4]] ((+) fold1) each", .kind = "domain", .word = "first" },
@@ -253,56 +253,56 @@ test "combinators: definitions inside an application are refused" {
     try support.expectErrors(&.{
         .{
             .name = "each scope",
-            .source = "[1 2 3] (dup 'k set k *) each",
+            .source = "[1 2 3] (dup `k set k *) each",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "zip-with scope",
-            .source = "[1] [2] (pop dup 'k set k pop) zip-with",
+            .source = "[1] [2] (pop dup `k set k pop) zip-with",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "for scope",
-            .source = "[1] (dup 'k set pop) for",
+            .source = "[1] (dup `k set pop) for",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "fold scope",
-            .source = "[1] 0 (+ dup 'k set) fold",
+            .source = "[1] 0 (+ dup `k set) fold",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "scan scope",
-            .source = "[1] 0 (+ dup 'k set) scan",
+            .source = "[1] 0 (+ dup `k set) scan",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "infra scope",
-            .source = "[1] (dup 'k set) infra",
+            .source = "[1] (dup `k set) infra",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "stencil scope",
-            .source = "[1] 1 (dup 'k set) stencil",
+            .source = "[1] 1 (dup `k set) stencil",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "unfold scope",
-            .source = "0 (dup 'k set pop 0) () unfold",
+            .source = "0 (dup `k set pop 0) () unfold",
             .kind = "domain",
             .word = "def",
         },
-        .{ .name = "attempt", .source = "[] (1 'k set) @attempt 'err at raise", .kind = "domain", .word = "def" },
-        .{ .name = "task", .source = "[] (1 'k set) @spawn task.await 'err at raise", .kind = "domain", .word = "def" },
-        .{ .name = "undef", .source = "1 'k set [1] ('k undef) each", .kind = "domain", .word = "undef" },
-        .{ .name = "import", .source = "[1] ('result ('ok) import) each", .kind = "domain", .word = "import" },
+        .{ .name = "attempt", .source = "[] (1 `k set) @attempt `err at raise", .kind = "domain", .word = "def" },
+        .{ .name = "task", .source = "[] (1 `k set) @spawn task.await `err at raise", .kind = "domain", .word = "def" },
+        .{ .name = "undef", .source = "1 `k set [1] (`k undef) each", .kind = "domain", .word = "undef" },
+        .{ .name = "import", .source = "[1] (`result (ok) import) each", .kind = "domain", .word = "import" },
     });
 }
 
@@ -329,7 +329,7 @@ test "inline times checkpointed guards and case prevalidate and select" {
         },
         .{
             .name = "cond stack rollback preserves environment effects",
-            .source = "[(1 'guard-effect set 0) () (guard-effect)] cond",
+            .source = "[(1 `guard-effect set 0) () (guard-effect)] cond",
             .expected = "1",
         },
         .{
@@ -359,7 +359,7 @@ test "inline times checkpointed guards and case prevalidate and select" {
         },
         .{
             .name = "while stack rollback preserves environment effects",
-            .source = "0 (1 'while-guard-effect set 0) () while while-guard-effect",
+            .source = "0 (1 `while-guard-effect set 0) () while while-guard-effect",
             .expected = "0 1",
         },
         .{ .name = "case", .source = "3 [1 (10) 3 (30) (90)] case", .expected = "30" },
@@ -378,13 +378,13 @@ test "inline times checkpointed guards and case prevalidate and select" {
         .{ .name = "case prevalidation", .source = "1 [1 (10) 2 20 (30)] case", .kind = "type", .word = "len" },
         .{
             .name = "cond prevalidation precedes effects",
-            .source = "[] ([(1 'k set 1) (10) 20] cond) @attempt pop k",
+            .source = "[] ([(1 `k set 1) (10) 20] cond) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
         .{
             .name = "case prevalidation precedes actions",
-            .source = "[] (1 [1 (7 'k set) 2 20 (30)] case) @attempt pop k",
+            .source = "[] (1 [1 (7 `k set) 2 20 (30)] case) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
@@ -415,7 +415,7 @@ test "linrec: terminal selection recursive descent and guard restoration are inl
         },
         .{
             .name = "predicate environment effects survive restoration",
-            .source = "0 (7 'linrec-effect set 1) (pop linrec-effect) () () linrec",
+            .source = "0 (7 `linrec-effect set 1) (pop linrec-effect) () () linrec",
             .expected = "7",
         },
     });
@@ -447,7 +447,7 @@ test "linrec: predicate IO effects survive checkpoint restoration" {
     defer runtime.deinit();
     try expectStack(
         &runtime,
-        "0 (\"guard\" io.print 7 'linrec-io-effect set 1) " ++
+        "0 (\"guard\" io.print 7 `linrec-io-effect set 1) " ++
             "(pop linrec-io-effect) (missing-pre) (missing-post) linrec",
         "7",
     );
@@ -458,23 +458,23 @@ test "linrec: quotations keep source scope module home and within authority" {
     try support.expectStacks(&.{
         .{
             .name = "all four escaped quotations stay source sealed",
-            .source = "[] ((dup 0 =) 'terminal? defp (pop 10) 'base-op defp " ++
-                "(dup 1 -) 'pre-op defp (+) 'post-op defp " ++
-                "((terminal?)) 'predicate def ((base-op)) 'base def " ++
-                "((pre-op)) 'pre def ((post-op)) 'post def) 'linrec-quotes @defm " ++
-                "(pop 1) 'terminal? def (pop 999) 'base-op def " ++
-                "(pop 0) 'pre-op def (pop pop 999) 'post-op def " ++
+            .source = "[] ((dup 0 =) `terminal? defp (pop 10) `base-op defp " ++
+                "(dup 1 -) `pre-op defp (+) `post-op defp " ++
+                "((terminal?)) `predicate def ((base-op)) `base def " ++
+                "((pre-op)) `pre def ((post-op)) `post def) `linrec-quotes @defm " ++
+                "(pop 1) `terminal? def (pop 999) `base-op def " ++
+                "(pop 0) `pre-op def (pop pop 999) `post-op def " ++
                 "2 linrec-quotes.predicate linrec-quotes.base " ++
                 "linrec-quotes.pre linrec-quotes.post linrec",
             .expected = "13",
         },
         .{
             .name = "cross-module quotations remain inside one caller effect boundary",
-            .source = "[] (((dup 0 =)) 'predicate def ((pop 10)) 'base def " ++
-                "((dup 1 -)) 'pre def ((+)) 'post def) 'linrec-source @defm " ++
+            .source = "[] (((dup 0 =)) `predicate def ((pop 10)) `base def " ++
+                "((dup 1 -)) `pre def ((+)) `post def) `linrec-source @defm " ++
                 "[] ((n -- result) (linrec-source.predicate linrec-source.base " ++
-                "linrec-source.pre linrec-source.post linrec) 'run def) " ++
-                "'linrec-runner @defm 2 linrec-runner.run",
+                "linrec-source.pre linrec-source.post linrec) `run def) " ++
+                "`linrec-runner @defm 2 linrec-runner.run",
             .expected = "13",
         },
     });
@@ -489,8 +489,8 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     defer runtime.deinit();
     switch (try runtime.runUnit(
         "linrec-source.ecl",
-        "[] (((dup 0 =)) 'predicate def (()) 'base def ((1 -)) 'pre def " ++
-            "((dup)) 'post def) 'linrec-source @defm",
+        "[] (((dup 0 =)) `predicate def (()) `base def ((1 -)) `pre def " ++
+            "((dup)) `post def) `linrec-source @defm",
     )) {
         .ok => {},
         .err => |failure| {
@@ -502,8 +502,8 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     switch (try runtime.runUnit(
         "linrec-runner.ecl",
         "[] ((n -- result) (linrec-source.predicate linrec-source.base " ++
-            "linrec-source.pre linrec-source.post linrec) 'run def) " ++
-            "'linrec-runner @defm",
+            "linrec-source.pre linrec-source.post linrec) `run def) " ++
+            "`linrec-runner @defm",
     )) {
         .ok => {},
         .err => |failure| {
@@ -532,12 +532,12 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered.bytes(),
-        "'trace ['linrec-runner.run]",
+        "trace (linrec-runner.run)",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered.bytes(),
-        "'source \"linrec-runner.ecl\"",
+        "source \"linrec-runner.ecl\"",
     ) != null);
 }
 
@@ -585,8 +585,8 @@ test "linrec: empty post retains explicit depth frames and cancellation reaches 
 
     try support.expectStack(
         "[] (200 (dup 100 = dup (task.cancel-self) () if pop dup 0 =) " ++
-            "(pop) (1 -) () linrec) @spawn task.await 'err at 'kind at",
-        "'cancelled",
+            "(pop) (1 -) () linrec) @spawn task.await `err at `kind at",
+        "cancelled",
     );
 }
 
@@ -677,13 +677,13 @@ test "cancellation retires continuation-installed work before failure unwind" {
     for (0..506) |_| try source.appendSlice(std.testing.allocator, "0 pop ");
     try source.appendSlice(
         std.testing.allocator,
-        "0 {'a 1} {'a 2} (pop pop task.cancel-self) dict.merge-with pop pop) " ++
-            "@spawn task.await 'err at 'kind at",
+        "0 {a 1} {a 2} (pop pop task.cancel-self) dict.merge-with pop pop) " ++
+            "@spawn task.await `err at `kind at",
     );
     try std.testing.expect((try runtime.runUnit("<driver-cancel>", source.items)) == .ok);
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("'cancelled", display.bytes());
+    try std.testing.expectEqualStrings("cancelled", display.bytes());
 }
 
 test "empty inline iterations remain cancellable and bounded-frame" {
@@ -720,12 +720,12 @@ test "combinators: vector reductions reuse only accumulators they own" {
         .{ .name = "scalar accumulator meeting a row", .source = "[1 2 [3]] (+) fold1", .expected = "[6]" },
         // A seed is the caller's and a scan accumulator is a published
         // element; neither may be written in place.
-        .{ .name = "vector seed survives", .source = "[0.0 0.0] 'seed set [[1.0 2.0] [3.0 4.0]] seed (+) fold seed", .expected = "[4.0 6.0] [0.0 0.0]" },
+        .{ .name = "vector seed survives", .source = "[0.0 0.0] `seed set [[1.0 2.0] [3.0 4.0]] seed (+) fold seed", .expected = "[4.0 6.0] [0.0 0.0]" },
         .{ .name = "scan keeps every accumulator", .source = "[[1.0 2.0] [3.0 4.0] [5.0 6.0]] [0.0 0.0] (+) scan", .expected = "([1.0 2.0]\n [4.0 6.0]\n [9.0 12.0])" },
         .{ .name = "rows survive", .source = "[[1 2] [3 4] [5 6]] dup (+) fold1 pop", .expected = "([1 2]\n [3 4]\n [5 6])" },
         // Roots without a flat leaf keep the generic route.
         .{ .name = "nested rows", .source = "[[[1 2] [3 4]] [[5 6] [7 8]] [[1 1] [1 1]]] (+) fold1", .expected = "([7 9]\n [11 13])" },
-        .{ .name = "dict rows", .source = "[{'a 1} {'a 2} {'a 3}] (+) fold1", .expected = "{'a 6}" },
+        .{ .name = "dict rows", .source = "[{a 1} {a 2} {a 3}] (+) fold1", .expected = "{a 6}" },
     });
 }
 
@@ -737,7 +737,7 @@ test "combinators: body words resolve as in the caller" {
         .{ .name = "plain body", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
         .{ .name = "nested application", .source = "[1 2 3] ((1 +) call dup *) each", .expected = "[4 9 16]" },
         .{ .name = "locals body", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
-        .{ .name = "redefinition between applications", .source = "(dup *) 'sq def [1 2 3] (sq) each (pop 7) 'sq def [1 2 3] (sq) each", .expected = "[1 4 9] [7 7 7]" },
+        .{ .name = "redefinition between applications", .source = "(dup *) `sq def [1 2 3] (sq) each (pop 7) `sq def [1 2 3] (sq) each", .expected = "[1 4 9] [7 7 7]" },
     });
 }
 
@@ -773,7 +773,7 @@ test "locals: the reserved backend words behave and blame as before" {
         .{ .name = "read twice", .source = "[1 2 3] (|x| x x *) each", .expected = "[1 4 9]" },
         .{ .name = "two names", .source = "3 4 (|a b| b a -) call", .expected = "1" },
         .{ .name = "three names", .source = "1 2 3 (|a b c| c b a) call", .expected = "3 2 1" },
-        .{ .name = "definition applied per element", .source = "(|x| x 1 +) 'inc def [1 2] (inc) each", .expected = "[2 3]" },
+        .{ .name = "definition applied per element", .source = "(|x| x 1 +) `inc def [1 2] (inc) each", .expected = "[2 3]" },
         .{ .name = "sequential applications", .source = "1 (|x| x) call 2 (|y| y) call +", .expected = "3" },
         .{ .name = "locals under zip-with", .source = "[1 2] [10 20] (|x y| y x -) zip-with", .expected = "[9 18]" },
         .{ .name = "a list is one value", .source = "[] (|x| x) call", .expected = "()" },
@@ -795,7 +795,7 @@ test "locals: the reserved backend words behave and blame as before" {
         // word fails as a primitive would; any other binder fails as itself.
         .{
             .name = "a definition's binder blames the definition",
-            .source = "(|x| x) 'f def f",
+            .source = "(|x| x) `f def f",
             .kind = "underflow",
             .word = "f",
             .message = "f needs 1 stack value, but found 0",
@@ -819,20 +819,20 @@ test "locals: the reserved backend words behave and blame as before" {
             .kind = "underflow",
             .message = "local binding needs 2 stack values, but found 0",
         },
-        .{ .name = "the backend names stay reserved", .source = "(|x| x) '_gl def", .kind = "domain", .word = "def" },
-        .{ .name = "nor can they be unset", .source = "'_ll unset", .kind = "domain", .word = "undef" },
+        .{ .name = "the backend names stay reserved", .source = "(|x| x) `_gl def", .kind = "domain", .word = "def" },
+        .{ .name = "nor can they be unset", .source = "`_ll unset", .kind = "domain", .word = "undef" },
         .{ .name = "the names are not words a program can write", .source = "0 _gl", .kind = "undefined-word", .word = "_gl" },
     });
     // The failing word appears once, and an anonymous binding names none.
     try support.expectStacks(&.{
         .{
             .name = "the owner is traced once",
-            .source = "(|x| x) 'f def ([] (f 1) @attempt 'err at 'trace at) 'g def g",
-            .expected = "['f 'g]",
+            .source = "(|x| x) `f def ([] (f 1) @attempt `err at `trace at) `g def g",
+            .expected = "(f g)",
         },
         .{
             .name = "an anonymous binding has no word",
-            .source = "[] ((|x| x) call) @attempt 'err at 'word dict.has?",
+            .source = "[] ((|x| x) call) @attempt `err at `word dict.core.has?",
             .expected = "0",
         },
     });
@@ -912,7 +912,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     try expectStack(
         &automatic,
-        "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
+        "pop [1 1.0 [2] {a 3} x] [2] (match?) partial each",
         "[0 0 1 0 0]",
     );
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
@@ -922,7 +922,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     try expectStack(
         &generic,
-        "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
+        "pop [1 1.0 [2] {a 3} x] [2] (match?) partial each",
         "[0 0 1 0 0]",
     );
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
@@ -947,7 +947,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     // `partial` prefixes a non-word constant as itself, so it reaches the same
     // constant-operand kernels a bare constant does, in both operand orders.
     // A wrapper spelled by hand is not a constant: it falls through to the
-    // generic path, where `first` is instead recognized once per element.
+    // generic path, where `first` is a builtin and nothing fuses.
     try expectStack(&automatic, "pop [1 2 3] 3 (+) partial each", "[4 5 6]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
@@ -955,7 +955,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
     try expectStack(&automatic, "pop [1 2 3] ((3 4) first +) each", "[4 5 6]");
-    try std.testing.expectEqual(@as(u64, 3), automatic.lastIdiomHits());
+    try std.testing.expectEqual(@as(u64, 0), automatic.lastIdiomHits());
 
     var fallback_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&fallback_heap);
@@ -1024,7 +1024,7 @@ test "idioms: a foreign stamp keeps recognition off" {
     // Recognizing it substituted the core builtin and returned 6.
     try expectStack(
         &runtime,
-        "[] ((pop pop 42) '+ def ((+)) 'q def) 'm @defm [1 2 3] 0 m.q fold",
+        "[] ((pop pop 42) `+ def ((+)) `q def) `m @defm [1 2 3] 0 m.q fold",
         "42",
     );
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
@@ -1050,8 +1050,8 @@ test "idioms: a foreign stamp keeps recognition off" {
     defer across.deinit();
     try expectStack(
         &across,
-        "[] (((+)) 'q def) 'a @defm " ++
-            "[] ((pop pop 42) '+ def (|l q| l 0 q fold) 'run def) 'b @defm " ++
+        "[] (((+)) `q def) `a @defm " ++
+            "[] ((pop pop 42) `+ def (|l q| l 0 q fold) `run def) `b @defm " ++
             "[1 2 3] a.q b.run",
         "6",
     );
@@ -1064,7 +1064,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer runtime_inputs13.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs13.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectStack(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
+    try expectStack(&runtime, "(pop pop 42) `+ def [1 2 3] 0 (+) fold", "42");
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
 
     var rebound_source_heap: test_heap.SessionHeap = .init;
@@ -1073,7 +1073,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer runtime_inputs14.deinit();
     var rebound_source = try session.Session.init(rebound_source_heap.allocator(), &.{}, runtime_inputs14.inputs(.{}), .default, .evaluate);
     defer rebound_source.deinit();
-    try expectStack(&rebound_source, "(pop 42) 'neg def [1 2] (neg) each", "[42 42]");
+    try expectStack(&rebound_source, "(pop 42) `neg def [1 2] (neg) each", "[42 42]");
     try std.testing.expectEqual(@as(u64, 0), rebound_source.lastIdiomHits());
 
     var rebound_match_heap: test_heap.SessionHeap = .init;
@@ -1084,7 +1084,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer rebound_match.deinit();
     try expectStack(
         &rebound_match,
-        "(pop pop 42) 'match? def [1 2] (1 match?) each",
+        "(pop pop 42) `match? def [1 2] (1 match?) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), rebound_match.lastIdiomHits());
@@ -1101,8 +1101,8 @@ test "idioms: a rebound name keeps recognition off" {
     defer rebound_quoted.deinit();
     try expectStack(
         &rebound_quoted,
-        "(pop pop 42) 'match? def " ++
-            "((match?) partial each first-where) 'find def [1 2] 2 find",
+        "(pop pop 42) `match? def " ++
+            "((match?) partial each first-where) `find def [1 2] 2 find",
         "0",
     );
 
@@ -1115,7 +1115,7 @@ test "idioms: a rebound name keeps recognition off" {
     // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution:
     // the result is unchanged and recognition, decided at the freeze edge,
     // stays on.
-    try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "-2");
+    try expectStack(&rebound_dependency, "(pop pop 42) `* def 2 neg", "-2");
 
     var direct_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&direct_sort_heap);
@@ -1124,7 +1124,7 @@ test "idioms: a rebound name keeps recognition off" {
     var direct_sort = try session.Session.init(direct_sort_heap.allocator(), &.{}, runtime_inputs18.inputs(.{}), .default, .evaluate);
     defer direct_sort.deinit();
     // Likewise `sort` reaches the prelude `grade`, session or module alike.
-    try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[1 2 3]");
+    try expectStack(&direct_sort, "(pop [0]) `grade def [3 1 2] sort", "[1 2 3]");
 
     var used_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&used_sort_heap);
@@ -1134,7 +1134,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
-        "[] ((a -- b) (pop [0]) 'grade def) 'm @defm 'm ('grade) import [3 1 2] sort",
+        "[] ((a -- b) (pop [0]) `grade def) `m @defm `m (grade) import [3 1 2] sort",
         "[1 2 3]",
     );
 
@@ -1146,7 +1146,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
-        "[1 2] (dup 1 = ([] ((a -- b) (pop 42) 'f def) 'm @defm) () if m.f) each",
+        "[1 2] (dup 1 = ([] ((a -- b) (pop 42) `f def) `m @defm) () if m.f) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());
@@ -1164,8 +1164,8 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
     // prelude's `sum`, written in core, keeps core `+`.
     try expectStack(
         &runtime,
-        "((+) fold1) 'f def [1 2] f [3 4] f [5 6] f [1 2 3] sum " ++
-            "(pop pop 42) '+ def [7 8] f [1 2 3] sum",
+        "((+) fold1) `f def [1 2] f [3 4] f [5 6] f [1 2 3] sum " ++
+            "(pop pop 42) `+ def [7 8] f [1 2 3] sum",
         "3 7 11 6 42 6",
     );
 }
@@ -1185,51 +1185,51 @@ fn expectFreshStack(source: []const u8, expected: []const u8) !void {
 // the parent's later definition if lookup crossed units; under the rule its
 // result does not depend on scheduling.
 test "bindings: a task keeps the bindings that existed when it was spawned" {
-    try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn (2) 'f def task.await", "{'ok [1]}");
+    try expectFreshStack("(1) `f def [] (20 clock.sleep f) @spawn (2) `f def task.await", "{ok [1]}");
     // Through a caller: the task's `f` still reaches the `g` of its creation.
-    try expectFreshStack("(1) 'g def (g) 'f def [] (20 clock.sleep f) @spawn (2) 'g def task.await", "{'ok [1]}");
+    try expectFreshStack("(1) `g def (g) `f def [] (20 clock.sleep f) @spawn (2) `g def task.await", "{ok [1]}");
     // Shadowing a core word after the spawn does not reach the task.
-    try expectFreshStack("[] (20 clock.sleep 1 2 +) @spawn (pop pop 42) '+ def task.await", "{'ok [3]}");
+    try expectFreshStack("[] (20 clock.sleep 1 2 +) @spawn (pop pop 42) `+ def task.await", "{ok [3]}");
     // Removing the name after the spawn does not either.
-    try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn 'f undef task.await", "{'ok [1]}");
+    try expectFreshStack("(1) `f def [] (20 clock.sleep f) @spawn `f undef task.await", "{ok [1]}");
     // Several replacements and a removal after the spawn: only the first
     // binding is kept for the task.
-    try expectFreshStack("(1) 'f def [] (20 clock.sleep f) @spawn (2) 'f def (3) 'f def 'f undef (4) 'f def task.await", "{'ok [1]}");
+    try expectFreshStack("(1) `f def [] (20 clock.sleep f) @spawn (2) `f def (3) `f def `f undef (4) `f def task.await", "{ok [1]}");
     // A name first defined after the spawn is undefined in the task.
-    try expectFreshStack("[] (20 clock.sleep g) @spawn (5) 'g def task.await 'err at 'kind at", "'undefined-word");
+    try expectFreshStack("[] (20 clock.sleep g) @spawn (5) `g def task.await `err at `kind at", "undefined-word");
     // Two tasks pinned together: the later one ends first, and the earlier
     // one still observes the binding they shared.
     try expectFreshStack(
-        "(1) 'f def [] (40 clock.sleep f) @spawn [] (20 clock.sleep f) @spawn (2) 'f def task.await swap task.await",
-        "{'ok [1]} {'ok [1]}",
+        "(1) `f def [] (40 clock.sleep f) @spawn [] (20 clock.sleep f) @spawn (2) `f def task.await swap task.await",
+        "{ok [1]} {ok [1]}",
     );
     // Pinned apart: each keeps its own binding, whichever ends first.
     try expectFreshStack(
-        "(1) 'f def [] (40 clock.sleep f) @spawn (2) 'f def [] (20 clock.sleep f) @spawn (3) 'f def task.await swap task.await",
-        "{'ok [2]} {'ok [1]}",
+        "(1) `f def [] (40 clock.sleep f) @spawn (2) `f def [] (20 clock.sleep f) @spawn (3) `f def task.await swap task.await",
+        "{ok [2]} {ok [1]}",
     );
 }
 
 test "bindings: a task spawned after a definition observes it" {
-    try expectFreshStack("(1) 'f def (2) 'f def [] (f) @spawn task.await", "{'ok [2]}");
-    try expectFreshStack("(1) 'f def 'f undef [] (f) @spawn task.await 'err at 'kind at", "'undefined-word");
+    try expectFreshStack("(1) `f def (2) `f def [] (f) @spawn task.await", "{ok [2]}");
+    try expectFreshStack("(1) `f def `f undef [] (f) @spawn task.await `err at `kind at", "undefined-word");
     // The defining unit itself sees its definitions as it makes them.
-    try expectFreshStack("(1) 'f def f (2) 'f def f", "1 2");
+    try expectFreshStack("(1) `f def f (2) `f def f", "1 2");
 }
 
 test "task.cancel-self requests cancellation of the current task" {
     // Outside a task there is nothing to cancel, including in an `@attempt`
     // of the root unit, which shares its scope.
-    try expectFreshStack("[] (task.cancel-self) @attempt 'err at 'kind at", "'domain");
+    try expectFreshStack("[] (task.cancel-self) @attempt `err at `kind at", "domain");
     // A request: the task runs on to its next safe point, where it observes it.
-    try expectFreshStack("[] (task.cancel-self 0 100000 (1 +) times) @spawn task.await 'err at 'kind at", "'cancelled");
+    try expectFreshStack("[] (task.cancel-self 0 100000 (1 +) times) @spawn task.await `err at `kind at", "cancelled");
 }
 
 test "bindings: a unit's cached resolutions follow its own definitions" {
-    try expectFreshStack("(1 +) 'inc def 5 inc inc (10 +) 'inc def inc", "17");
-    try expectFreshStack("(1 +) 'inc def 0 3 (inc) times (10 +) 'inc def 3 (inc) times", "33");
+    try expectFreshStack("(1 +) `inc def 5 inc inc (10 +) `inc def inc", "17");
+    try expectFreshStack("(1 +) `inc def 0 3 (inc) times (10 +) `inc def 3 (inc) times", "33");
     // Shadowing a core word after using it, and removing the shadow.
-    try expectFreshStack("1 2 + (pop pop 42) '+ def 1 2 + '+ undef 1 2 +", "3 42 3");
+    try expectFreshStack("1 2 + (pop pop 42) `+ def 1 2 + `+ undef 1 2 +", "3 42 3");
 }
 
 test "while restores a checkpoint deeper than one turn's budget" {
@@ -1237,7 +1237,7 @@ test "while restores a checkpoint deeper than one turn's budget" {
     // suspend under a driver; a condition that consumes the stack still
     // leaves it as it found it.
     try expectFreshStack(
-        "[] (100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await 'ok at last",
+        "[] (100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await `ok at last",
         "100001",
     );
 }
@@ -1246,7 +1246,7 @@ test "while abandons a checkpoint deeper than one turn's budget" {
     // A failing condition abandons the loop with 100,001 operands saved; the
     // checkpoint goes to the release domain whole, and nothing leaks.
     try expectFreshStack(
-        "[] (100000 (7) times 0 (dup 'x +) () while) @spawn task.await 'err at 'kind at",
-        "'type",
+        "[] (100000 (7) times 0 (dup `x +) () while) @spawn task.await `err at `kind at",
+        "type",
     );
 }

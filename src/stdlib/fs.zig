@@ -205,8 +205,8 @@ const NextEntry = struct {
                 self.state = .complete;
                 defer evaluator.releaseDomain().releaseValue(name);
                 break :result .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
-                    .{ .{ .symbol = try intern.intern("name") }, name },
-                    .{ .{ .symbol = try intern.intern("kind") }, .{ .symbol = try intern.intern(self.entry.kind.symbol()) } },
+                    .{ .{ .symbol = .{ .name = try intern.intern("name") } }, name },
+                    .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern(self.entry.kind.symbol()) } } },
                 }) };
             },
         };
@@ -268,8 +268,8 @@ fn failResource(evaluator: *Machine, item: Value, operation: []const u8, reason:
     defer evaluator.releaseDomain().releaseValue(path);
     const failure = evaluator.fail(errorKindFor(reason), reason.message());
     evaluator.addErrorFilesystem(.{
-        .operation = .{ .symbol = operation_symbol },
-        .reason = .{ .symbol = reason_symbol },
+        .operation = .{ .symbol = .{ .name = operation_symbol } },
+        .reason = .{ .symbol = .{ .name = reason_symbol } },
         .target = .{ .single = .{ .root = item, .path = path } },
     });
     return failure;
@@ -506,7 +506,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             var path = try evaluator.popValue();
             errdefer path.deinit();
             if (!path.borrow().isString()) return evaluator.typeError("an absolute host directory path");
-            inputs = .{ .root = .{ .symbol = try intern.intern("host") }, .path = path.take() };
+            inputs = .{ .root = .{ .symbol = .{ .name = try intern.intern("host") } }, .path = path.take() };
         },
         .unary => {
             var path = try evaluator.popValue();
@@ -647,8 +647,8 @@ fn failInputs(
     const reason_symbol = try reasonSymbol(reason);
     const failure = evaluator.fail(kind, reason.message());
     evaluator.addErrorFilesystem(.{
-        .operation = .{ .symbol = symbols.operation },
-        .reason = .{ .symbol = reason_symbol },
+        .operation = .{ .symbol = .{ .name = symbols.operation } },
+        .reason = .{ .symbol = .{ .name = reason_symbol } },
         .target = if (operation == .copy) .{ .transfer = .{
             .source_root = inputs.root,
             .source_path = inputs.path,
@@ -822,8 +822,8 @@ const Driver = struct {
         const reason_symbol = try reasonSymbol(reason);
         const failure = evaluator.fail(kind, message);
         evaluator.addErrorFilesystem(.{
-            .operation = .{ .symbol = self.symbols.operation },
-            .reason = .{ .symbol = reason_symbol },
+            .operation = .{ .symbol = .{ .name = self.symbols.operation } },
+            .reason = .{ .symbol = .{ .name = reason_symbol } },
             .target = if (self.operation == .copy) .{ .transfer = .{
                 .source_root = self.inputs.root,
                 .source_path = self.inputs.path,
@@ -1256,12 +1256,12 @@ const Driver = struct {
         if (followed and kind == .symlink) return self.fail(evaluator, .changed);
         const result = if (kind == .file)
             try dict.fromUniquePairs(self.allocator, evaluator.releaseDomain(), &.{
-                .{ .{ .symbol = self.symbols.kind }, .{ .symbol = self.symbols.file } },
-                .{ .{ .symbol = self.symbols.size }, .{ .int = std.math.cast(i64, info.size) orelse std.math.maxInt(i64) } },
+                .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.file } } },
+                .{ .{ .symbol = .{ .name = self.symbols.size } }, .{ .int = std.math.cast(i64, info.size) orelse std.math.maxInt(i64) } },
             })
         else
             try dict.fromUniquePairs(self.allocator, evaluator.releaseDomain(), &.{
-                .{ .{ .symbol = self.symbols.kind }, .{ .symbol = self.symbols.entryKind(kind) } },
+                .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.entryKind(kind) } } },
             });
         self.state = .complete;
         return .{ .output = result };
@@ -1382,8 +1382,8 @@ const Driver = struct {
             build.name = null;
             defer evaluator.releaseDomain().releaseValue(name_value);
             build.values[build.built] = try dict.fromUniquePairs(self.allocator, evaluator.releaseDomain(), &.{
-                .{ .{ .symbol = self.symbols.name }, name_value },
-                .{ .{ .symbol = self.symbols.kind }, .{ .symbol = self.symbols.entryKind(entry.kind) } },
+                .{ .{ .symbol = .{ .name = self.symbols.name } }, name_value },
+                .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.entryKind(entry.kind) } } },
             });
             build.built += 1;
         }

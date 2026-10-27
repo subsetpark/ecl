@@ -12,8 +12,8 @@ const MachineError = machine.MachineError;
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "kind",
-        .effect = "value -- 'string|'generic|'other",
-        .doc = "( value -- kind ) 'string for a list stored as characters, 'generic for a list whose elements must be examined, 'other for a value that cannot be a string.",
+        .effect = "value -- `string|`generic|`other",
+        .doc = "( value -- kind ) `string for a list stored as characters, `generic for a list whose elements must be examined, `other for a value that cannot be a string.",
         .primitive = kind,
     },
 };
@@ -25,9 +25,9 @@ fn kind(evaluator: *Machine) MachineError!void {
         .list => |header| if (header.length() == 0) "string" else switch (header.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => "string",
             .generic_spine => "generic",
-            .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .address, .reserved_mask => "other",
+            .leaf_u8, .leaf_i64, .leaf_f64, .dict, .task, .port, .address, .reserved_mask => "other",
         },
         else => "other",
     };
-    try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
+    try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
 }

@@ -427,17 +427,17 @@ const OrdinaryErrorCursor = struct {
         values: *CompletedValues,
     ) error{OutOfMemory}!void {
         var count: usize = 0;
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[1] }, .{ .symbol = self.names[0] } };
+        self.outer_pairs[count] = .{ .{ .symbol = .{ .name = self.names[1] } }, .{ .symbol = .{ .name = self.names[0] } } };
         count += 1;
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[2] }, values.base.message };
+        self.outer_pairs[count] = .{ .{ .symbol = .{ .name = self.names[2] } }, values.base.message };
         count += 1;
         if (self.resolved.word) |word| {
-            self.outer_pairs[count] = .{ .{ .symbol = self.names[3] }, .{ .symbol = word } };
+            self.outer_pairs[count] = .{ .{ .symbol = .{ .name = self.names[3] } }, .{ .symbol = .{ .name = word } } };
             count += 1;
         }
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[4] }, values.base.trace };
+        self.outer_pairs[count] = .{ .{ .symbol = .{ .name = self.names[4] } }, values.base.trace };
         count += 1;
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[5] }, values.data };
+        self.outer_pairs[count] = .{ .{ .symbol = .{ .name = self.names[5] } }, values.data };
         count += 1;
         const builder = try dict.Materializer.init(
             self.allocator,
@@ -502,7 +502,7 @@ const OrdinaryErrorCursor = struct {
             },
             .trace_copy => |*trace| result: {
                 if (trace.index != self.resolved.trace.len) {
-                    trace.items[trace.index] = .{ .symbol = self.resolved.trace[trace.index] };
+                    trace.items[trace.index] = .{ .symbol = .{ .name = self.resolved.trace[trace.index] } };
                     trace.index += 1;
                 } else {
                     const next = @FieldType(State, "trace_build"){
@@ -555,7 +555,7 @@ const OrdinaryErrorCursor = struct {
                 .pending => .pending,
                 .complete => |key| result: {
                     const entry = self.failure.data[insertion.index];
-                    self.data_pairs[insertion.index] = .{ .{ .symbol = key }, entry.value };
+                    self.data_pairs[insertion.index] = .{ .{ .symbol = .{ .name = key } }, entry.value };
                     self.state = .{ .data = .{
                         .base = insertion.base,
                         .index = insertion.index + 1,
@@ -571,11 +571,11 @@ const OrdinaryErrorCursor = struct {
                     source.builder.deinit();
                     const located = self.location.?;
                     var index = source_index;
-                    self.data_pairs[index] = .{ .{ .symbol = self.names[6] }, item };
+                    self.data_pairs[index] = .{ .{ .symbol = .{ .name = self.names[6] } }, item };
                     index += 1;
-                    self.data_pairs[index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.line } };
+                    self.data_pairs[index] = .{ .{ .symbol = .{ .name = self.names[7] } }, .{ .int = located.span.line } };
                     index += 1;
-                    self.data_pairs[index] = .{ .{ .symbol = self.names[8] }, .{ .int = located.span.col } };
+                    self.data_pairs[index] = .{ .{ .symbol = .{ .name = self.names[8] } }, .{ .int = located.span.col } };
                     index += 1;
                     self.state = .{ .data_prepare = .{
                         .base = base,
@@ -765,8 +765,8 @@ const RaisedErrorCursor = struct {
     }
     fn beginOptionalValues(self: *RaisedErrorCursor) error{OutOfMemory}!void {
         if (self.fields[1] == null) {
-            const kind = self.fields[0].?.symbol;
-            const message = std.fmt.bufPrint(&self.message_bytes, "raised '{s}", .{intern.get(kind)}) catch
+            const kind = self.fields[0].?.symbol.name;
+            const message = std.fmt.bufPrint(&self.message_bytes, "raised {s}", .{intern.get(kind)}) catch
                 "raised user error";
             if (message.ptr != self.message_bytes[0..].ptr)
                 @memcpy(self.message_bytes[0..message.len], message);
@@ -815,17 +815,17 @@ const RaisedErrorCursor = struct {
                 } };
                 return;
             }
-            data.pairs[index] = .{ .{ .symbol = self.names[5] }, self.built.source.? };
+            data.pairs[index] = .{ .{ .symbol = .{ .name = self.names[5] } }, self.built.source.? };
             index += 1;
         }
         if (data.additions.line) {
             const located = self.location.?;
-            data.pairs[index] = .{ .{ .symbol = self.names[6] }, .{ .int = located.span.line } };
+            data.pairs[index] = .{ .{ .symbol = .{ .name = self.names[6] } }, .{ .int = located.span.line } };
             index += 1;
         }
         if (data.additions.col) {
             const located = self.location.?;
-            data.pairs[index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.col } };
+            data.pairs[index] = .{ .{ .symbol = .{ .name = self.names[7] } }, .{ .int = located.span.col } };
             index += 1;
         }
         const builder = try dict.Materializer.init(
@@ -854,19 +854,19 @@ const RaisedErrorCursor = struct {
     ) error{OutOfMemory}!void {
         var index = outer.index;
         if (self.fields[1] == null) {
-            outer.pairs[index] = .{ .{ .symbol = self.names[1] }, self.built.message.? };
+            outer.pairs[index] = .{ .{ .symbol = .{ .name = self.names[1] } }, self.built.message.? };
             index += 1;
         }
         if (self.fields[2] == null) if (self.resolved.word) |word| {
-            outer.pairs[index] = .{ .{ .symbol = self.names[2] }, .{ .symbol = word } };
+            outer.pairs[index] = .{ .{ .symbol = .{ .name = self.names[2] } }, .{ .symbol = .{ .name = word } } };
             index += 1;
         };
         if (self.fields[3] == null) {
-            outer.pairs[index] = .{ .{ .symbol = self.names[3] }, self.built.trace.? };
+            outer.pairs[index] = .{ .{ .symbol = .{ .name = self.names[3] } }, self.built.trace.? };
             index += 1;
         }
         if (self.fields[4] == null) {
-            outer.pairs[index] = .{ .{ .symbol = self.names[4] }, self.built.data.? };
+            outer.pairs[index] = .{ .{ .symbol = .{ .name = self.names[4] } }, self.built.data.? };
             index += 1;
         }
         const builder = try dict.Materializer.init(
@@ -922,7 +922,7 @@ const RaisedErrorCursor = struct {
                     .cursor = .initHeader(
                         self.allocator,
                         raised.dict,
-                        .{ .symbol = self.names[index] },
+                        .{ .symbol = .{ .name = self.names[index] } },
                     ),
                 } };
                 break :result .pending;
@@ -956,7 +956,7 @@ const RaisedErrorCursor = struct {
             },
             .trace_copy => |*trace| result: {
                 if (trace.index != self.resolved.trace.len) {
-                    trace.items[trace.index] = .{ .symbol = self.resolved.trace[trace.index] };
+                    trace.items[trace.index] = .{ .symbol = .{ .name = self.resolved.trace[trace.index] } };
                     trace.index += 1;
                 } else {
                     self.state = .{ .trace_build = .{
@@ -990,7 +990,7 @@ const RaisedErrorCursor = struct {
                     .cursor = .initHeader(
                         self.allocator,
                         old_data.?.dict,
-                        .{ .symbol = self.names[5 + index] },
+                        .{ .symbol = .{ .name = self.names[5 + index] } },
                     ),
                 } };
                 break :result .pending;
@@ -1056,7 +1056,7 @@ const RaisedErrorCursor = struct {
                     const old_value = dict.valueAt(raised.dict, outer.index);
                     outer.pairs[outer.index] = .{
                         key,
-                        if (key == .symbol and key.symbol == self.names[4] and self.built.data != null)
+                        if (key == .symbol and key.symbol.name == self.names[4] and self.built.data != null)
                             self.built.data.?
                         else
                             old_value,
@@ -2882,13 +2882,13 @@ pub const Machine = struct {
     }
     /// The word `name` linked to its slot in the running activation's root, as
     /// a word built at run time on that activation's behalf is.
-    pub fn linkedWord(self: *Machine, name: u32) error{OutOfMemory}!value.WordRef {
+    pub fn linkedWord(self: *Machine, name: u32) error{OutOfMemory}!value.Symbol {
         const linker = try self.rootLinker(self.currentScope());
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The word `name` linked to its core slot, as a word the implementation
     /// builds for itself is: it means core's binding wherever it runs.
-    pub fn coreWord(self: *Machine, name: u32) error{OutOfMemory}!value.WordRef {
+    pub fn coreWord(self: *Machine, name: u32) error{OutOfMemory}!value.Symbol {
         const linker = self.unit.environment.linker(self.unit.environment.coreCell());
         return .{ .name = name, .slot = try linker.link(name) };
     }
@@ -3159,7 +3159,7 @@ pub const Machine = struct {
                 return .detached;
             },
             .unregistered_module => |name| {
-                try self.pushBorrowed(.{ .symbol = requested });
+                try self.pushBorrowed(.{ .symbol = .{ .name = requested } });
                 self.unit.current.?.rewind(self.unit.active_index);
                 try self.autoLoadModule(name, .{
                     .qualified = requested,
@@ -3203,7 +3203,7 @@ pub const Machine = struct {
         var owned = heap.Owned(Value).init(requested);
         defer owned.deinit(self.releaseDomain(), self.allocator());
         var reservation = try self.reserveStack(2);
-        reservation.pushBorrowed(.{ .symbol = module_id });
+        reservation.pushBorrowed(.{ .symbol = .{ .name = module_id } });
         reservation.pushOwned(owned.take());
         std.debug.assert(reservation.complete());
     }
@@ -4744,7 +4744,7 @@ pub const Machine = struct {
     }
     pub fn undefinedModule(self: *Machine, name: u32) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
-        self.unit.pendingFailure().addData(.name, .{ .symbol = name });
+        self.unit.pendingFailure().addData(.name, .{ .symbol = .{ .name = name } });
         return failure;
     }
     /// A resolution miss, reported as the reference the program actually
@@ -4752,7 +4752,7 @@ pub const Machine = struct {
     /// lookup chain that was searched.
     pub fn undefinedWordIn(self: *Machine, word: u32, chain: LookupChain) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
-        self.unit.pendingFailure().addData(.name, .{ .symbol = word });
+        self.unit.pendingFailure().addData(.name, .{ .symbol = .{ .name = word } });
         self.addLookupChain(chain) catch return error.OutOfMemory;
         return failure;
     }
@@ -4765,7 +4765,7 @@ pub const Machine = struct {
     }
     fn addLookupChain(self: *Machine, chain: LookupChain) error{OutOfMemory}!void {
         const named = try intern.intern(chain.spelling());
-        self.unit.pendingFailure().addData(.scope, .{ .symbol = named });
+        self.unit.pendingFailure().addData(.scope, .{ .symbol = .{ .name = named } });
     }
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
@@ -4823,7 +4823,7 @@ pub const Machine = struct {
         self.unit.pendingFailure().addData(.available, .{ .int = @intCast(self.available()) });
         if (isolation) |guidance| self.unit.pendingFailure().addData(
             .isolation,
-            .{ .word = .{ .name = intern.intern(guidance.constructor) catch return failure } },
+            .{ .symbol = .{ .name = intern.intern(guidance.constructor) catch return failure } },
         );
         return failure;
     }
@@ -4848,7 +4848,7 @@ pub const Machine = struct {
                 .module => .{
                     .constructor = "@defm",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values (body) 'name @defm`",
+                        "pass initial values in the constructor's values operand: `values (body) `name @defm`",
                 },
             };
         }
@@ -4935,7 +4935,7 @@ pub const Machine = struct {
         var item = try self.popValue();
         defer item.deinit();
         return switch (item.borrow()) {
-            .symbol => |name| name,
+            .symbol => |name| name.name,
             else => self.typeError("a symbol name"),
         };
     }
@@ -5404,8 +5404,8 @@ pub const Machine = struct {
         if (current.nextIndex() == length) return true;
         if (length - current.nextIndex() == 1) {
             const drop = list.atUnchecked(.{ .list = current.code }, current.nextIndex());
-            if (drop != .word or drop.word.name != self.unit.environment.localsWords().drop) return false;
-            const count = env.localOperand(drop.word.slot) orelse return false;
+            if (drop != .symbol or drop.symbol.name != self.unit.environment.localsWords().drop) return false;
+            const count = env.localOperand(drop.symbol.slot) orelse return false;
             return count <= self.unit.locals.items.len;
         }
         return false;
@@ -5645,7 +5645,7 @@ pub const Machine = struct {
         out: *Resolution,
     ) bool {
         // The root's own binding as this unit observes it, else core's. Only
-        // session bindings are versioned (`Scope.isSession`).
+        // session bindings are versioned (Scope.isSession).
         const pin = if (written != null and written.?.isSession()) self.unit.bindingPin() else null;
         // A task reading an image still under construction counts its lease:
         // the constructor may replace the binding during the dispatch, and no
@@ -5772,7 +5772,7 @@ pub const Machine = struct {
     /// slot yields, or returns false when that is nothing a plain word may run. Recognition only ever declines,
     /// so this never records a failure: an unlinked word, or one whose root
     /// has retired, is simply not a match, and generic execution reports it.
-    pub fn peekSlotWord(self: *Machine, word: value.WordRef, out: *Resolution) bool {
+    pub fn peekSlotWord(self: *Machine, word: value.Symbol, out: *Resolution) bool {
         if (word.slot == 0 or env.localOperand(word.slot) != null) return false;
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
@@ -5824,7 +5824,7 @@ pub const Machine = struct {
     /// cache, filled on a miss exactly as dispatch fills it. Null for a word
     /// the cache does not hold (a local, a qualified or module word, one that
     /// resolves to nothing a plain word may run).
-    pub fn cachedResolution(self: *Machine, word: value.WordRef) error{OutOfMemory}!?BindingCache.Entry {
+    pub fn cachedResolution(self: *Machine, word: value.Symbol) error{OutOfMemory}!?BindingCache.Entry {
         if (word.slot == 0 or env.wordTarget(word.slot) != .slot) return null;
         const view = self.bindingView();
         if (self.unit.binding_cache.find(word.slot, view)) |cached| return cached.*;
@@ -5846,7 +5846,7 @@ pub const Machine = struct {
         return entry;
     }
 
-    pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+    pub fn executeWord(self: *Machine, word: value.Symbol) MachineError!void {
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         // A session or core word resolved before in this unit's view.
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
@@ -5869,8 +5869,11 @@ pub const Machine = struct {
             };
             return executeResolved(self, &resolved);
         };
-        // A word built at run time without a slot links where it executes.
-        const linked = if (word.slot == 0) try self.linkedWord(word.name) else word;
+        // A symbol with no slot was built by the implementation for itself (an
+        // error-dict key, a trace entry, a `type` result) and means core's
+        // binding wherever it runs; every symbol a program builds is linked
+        // where it is built.
+        const linked = if (word.slot == 0) try self.coreWord(word.name) else word;
         // A binding borrowed below stays valid for the dispatch: a unit that
         // may define replaces bindings only by running code, which starts
         // after the dispatch has retained what it keeps (a scheduled body, an
@@ -6609,8 +6612,8 @@ fn poll(self: *Machine) MachineError!void {
 }
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
-        .word => |reference| reference,
-        .int, .float, .char, .symbol, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
+        .symbol => |reference| reference,
+        .int, .float, .char, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }
@@ -6741,7 +6744,7 @@ const QualifiedLoadPreparationDriver = struct {
                 switch (restore) {
                     .none => {},
                     .operand => |requested| {
-                        try evaluator.pushBorrowed(.{ .symbol = requested });
+                        try evaluator.pushBorrowed(.{ .symbol = .{ .name = requested } });
                         evaluator.unit.current.?.rewind(evaluator.unit.active_index);
                     },
                 }
@@ -8737,7 +8740,7 @@ pub fn outcomeDict(
 ) error{OutOfMemory}!Value {
     defer releases.releaseValue(payload);
     const key = try intern.intern(name);
-    return dict.fromUniquePairs(allocator, releases, &.{.{ .{ .symbol = key }, payload }});
+    return dict.fromUniquePairs(allocator, releases, &.{.{ .{ .symbol = .{ .name = key } }, payload }});
 }
 fn startFailure(self: *Machine) error{OutOfMemory}!void {
     std.debug.assert(self.unit.hasPendingFailure());
@@ -9056,7 +9059,7 @@ const FailureDriver = struct {
                 .pending => {},
                 .complete => |key| {
                     const error_value = outcome.error_value;
-                    self.outcome_pair[0] = .{ .{ .symbol = key }, error_value };
+                    self.outcome_pair[0] = .{ .{ .symbol = .{ .name = key } }, error_value };
                     self.state = .{ .outcome_prepare = error_value };
                 },
             },

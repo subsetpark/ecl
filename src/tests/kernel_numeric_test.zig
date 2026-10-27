@@ -14,7 +14,7 @@ test "numeric: scalar leaf and mixed numeric semantics match" {
     );
     try helper.expectError(.{
         .name = "symbols are not numeric leaves",
-        .source = "'not-a-number 1 +",
+        .source = "`not-a-number 1 +",
         .kind = "type",
         .word = "+",
     });
@@ -96,8 +96,8 @@ test "numeric: ragged broadcast dict alignment and representation parity" {
     try helper.expectStack("[[1 2] [3 4]] 1 +", "([2 3]\n [4 5])");
     try helper.expectStack("[\"az\" \"λ🙂\"] 1 +", "([98 123]\n [956 128579])");
     try helper.expectStack(
-        "{'a 1 'b 2} {'b 10 'c 30} + {'a 1} [10 20] +",
-        "{'a 1 'b 12 'c 30} {'a [11 21]}",
+        "{a 1 b 2} {b 10 c 30} + {a 1} [10 20] +",
+        "{a 1 b 12 c 30} {a [11 21]}",
     );
     try helper.expectError(.{
         .name = "a fault in a nested typed leaf reports its inner index",
@@ -318,8 +318,8 @@ test "kernel: bitwise words are pattern words over the integer bit pattern" {
         },
         .{
             .name = "pervasion and dict alignment come from the shared cursor",
-            .source = "[1 2 4] 1 bsl [12 10] bnot {'a 6 'b 3} 1 band",
-            .expected = "[2 4 8] [-13 -11] {'a 0 'b 1}",
+            .source = "[1 2 4] 1 bsl [12 10] bnot {a 6 b 3} 1 band",
+            .expected = "[2 4 8] [-13 -11] {a 0 b 1}",
         },
     });
     try helper.expectErrors(&.{

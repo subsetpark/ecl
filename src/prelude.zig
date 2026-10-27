@@ -1,5 +1,6 @@
 //! Embedded target-language bootstrap loader.
 const std = @import("std");
+const print = @import("print.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const reader = @import("reader.zig");
@@ -99,7 +100,16 @@ pub fn installSource(
     unit.replaceRootScope(building.rootScope(allocator));
     machine.run(&unit, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.InvalidPrelude,
+        error.Ecl => {
+            // The prelude is fixed at build time, so a failure here is a
+            // source defect; name it rather than leaving a bare panic.
+            if (unit.terminal == .failed) {
+                const rendered = try print.toOwnedString(allocator, unit.terminal.failed);
+                defer allocator.free(rendered);
+                if (!@import("builtin").is_test) std.log.err("embedded prelude failed: {s}", .{rendered});
+            }
+            return error.InvalidPrelude;
+        },
     };
     if (unit.stack.items.len != 0) return error.InvalidPrelude;
     try building.finish(recognizer);

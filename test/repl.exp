@@ -52,7 +52,7 @@ proc clean_eof {name} {
 
 proc expect_input_error {name label} {
     expect {
-        -re {'kind '(parse|undefined-word)} {}
+        -re {kind (parse|undefined-word)} {}
         timeout { fail_case $name "$label did not produce a language error" }
         eof { fail_case $name "process exited during $label" }
     }
@@ -86,7 +86,7 @@ set name "repl pty: failed units roll back the stack and retain completed defini
 start_repl $binary $rollback_home $name
 send "10\r"
 expect_stack $name 10
-send "(99) 'kept def 20 + missing\r"
+send "(99) `kept def 20 + missing\r"
 expect_input_error $name "failing unit"
 send "dup io.pp\r"
 expect_stack $name 10
@@ -265,7 +265,7 @@ puts "PASS: $name"
 
 set name "repl pty: dotted completion lists only public exports"
 start_repl $binary $temporary $name
-send "\[\] (1 'hidden setp 2 'mean set) 'stats @defm 'st 'stats alias\r"
+send "\[\] (1 `hidden setp 2 `mean set) `stats @defm `st `stats alias\r"
 expect {
     -re {\r\n\recl> } {}
     timeout { fail_case $name "module setup did not finish" }

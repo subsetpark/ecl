@@ -356,12 +356,12 @@ test "reader fixtures remain byte-for-byte anchors" {
     const Fixture = struct { source: []const u8, expected: []const []const u8 };
     const fixtures = [_]Fixture{
         .{
-            .source = "1, -2 0x10 3.5 2e3 # hi\n [\\a 'x \"ok\"]",
-            .expected = &.{ "1", "-2", "16", "3.5", "2000.0", "(\\a 'x \"ok\")" },
+            .source = "1, -2 0x10 3.5 2e3 # hi\n [\\a x \"ok\"]",
+            .expected = &.{ "1", "-2", "16", "3.5", "2000.0", "(\\a x \"ok\")" },
         },
         .{
-            .source = "{'answer (40 2 +) plus +}",
-            .expected = &.{"{'answer (40 2 +) plus +}"},
+            .source = "{answer (40 2 +) plus +}",
+            .expected = &.{"{answer (40 2 +) plus +}"},
         },
         .{
             .source = "(|x| x x *)",
@@ -400,11 +400,13 @@ test "reader fixtures remain byte-for-byte anchors" {
     var diag: lexer.Diag = .{};
     try std.testing.expect((try reader.read(host.cleanup(), "<repl>", "1 (2", &diag)) == .incomplete);
     try std.testing.expectError(error.Parse, reader.read(host.cleanup(), "test", "[1 2)", &diag));
-    try std.testing.expectError(error.Parse, reader.read(host.cleanup(), "test", "(|x| (x))", &diag));
-    try std.testing.expectEqualStrings(
-        "local `x` crosses a quotation boundary; use `partial` to construct a quotation that captures it",
-        diag.text(),
-    );
+    // A local name inside a nested list is the symbol it spells, not a
+    // crossing: the body reads and lowers.
+    var nested = switch (try reader.read(host.cleanup(), "test", "(|x| (x))", &diag)) {
+        .complete => |complete| complete,
+        .incomplete => return error.TestUnexpectedResult,
+    };
+    nested.deinit();
     try std.testing.expectError(
         error.Parse,
         reader.read(host.cleanup(), "test", "9223372036854775808", &diag),
@@ -466,7 +468,7 @@ test "reader bounds long classification and post-growth materialization" {
     defer allocator.free(atom);
     try expectReadNeedsSteps(atom, 170_000);
 
-    const quoted = try repeatedSource(allocator, "'", "a", 70_000, "");
+    const quoted = try repeatedSource(allocator, "`", "a", 70_000, "");
     defer allocator.free(quoted);
     try expectReadNeedsSteps(quoted, 170_000);
 
@@ -553,8 +555,8 @@ fn readFailureProbe(allocator: std.mem.Allocator) !void {
     var parsed = switch (try reader.read(
         host.cleanup(),
         "oom.ecl",
-        "1 -2 0x10 3.5 2e3 [\\a 'x \"ok\\u{3bb}\"] " ++
-            "{'answer [40 2 +]} (|x y| x y +)",
+        "1 -2 0x10 3.5 2e3 [\\a x \"ok\\u{3bb}\"] " ++
+            "{answer [40 2 +]} (|x y| x y +)",
         &diag,
     )) {
         .complete => |complete| complete,

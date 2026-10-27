@@ -18,7 +18,7 @@ pub const words = [_]env.BuiltinWord{
     .{
         .name = "in",
         .effect = "-- fd",
-        .doc = "( -- fd ) The standard input device, a readable byte endpoint; 'io when standard input is the program source.",
+        .doc = "( -- fd ) The standard input device, a readable byte endpoint; `io when standard input is the program source.",
         .primitive = input,
     },
     .{

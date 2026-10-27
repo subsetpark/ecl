@@ -7,7 +7,7 @@
 //! `ECL_PATH` and no readable working directory at all.
 //!
 //! These names are reserved: user registration, aliasing, and removal under
-//! one are `'domain` (`Machine.refuseReservedModule`).
+//! one are `'domain` (Machine.refuseReservedModule).
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");
@@ -59,7 +59,11 @@ const modules = [_]Module{
     } } },
     .{ .name = "port.core", .entry = .{ .builtin = &@import("stdlib/port.zig").words } },
     .{ .name = "task", .entry = .{ .builtin = &@import("task_prims.zig").words } },
-    .{ .name = "dict", .entry = .{ .builtin = &dict_module.words } },
+    .{ .name = "dict", .entry = .{ .source = .{
+        .name = "<stdlib:dict>",
+        .text = @embedFile("stdlib/dict.ecl"),
+    } } },
+    .{ .name = "dict.core", .entry = .{ .builtin = &dict_module.words } },
     .{ .name = "error", .entry = .{ .source = .{
         .name = "<stdlib:error>",
         .text = @embedFile("stdlib/error.ecl"),

@@ -1,8 +1,8 @@
 ### module stdlib.test.str
 []
 (
- 'stdlib.test.support
- ('equal 'raises-containing 'documented)
+ `stdlib.test.support
+ (equal raises-containing documented)
  import
 
  ### test string-predicate
@@ -16,11 +16,11 @@
   "abc" bytes str.str? 0 equal
   [1 2] str.str? 0 equal
   [1.5] str.str? 0 equal
-  ['a] str.str? 0 equal
+  [a] str.str? 0 equal
   42 str.str? 0 equal
-  'a str.str? 0 equal
-  {'a 1} str.str? 0 equal)
- 'string-predicate test
+  `a str.str? 0 equal
+  {a 1} str.str? 0 equal)
+ `string-predicate test
 
  ### test case-operations
  (-- : "Apply ASCII-only case conversion while preserving every codepoint.")
@@ -33,7 +33,7 @@
   "MiXeD" str.lower dup str.lower match? 1 equal
   "@[`{" str.upper "@[`{" equal
   "@[`{" str.lower "@[`{" equal)
- 'case-operations test
+ `case-operations test
 
  ### test trimming
  (-- : "Trim exactly the ASCII whitespace scalars from requested edges.")
@@ -45,7 +45,7 @@
   "" str.trim "" equal
   "  a b  " str.trim "a b" equal
   "  hi  " str.trim dup str.trim match? 1 equal)
- 'trimming test
+ `trimming test
 
  ### test search
  (-- : "Handle prefix, suffix, containment, and index edge cases consistently.")
@@ -70,10 +70,10 @@
   "a" "" str.index-of 0 equal
   "" "" str.index-of 0 equal
   ("hello" "zz" str.index-of)
-  'domain
+  `domain
   "no occurrence"
   raises-containing)
- 'search test
+ `search test
 
  ### test construction
  (-- : "Replace, repeat, and pad strings by explicit widths.")
@@ -90,56 +90,56 @@
   "abcd" 3 str.pad-left "abcd" equal
   "abcd" 3 str.pad-right "abcd" equal
   "" 2 str.pad-left "  " equal
-  ("ab" -1 str.repeat) 'domain "nonnegative count" raises-containing)
- 'construction test
+  ("ab" -1 str.repeat) `domain "nonnegative count" raises-containing)
+ `construction test
 
  ### test validation
  (-- : "Validate complete public arguments before executing string kernels.")
- ((5 str.upper) 'type "str.upper expects a string" raises-containing
-  ([\a 1] str.lower) 'type "str.lower expects a string" raises-containing
-  (5 str.trim-left) 'type "str.trim-left expects a string" raises-containing
-  (5 str.trim-right) 'type "str.trim-right expects a string" raises-containing
-  (5 str.trim) 'type "str.trim expects a string" raises-containing
+ ((5 str.upper) `type "str.upper expects a string" raises-containing
+  ([\a 1] str.lower) `type "str.lower expects a string" raises-containing
+  (5 str.trim-left) `type "str.trim-left expects a string" raises-containing
+  (5 str.trim-right) `type "str.trim-right expects a string" raises-containing
+  (5 str.trim) `type "str.trim expects a string" raises-containing
   ("abc" 5 str.starts?)
-  'type
+  `type
   "string and a string prefix"
   raises-containing
-  (5 "c" str.ends?) 'type "string and a string suffix" raises-containing
+  (5 "c" str.ends?) `type "string and a string suffix" raises-containing
   ("abc" 5 str.contains?)
-  'type
+  `type
   "string and a string needle"
   raises-containing
   (5 "a" str.index-of)
-  'type
+  `type
   "string and a string needle"
   raises-containing
   ("a" "a" 5 str.replace)
-  'type
+  `type
   "needle, and replacement strings"
   raises-containing
   (5 2 str.repeat)
-  'type
+  `type
   "string and an integer count"
   raises-containing
   ("a" 2.5 str.repeat)
-  'type
+  `type
   "string and an integer count"
   raises-containing
   ("a" 2.5 str.pad-left)
-  'type
+  `type
   "string and an integer width"
   raises-containing
   (5 2 str.pad-right)
-  'type
+  `type
   "string and an integer width"
   raises-containing)
- 'validation test
+ `validation test
 
  ### test documentation
  (-- : "Expose documentation for every str module export.")
- (['str.upper 'str.lower 'str.trim 'str.trim-left 'str.trim-right
-   'str.starts? 'str.ends? 'str.contains? 'str.index-of 'str.replace
-   'str.repeat 'str.pad-left 'str.pad-right]
+ ([str.upper str.lower str.trim str.trim-left str.trim-right
+   str.starts? str.ends? str.contains? str.index-of str.replace
+   str.repeat str.pad-left str.pad-right]
   documented)
- 'documentation test
-) 'stdlib.test.str @defm
+ `documentation test
+) `stdlib.test.str @defm

@@ -5,7 +5,7 @@
  (pattern path expected -- : "Assert source-pattern selection independently of the matcher.")
  (|pattern path expected|
   pattern path pkg.glob.matches? expected match?
-  {'kind 'user 'msg "source glob assertion failed"} assert) 'check defp
+  {kind user msg "source glob assertion failed"} assert) `check defp
 
  ### test source-patterns
  (-- : "Match component wildcards and recursive paths with no exponential backtracking.")
@@ -27,5 +27,5 @@
   "??" "λ" 1 check
   "λ*.ecl" "λ.ecl" 1 check
   "**/a/**/b" "x/a/y/z/b" 1 check)
- 'source-patterns test
-) 'pkg.test.glob @defm
+ `source-patterns test
+) `pkg.test.glob @defm

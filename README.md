@@ -81,9 +81,9 @@ Here, `bi` applies both `(sum)` and `(len)` to the same list, then `/`
 divides their results. The built-in help lets you explore words as you go:
 
 ```ecl
-'fold1 doc
-'fold1 see
-'str.upper which
+`fold1 doc
+`fold1 see
+`str.upper which
 ```
 
 Use `doc` for documentation, `see` for a definition, and `which` to locate a
@@ -160,9 +160,9 @@ repair. See the [package application contract](apps/pkg/README.md).
 List your source files and the modules other files may use in `ecl.pkg`:
 
 ```ecl
-{'format 2 'name "my.app" 'version "0.1.0"
- 'sources ["src/*.ecl"] 'exports ["my.app"]
- 'requires {}}
+{format 2 name "my.app" version "0.1.0"
+ `sources ["src/*.ecl"] `exports ["my.app"]
+ `requires {}}
 ```
 
 Exports name exact modules exposed to installed consumers. Other registrations

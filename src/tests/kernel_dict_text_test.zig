@@ -9,9 +9,9 @@ const helper = @import("kernel_test_support.zig");
 
 test "dict-text: polymorphic collection updates preserve ownership" {
     try helper.expectStack(
-        "{'a 1} 'b 2 put {'a 1 'b 2} 'a del {[1 2] 9} [1 2] 10 put " ++
+        "{a 1} `b 2 put {a 1 b 2} `a del {[1 2] 9} [1 2] 10 put " ++
             "[1 2 3] 1 9 put [1 2 3] 1 del",
-        "{'a 1 'b 2} {'b 2} {[1 2] 10} [1 9 3] [1 3]",
+        "{a 1 b 2} {b 2} {[1 2] 10} [1 9 3] [1 3]",
     );
 }
 
@@ -41,7 +41,7 @@ test "dict-text: put pervades over list selectors with conforming replacements" 
         },
         .{
             .name = "put selector leaves must be integer indices",
-            .source = "[1 2] [0 'a] 9 put",
+            .source = "[1 2] [0 a] 9 put",
             .kind = "type",
             .word = "put",
         },
@@ -59,13 +59,13 @@ test "dict-text: del removes original list positions through pervasive selectors
         "[10 20 30 40 50] [3 4] del " ++
             "[10 20 30 40 50] [[4 1] 4] del " ++
             "[10 20] [] del " ++
-            "{[1 2] 9 'a 1} [1 2] del",
-        "[10 20 30] [10 30 40] [10 20] {'a 1}",
+            "{[1 2] 9 a 1} [1 2] del",
+        "[10 20 30] [10 30 40] [10 20] {a 1}",
     );
     try helper.expectErrors(&.{
         .{
             .name = "del selector leaves must be integer indices",
-            .source = "[1 2] [0 'a] del",
+            .source = "[1 2] [0 a] del",
             .kind = "type",
             .word = "del",
         },
@@ -80,26 +80,26 @@ test "dict-text: del removes original list positions through pervasive selectors
 
 test "dict-text: dict.from-lists and polymorphic list updates" {
     try helper.expectStack(
-        "1 type 1.0 type \\a type 'a type (missing) first type [] type {} type " ++
-            "['a 1] str " ++
-            "['a 'b] [1 2] dict.from-lists [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
+        "1 type 1.0 type \\a type `a type (missing) first type [] type {} type " ++
+            "[a 1] str " ++
+            "[a b] [1 2] dict.from-lists [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
             "[1 2 3] 1 del \"abc\" 0 del",
-        "'int 'float 'char 'symbol 'word 'list 'dict " ++
-            "\"('a 1)\" " ++
-            "{'a 1 'b 2} [1 9 3] [1 9 3] [1 2 3] [1 3] \"bc\"",
+        "int float char symbol symbol list dict " ++
+            "\"(a 1)\" " ++
+            "{a 1 b 2} [1 9 3] [1 9 3] [1 2 3] [1 3] \"bc\"",
     );
     try helper.expectErrors(&.{
         .{
             .name = "dict.from-lists requires conforming lists",
-            .source = "['a] [1 2] dict.from-lists",
+            .source = "[a] [1 2] dict.from-lists",
             .kind = "shape",
-            .word = "dict.from-lists",
+            .word = "dict.core.from-lists",
         },
         .{
             .name = "dict.from-lists requires distinct keys",
-            .source = "['a 'a] [1 2] dict.from-lists",
+            .source = "[a a] [1 2] dict.from-lists",
             .kind = "domain",
-            .word = "dict.from-lists",
+            .word = "dict.core.from-lists",
         },
         .{
             .name = "put index must be in bounds",
@@ -115,7 +115,7 @@ test "dict-text: dict.from-lists and polymorphic list updates" {
         },
         .{
             .name = "put index must be an integer",
-            .source = "[1 2] 'a 9 put",
+            .source = "[1 2] `a 9 put",
             .kind = "type",
             .word = "put",
         },
@@ -133,7 +133,7 @@ test "dict-text: dict.from-lists and polymorphic list updates" {
         },
         .{
             .name = "del index must be an integer",
-            .source = "[1 2] 'a del",
+            .source = "[1 2] `a del",
             .kind = "type",
             .word = "del",
         },
@@ -146,8 +146,8 @@ test "dict-text: dict.from-lists and polymorphic list updates" {
 
 test "dict-text: dict.from-flat converts one flat list without evaluation" {
     try helper.expectStack(
-        "'total 3 4 + pair dict.from-flat",
-        "{'total 7}",
+        "`total 3 4 + pair dict.from-flat",
+        "{total 7}",
     );
     try helper.expectStack("[plus +] dict.from-flat", "{plus +}");
     try helper.expectErrors(&.{
@@ -155,19 +155,19 @@ test "dict-text: dict.from-flat converts one flat list without evaluation" {
             .name = "dict.from-flat requires an even item count",
             .source = "[1] dict.from-flat",
             .kind = "contract",
-            .word = "dict.from-flat",
+            .word = "dict.core.from-flat",
         },
         .{
             .name = "dict.from-flat rejects numerically duplicate keys",
             .source = "[1 one 1.0 two] dict.from-flat",
             .kind = "domain",
-            .word = "dict.from-flat",
+            .word = "dict.core.from-flat",
         },
         .{
             .name = "dict.from-flat requires a list",
             .source = "1 dict.from-flat",
             .kind = "type",
-            .word = "dict.from-flat",
+            .word = "dict.core.from-flat",
         },
     });
 }

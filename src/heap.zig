@@ -839,7 +839,7 @@ fn mutableHeader(handle: anytype) *Header {
 pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
         .dict, .task, .port, .address, .reserved_mask => false,
     });
     return result;
@@ -925,7 +925,6 @@ fn allocObject(
         .leaf_char1,
         .leaf_char2,
         .leaf_char4,
-        .leaf_symbol,
         => |list_kind| try allocListObject(LeafElement(list_kind), allocator, capacity_value),
         .dict, .reserved_mask => try allocator.create(Object),
         .task, .port, .address => unreachable,
@@ -953,7 +952,7 @@ fn allocListHeader(
     provenance_namespace: CodeProvenanceNamespace,
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => true,
         .dict, .task, .port, .address, .reserved_mask => false,
     });
     const header = try allocObject(allocator, kind_value, len_value, capacity_value);
@@ -973,14 +972,14 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_f64 => f64,
         .leaf_char1 => u8,
         .leaf_char2 => u16,
-        .leaf_char4, .leaf_symbol => u32,
+        .leaf_char4 => u32,
         .dict, .task, .port, .address, .reserved_mask => @compileError("a list representation is required"),
     };
 }
 
 /// Two representations are reuse-compatible when their elements occupy the same
-/// bytes: `leaf_u8`/`leaf_char1`, `leaf_i64`/`leaf_f64`, and
-/// `leaf_char4`/`leaf_symbol` are the compatible pairs. That is exactly when a
+/// bytes: `leaf_u8`/`leaf_char1` and `leaf_i64`/`leaf_f64` are the
+/// compatible pairs. That is exactly when a
 /// unique input buffer can carry a result of the other kind by retag rather
 /// than by reallocation.
 pub fn leafElementSize(kind_value: HeapKind) usize {
@@ -991,7 +990,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_f64 => @sizeOf(f64),
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
-        .leaf_char4, .leaf_symbol => @sizeOf(u32),
+        .leaf_char4 => @sizeOf(u32),
         .dict, .task, .port, .address, .reserved_mask => 0,
     };
 }
@@ -1078,7 +1077,6 @@ pub const AnyListBuilder = union(enum) {
     char1: ListBuilder(.leaf_char1),
     char2: ListBuilder(.leaf_char2),
     char4: ListBuilder(.leaf_char4),
-    symbol: ListBuilder(.leaf_symbol),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1104,7 +1102,6 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char1 => .{ .char1 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
-            .leaf_symbol => .{ .symbol = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }
@@ -1177,9 +1174,6 @@ pub const AnyListBuilder = union(enum) {
             },
             .char4 => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
                 slot.* = item.char;
-            },
-            .symbol => |*builder| for (items, builder.items()[index..][0..items.len]) |item, *slot| {
-                slot.* = item.symbol;
             },
         }
     }
@@ -1560,11 +1554,6 @@ pub fn chars32(header: *ListHandle) []const u32 {
     return payloadItems(u32, mutableHeader(header));
 }
 
-pub fn symbols(header: *ListHandle) []const u32 {
-    std.debug.assert(listKind(header) == .leaf_symbol);
-    return payloadItems(u32, mutableHeader(header));
-}
-
 pub fn setUniqueListLength(list_header: *UniqueList, new_len: usize) void {
     const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
     std.debug.assert(new_len <= capacity(uniqueHeader(header)));
@@ -1586,7 +1575,7 @@ pub fn incRef(handle: anytype) void {
 
 pub fn retainValue(item: Value) void {
     switch (item) {
-        .int, .float, .char, .symbol, .word => {},
+        .int, .float, .char, .symbol => {},
         .list => |header| incRef(header),
         .dict => |header| incRef(header),
         .task => |header| incRef(header),
@@ -2411,7 +2400,6 @@ pub const ReleaseDomain = struct {
             .leaf_char1,
             .leaf_char2,
             .leaf_char4,
-            .leaf_symbol,
             .reserved_mask,
             => return false,
         }
@@ -3100,7 +3088,7 @@ pub const OwnedValueChain = union(enum) {
 /// provenance has no retirement hook, so destroying it is a single step.
 fn ownsNoReferences(header: *const Header) bool {
     return switch (kind(header)) {
-        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => objectConst(header).provenance_namespace == .none,
+        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => objectConst(header).provenance_namespace == .none,
         .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
     };
 }
@@ -3116,7 +3104,6 @@ fn destroyObject(allocator: std.mem.Allocator, header: *Header) void {
         .leaf_char1,
         .leaf_char2,
         .leaf_char4,
-        .leaf_symbol,
         => |list_kind| freeListObject(LeafElement(list_kind), allocator, object(header)),
         .dict, .task, .port, .address, .reserved_mask => {
             freeStorage(allocator, header);
@@ -3128,7 +3115,7 @@ fn destroyObject(allocator: std.mem.Allocator, header: *Header) void {
 fn freeStorage(allocator: std.mem.Allocator, header: *Header) void {
     const obj = object(header);
     switch (kind(header)) {
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => unreachable,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => unreachable,
         .dict => {
             const storage: *DictStorage = @constCast(dictStorageConst(@ptrCast(@alignCast(header))));
             switch (storage.*) {

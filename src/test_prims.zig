@@ -115,25 +115,25 @@ fn descriptorValue(
     var pairs: [5]dict.Pair = undefined;
     var count: usize = 0;
     pairs[count] = .{
-        .{ .symbol = keys.module },
-        .{ .symbol = intern.moduleId(item.module) },
+        .{ .symbol = .{ .name = keys.module } },
+        .{ .symbol = .{ .name = intern.moduleId(item.module) } },
     };
     count += 1;
     pairs[count] = .{
-        .{ .symbol = keys.name },
-        .{ .symbol = intern.bindingId(item.metadata.name) },
+        .{ .symbol = .{ .name = keys.name } },
+        .{ .symbol = .{ .name = intern.bindingId(item.metadata.name) } },
     };
     count += 1;
     if (item.source) |source| {
-        pairs[count] = .{ .{ .symbol = keys.source }, .{ .int = @backingInt(source) } };
+        pairs[count] = .{ .{ .symbol = .{ .name = keys.source } }, .{ .int = @backingInt(source) } };
         count += 1;
     }
     if (item.metadata.effect) |effect| {
-        pairs[count] = .{ .{ .symbol = keys.effect }, .{ .list = effect.header() } };
+        pairs[count] = .{ .{ .symbol = .{ .name = keys.effect } }, .{ .list = effect.header() } };
         count += 1;
     }
     if (item.metadata.doc) |doc| {
-        pairs[count] = .{ .{ .symbol = keys.doc }, .{ .list = env.documentationHeader(doc) } };
+        pairs[count] = .{ .{ .symbol = .{ .name = keys.doc } }, .{ .list = env.documentationHeader(doc) } };
         count += 1;
     }
     return dict.fromUniquePairs(allocator, releases, pairs[0..count]);
@@ -372,16 +372,16 @@ const InvocationDriver = struct {
                 const payload = dict.valueAt(descriptor.dict, self.scan_index);
                 self.scan_index += 1;
                 if (key != .symbol) return invalid(evaluator);
-                if (key.symbol == self.keys.module) {
+                if (key.symbol.name == self.keys.module) {
                     if (self.module_id != null or payload != .symbol) return invalid(evaluator);
-                    self.module_id = payload.symbol;
-                } else if (key.symbol == self.keys.name) {
+                    self.module_id = payload.symbol.name;
+                } else if (key.symbol.name == self.keys.name) {
                     if (self.name_id != null or payload != .symbol) return invalid(evaluator);
-                    self.name_id = payload.symbol;
-                } else if (key.symbol == self.keys.source) {
+                    self.name_id = payload.symbol.name;
+                } else if (key.symbol.name == self.keys.source) {
                     if (self.source_id != null or payload != .int or payload.int < 0 or payload.int > std.math.maxInt(u32)) return invalid(evaluator);
                     self.source_id = @fromBackingInt(@intCast(@as(u32, @intCast(payload.int))));
-                } else if (key.symbol != self.keys.effect and key.symbol != self.keys.doc) {
+                } else if (key.symbol.name != self.keys.effect and key.symbol.name != self.keys.doc) {
                     return invalid(evaluator);
                 }
                 _ = work.spend();

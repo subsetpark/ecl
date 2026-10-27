@@ -27,7 +27,7 @@ pub const View = opaque {
         return @intCast(self.envelope().value().dict.length());
     }
     pub fn key(self: *const View, index: usize) u32 {
-        return dict.keyAt(self.envelope().value().dict, index).symbol;
+        return dict.keyAt(self.envelope().value().dict, index).symbol.name;
     }
     pub fn value(self: *const View, index: usize) Value {
         return dict.valueAt(self.envelope().value().dict, index);
