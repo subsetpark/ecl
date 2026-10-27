@@ -706,7 +706,6 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
         "\"abc\" [2 0 0 0 0] where at",
         "[1 2 3 4] [1 1 0 1] where at",
         "[1.5 2.5] [0 1] where at",
-        "[a b c] [1 0 1] where at",
         "\"\u{2713}x\u{2713}\" [1 0 1] where at",
         "[1 2 3] [0 0 0] where at",
         "[1 2 3] [1 0 1] 0 = where at",
@@ -729,6 +728,8 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
     // whose own gather handles them.
     try expectPhraseHits("[1 2 3] [1 0 1000] where at", 0);
     try expectPhraseHits("([1] \"a\" [2]) [1 0 3] where at", 0);
+    // Symbols have no typed leaf, so a symbol list is a generic source too.
+    try expectPhraseHits("[a b c] [1 0 1] where at", 0);
 }
 
 test "idioms: a caller's quotation is recognized inside prelude definitions" {
