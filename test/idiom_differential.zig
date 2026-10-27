@@ -713,6 +713,9 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
         "\"abc\" bytes 1000000 take dup 97 > where at len",
         "\"abc\" 1000000 take dup \\b = where at len",
         "\"\u{2713}x\" 1000 take dup \\x > where at",
+        // Masks spanning several count blocks; the stacks compare by value.
+        "\"abcdefg\" bytes 1000 take dup 97 = where at",
+        "\"abcdefgh\" bytes 600 take [0 2 1] bytes 600 take where at",
     }) |source| {
         compareExecutions(source) catch |err| {
             std.log.err("where at differs for `{s}`", .{source});

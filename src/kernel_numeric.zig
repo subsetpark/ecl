@@ -1525,7 +1525,14 @@ fn binaryKernelInto(
     const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
     const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
     const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
-    const lanes = std.simd.suggestVectorLength(left_class.Element()) orelse 1;
+    // A result narrower than its operands, such as an int comparison's byte
+    // mask, runs as many lanes as one output vector holds: the narrowed lanes
+    // then fill a whole store, and the narrowing is one shuffle tree per
+    // output vector rather than a narrowing chain per operand vector.
+    const lanes = @max(
+        std.simd.suggestVectorLength(left_class.Element()) orelse 1,
+        std.simd.suggestVectorLength(out.Element()) orelse 1,
+    );
     const Vectors = flat.VectorFamily(left_class.Element(), right_class.Element(), out.Element(), lanes);
     const infallible_body = struct {
         fn run(a: left_class.Element(), b: right_class.Element()) out.Element() {

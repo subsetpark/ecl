@@ -199,6 +199,42 @@ const FlatGatherDriver = struct {
     }
 };
 
+/// One block's count total and the `or` of its counts.
+const BlockSum = struct { sum: usize, bits: i64 };
+
+const byte_lanes = std.simd.suggestVectorLength(u8) orelse 1;
+comptime {
+    // Each 16-bit lane of `byteBlockSum` holds at most a block of maximal
+    // byte counts.
+    if (kernel_flat.block_size * std.math.maxInt(u8) > std.math.maxInt(u16))
+        @compileError("a block of byte counts can overflow a 16-bit lane");
+}
+
+/// The total and `or` of at most one block of byte counts, which are never
+/// negative or too large, so every block sums. Whole byte vectors are `or`ed
+/// as bytes and summed with a widening add rather than widened to int lanes
+/// first: a comparison's mask is a byte leaf, so this is `where`'s and
+/// `compress`'s common case.
+fn byteBlockSum(counts: []const u8) BlockSum {
+    std.debug.assert(counts.len <= kernel_flat.block_size);
+    var bits: @Vector(byte_lanes, u8) = @splat(0);
+    var sum: @Vector(byte_lanes, u16) = @splat(0);
+    const vector_end = counts.len / byte_lanes * byte_lanes;
+    var index: usize = 0;
+    while (index != vector_end) : (index += byte_lanes) {
+        const items: @Vector(byte_lanes, u8) = counts[index..][0..byte_lanes].*;
+        bits |= items;
+        sum += @as(@Vector(byte_lanes, u16), items);
+    }
+    var tail_bits: i64 = @reduce(.Or, bits);
+    var tail_sum: usize = @reduce(.Add, @as(@Vector(byte_lanes, u32), sum));
+    for (counts[vector_end..]) |item| {
+        tail_bits |= item;
+        tail_sum += item;
+    }
+    return .{ .sum = tail_sum, .bits = tail_bits };
+}
+
 /// `mask where at` as one pass: the elements of the source at the positions
 /// `where` would list, each repeated its count, without the index list. The
 /// phrase admits a byte-leaf mask, or an empty one, over a typed leaf; a
@@ -273,17 +309,17 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                     // Positions the source has only need their sum; beyond
                     // it, a nonzero count is the gather's fault.
                     const inside = @min(block.len, length -| range.start);
-                    var total: usize = 0;
-                    var bits: u8 = 0;
-                    for (block[0..inside]) |count| {
-                        total += count;
-                        bits |= count;
+                    var offset: usize = 0;
+                    while (offset != inside) {
+                        const piece = @min(kernel_flat.block_size, inside - offset);
+                        const summed = byteBlockSum(block[offset..][0..piece]);
+                        output.total += summed.sum;
+                        output.mask = output.mask and summed.bits <= 1;
+                        offset += piece;
                     }
                     for (block[inside..]) |count| {
                         if (count != 0) return context.fail(.domain, "at index is out of bounds");
                     }
-                    output.total += total;
-                    output.mask = output.mask and bits <= 1;
                     output.index = range.end;
                 },
                 .fill => {
@@ -293,14 +329,21 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                     const out = output.writer.?.unpublishedRange(0, output.total);
                     if (output.mask) {
                         // Every position stores at the write cursor; only a
-                        // selected one advances it. The store is in bounds
-                        // while elements remain to select, so the loop ends
-                        // at the last selected position, not at the block.
-                        for (block, output.index..) |count, position| {
-                            if (output.written == output.total) break;
-                            out[output.written] = items[position];
-                            output.written += count;
+                        // selected one advances it. A stretch is no longer
+                        // than the room left, so each of its stores is in
+                        // bounds without a test, and filling ends at the last
+                        // selected position, not at the block.
+                        var position = output.index;
+                        var written = output.written;
+                        while (position != end and written != output.total) {
+                            const stretch = @min(end - position, output.total - written);
+                            for (all[position..][0..stretch], items[position..][0..stretch]) |count, item| {
+                                out[written] = item;
+                                written += count;
+                            }
+                            position += stretch;
                         }
+                        output.written = written;
                     } else for (block, output.index..) |count, position| {
                         if (output.written == output.total) break;
                         const element: Element = items[position];
@@ -615,9 +658,11 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
         /// The sum of one block of typed counts and the `or` of its counts, or
         /// null when the block holds a count that is negative or too large to
         /// sum without a checked add. Every count below 2^55 keeps a block's
-        /// sum below 2^63, so the `or` decides both.
-        fn blockSum(counts: []const Count) ?struct { sum: usize, bits: i64 } {
+        /// sum below 2^63, so the `or` decides both. Byte counts can be
+        /// neither, so they always sum.
+        fn blockSum(counts: []const Count) ?BlockSum {
             std.debug.assert(counts.len <= kernel_flat.block_size);
+            if (comptime @sizeOf(Count) == 1) return byteBlockSum(counts);
             // Independent accumulators, `unroll` vectors per iteration, so
             // loop control is paid once per group.
             var bits: [unroll]Lanes = @splat(@splat(0));
