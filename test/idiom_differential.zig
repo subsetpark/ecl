@@ -978,6 +978,11 @@ test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
         "[1 2] (pop pop) fold1",                  "[1 2] (pair) fold1",
         "(pop pop 9) `and def [1 0] (and) fold1", "(pop pop 9) `or def [0 0] 0 (or) fold",
         "(pop 1) `not def [1 0] 1 (and) fold",    "(pop pop 7) `fold1 def [1 0] (and) fold1",
+        // Comparison masks are byte leaves; the int seed widens their 0/1.
+        "5 range 0 >= 1 (and) fold",              "5 range 3 >= 0 (or) fold",
+        "5 range 2 >= 1 (and) scan",              "5 range 3 >= 0 (or) scan",
+        "5 range 2 >= (and) fold1",               "5 range 3 >= (or) fold1",
+        "5 range 2 >= 2 (and) fold",              "5 range 2 >= 1.0 (or) scan",
     }) |source| compareReductionModes(source) catch |err| {
         std.log.err("reduction comparison failed for {s}", .{source});
         return err;

@@ -737,6 +737,15 @@ comptime {
     }
 }
 
+comptime {
+    @setEvalBranchQuota(1_000_000);
+    for (registry) |entry| switch (entry.context) {
+        .fold, .scan, .fold1 => if (entry.operation == .binary and !numeric.reducesIntLanesTyped(entry.operation.binary))
+            @compileError("a recognized reduction has no typed plan over int lanes: " ++ entry.operation.binary.spelling()),
+        else => {},
+    };
+}
+
 /// Phrase words' interned names, interned on first use: each entry's head,
 /// then its following words. The intern table is one per process and never
 /// reset, so an id once learned stays valid.

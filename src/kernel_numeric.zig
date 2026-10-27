@@ -3339,6 +3339,19 @@ pub fn typedReduceCandidate(operation: BinaryOp, input: Value, initial: Value) b
     return NumericReducePlan.select(operation, accumulator_class, element_class, false) != null;
 }
 
+/// Whether a recognized `fold` or `scan` of `operation` with an int seed is
+/// one typed pass over int and byte lanes. The idiom registry requires this
+/// of every reduction it recognizes: one that matches but has no plan still
+/// runs, one scheduler turn per element, so only the cost would show it.
+pub fn reducesIntLanesTyped(comptime operation: BinaryOp) bool {
+    inline for ([_]Number{ .integer, .byte }) |element| {
+        inline for ([_]bool{ false, true }) |scan| {
+            if (NumericReducePlan.select(operation, .integer, element, scan) == null) return false;
+        }
+    }
+    return true;
+}
+
 /// The opaque plan binds a possible seed transition to its stable loop and
 /// output representation. Guard and entry use the same classification.
 const NumericReducePlan = opaque {
@@ -3353,17 +3366,21 @@ const NumericReducePlan = opaque {
     };
 
     fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
-        @setEvalBranchQuota(4000);
+        @setEvalBranchQuota(8000);
         return switch (operation) {
             inline else => |selected| blk: {
-                // Scalar accumulators have no byte storage class.
+                // Scalar accumulators have no byte storage class: a 0/1 result
+                // that is a byte in a leaf is an int scalar, as `scalarBinary`
+                // returns it, so the accumulator and a scan's output widen.
                 inline for ([_]Number{ .integer, .real }) |candidate_accumulator| {
                     inline for (number_classes) |candidate_element| {
-                        const out = comptime binaryResult(selected, candidate_accumulator, candidate_element);
-                        if (comptime out == null or out.? == .byte) continue;
+                        const raw = comptime binaryResult(selected, candidate_accumulator, candidate_element);
+                        if (comptime raw == null) continue;
+                        const out: ?Number = comptime widened(raw.?);
                         // A known first result is insufficient: every later
                         // result must have that same representation as well.
-                        if (comptime binaryResult(selected, out.?, candidate_element) != out) continue;
+                        const next = comptime binaryResult(selected, out.?, candidate_element);
+                        if (comptime next == null or widened(next.?) != out.?) continue;
                         inline for ([_]bool{ false, true }) |candidate_scan| {
                             if (accumulator == candidate_accumulator and element == candidate_element and scan == candidate_scan) {
                                 const seeded = comptime out.? != candidate_accumulator;
