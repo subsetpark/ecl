@@ -133,7 +133,7 @@ test "process: stdin stdout and stderr are byte endpoints and the old words comp
     for ([_]u32{ 1, 8 }) |workers| try expectStackWithWorkers(program, .{
         .stdin_capacity = 1,
         .stdout_capacity = 1,
-    }, "[97 10] [98 99 10] \"d\" [] [] [] 0 `type `port", workers);
+    }, "[97 10] [98 99 10] \"d\" [] [] [] 0 type port", workers);
 }
 
 test "process: common factories preserve unicode arguments environment and working directory" {
