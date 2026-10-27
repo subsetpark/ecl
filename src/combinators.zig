@@ -1527,7 +1527,7 @@ const StencilBootstrapDriver = struct {
         const control = self.control.borrow();
         const input = control.input.borrow().list;
         switch (input.kind()) {
-            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (self.typed_window == null) self.typed_window = .init(.{
                     .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, control.width, control.width),
                 });

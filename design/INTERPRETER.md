@@ -334,16 +334,17 @@ The root program and every quotation are lists. Evaluation has three cases:
 - applying a quotation evaluates its elements by the same rule.
 
 A symbol is one representation whichever position it occupies: its interned
-name plus a resolution slot. The slot is metadata the reader links for the
-root the text was written in and a runtime-built symbol leaves zero; equality,
-hashing, and printing ignore it, and a zero slot links lazily where it runs.
+name plus a resolution slot. The slot is metadata: the reader links it for
+the root the text was written in, `symbol`, `intern`, and `qualify` link it
+for the root of the activation that builds the symbol, and a symbol the
+implementation builds for itself (an error-dict key, a trace entry) leaves
+zero and means core. Equality, hashing, and printing ignore it.
 Nothing else distinguishes "code" from "data": the reader's quote is the two
 forms `(x) core.first`, which is why `first` is a kernel builtin rather than a
 prelude word, and a locals declaration rewrites only its body's own top-level
 occurrences, since a symbol inside a nested list or dict is the symbol it
-spells. A symbol vector stores as a leaf only when every slot is zero, so a
-quotation keeps its links; printing chooses `(...)` for both storages. The
-same rule binds quotations the implementation assembles from values: an
+spells. A symbol list is always a generic spine, since no leaf holds a slot.
+The same rule binds quotations the implementation assembles from values: an
 operand spliced into one is data, so a symbol operand is spliced as its quote
 expansion, never as a bare element that would resolve. A `core.`-qualified
 occurrence links to core's slot for its unqualified name in every root, so it

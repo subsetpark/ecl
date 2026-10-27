@@ -701,8 +701,7 @@ fn membershipKindsCompatible(comptime needle_kind: value.HeapKind, comptime hays
     const needle_char = needle_kind == .leaf_char1 or needle_kind == .leaf_char2 or needle_kind == .leaf_char4;
     const haystack_char = haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4;
     return (needle_numeric and haystack_numeric) or
-        (needle_char and haystack_char) or
-        (needle_kind == .leaf_symbol and haystack_kind == .leaf_symbol);
+        (needle_char and haystack_char);
 }
 
 fn scalarMatchesElement(
@@ -730,10 +729,6 @@ fn scalarMatchesElement(
             .char => |codepoint| codepoint == @as(u32, candidate),
             else => false,
         },
-        .leaf_symbol => switch (needle) {
-            .symbol => |symbol| symbol.name == candidate,
-            else => false,
-        },
         .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
     };
 }
@@ -742,8 +737,7 @@ fn scalarCanMatchKind(needle: Value, haystack_kind: value.HeapKind) bool {
     return switch (needle) {
         .int, .float => haystack_kind == .leaf_u8 or haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
         .char => haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4,
-        .symbol => haystack_kind == .leaf_symbol,
-        .list, .dict, .task, .port, .address => false,
+        .symbol, .list, .dict, .task, .port, .address => false,
     };
 }
 
@@ -1208,7 +1202,7 @@ const RazeDriver = struct {
     /// whose representation the profile joined `child`'s into.
     fn copyChild(comptime out_kind: value.HeapKind, out: []heap.LeafElement(out_kind), child: *heap.ListHandle, from: usize, releases: *heap.ReleaseDomain) void {
         switch (child.kind()) {
-            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (comptime list.ListProfile.joinKinds(kind, out_kind) != out_kind) unreachable else {
                     var reader = heap.LeafReader(kind).acquire(child);
                     defer reader.release(releases);
@@ -1859,7 +1853,7 @@ const FlipDriver = struct {
 
     fn leafKind(kind: value.HeapKind) ?value.HeapKind {
         return switch (kind) {
-            .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => kind,
+            .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => kind,
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => null,
         };
     }
@@ -1962,7 +1956,7 @@ const FlipDriver = struct {
         releases: *heap.ReleaseDomain,
     ) void {
         switch (children[0].kind()) {
-            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| {
+            inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (comptime heap.LeafElement(kind) != Out) unreachable;
                 var readers: [scatter_group]heap.LeafReader(kind) = undefined;
                 var sources: [scatter_group][]const Out = undefined;
@@ -2533,7 +2527,6 @@ fn builderKind(comptime tag: std.meta.Tag(heap.AnyListBuilder)) value.HeapKind {
         .char1 => .leaf_char1,
         .char2 => .leaf_char2,
         .char4 => .leaf_char4,
-        .symbol => .leaf_symbol,
     };
 }
 
@@ -2544,7 +2537,6 @@ const leaf_kinds = [_]value.HeapKind{
     .leaf_char1,
     .leaf_char2,
     .leaf_char4,
-    .leaf_symbol,
 };
 
 /// The typed copy kernels. The result's representation is the one
@@ -2634,7 +2626,6 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         fn element(item: Value) Out {
             return switch (comptime out_kind) {
                 .leaf_f64 => item.float,
-                .leaf_symbol => item.symbol.name,
                 .leaf_char1, .leaf_char2, .leaf_char4 => @intCast(item.char),
                 else => @intCast(item.int),
             };

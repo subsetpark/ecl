@@ -2319,7 +2319,6 @@ fn firstFlatElement(item: Value) ?Value {
         .leaf_char1 => .{ .char = heap.chars8(item.list)[0] },
         .leaf_char2 => .{ .char = heap.chars16(item.list)[0] },
         .leaf_char4 => .{ .char = @intCast(heap.chars32(item.list)[0]) },
-        .leaf_symbol => .{ .symbol = .{ .name = heap.symbols(item.list)[0] } },
         .generic_spine, .dict, .task, .port, .address, .reserved_mask => null,
     };
 }

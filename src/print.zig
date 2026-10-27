@@ -141,16 +141,6 @@ pub const RenderCursor = struct {
                         try self.writeByte(writer, '[');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
-                    // A vector of symbols is a quotation's shape whatever its
-                    // storage, so it prints as one; see Printing.
-                    .leaf_symbol => {
-                        if (self.style == .display and header.length() > display_list_limit) {
-                            try self.writeFmt(writer, "(<{d}-values-elided>)", .{header.length()});
-                            return;
-                        }
-                        try self.writeByte(writer, '(');
-                        try self.pushSequence(render.item, render.indent + 1, false);
-                    },
                     .dict, .task, .port, .address, .reserved_mask => unreachable,
                 },
                 .dict => |header| {
@@ -174,7 +164,7 @@ pub const RenderCursor = struct {
                 const count: usize = @intCast(continuation.collection.list.length());
                 if (continuation.index == count) {
                     try self.writeByte(writer, switch (continuation.collection.list.kind()) {
-                        .generic_spine, .leaf_symbol => ')',
+                        .generic_spine => ')',
                         else => ']',
                     });
                     return;
@@ -816,7 +806,6 @@ fn isFlatRow(item: Value) bool {
     if (item != .list) return false;
     return switch (item.list.kind()) {
         .leaf_u8, .leaf_i64, .leaf_f64 => true,
-        .leaf_symbol => false,
         .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .port, .address, .reserved_mask => false,
     };
 }

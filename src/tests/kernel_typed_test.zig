@@ -194,8 +194,10 @@ fn buildCodepoints(representation: Representation, codepoints: []const u32) !val
     return list.fromValuesGeneric(allocator, boxed);
 }
 
+// A symbol list has one representation, the generic spine, so both
+// representations build the same list.
 fn buildSymbols(representation: Representation, symbols: []const u32) !value.Value {
-    if (representation == .specialized) return list.fromSymbolIds(allocator, symbols);
+    _ = representation;
     var boxed = try allocator.alloc(value.Value, symbols.len);
     defer allocator.free(boxed);
     for (symbols, 0..) |symbol, index| boxed[index] = .{ .symbol = .{ .name = symbol } };

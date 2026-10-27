@@ -18,7 +18,6 @@ pub const ElemProfile = enum {
     all_int,
     all_float,
     all_char,
-    all_symbol,
     mixed,
 };
 
@@ -41,10 +40,9 @@ pub const ListProfile = struct {
             .int => |integer| .{ .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int },
             .float => .{ .kind = .all_float },
             .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
-            // A linked occurrence keeps its slot, which the symbol leaf cannot
-            // hold; only unlinked symbols pack into one.
-            .symbol => |symbol| .{ .kind = if (symbol.slot == 0) .all_symbol else .mixed },
-            .list, .dict, .task, .port, .address => .{ .kind = .mixed },
+            // A symbol keeps its slot, which no leaf holds, so a symbol list
+            // is always a generic spine.
+            .symbol, .list, .dict, .task, .port, .address => .{ .kind = .mixed },
         };
     }
 
@@ -58,7 +56,6 @@ pub const ListProfile = struct {
             .leaf_char1 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u8) },
             .leaf_char2 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u16) },
             .leaf_char4 => .{ .kind = .all_char, .max_codepoint = std.math.maxInt(u21) },
-            .leaf_symbol => .{ .kind = .all_symbol },
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => .{ .kind = .mixed },
         };
     }
@@ -85,7 +82,6 @@ pub const ListProfile = struct {
                 .leaf_char2
             else
                 .leaf_char4,
-            .all_symbol => .leaf_symbol,
         };
     }
 
@@ -144,7 +140,6 @@ fn ExactSliceMaterializer(comptime Source: type, comptime kind: HeapKind) type {
 pub const ByteListMaterializer = ExactSliceMaterializer(u8, .leaf_u8);
 pub const I64Materializer = ExactSliceMaterializer(i64, .leaf_i64);
 pub const F64Materializer = ExactSliceMaterializer(f64, .leaf_f64);
-pub const SymbolMaterializer = ExactSliceMaterializer(u32, .leaf_symbol);
 
 pub const CodepointMaterializer = struct {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
@@ -480,17 +475,6 @@ pub fn emptyLike(
     return .{ .list = builder.finish() };
 }
 
-pub fn fromSymbolIds(
-    allocator: std.mem.Allocator,
-    source: []const u32,
-) error{OutOfMemory}!Value {
-    var cursor = SymbolMaterializer.init(allocator, source);
-    var work = poll.unbounded();
-    const result = try poll.driveFallible(Value, &cursor, .{&work});
-    cursor.deinit();
-    return result;
-}
-
 pub fn len(collection: Value) error{NotAList}!usize {
     const header = try listHeader(collection);
     return @intCast(header.length());
@@ -515,7 +499,6 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
         .leaf_char1 => .{ .char = heap.chars8(header)[index] },
         .leaf_char2 => .{ .char = heap.chars16(header)[index] },
         .leaf_char4 => .{ .char = heap.chars32(header)[index] },
-        .leaf_symbol => .{ .symbol = .{ .name = heap.symbols(header)[index] } },
         .dict, .task, .port, .address, .reserved_mask => unreachable,
     };
 }
@@ -530,7 +513,6 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
             .leaf_char1,
             .leaf_char2,
             .leaf_char4,
-            .leaf_symbol,
             => header,
             .dict, .task, .port, .address, .reserved_mask => error.NotAList,
         },
@@ -565,8 +547,6 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.releaseValue(floats);
     const chars = try fromCodepoints(allocator, &.{ 'a', 0x100, 0x10000 });
     defer cleanup.releaseValue(chars);
-    const symbols = try fromSymbolIds(allocator, &.{ 1, 2 });
-    defer cleanup.releaseValue(symbols);
 }
 
 test "constructors exhaust allocation failures" {

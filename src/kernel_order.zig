@@ -102,7 +102,6 @@ const order_leaf_kinds = [_]value.HeapKind{
     .leaf_char1,
     .leaf_char2,
     .leaf_char4,
-    .leaf_symbol,
 };
 
 /// The classes `cmp` orders within: numbers with numbers, chars with chars.
@@ -433,7 +432,6 @@ fn startTypedGrade(evaluator: *Machine, collection: *heap.OwnedValue, sorted_val
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0 or collection.borrow().list.kind() == .generic_spine) return false;
     const kind = collection.borrow().list.kind();
-    if (kind == .leaf_symbol) return evaluator.failAtIndex(.type, incomparable_grade, 0);
     inline for (order_leaf_kinds) |candidate| {
         if (kind == candidate) {
             try support.Kernel(GradeKernel(candidate)).run(evaluator, .{collection}, sorted_values, count);
@@ -983,7 +981,6 @@ const GroupDriver = struct {
             .leaf_u8, .leaf_i64 => .{ .int = item },
             .leaf_f64 => .{ .float = item },
             .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = item },
-            .leaf_symbol => .{ .symbol = .{ .name = item } },
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }
@@ -1074,7 +1071,7 @@ const GroupDriver = struct {
                 }
                 const rows = work.take(self.row_count - self.item_index);
                 switch (self.collection.borrow().list.kind()) {
-                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => |kind| self.assignTyped(kind, rows, evaluator.releaseDomain()),
+                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| self.assignTyped(kind, rows, evaluator.releaseDomain()),
                     .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
                 }
             },

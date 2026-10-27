@@ -347,7 +347,6 @@ const leaf_kinds = [_]value.HeapKind{
     .leaf_char1,
     .leaf_char2,
     .leaf_char4,
-    .leaf_symbol,
 };
 
 /// `kind` is the source's leaf representation, which the result shares, or

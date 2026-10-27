@@ -641,7 +641,7 @@ pub const LeafMatchKey = struct {
                 .{ .class = .integer, .bits = @bitCast(@as(i64, @intFromFloat(item))) }
             else
                 .{ .class = .real, .bits = @bitCast(item) },
-            .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => .{ .class = .other, .bits = item },
+            .leaf_char1, .leaf_char2, .leaf_char4 => .{ .class = .other, .bits = item },
             .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
         };
     }
