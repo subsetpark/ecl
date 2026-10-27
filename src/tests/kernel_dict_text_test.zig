@@ -93,13 +93,13 @@ test "dict-text: dict.from-lists and polymorphic list updates" {
             .name = "dict.from-lists requires conforming lists",
             .source = "[a] [1 2] dict.from-lists",
             .kind = "shape",
-            .word = "dict.from-lists",
+            .word = "dict.core.from-lists",
         },
         .{
             .name = "dict.from-lists requires distinct keys",
             .source = "[a a] [1 2] dict.from-lists",
             .kind = "domain",
-            .word = "dict.from-lists",
+            .word = "dict.core.from-lists",
         },
         .{
             .name = "put index must be in bounds",
@@ -155,19 +155,19 @@ test "dict-text: dict.from-flat converts one flat list without evaluation" {
             .name = "dict.from-flat requires an even item count",
             .source = "[1] dict.from-flat",
             .kind = "contract",
-            .word = "dict.from-flat",
+            .word = "dict.core.from-flat",
         },
         .{
             .name = "dict.from-flat rejects numerically duplicate keys",
             .source = "[1 one 1.0 two] dict.from-flat",
             .kind = "domain",
-            .word = "dict.from-flat",
+            .word = "dict.core.from-flat",
         },
         .{
             .name = "dict.from-flat requires a list",
             .source = "1 dict.from-flat",
             .kind = "type",
-            .word = "dict.from-flat",
+            .word = "dict.core.from-flat",
         },
     });
 }

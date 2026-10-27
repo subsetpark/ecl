@@ -751,7 +751,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 273 col 51}}
+        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 185 col 51}}
         \\=== result.ok? ===
         \\source: [] (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -843,7 +843,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\(:
-        \\ "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v 'name set` is observationally `v literal 'name def`: the stored body is `((v) first)`. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested by `literal` and remain captured data.")
+        \\ "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v `name set` is observationally `v literal `name def`: the stored body is `((v) first)`. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested by `literal` and remain captured data.")
         \\(swap literal swap def)
         \\stderr:
         \\<empty>
@@ -853,7 +853,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 287 col 20}}
+        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 229 col 20}}
         \\=== qualify execute ===
         \\source: [] ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0
@@ -925,7 +925,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.and-then) data {source "prelude.ecl" line 298 col 14}}
+        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.and-then) data {source "prelude.ecl" line 22 col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -939,7 +939,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (raise assert str.index-of) data {source "prelude.ecl" line 298 col 14}}
+        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (raise assert str.index-of) data {source "prelude.ecl" line 22 col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d,,f" [] csv.parse
@@ -1010,7 +1010,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind shape msg "table columns must share one length" word raise trace (raise assert table.rows) data {source "prelude.ecl" line 298 col 14}}
+        \\{kind shape msg "table columns must share one length" word raise trace (raise assert table.rows) data {source "prelude.ecl" line 22 col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1

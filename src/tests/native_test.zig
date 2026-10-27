@@ -1559,7 +1559,7 @@ test "native: column primitives cancel active work and reuse the session" {
         .{ .setup = "500000 range dup pair wrap", .body = "group-columns", .word = "group-columns" },
         .{ .setup = "\"x\" 2000000 str.repeat dup pair wrap", .body = "group", .word = "group" },
         .{ .setup = "[1] [0] 8000000 take wrap pair", .body = "`sum reduce-groups", .word = "reduce-groups" },
-        .{ .setup = "{0 1} [0] 2000000 take 0 3 pack", .body = "dict.at-or", .word = "dict.at-or" },
+        .{ .setup = "{0 1} [0] 2000000 take 0 3 pack", .body = "dict.at-or", .word = "dict.core.at-or" },
     };
     for (cases) |case| {
         try expectOk(&runtime, case.setup);
