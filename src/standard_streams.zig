@@ -134,6 +134,8 @@ pub const Output = struct {
     head: u64 = 0,
     finished: bool = false,
     waiting: ?*Permit = null,
+    /// Turns retired before reaching the head, kept until the head passes them.
+    retired: ?*Permit = null,
 
     pub fn allocator(self: *Output) std.mem.Allocator {
         return self.memory;
@@ -172,19 +174,33 @@ pub const Output = struct {
         return .{ .written = source.len };
     }
 
-    /// Advance past a retired head turn and wake the turn that follows it.
-    fn retire(self: *Output, permit: *Permit) void {
+    /// Advance past a retired head turn, then past every later turn that
+    /// retired before it reached the head, and wake the turn that follows.
+    /// A turn retired ahead of the head is adopted by the device, which
+    /// drops the driver's reference once the head passes it; the result says
+    /// whether that happened.
+    fn retire(self: *Output, permit: *Permit) bool {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
+        if (permit.ticket != self.head) {
+            permit.retired_next = self.retired;
+            self.retired = permit;
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return true;
+        }
         var wake: ?external.WakeTarget = null;
-        if (permit.ticket == self.head) {
+        var passed: ?*Permit = null;
+        self.head += 1;
+        while (self.takeRetired(self.head)) |skipped| {
             self.head += 1;
-            var cursor = self.waiting;
-            while (cursor) |waiter| : (cursor = waiter.next) {
-                if (waiter.ticket == self.head) {
-                    wake = waiter.target;
-                    waiter.target = null;
-                    break;
-                }
+            skipped.retired_next = passed;
+            passed = skipped;
+        }
+        var cursor = self.waiting;
+        while (cursor) |waiter| : (cursor = waiter.next) {
+            if (waiter.ticket == self.head) {
+                wake = waiter.target;
+                waiter.target = null;
+                break;
             }
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -192,6 +208,23 @@ pub const Output = struct {
             target.wake(.ready);
             target.release();
         }
+        while (passed) |skipped| {
+            passed = skipped.retired_next;
+            skipped.release();
+        }
+        return false;
+    }
+
+    fn takeRetired(self: *Output, ticket: u64) ?*Permit {
+        var link = &self.retired;
+        while (link.*) |candidate| : (link = &candidate.retired_next) {
+            if (candidate.ticket == ticket) {
+                link.* = candidate.retired_next;
+                candidate.retired_next = null;
+                return candidate;
+            }
+        }
+        return null;
     }
 
     pub const Permit = struct {
@@ -203,6 +236,7 @@ pub const Output = struct {
         target: ?external.WakeTarget = null,
         next: ?*Permit = null,
         retired: bool = false,
+        retired_next: ?*Permit = null,
 
         pub fn source(self: *Permit) external.ReadinessSource {
             return external.readinessSource(Permit, self, self.ticket);
@@ -218,8 +252,7 @@ pub const Output = struct {
             std.Io.Threaded.mutexLockUncancelable(&device.mutex);
             self.retired = true;
             std.Io.Threaded.mutexUnlock(&device.mutex);
-            device.retire(self);
-            self.release();
+            if (!device.retire(self)) self.release();
         }
 
         pub fn retainReadiness(self: *Permit) void {

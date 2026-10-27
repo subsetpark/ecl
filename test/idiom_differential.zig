@@ -704,6 +704,7 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
     for ([_][]const u8{
         "\"abcdef\" [1 0 1] where at",
         "\"abcdef\" bytes [0 2 1] where at",
+        "\"abc\" [2 0 0 0 0] where at",
         "[1 2 3 4] [1 1 0 1] where at",
         "[1.5 2.5] [0 1] where at",
         "['a 'b 'c] [1 0 1] where at",

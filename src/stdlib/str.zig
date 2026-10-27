@@ -22,7 +22,7 @@ fn kind(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const spelling: []const u8 = switch (item.borrow()) {
-        .list => |header| switch (header.kind()) {
+        .list => |header| if (header.length() == 0) "string" else switch (header.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => "string",
             .generic_spine => "generic",
             .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .port, .address, .reserved_mask => "other",

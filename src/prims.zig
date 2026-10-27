@@ -1022,8 +1022,6 @@ const GetenvDriver = struct {
     }
 };
 
-/// Reads the whole standard input stream once. The gate lives in the machine
-/// so the CLI mode that owns stdin as program source cannot be raced.
 fn args(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(evaluator.unit.arguments);
 }

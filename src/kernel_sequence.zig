@@ -298,6 +298,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                             output.written += count;
                         }
                     } else for (block, output.index..) |count, position| {
+                        if (output.written == output.total) break;
                         const element: Element = items[position];
                         @memset(out[output.written..][0..count], element);
                         output.written += count;

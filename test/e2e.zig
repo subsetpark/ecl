@@ -1813,10 +1813,19 @@ test "e2e: concurrent fd writes stay contiguous" {
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 6 * 70000), result.stdout.len);
     var index: usize = 0;
+    var a_runs: usize = 0;
+    var b_runs: usize = 0;
     while (index < result.stdout.len) : (index += 70000) {
         const run_bytes = result.stdout[index..][0..70000];
         for (run_bytes) |byte| try std.testing.expectEqual(run_bytes[0], byte);
+        switch (run_bytes[0]) {
+            'A' => a_runs += 1,
+            'B' => b_runs += 1,
+            else => return error.TestUnexpectedResult,
+        }
     }
+    try std.testing.expectEqual(@as(usize, 3), a_runs);
+    try std.testing.expectEqual(@as(usize, 3), b_runs);
 }
 
 test "e2e: entropy is the one draw that differs between processes" {

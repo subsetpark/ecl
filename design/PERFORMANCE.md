@@ -703,7 +703,7 @@ tails above 500 µs appeared once on each side and did not reproduce.
 
 ## Standard streams, masks, and `where at` — 2026-10-26
 
-Four changes measured together on one input, the Benchmarks Game fasta
+Eight changes measured together on one input, the Benchmarks Game fasta
 output for N = 25,000,000 (254 MB of ASCII), Zig 0.17.0 ReleaseFast
 `-Dcpu=native`, Apple M4 Max, instructions retired per process
 (`/usr/bin/time -l`), control master `75b6503`.
