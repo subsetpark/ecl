@@ -22,8 +22,8 @@
   {1 9} 1.0 dict.has? 1 equal
   {"ab" 9} "a" dict.has? 0 equal
   ({a 1} len) `type `len raises-word
-  ([] dict.size) `type `dict.size raises-word
-  ([] `a dict.has?) `type `dict.has? raises-word)
+  ([] dict.size) `type `dict.core.size raises-word
+  ([] `a dict.has?) `type `dict.core.has? raises-word)
  `observations test
 
  ### test gathering
@@ -38,15 +38,15 @@
   {a foo} `a 9 dict.get (foo) first equal
   {[1 2] 8} [1 2] 0 dict.get 8 equal
   {} `a (bar) first dict.get (bar) first equal
-  ([1 2] 0 9 dict.get) `type `dict.get raises-word
+  ([1 2] 0 9 dict.get) `type `dict.core.get raises-word
   {a 1} [] dict.at () equal
   {[1 2] 9} [1 2] at 9 equal
   ({a 1} [[a missing]] dict.at)
   `domain
   "could not find the dict key"
   raises-containing
-  ({a 1} `a dict.at) `type `dict.at raises-word
-  ([] [] dict.at) `type `dict.at raises-word)
+  ({a 1} `a dict.at) `type `dict.core.at raises-word
+  ([] [] dict.at) `type `dict.core.at raises-word)
  `gathering test
 
  ### test updates
@@ -58,9 +58,9 @@
   {"ab" 1} ["ab" "ab"] (1 +) dict.update {"ab" 3} equal
   {a 1} [a a] (1 +) dict.update {a 3} equal
   {a 1} [] (missing) dict.update {a 1} equal
-  ({a 1} [a b] (10 *) dict.update) `domain `dict.update raises-word
-  ({a 1} `a (10 *) dict.update) `type `dict.update raises-word
-  ({a 1} [a] (dup) dict.update) `contract `dict.update raises-word
+  ({a 1} [a b] (10 *) dict.update) `domain `dict.core.update raises-word
+  ({a 1} `a (10 *) dict.update) `type `dict.core.update raises-word
+  ({a 1} [a] (dup) dict.update) `contract `dict.core.update raises-word
   {a 2} `a 9 (10 *) dict.update-or {a 20} equal
   {a 2} `b 9 (missing) dict.update-or {a 2 b 9} equal)
  `updates test
@@ -72,7 +72,7 @@
   {"ab" [3 4] c 2} equal dict.keys ["ab" c] equal
   {a 1} "ab" 2 dict.put dict.keys [a "ab"] equal
   {1 9} 1.0 7 dict.put {1 7} equal
-  ([] `a 1 dict.put) `type `dict.put raises-word)
+  ([] `a 1 dict.put) `type `dict.core.put raises-word)
  `assignment test
 
  ### test construction
@@ -87,7 +87,7 @@
   `shape
   "two-element pairs"
   raises-containing
-  ([[a 1] [a 2]] dict.from-pairs) `domain `dict.from-flat raises-word)
+  ([[a 1] [a 2]] dict.from-pairs) `domain `dict.core.from-flat raises-word)
  `construction test
 
  ### test mapping
@@ -110,7 +110,7 @@
   {a 1 b 2 c 3} [c a] dict.split
   {b 2} equal
   {a 1 c 3} equal
-  ({a 1} `a dict.del) `type `dict.del raises-word)
+  ({a 1} `a dict.del) `type `dict.core.del raises-word)
  `selection test
 
  ### test merging
@@ -123,7 +123,7 @@
   {} {a 1} (missing) dict.merge-with {a 1} equal
   ({a 1} {a 2} (pop pop pop) dict.merge-with)
   `contract
-  `dict.merge-with
+  `dict.core.merge-with
   raises-word)
  `merging test
 

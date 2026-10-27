@@ -212,6 +212,7 @@ pub const stdlib_exports = [_][]const u8{
     "port.core.await",
     "task.pending",
     "dict.from-pairs",
+    "dict.core.at",
     "error.new",
     "result.ok",
     "str.upper",

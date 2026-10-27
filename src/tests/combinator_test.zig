@@ -832,7 +832,7 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "an anonymous binding has no word",
-            .source = "[] ((|x| x) call) @attempt `err at `word dict.has?",
+            .source = "[] ((|x| x) call) @attempt `err at `word dict.core.has?",
             .expected = "0",
         },
     });

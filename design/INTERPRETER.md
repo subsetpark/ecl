@@ -344,9 +344,7 @@ forms `(x) core.first`, which is why `first` is a kernel builtin rather than a
 prelude word, and a locals declaration rewrites only its body's own top-level
 occurrences, since a symbol inside a nested list or dict is the symbol it
 spells. A symbol list is always a generic spine, since no leaf holds a slot.
-The same rule binds quotations the implementation assembles from values: an
-operand spliced into one is data, so a symbol operand is spliced as its quote
-expansion, never as a bare element that would resolve. A `core.`-qualified
+A `core.`-qualified
 occurrence links to core's slot for its unqualified name in every root, so it
 dispatches, caches, and fuses exactly as the plain core word does and only its
 spelling stays qualified; the registry path serves module-qualified names
