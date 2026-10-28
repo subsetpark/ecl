@@ -442,27 +442,8 @@ pub const FindCursor = struct {
     }
 };
 
-pub fn fromPairs(
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    pairs: []const Pair,
-) error{ OutOfMemory, DuplicateKey }!Value {
-    var materializer = try Materializer.init(allocator, pairs, true);
-    var completed = false;
-    defer if (!completed) materializer.retire(releases);
-    var work = poll.unbounded();
-    while (true) switch (try materializer.advance(&work)) {
-        .pending => {},
-        .duplicate_key => return error.DuplicateKey,
-        .complete => |dictionary| {
-            materializer.deinit();
-            completed = true;
-            return dictionary;
-        },
-    };
-}
-
-/// `fromPairs` for call sites whose keys are distinct by construction.
+/// Blocking construction for call sites whose keys are distinct by
+/// construction and whose pair count the caller bounds.
 pub fn fromUniquePairs(
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
@@ -483,42 +464,56 @@ pub fn fromUniquePairs(
     };
 }
 
-/// Returns a borrowed value. The dict continues to own heap children.
-///
-/// This convenience wrapper is for tests and small tools that do not own an
-/// allocator. Runtime code must use `getWithAllocator` so OOM remains an
-/// ordinary error.
-pub fn get(dictionary: Value, key: Value) error{NotADict}!?Value {
-    const header = try dictHeader(dictionary);
-    const found = findWithAllocator(std.heap.smp_allocator, header, key) catch
-        @panic("dictionary lookup out of memory") orelse return null;
-    return valueAt(header, found);
-}
+/// Blocking construction and lookup. They drive a cursor to completion in one
+/// call, so they exist only in test builds; production code drives
+/// `Materializer` or `FindCursor` against its owner's budget.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub fn fromPairs(
+        allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
+        pairs: []const Pair,
+    ) error{ OutOfMemory, DuplicateKey }!Value {
+        var materializer = try Materializer.init(allocator, pairs, true);
+        var completed = false;
+        defer if (!completed) materializer.retire(releases);
+        var work = poll.testing.budget(std.math.maxInt(usize));
+        while (true) switch (try materializer.advance(&work)) {
+            .pending => {},
+            .duplicate_key => return error.DuplicateKey,
+            .complete => |dictionary| {
+                materializer.deinit();
+                completed = true;
+                return dictionary;
+            },
+        };
+    }
 
-/// Allocator-aware lookup for runtime code. The returned value is borrowed;
-/// the dictionary continues to own heap children.
-pub fn getWithAllocator(
-    allocator: std.mem.Allocator,
-    dictionary: Value,
-    key: Value,
-) error{ OutOfMemory, NotADict }!?Value {
-    const header = try dictHeader(dictionary);
-    const found = try findWithAllocator(allocator, header, key) orelse return null;
-    return valueAt(header, found);
-}
+    /// Returns a borrowed value; the dictionary continues to own heap children.
+    pub fn get(
+        allocator: std.mem.Allocator,
+        dictionary: Value,
+        key: Value,
+    ) error{ OutOfMemory, NotADict }!?Value {
+        const header = try dictHeader(dictionary);
+        var cursor = FindCursor.initHeader(allocator, header, key);
+        defer cursor.deinit();
+        _ = try poll.testing.driveInSlices(?Value, &cursor, std.math.maxInt(usize));
+        const found = cursor.foundIndex() orelse return null;
+        return valueAt(header, found);
+    }
 
-/// `getWithAllocator` for call sites that have already proved dict-ness.
-/// The returned value is borrowed.
-pub fn symbolField(
-    allocator: std.mem.Allocator,
-    dictionary: Value,
-    key: u32,
-) error{OutOfMemory}!?Value {
-    return getWithAllocator(allocator, dictionary, .{ .symbol = .{ .name = key } }) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.NotADict => unreachable,
-    };
-}
+    /// `get` for call sites that have already proved dict-ness.
+    pub fn symbolField(
+        allocator: std.mem.Allocator,
+        dictionary: Value,
+        key: u32,
+    ) error{OutOfMemory}!?Value {
+        return get(allocator, dictionary, .{ .symbol = .{ .name = key } }) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.NotADict => unreachable,
+        };
+    }
+} else struct {};
 
 pub fn keysOf(header: *DictHandle) Value {
     return .{ .list = heap.dictStorageConst(header).payload().keys };
@@ -548,23 +543,11 @@ pub fn hashAt(header: *DictHandle, index: usize) u64 {
     return @bitCast(heap.i64s(hashes)[index]);
 }
 
-fn findWithAllocator(
-    allocator: std.mem.Allocator,
-    header: *DictHandle,
-    key: Value,
-) error{OutOfMemory}!?usize {
-    var cursor = FindCursor.initHeader(allocator, header, key);
-    defer cursor.deinit();
-    var work = poll.unbounded();
-    _ = try poll.driveFallible(?Value, &cursor, .{&work});
-    return cursor.foundIndex();
-}
-
 fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
     const releases = cleanup.domain();
-    const dictionary = try fromPairs(allocator, releases, &.{
+    const dictionary = try testing.fromPairs(allocator, releases, &.{
         .{ .{ .int = 1 }, .{ .symbol = .{ .name = 10 } } },
         .{ .{ .float = 2.5 }, .{ .symbol = .{ .name = 20 } } },
     });
@@ -572,7 +555,7 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
 
     var pairs: [index_threshold]Pair = undefined;
     for (&pairs, 0..) |*pair, index| pair.* = .{ .{ .int = @intCast(index) }, .{ .int = @intCast(index * 2) } };
-    const indexed = try fromPairs(allocator, releases, &pairs);
+    const indexed = try testing.fromPairs(allocator, releases, &pairs);
     cleanup.releaseValue(indexed);
 }
 
@@ -584,9 +567,9 @@ fn lookupFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.releaseValue(stored_key);
     const query_key = try list.fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(query_key);
-    const dictionary = try fromPairs(allocator, releases, &.{.{ stored_key, .{ .symbol = .{ .name = 10 } } }});
+    const dictionary = try testing.fromPairs(allocator, releases, &.{.{ stored_key, .{ .symbol = .{ .name = 10 } } }});
     defer cleanup.releaseValue(dictionary);
-    _ = try getWithAllocator(allocator, dictionary, query_key);
+    _ = try testing.get(allocator, dictionary, query_key);
 }
 
 test "dict allocation paths are exhaustive and leak-free" {
@@ -629,15 +612,15 @@ test "blocking and resumable dictionary APIs share construction and lookup" {
 
     for (pairs, 0..) |pair, index| {
         try std.testing.expectEqual(pair[0], keyAt(dictionary.dict, index));
-        try std.testing.expectEqual(pair[1], (try getWithAllocator(allocator, dictionary, pair[0])).?);
+        try std.testing.expectEqual(pair[1], (try testing.get(allocator, dictionary, pair[0])).?);
     }
-    try std.testing.expect((try getWithAllocator(allocator, dictionary, .{ .int = 99 })) == null);
+    try std.testing.expect((try testing.get(allocator, dictionary, .{ .int = 99 })) == null);
 
     const duplicates = [_]Pair{
         .{ .{ .int = 1 }, .{ .int = 10 } },
         .{ .{ .int = 1 }, .{ .int = 20 } },
     };
-    try std.testing.expectError(error.DuplicateKey, fromPairs(allocator, releases, &duplicates));
+    try std.testing.expectError(error.DuplicateKey, testing.fromPairs(allocator, releases, &duplicates));
     var duplicate_cursor = try Materializer.init(allocator, &duplicates, true);
     defer duplicate_cursor.retire(releases);
     while (true) {

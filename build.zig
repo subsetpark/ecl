@@ -997,6 +997,7 @@ pub fn build(b: *std.Build) void {
             "dict.test.",
             "equal.test.",
             "print.test.",
+            "module_map.test.",
             "spans.test.",
             "env.test.",
             "console.test.",

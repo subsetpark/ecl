@@ -41,24 +41,22 @@ const Action = union(enum) {
     },
 };
 
-/// Convenience wrapper for tests and small tools that do not own an
-/// allocator. Runtime code must use `matchWithAllocator` so OOM remains an
-/// ordinary error.
-pub fn match(a: Value, b: Value) bool {
-    return matchWithAllocator(std.heap.smp_allocator, a, b) catch
-        @panic("structural equality out of memory");
-}
+/// Blocking structural equality and hashing. They drive a cursor to
+/// completion in one call, so they exist only in test builds; production code
+/// drives `MatchCursor` or `HashCursor` against its owner's budget.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub fn match(allocator: std.mem.Allocator, a: Value, b: Value) error{OutOfMemory}!bool {
+        var cursor = try MatchCursor.init(allocator, a, b);
+        defer cursor.deinit();
+        return poll.testing.driveInSlices(bool, &cursor, std.math.maxInt(usize));
+    }
 
-pub fn matchWithAllocator(
-    allocator: std.mem.Allocator,
-    a: Value,
-    b: Value,
-) error{OutOfMemory}!bool {
-    var cursor = try MatchCursor.init(allocator, a, b);
-    defer cursor.deinit();
-    var work = poll.unbounded();
-    return poll.driveFallible(bool, &cursor, .{&work});
-}
+    pub fn hash(allocator: std.mem.Allocator, item: Value) error{OutOfMemory}!u64 {
+        var cursor = try HashCursor.init(allocator, item);
+        defer cursor.deinit();
+        return poll.testing.driveInSlices(u64, &cursor, std.math.maxInt(usize));
+    }
+} else struct {};
 
 /// The comparison a match needs no worklist for: any pair that is not a list
 /// against a list or a dict against a dict. `null` means the pair has
@@ -398,24 +396,6 @@ const HashAction = union(enum) {
     },
 };
 
-/// Convenience wrapper for tests and small tools that do not own an
-/// allocator. Runtime code must use `hashWithAllocator` so OOM remains an
-/// ordinary error.
-pub fn hash(item: Value) u64 {
-    return hashWithAllocator(std.heap.smp_allocator, item) catch
-        @panic("structural hashing out of memory");
-}
-
-pub fn hashWithAllocator(
-    allocator: std.mem.Allocator,
-    item: Value,
-) error{OutOfMemory}!u64 {
-    var cursor = try HashCursor.init(allocator, item);
-    defer cursor.deinit();
-    var work = poll.unbounded();
-    return poll.driveFallible(u64, &cursor, .{&work});
-}
-
 pub const HashProgress = poll.Progress(u64);
 
 /// Owned structural-hash state. Every transition is bounded and the cursor
@@ -722,8 +702,8 @@ fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
         .{ .symbol = .{ .name = 3 } },
     });
     defer cleanup.releaseValue(right);
-    _ = try matchWithAllocator(allocator, left, right);
-    _ = try hashWithAllocator(allocator, left);
+    _ = try testing.match(allocator, left, right);
+    _ = try testing.hash(allocator, left);
 }
 
 // A word's scope is resolution metadata outside its identity, and both
@@ -770,8 +750,8 @@ test "deep structural identity uses explicit worklists" {
     }
     defer cleanup.releaseValue(left);
     defer cleanup.releaseValue(right);
-    try std.testing.expect(match(left, right));
-    try std.testing.expectEqual(hash(left), hash(right));
+    try std.testing.expect(try testing.match(allocator, left, right));
+    try std.testing.expectEqual(try testing.hash(allocator, left), try testing.hash(allocator, right));
 }
 
 test "allocator-aware equality paths propagate every allocation failure" {
@@ -807,13 +787,13 @@ test "identity: scalar composite children use bounded allocation-free cursors" {
     try std.testing.expect(try hashing.advance(&exhausted) == .pending);
     try std.testing.expect(try poll.testing.advanceWithin(&hashing, 1) == .pending);
     try std.testing.expectEqual(
-        try hashWithAllocator(failing.allocator(), right),
+        try testing.hash(failing.allocator(), right),
         try poll.testing.driveInSlices(u64, &hashing, 1),
     );
     reals[512] = .{ .float = 2 };
     const different = try list.fromValuesGeneric(allocator, &reals);
     defer cleanup.releaseValue(different);
-    try std.testing.expect(!try matchWithAllocator(failing.allocator(), left, different));
+    try std.testing.expect(!try testing.match(failing.allocator(), left, different));
 }
 
 test "identity: strings share equality and hashes across widths and generic lists" {
@@ -832,14 +812,14 @@ test "identity: strings share equality and hashes across widths and generic list
         strings[i] = writer.finish();
     }
     defer for (strings) |item| cleanup.releaseValue(item);
-    const expected_hash = try hashWithAllocator(allocator, generic);
+    const expected_hash = try testing.hash(allocator, generic);
     for (strings) |left| {
-        try std.testing.expect(try matchWithAllocator(allocator, generic, left));
-        try std.testing.expectEqual(expected_hash, try hashWithAllocator(allocator, left));
+        try std.testing.expect(try testing.match(allocator, generic, left));
+        try std.testing.expectEqual(expected_hash, try testing.hash(allocator, left));
         for (strings) |right| {
             var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-            try std.testing.expect(try matchWithAllocator(failing.allocator(), left, right));
-            try std.testing.expectEqual(expected_hash, try hashWithAllocator(failing.allocator(), left));
+            try std.testing.expect(try testing.match(failing.allocator(), left, right));
+            try std.testing.expectEqual(expected_hash, try testing.hash(failing.allocator(), left));
         }
     }
     var comparison = try MatchCursor.init(allocator, strings[0], strings[1]);
@@ -858,10 +838,10 @@ test "identity: strings share equality and hashes across widths and generic list
     mismatch_writer.fillRange(512, 1, 0x1f600);
     const mismatch = mismatch_writer.finish();
     defer cleanup.releaseValue(mismatch);
-    for (strings) |item| try std.testing.expect(!try matchWithAllocator(allocator, item, mismatch));
+    for (strings) |item| try std.testing.expect(!try testing.match(allocator, item, mismatch));
     characters[512] = .{ .char = 0x1f600 };
     const wide_generic = try list.fromValuesGeneric(allocator, &characters);
     defer cleanup.releaseValue(wide_generic);
-    try std.testing.expect(try matchWithAllocator(allocator, wide_generic, mismatch));
-    try std.testing.expectEqual(try hashWithAllocator(allocator, wide_generic), try hashWithAllocator(allocator, mismatch));
+    try std.testing.expect(try testing.match(allocator, wide_generic, mismatch));
+    try std.testing.expectEqual(try testing.hash(allocator, wide_generic), try testing.hash(allocator, mismatch));
 }

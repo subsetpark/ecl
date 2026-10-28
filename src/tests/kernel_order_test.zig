@@ -268,9 +268,9 @@ test "order: distinct charges nested structural hash and equality work" {
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
 
-    const left = try list.fromI64Slice(allocator, integers);
+    const left = try list.testing.fromI64Slice(allocator, integers);
     defer cleanup.releaseValue(left);
-    const right = try list.fromI64Slice(allocator, integers);
+    const right = try list.testing.fromI64Slice(allocator, integers);
     defer cleanup.releaseValue(right);
     const outer = try list.fromValuesGeneric(allocator, &.{ left, right });
     var outer_owned = true;

@@ -71,6 +71,7 @@ test {
     _ = native_module;
     _ = native_call;
     _ = modules;
+    _ = module_map;
     _ = machine;
     _ = prims;
     _ = combinators;

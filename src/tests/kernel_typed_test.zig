@@ -34,7 +34,7 @@ test "typed kernels: transitioning reduction seeds use bounded typed passes" {
         defer allocator.free(numbers);
         @memset(numbers, 1.0);
         for ([_][]const u8{ "sum", "0 (+) fold", "0 (+) scan last" }) |source| {
-            try runtime.pushOwned(try list.fromF64Slice(allocator, numbers));
+            try runtime.pushOwned(try list.testing.fromF64Slice(allocator, numbers));
             switch (try runtime.runUnit("<transitioning-reduction>", source)) {
                 .ok => {},
                 .err => |failure| {
@@ -159,7 +159,7 @@ fn buildIntsOn(
     representation: Representation,
     numbers: []const i64,
 ) !value.Value {
-    if (representation == .specialized) return list.fromI64Slice(session_allocator, numbers);
+    if (representation == .specialized) return list.testing.fromI64Slice(session_allocator, numbers);
     var boxed = try allocator.alloc(value.Value, numbers.len);
     defer allocator.free(boxed);
     for (numbers, 0..) |number, index| boxed[index] = .{ .int = number };
@@ -171,7 +171,7 @@ fn buildInts(representation: Representation, numbers: []const i64) !value.Value 
 }
 
 fn buildBytes(representation: Representation, numbers: []const u8) !value.Value {
-    if (representation == .specialized) return list.fromU8Slice(allocator, numbers);
+    if (representation == .specialized) return list.testing.fromU8Slice(allocator, numbers);
     var boxed = try allocator.alloc(value.Value, numbers.len);
     defer allocator.free(boxed);
     for (numbers, 0..) |number, index| boxed[index] = .{ .int = number };
@@ -179,7 +179,7 @@ fn buildBytes(representation: Representation, numbers: []const u8) !value.Value 
 }
 
 fn buildFloats(representation: Representation, numbers: []const f64) !value.Value {
-    if (representation == .specialized) return list.fromF64Slice(allocator, numbers);
+    if (representation == .specialized) return list.testing.fromF64Slice(allocator, numbers);
     var boxed = try allocator.alloc(value.Value, numbers.len);
     defer allocator.free(boxed);
     for (numbers, 0..) |number, index| boxed[index] = .{ .float = number };

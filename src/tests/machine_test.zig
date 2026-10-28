@@ -14,7 +14,7 @@ const Value = value.Value;
 
 fn field(allocator: std.mem.Allocator, dictionary: Value, name: []const u8) !Value {
     const key = try intern.intern(name);
-    return (try dict.symbolField(allocator, dictionary, key)).?;
+    return (try dict.testing.symbolField(allocator, dictionary, key)).?;
 }
 
 fn execute(runtime: *session.Session, source: []const u8) !?Value {
@@ -68,7 +68,7 @@ fn expectLocation(
 fn expectNoLocation(allocator: std.mem.Allocator, data: Value) !void {
     inline for ([_][]const u8{ "source", "line", "col" }) |name| {
         const key = try intern.intern(name);
-        try std.testing.expect((try dict.symbolField(allocator, data, key)) == null);
+        try std.testing.expect((try dict.testing.symbolField(allocator, data, key)) == null);
     }
 }
 
@@ -577,14 +577,14 @@ test "attempt reifies failure and def rejects scalar bodies" {
     try std.testing.expect((try execute(&runtime, "7 [] (1 0 div) @attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     const err_key = try intern.intern("err");
-    try std.testing.expect((try dict.symbolField(
+    try std.testing.expect((try dict.testing.symbolField(
         allocator,
         runtime.stackItems()[1],
         err_key,
     )) != null);
     try std.testing.expect((try execute(&runtime, "pop [] (pop) @attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
-    const isolated_error = (try dict.symbolField(
+    const isolated_error = (try dict.testing.symbolField(
         allocator,
         runtime.stackItems()[1],
         err_key,
@@ -592,7 +592,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
     try std.testing.expectEqualStrings("underflow", try errorKind(allocator, isolated_error));
     try std.testing.expect((try execute(&runtime, "[] (2 3 +) @attempt")) == null);
     const ok_key = try intern.intern("ok");
-    const ok_results = (try dict.symbolField(
+    const ok_results = (try dict.testing.symbolField(
         allocator,
         runtime.stackItems()[2],
         ok_key,

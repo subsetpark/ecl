@@ -300,7 +300,7 @@ test "numeric: result materialization remains cancellable" {
     const integers = try allocator.alloc(i64, 70_000);
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
-    const input = try list.fromI64Slice(allocator, integers);
+    const input = try list.testing.fromI64Slice(allocator, integers);
     defer cleanup.releaseValue(input);
 
     var runtime_inputs = try runtime_fixture.Fixture.init();

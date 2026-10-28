@@ -304,8 +304,8 @@ fn expectRoundTrip(original: testgen.Value) !void {
     };
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.values().len);
-    try std.testing.expect(equal.match(original, parsed.values()[0]));
-    try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.values()[0]));
+    try std.testing.expect(try equal.testing.match(allocator, original, parsed.values()[0]));
+    try std.testing.expectEqual(try equal.testing.hash(allocator, original), try equal.testing.hash(allocator, parsed.values()[0]));
 }
 
 fn dictFreeRoundTrip(recipe: testgen.ValueRecipe) !void {

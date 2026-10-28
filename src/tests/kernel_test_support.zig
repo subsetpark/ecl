@@ -144,7 +144,7 @@ fn expectErrorCase(case: ErrorCase) !void {
 
 fn requiredField(dictionary: value.Value, name: []const u8) !value.Value {
     const key = try intern.intern(name);
-    return (try dict.symbolField(allocator, dictionary, key)) orelse {
+    return (try dict.testing.symbolField(allocator, dictionary, key)) orelse {
         std.log.err("language-error dict is missing field `{s}`", .{name});
         return error.TestUnexpectedResult;
     };

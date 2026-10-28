@@ -252,7 +252,7 @@ test "dict-text: large updates yield through the public runtime" {
     const integers = try allocator.alloc(i64, 70_000);
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
-    const sequence = try list.fromI64Slice(allocator, integers);
+    const sequence = try list.testing.fromI64Slice(allocator, integers);
     defer cleanup.releaseValue(sequence);
     try runtime.pushBorrowed(sequence);
     try std.testing.expect((try runtime.runUnit("<test>", "69999 1 put pop")) == .ok);
