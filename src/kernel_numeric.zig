@@ -1525,14 +1525,15 @@ fn binaryKernelInto(
     const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
     const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
     const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
-    // A result narrower than its operands, such as an int comparison's byte
-    // mask, runs as many lanes as one output vector holds: the narrowed lanes
-    // then fill a whole store, and the narrowing is one shuffle tree per
-    // output vector rather than a narrowing chain per operand vector.
-    const lanes = @max(
-        std.simd.suggestVectorLength(left_class.Element()) orelse 1,
-        std.simd.suggestVectorLength(out.Element()) orelse 1,
-    );
+    // An int operation with a byte result, such as a comparison's mask, runs
+    // as many lanes as one output vector holds: the narrowed lanes then fill
+    // a whole store, and the narrowing is one shuffle tree per output vector
+    // rather than a narrowing chain per operand vector. Only that pairing
+    // widens, since every widened loop is code in every binary.
+    const lanes = if (left_class == .integer and out == .byte)
+        std.simd.suggestVectorLength(u8) orelse 1
+    else
+        std.simd.suggestVectorLength(left_class.Element()) orelse 1;
     const Vectors = flat.VectorFamily(left_class.Element(), right_class.Element(), out.Element(), lanes);
     const infallible_body = struct {
         fn run(a: left_class.Element(), b: right_class.Element()) out.Element() {
@@ -3383,6 +3384,11 @@ const NumericReducePlan = opaque {
                     inline for (number_classes) |candidate_element| {
                         const raw = comptime binaryResult(selected, candidate_accumulator, candidate_element);
                         if (comptime raw == null) continue;
+                        // A widened 0/1 result is planned only where it is
+                        // used, an int seed over int or byte lanes; any other
+                        // pairing keeps the generic route and its code size.
+                        if (comptime raw.? == .byte and (candidate_accumulator != .integer or
+                            (candidate_element != .integer and candidate_element != .byte))) continue;
                         const out: ?Number = comptime widened(raw.?);
                         // A known first result is insufficient: every later
                         // result must have that same representation as well.
