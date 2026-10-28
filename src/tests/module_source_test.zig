@@ -506,6 +506,9 @@ test "module: importp binds a module-private forwarding word" {
     try expectErrorContains(&runtime, "holder.x", &.{ "kind undefined-word", "name holder.x" });
     try expectErrorContains(&runtime, "x", &.{ "kind undefined-word", "word x" });
     try expectErrorContains(&runtime, "`src (x) importp", &.{ "kind domain", "word importp" });
+    // An empty request is refused after construction too.
+    try expectOk(&runtime, "[] ((`src () importp) `late def) `later @defm!");
+    try expectErrorContains(&runtime, "later.late", &.{ "kind domain", "word importp" });
     try expectErrorContains(&runtime, "(`src (missing) importp) `bad @defm!", &.{
         "kind undefined-word",
         "name src.missing",

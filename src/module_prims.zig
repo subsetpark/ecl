@@ -177,7 +177,7 @@ fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
 fn importWord(evaluator: *Machine, visibility: env.Visibility) MachineError!void {
     try evaluator.require(2);
     const scope = try evaluator.definitionScope();
-    if (visibility == .private and scope.publisher() != .module)
+    if (visibility == .private and !scope.isUnderConstruction())
         return evaluator.fail(.domain, "importp is legal only in a module root");
     var requested = try evaluator.popList();
     errdefer requested.deinit();
