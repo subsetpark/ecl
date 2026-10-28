@@ -646,7 +646,7 @@ pub const PervadeCursor = struct {
             shape,
         ) orelse return null;
         const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-        return try self.runTyped(try data.nested(evaluator, .{ node.left, node.right }, null, .{ .reuse = false }, length));
+        return try self.runTyped(try data.startNested(evaluator, .{ node.left, node.right }, null, .{ .reuse = false }, length));
     }
 
     fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
@@ -1500,9 +1500,8 @@ fn narrowLanes(comptime In: type, comptime Out: type, comptime lanes: usize, val
     return @truncate(values);
 }
 
-/// A binary typed operation: one range loop (runPieces) and its replay, as
-/// a `support.Kernel` spec run at top level (run) or inside pervasion
-/// (nested).
+/// A binary typed operation: one range loop (runPieces) and its replay, run
+/// by its result class's `BinaryKernel` at top level or inside pervasion.
 fn binaryKernel(
     comptime operation: BinaryOp,
     comptime left_class: Number,
@@ -1787,48 +1786,21 @@ fn binaryKernelInto(
             return null;
         }
 
-        /// The operation as a `support.Kernel`: its output is the left
-        /// operand's buffer when that is solely owned, or a fresh one.
-        const Spec = struct {
-            pub const arity = 2;
-            pub const Params = NumericParams;
-            pub const Output = KernelOutput;
-
-            pub fn prepare(evaluator: *Machine, operands: [2]Value, params: NumericParams, length: usize) error{OutOfMemory}!Output {
-                if (shape != .scalar_leaf and params.reuse) {
-                    if (heap.UniqueLeafAdoption(out.kind()).claim(operands[0].list, length)) |claimed| return .{
-                        .typed = switch (out) {
-                            .byte => .{ .reuse_bytes = claimed },
-                            .integer => .{ .reuse_ints = claimed },
-                            .real => .{ .reuse_reals = claimed },
-                            .char1, .char2, .char4 => unreachable,
-                        },
-                        .adopted = true,
-                    };
-                }
-                return .{ .typed = try freshOutput(out, evaluator, length), .adopted = false };
-            }
-
-            pub fn chunk(params: NumericParams, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                const left: Left = if (shape == .scalar_leaf)
-                    left_class.unboxed(operands[0])
-                else
-                    heap.leafElements(left_class.kind(), operands[0].list);
-                const right: Right = if (shape == .leaf_scalar)
-                    right_class.unboxed(operands[1])
-                else
-                    heap.leafElements(right_class.kind(), operands[1].list);
-                const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
-                if (runPieces(left, right, &output.typed, placement, range)) |faulted|
-                    return replayDirect(context, params.report, left, right, faulted);
-            }
-
-            pub const finish = KernelOutput.finish;
-            pub const adopted = KernelOutput.adoptedOperand;
-        };
-
-        const run = support.Kernel(Spec).run;
-        const nested = support.Kernel(Spec).nested;
+        /// The operation's range loop over these classes, as
+        /// `BinaryKernel` calls it.
+        fn chunk(params: NumericParams, operands: [2]Value, output: *KernelOutput, range: flat.Chunk, context: support.Context) MachineError!void {
+            const left: Left = if (shape == .scalar_leaf)
+                left_class.unboxed(operands[0])
+            else
+                heap.leafElements(left_class.kind(), operands[0].list);
+            const right: Right = if (shape == .leaf_scalar)
+                right_class.unboxed(operands[1])
+            else
+                heap.leafElements(right_class.kind(), operands[1].list);
+            const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
+            if (runPieces(left, right, &output.typed, placement, range)) |faulted|
+                return replayDirect(context, params.report, left, right, faulted);
+        }
 
         noinline fn replayDirect(context: support.Context, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
@@ -1932,38 +1904,14 @@ fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, 
             return null;
         }
 
-        /// The operation as a `support.Kernel`; see `binaryKernel`.
-        const Spec = struct {
-            pub const arity = 1;
-            pub const Params = NumericParams;
-            pub const Output = KernelOutput;
-
-            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: NumericParams, length: usize) error{OutOfMemory}!Output {
-                if (params.reuse) if (heap.UniqueLeafAdoption(out.kind()).claim(operands[0].list, length)) |claimed| return .{
-                    .typed = switch (out) {
-                        .byte => .{ .reuse_bytes = claimed },
-                        .integer => .{ .reuse_ints = claimed },
-                        .real => .{ .reuse_reals = claimed },
-                        .char1, .char2, .char4 => unreachable,
-                    },
-                    .adopted = true,
-                };
-                return .{ .typed = try freshOutput(out, evaluator, length), .adopted = false };
-            }
-
-            pub fn chunk(params: NumericParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                const elements = heap.leafElements(operand_class.kind(), operands[0].list);
-                const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
-                if (runPieces(elements, &output.typed, placement, range)) |faulted|
-                    return replayDirect(context, params.report, elements, faulted);
-            }
-
-            pub const finish = KernelOutput.finish;
-            pub const adopted = KernelOutput.adoptedOperand;
-        };
-
-        const run = support.Kernel(Spec).run;
-        const nested = support.Kernel(Spec).nested;
+        /// The operation's range loop over this class, as `UnaryKernel`
+        /// calls it.
+        fn chunk(params: NumericParams, operands: [1]Value, output: *KernelOutput, range: flat.Chunk, context: support.Context) MachineError!void {
+            const elements = heap.leafElements(operand_class.kind(), operands[0].list);
+            const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
+            if (runPieces(elements, &output.typed, placement, range)) |faulted|
+                return replayDirect(context, params.report, elements, faulted);
+        }
 
         noinline fn replayDirect(context: support.Context, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
@@ -2003,10 +1951,100 @@ fn freshOutput(comptime out: Number, evaluator: *Machine, length: usize) error{O
     };
 }
 
+/// One operation's range loop over one pair of classes; see `BinaryKernel`.
+const BinaryChunk = *const fn (NumericParams, [2]Value, *KernelOutput, flat.Chunk, support.Context) MachineError!void;
+
+/// What a binary kernel runs with: the caller's parameters and the plan's
+/// range loop.
+const BinaryParams = struct {
+    numeric: NumericParams,
+    chunk: BinaryChunk,
+};
+
+/// The `support.Kernel` of every binary operation with this result class and
+/// shape. Its inline, nested, and driver paths depend only on how the output
+/// is prepared, so they are compiled once per output representation, and each
+/// operation and class pair contributes only its range loop, which the plan
+/// hands over in its parameters.
+fn BinaryKernel(comptime out: Number, comptime shape: Shape) type {
+    return struct {
+        /// A broadcast scalar has no buffer, so only a left leaf may become
+        /// the output; see `prepareOutput`.
+        const Spec = struct {
+            pub const arity = 2;
+            pub const Params = BinaryParams;
+            pub const Output = KernelOutput;
+
+            pub fn prepare(evaluator: *Machine, operands: [2]Value, params: BinaryParams, length: usize) error{OutOfMemory}!Output {
+                return prepareOutput(out, evaluator, operands[0], shape != .scalar_leaf and params.numeric.reuse, length);
+            }
+
+            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                return params.chunk(params.numeric, operands, output, range, context);
+            }
+
+            pub const finish = KernelOutput.finish;
+            pub const adopted = KernelOutput.adoptedOperand;
+        };
+
+        const run = support.Kernel(Spec).run;
+        const nested = support.Kernel(Spec).nested;
+    };
+}
+
+/// One operation's range loop over one operand class; see `UnaryKernel`.
+const UnaryChunk = *const fn (NumericParams, [1]Value, *KernelOutput, flat.Chunk, support.Context) MachineError!void;
+
+const UnaryParams = struct {
+    numeric: NumericParams,
+    chunk: UnaryChunk,
+};
+
+/// The `support.Kernel` of every unary operation with this result class; see
+/// `BinaryKernel`.
+fn UnaryKernel(comptime out: Number) type {
+    return struct {
+        const Spec = struct {
+            pub const arity = 1;
+            pub const Params = UnaryParams;
+            pub const Output = KernelOutput;
+
+            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: UnaryParams, length: usize) error{OutOfMemory}!Output {
+                return prepareOutput(out, evaluator, operands[0], params.numeric.reuse, length);
+            }
+
+            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                return params.chunk(params.numeric, operands, output, range, context);
+            }
+
+            pub const finish = KernelOutput.finish;
+            pub const adopted = KernelOutput.adoptedOperand;
+        };
+
+        const run = support.Kernel(Spec).run;
+        const nested = support.Kernel(Spec).nested;
+    };
+}
+
+/// A kernel's output: the first operand's buffer when `reuse` allows it and
+/// that buffer is solely owned and of the result's width, or a fresh one.
+fn prepareOutput(comptime out: Number, evaluator: *Machine, first: Value, reuse: bool, length: usize) error{OutOfMemory}!KernelOutput {
+    if (reuse) if (heap.UniqueLeafAdoption(out.kind()).claim(first.list, length)) |claimed| return .{
+        .typed = switch (out) {
+            .byte => .{ .reuse_bytes = claimed },
+            .integer => .{ .reuse_ints = claimed },
+            .real => .{ .reuse_reals = claimed },
+            .char1, .char2, .char4 => unreachable,
+        },
+        .adopted = true,
+    };
+    return .{ .typed = try freshOutput(out, evaluator, length), .adopted = false };
+}
+
 /// Runs a plan's operation through `support.Kernel`, inline or as a driver.
-const RunBinary = *const fn (*Machine, [2]*heap.OwnedValue, NumericParams, usize) MachineError!void;
+const RunBinary = *const fn (*Machine, [2]*heap.OwnedValue, BinaryParams, usize) MachineError!void;
 /// Runs a plan's operation for a leaf inside pervasion; see `support.Kernel`.
-const NestedBinary = *const fn (*Machine, [2]Value, ?*heap.OwnedValue, NumericParams, usize) MachineError!support.NestedOutcome;
+const NestedBinary = *const fn (*Machine, [2]Value, ?*heap.OwnedValue, BinaryParams, usize) MachineError!support.NestedOutcome;
 
 /// Static selection binds the element classes, output width, and kernel
 /// together, so no caller can pair a kernel with another storage contract.
@@ -2018,6 +2056,17 @@ const NumericBinaryPlan = opaque {
         out: Number,
         run: RunBinary,
         nested: NestedBinary,
+        chunk: BinaryChunk,
+
+        /// Runs the operation inline or as a driver.
+        fn start(self: *const Data, evaluator: *Machine, owners: [2]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
+            return self.run(evaluator, owners, .{ .numeric = params, .chunk = self.chunk }, length);
+        }
+
+        /// Runs the operation for a leaf inside pervasion.
+        fn startNested(self: *const Data, evaluator: *Machine, operands: [2]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
+            return self.nested(evaluator, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
+        }
     };
 
     fn select(operation: BinaryOp, left: Number, right: Number, shape: Shape) ?*const NumericBinaryPlan {
@@ -2053,14 +2102,15 @@ const NumericBinaryPlan = opaque {
                     if (candidate_shape == .scalar_leaf and !candidate_left.scalar()) continue;
                     if (candidate_shape == .leaf_scalar and !candidate_right.scalar()) continue;
                     const out = binaryResult(operation, candidate_left, candidate_right) orelse continue;
-                    const Kernel = binaryKernel(operation, candidate_left, candidate_right, candidate_shape);
+                    const Shared = BinaryKernel(out, candidate_shape);
                     const data = Data{
                         .left = candidate_left,
                         .right = candidate_right,
                         .shape = candidate_shape,
                         .out = out,
-                        .run = Kernel.run,
-                        .nested = Kernel.nested,
+                        .run = Shared.run,
+                        .nested = Shared.nested,
+                        .chunk = binaryKernel(operation, candidate_left, candidate_right, candidate_shape).chunk,
                     };
                     table[@backingInt(candidate_left)][@backingInt(candidate_right)][@backingInt(candidate_shape)] =
                         @ptrCast(&data);
@@ -2151,7 +2201,7 @@ fn startNestedNumericBinary(
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    return try data.nested(evaluator, .{ left_item, right_item }, root, .{ .report = report, .reuse = root != null }, length);
+    return try data.startNested(evaluator, .{ left_item, right_item }, root, .{ .report = report, .reuse = root != null }, length);
 }
 
 /// A typed leaf inside pervasion. `root`, when present, owns `left` and is
@@ -2170,25 +2220,42 @@ fn startNestedBinary(
     return null;
 }
 
-const RunUnary = *const fn (*Machine, [1]*heap.OwnedValue, NumericParams, usize) MachineError!void;
-const NestedUnary = *const fn (*Machine, [1]Value, ?*heap.OwnedValue, NumericParams, usize) MachineError!support.NestedOutcome;
+const RunUnary = *const fn (*Machine, [1]*heap.OwnedValue, UnaryParams, usize) MachineError!void;
+const NestedUnary = *const fn (*Machine, [1]Value, ?*heap.OwnedValue, UnaryParams, usize) MachineError!support.NestedOutcome;
 
 /// A closed operation/class pair binds the loop and its output representation.
 /// Top-level and nested operations share it.
 const NumericUnaryPlan = opaque {
-    const Data = struct { input: Number, out: Number, run: RunUnary, nested: NestedUnary };
+    const Data = struct {
+        input: Number,
+        out: Number,
+        run: RunUnary,
+        nested: NestedUnary,
+        chunk: UnaryChunk,
+
+        /// Runs the operation inline or as a driver.
+        fn start(self: *const Data, evaluator: *Machine, owners: [1]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
+            return self.run(evaluator, owners, .{ .numeric = params, .chunk = self.chunk }, length);
+        }
+
+        /// Runs the operation for a leaf inside pervasion.
+        fn startNested(self: *const Data, evaluator: *Machine, operands: [1]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
+            return self.nested(evaluator, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
+        }
+    };
 
     fn select(operation: UnaryOp, input: Number) *const NumericUnaryPlan {
         return switch (operation) {
             inline else => |selected| blk: {
                 inline for (number_classes) |candidate| {
                     if (candidate == input) {
-                        const Kernel = comptime unaryKernel(selected, candidate);
+                        const out = comptime unaryResult(selected, candidate);
                         const data = comptime Data{
                             .input = candidate,
-                            .out = unaryResult(selected, candidate),
-                            .run = Kernel.run,
-                            .nested = Kernel.nested,
+                            .out = out,
+                            .run = UnaryKernel(out).run,
+                            .nested = UnaryKernel(out).nested,
+                            .chunk = unaryKernel(selected, candidate).chunk,
                         };
                         break :blk @ptrCast(&data);
                     }
@@ -2212,7 +2279,7 @@ fn startNestedUnary(
     const length: usize = @intCast(operand.list.length());
     if (length == 0) return null;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    return try data.nested(evaluator, .{operand}, null, .{ .report = report, .reuse = false }, length);
+    return try data.startNested(evaluator, .{operand}, null, .{ .report = report, .reuse = false }, length);
 }
 
 /// A numeric operation runs through its plan's kernel, inline or as a
@@ -2246,7 +2313,7 @@ fn startNumericBinary(
         shape,
     ) orelse return false;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    try data.run(evaluator, .{ left, right }, .{ .report = report }, length);
+    try data.start(evaluator, .{ left, right }, .{ .report = report }, length);
     return true;
 }
 
@@ -2278,7 +2345,7 @@ fn startTypedUnary(
     const length: usize = @intCast(item.list.length());
     if (length == 0) return false;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    try data.run(evaluator, .{operand}, .{ .report = report }, length);
+    try data.start(evaluator, .{operand}, .{ .report = report }, length);
     return true;
 }
 
@@ -3077,16 +3144,13 @@ const ReduceOutput = struct {
     }
 };
 
-const RunReduce = *const fn (*Machine, [1]*heap.OwnedValue, ReduceParams, usize) MachineError!void;
+const RunReduce = *const fn (*Machine, [1]*heap.OwnedValue, ReduceKernelParams, usize) MachineError!void;
 
 fn reduceKernel(
     comptime operation: BinaryOp,
     comptime accumulator_class: Number,
     comptime element_class: Number,
     comptime scan: bool,
-    /// The seed changes class, so the first remaining element takes one
-    /// scalar step before the loop.
-    comptime seeded: bool,
 ) type {
     const Staging = flat.Block(accumulator_class.Element());
     return struct {
@@ -3147,6 +3211,11 @@ fn reduceKernel(
                     offset += piece.len();
                     continue;
                 }
+                // The accumulator stays in a local for the block: `output`
+                // is reached through a pointer the loop cannot prove distinct
+                // from `elements`, so updating it there would store and reload
+                // it on every element.
+                var accumulator = accumulated(output);
                 for (piece.start..piece.end) |index| {
                     // Both operand tags are comptime-known here, so inlining
                     // the scalar authority lets its type dispatch fold away and
@@ -3155,7 +3224,7 @@ fn reduceKernel(
                     // and was most of a float reduction's cost.
                     const next = @call(.always_inline, scalarBinary, .{
                         operation,
-                        accumulator_class.boxed(accumulated(output)),
+                        accumulator_class.boxed(accumulator),
                         element_class.boxed(elements[index]),
                     }) catch |fault| {
                         // A sequential fold's first fault is the fault: there is
@@ -3166,38 +3235,68 @@ fn reduceKernel(
                         const diagnostic = scalarDiagnostic(fault);
                         return context.fail(diagnostic.kind, diagnostic.message);
                     };
-                    store(output, accumulator_class.unboxed(next));
-                    if (scan) {
-                        block.items[index - piece.start] = accumulated(output);
-                        block.len = index - piece.start + 1;
-                    }
+                    accumulator = accumulator_class.unboxed(next);
+                    if (scan) block.items[index - piece.start] = accumulator;
                 }
-                if (scan) output.scan.?.store(accumulator_class, piece.start, block.written());
+                store(output, accumulator);
+                if (scan) {
+                    block.len = piece.len();
+                    output.scan.?.store(accumulator_class, piece.start, block.written());
+                }
                 offset += piece.len();
             }
         }
 
-        /// The reduction as a `support.Kernel`. Its positions are the list
-        /// indices after the seed: a seed that changes class takes one scalar
-        /// step from the first remaining element before the loop.
+        /// The reduction's loop over these classes, as `ReduceKernel` calls
+        /// it. Its positions are the list indices after the seed.
+        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, context: support.Context) MachineError!void {
+            return accumulate(
+                output,
+                heap.leafElements(element_class.kind(), operands[0].list),
+                .{ .start = output.base + range.start, .end = output.base + range.end },
+                context,
+            );
+        }
+    };
+}
+
+/// One reduction's loop over one accumulator and element class; see
+/// `ReduceKernel`.
+const ReduceChunk = *const fn ([1]Value, *ReduceOutput, flat.Chunk, support.Context) MachineError!void;
+
+/// What a reduction kernel runs with: the caller's seed and start, the
+/// operation's scalar step for a seed that changes class, and the plan's
+/// loop.
+const ReduceKernelParams = struct {
+    reduce: ReduceParams,
+    step: ScalarBinary,
+    chunk: ReduceChunk,
+};
+
+/// The `support.Kernel` of every sequential reduction with this accumulator
+/// class and form; see `BinaryKernel`. A seed that changes class takes one
+/// scalar step from the first remaining element before the loop.
+fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptime seeded: bool) type {
+    return struct {
         const Spec = struct {
             pub const arity = 1;
-            pub const Params = ReduceParams;
+            pub const Params = ReduceKernelParams;
             pub const Output = ReduceOutput;
 
-            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: ReduceParams, _: usize) MachineError!Output {
+            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
                 const input = operands[0];
+                const start = params.reduce.cursor_start;
                 const seed = if (seeded) first: {
                     // Charge even this single step to the shared budget: many
                     // short reductions must not evade cancellation. Do not
                     // pre-cast initial; mixed numeric comparisons in particular
                     // would lose information.
                     try evaluator.advanceKernel(1);
-                    break :first scalarBinary(operation, params.initial, list.atUnchecked(input, params.cursor_start)) catch |fault| {
+                    break :first params.step(params.reduce.initial, list.atUnchecked(input, start)) catch |fault| {
                         const diagnostic = scalarDiagnostic(fault);
                         return evaluator.fail(diagnostic.kind, diagnostic.message);
                     };
-                } else ordinal(params.initial);
+                } else ordinal(params.reduce.initial);
                 var output: Output = .{
                     .accumulator = switch (accumulator_class) {
                         .byte, .char1, .char2, .char4 => unreachable,
@@ -3205,22 +3304,17 @@ fn reduceKernel(
                         .real => .{ .real = seed.float },
                     },
                     .scan = null,
-                    .base = params.cursor_start + @intFromBool(seeded),
+                    .base = start + @intFromBool(seeded),
                 };
                 if (scan) {
                     output.scan = try freshOutput(accumulator_class, evaluator, @intCast(input.list.length()));
-                    if (seeded) output.scan.?.store(accumulator_class, params.cursor_start, &.{accumulator_class.unboxed(seed)});
+                    if (seeded) output.scan.?.store(accumulator_class, start, &.{accumulator_class.unboxed(seed)});
                 }
                 return output;
             }
 
-            pub fn chunk(_: ReduceParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                return accumulate(
-                    output,
-                    heap.leafElements(element_class.kind(), operands[0].list),
-                    .{ .start = output.base + range.start, .end = output.base + range.end },
-                    context,
-                );
+            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+                return params.chunk(operands, output, range, context);
             }
 
             pub fn finish(output: *Output) Value {
@@ -3254,6 +3348,8 @@ const NumericReducePlan = opaque {
         scan: bool,
         seeded: bool,
         run: RunReduce,
+        step: ScalarBinary,
+        chunk: ReduceChunk,
     };
 
     fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
@@ -3276,7 +3372,9 @@ const NumericReducePlan = opaque {
                                     .element = candidate_element,
                                     .scan = candidate_scan,
                                     .seeded = seeded,
-                                    .run = reduceKernel(selected, out.?, candidate_element, candidate_scan, seeded).run,
+                                    .run = ReduceKernel(out.?, candidate_scan, seeded).run,
+                                    .step = selectScalar(selected),
+                                    .chunk = reduceKernel(selected, out.?, candidate_element, candidate_scan).chunk,
                                 };
                                 break :blk @ptrCast(&data);
                             }
@@ -3305,7 +3403,12 @@ const NumericReducePlan = opaque {
         const list_owner = &popped[consumed - 1];
         std.debug.assert(list_owner.borrow().list == input.list);
         const first = cursor_start + @intFromBool(data.seeded);
-        try data.run(evaluator, .{list_owner}, .{ .initial = initial, .cursor_start = cursor_start }, @as(usize, @intCast(input.list.length())) - first);
+        const params: ReduceKernelParams = .{
+            .reduce = .{ .initial = initial, .cursor_start = cursor_start },
+            .step = data.step,
+            .chunk = data.chunk,
+        };
+        try data.run(evaluator, .{list_owner}, params, @as(usize, @intCast(input.list.length())) - first);
     }
 };
 
@@ -3366,7 +3469,13 @@ pub fn foldLeafRow(
 /// fold's accumulator class settles after at most one step. Byte rows settle
 /// on ints, int and real rows on reals; `min` and `max` over mixed classes
 /// have no single-class result and stay on the per-row cursor.
+///
+/// No step produces a stored width other than its own operands' byte, so an
+/// accumulator stored narrower than an int differs from its row's class at
+/// most once per fold, at its first step over rows of mixed classes; that
+/// one step takes the cursor too.
 fn rowFoldAccepts(comptime operation: BinaryOp, comptime accumulator: Number, comptime row: Number) bool {
+    if (!accumulator.scalar() and accumulator != row) return false;
     const out = binaryResult(operation, accumulator, row) orelse return false;
     return binaryResult(operation, out, row) == out;
 }

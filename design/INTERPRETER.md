@@ -1080,7 +1080,10 @@ readers and output from that plan for both direct and nested pervasion; callers
 cannot choose a loop independently of its storage contract. Only reachable
 class and shape combinations instantiate loops. Allocation, ownership transfer,
 and driver setup stay outside the operation-by-representation expansion, while
-the bounded element loops retain their concrete types.
+the bounded element loops retain their concrete types: the executor is
+instantiated once per result representation and broadcast shape, and a plan
+contributes only its loop, so a new storage class multiplies loops and never
+executors.
 Sequential reductions use the same separation: a static plan admits accumulator
 classes that stabilize after at most one scalar operation, and owns selection
 for both the recognition guard and entry. A transitioning seed participates in
