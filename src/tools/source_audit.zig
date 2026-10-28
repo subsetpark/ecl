@@ -233,6 +233,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditHttpServerWriteSink() or failed;
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
+    failed = auditResultAdoption() or failed;
     failed = auditKernelDriverStarts() or failed;
     failed = auditUnreferencedDeclarations(init) or failed;
     if (failed) return error.SourceAuditFailed;
@@ -964,6 +965,30 @@ fn auditKernelDriverStarts() bool {
         if (found) continue;
         std.log.err("{s}: kernel_driver_exceptions lists `{s}`, which no longer starts a driver; remove it", .{ exception.file, exception.function });
         failed = true;
+    }
+    return failed;
+}
+
+/// A result takes over an operand's buffer through one decision,
+/// `support.adopt`, which every producer that can write over its input asks
+/// (a `support.Kernel` declares its result shape and the executor asks for
+/// it). The capability that decision issues is the heap's; naming it anywhere
+/// else is a producer claiming a buffer for itself.
+const result_adoption_owners = [_][]const u8{ "heap.zig", "kernel_support.zig" };
+
+fn auditResultAdoption() bool {
+    const claims = [_][]const []const u8{
+        &.{"UniqueLeafAdoption"},
+        &.{"claimHeld"},
+        &.{"claimUniqueList"},
+    };
+    var failed = false;
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            if (!namedIn(&result_adoption_owners, file))
+                failed = auditProductionTokens(file, source, &claims) or failed;
+        }
     }
     return failed;
 }

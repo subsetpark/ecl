@@ -665,3 +665,31 @@ test "strings: plain text and escapes read the same however long the run" {
         .data = &.{.{ .name = "col", .expected = .{ .int = 152 } }},
     }});
 }
+
+test "reuse: a result never overwrites a value still observed" {
+    // Results take over an operand's buffer only when the call holds every
+    // reference to it and the kernel's loop permits it at every position the
+    // list occupies. Each case keeps or shares the operand; expected values
+    // are master's, before reuse was generalized.
+    try support.expectStacks(&.{
+        .{ .name = "same list twice, also bound", .source = "[1 2 3] `x set x x + x", .expected = "[2 4 6] [1 2 3]" },
+        .{ .name = "same list twice, also on the stack", .source = "5 range dup dup + +", .expected = "[0 3 6 9 12]" },
+        .{ .name = "right operand kept", .source = "5 range dup 3 + swap", .expected = "[3 4 5 6 7] [0 1 2 3 4]" },
+        // A gather over its own indices would read sources it already
+        // stored over; the reversed list makes every read cross a store.
+        .{ .name = "gather from its own indices", .source = "3 range reverse dup at", .expected = "[0 1 2]" },
+        .{ .name = "put into kept list", .source = "5 range dup 2 99 put swap", .expected = "[0 1 99 3 4] [0 1 2 3 4]" },
+        // One list as collection, indices, and replacement: a scatter over
+        // itself would read replacements it already stored over.
+        .{ .name = "vector put from itself", .source = "5 range reverse dup dup put", .expected = "[0 1 2 3 4]" },
+        .{ .name = "drop of kept list", .source = "10 range dup 3 drop swap", .expected = "[3 4 5 6 7 8 9] [0 1 2 3 4 5 6 7 8 9]" },
+        .{ .name = "cat with itself", .source = "5 range dup cat", .expected = "[0 1 2 3 4 0 1 2 3 4]" },
+        .{ .name = "scan of kept list", .source = "10 range dup 0 (+) scan swap", .expected = "[0 1 3 6 10 15 21 28 36 45] [0 1 2 3 4 5 6 7 8 9]" },
+        .{ .name = "row fold of kept list", .source = "12 range dup [3 4] reshape sum swap len", .expected = "[12 15 18 21] 12" },
+        .{ .name = "del of kept list", .source = "5 range dup 2 del swap", .expected = "[0 1 3 4] [0 1 2 3 4]" },
+        // Owned outright, the same operations still compute correctly.
+        .{ .name = "owned drop", .source = "1000 range 500 drop sum", .expected = "374750" },
+        .{ .name = "owned cat", .source = "1000 range dup 500 drop cat len", .expected = "1500" },
+        .{ .name = "owned put", .source = "5 range 2 99 put", .expected = "[0 1 99 3 4]" },
+    });
+}

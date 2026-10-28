@@ -1787,19 +1787,14 @@ fn rangePrimitive(evaluator: *Machine) MachineError!void {
 const RangeKernel = struct {
     pub const arity = 0;
     pub const Params = void;
-    pub const Output = heap.LeafWriter(.leaf_i64);
-
-    pub fn prepare(evaluator: *Machine, _: [0]Value, _: void, length: usize) error{OutOfMemory}!Output {
-        return .init(evaluator.allocator(), length);
-    }
+    pub const Output = support.LeafResult(.leaf_i64);
+    pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
     pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
-        for (output.unpublishedRange(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
+        for (output.range(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
     }
 
-    pub fn finish(output: *Output) Value {
-        return output.finish();
-    }
+    pub const finish = Output.finish;
 };
 
 fn lenPrimitive(evaluator: *Machine) MachineError!void {
@@ -2714,7 +2709,9 @@ const CopyShape = union(enum) {
 /// representation, which `list.ListProfile` chose, is wider; a plain copy when
 /// they match. Every typed list move widens through this.
 fn copyWidened(comptime Out: type, out: []Out, items: anytype) void {
-    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return @memcpy(out, items);
+    // A result moving within its own source starts no later than it, so a
+    // forward copy is exact where `@memcpy` would forbid the overlap.
+    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return std.mem.copyForwards(Out, out, items);
     for (out, items) |*slot, item| slot.* = item;
 }
 
@@ -2756,54 +2753,52 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
     const Out = heap.LeafElement(out_kind);
     const Index = heap.LeafElement(index_kind);
     return struct {
-        fn prepareWriter(evaluator: *Machine, length: usize) error{OutOfMemory}!heap.LeafWriter(out_kind) {
-            return .init(evaluator.allocator(), length);
-        }
-
-        fn finishWriter(output: *heap.LeafWriter(out_kind)) Value {
-            return output.finish();
-        }
+        const Result = support.LeafResult(out_kind);
 
         const Single = struct {
             pub const arity = 1;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// A contiguous copy reads each source position at or past the
+            /// result position it lands on, so it may move within its source;
+            /// a reversed or cyclic one reads positions already stored over.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
+            pub fn mayOverwrite(shape: CopyShape, _: usize) bool {
+                return shape == .contiguous;
             }
             pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         const Concat = struct {
             pub const arity = 2;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// The left operand's elements keep their positions, so a left
+            /// list with room for the right becomes the result.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
-            }
             pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         const Gather = struct {
             pub const arity = 2;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// Each result position is stored after its own index is read,
+            /// so the index list may become the result.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{1} };
 
-            pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
-            }
             pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         /// An atom before a source's elements; an empty source is never read,
@@ -2811,16 +2806,16 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         const Cons = struct {
             pub const arity = 1;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// The source shifts right past the head, so it never becomes
+            /// the result.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{} };
 
-            pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
-            }
             pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
                 const source: []const Element = if (range.end > 1) heap.leafElements(kind, operands[0].list) else &.{};
-                return copyRange(context, shape, source, null, null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, source, null, null, output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         /// An atom as the result's element; `ListProfile` admitted its class.
@@ -2832,9 +2827,9 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             };
         }
 
-        /// Copies `range` of the result into `out`. Nothing reads the result
-        /// before it is published, so each shape writes its range in place,
-        /// with no staging block.
+        /// Copies `range` of the result into `out`, which may be the source's
+        /// own buffer for the shapes `Single` and `Concat` allow; each shape
+        /// writes its range in place, with no staging block.
         fn copyRange(
             context: support.Context,
             shape: CopyShape,

@@ -339,6 +339,19 @@ pub const RandomOp = enum {
 /// - `finish(*Output) Value`: publishes the result.
 /// - optional `adopted(*const Output) ?usize`: the operand whose buffer the
 ///   result took over, whose reference therefore becomes the result's.
+/// - optional `result: ?ResultShape`: the kernel's result is one leaf, which
+///   this executor prepares, taking over an operand's buffer whenever the
+///   shape says the loop permits it and the call alone holds that buffer.
+///   `prepare` then takes the prepared `LeafResult` as a fifth argument, and
+///   `leafResult(*Output) *LeafResult` finds it when it is not the whole
+///   output. An optional `resultLength(params, operands, length) usize`
+///   gives its length when that is not `length`, and an optional
+///   `mayOverwrite(params, position) bool` narrows the declared operands for
+///   a kernel whose structure depends on its parameters, and an optional
+///   `positions(params, aliased, length) usize` gives the work left when the
+///   result took over an operand that already holds most of it. Every kernel whose result
+///   fits this shape declares it: reuse is decided here, once, for all of
+///   them, and no kernel claims a buffer itself.
 /// - optional `done(*const Output) bool`: the kernel can finish its positions
 ///   early, as a search does. It then runs range by range, charged for each
 ///   range as it goes, and leaves its positions as soon as `done` holds.
@@ -356,6 +369,82 @@ pub fn Kernel(comptime Spec: type) type {
         /// The caller's references to the operands.
         pub const Owners = [Spec.arity]*heap.OwnedValue;
 
+        const shape: ?ResultShape = if (@hasDecl(Spec, "result")) Spec.result else null;
+        const Result = if (shape) |declared| LeafResult(declared.kind) else void;
+
+        /// Which operands this call owns, and so may take a buffer from: all
+        /// of them at top level, only the caller's root inside pervasion.
+        const Ownership = enum { all, first, none };
+
+        /// The output, with the result leaf prepared here when the kernel
+        /// declares one.
+        inline fn prepareOutput(evaluator: *Machine, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) MachineError!Spec.Output {
+            if (comptime shape == null) return Spec.prepare(evaluator, operands, params, length);
+            const result_length = if (comptime @hasDecl(Spec, "resultLength")) Spec.resultLength(params, operands, length) else length;
+            var result = try prepareResult(evaluator, operands, ownership, params, result_length);
+            if (comptime Spec.Output == Result) return result;
+            return Spec.prepare(evaluator, operands, params, length, result) catch |err| {
+                result.retire(evaluator.releaseDomain());
+                return err;
+            };
+        }
+
+        /// The one place a kernel's result takes over an operand's buffer: an
+        /// overwritable operand the call owns, held only through the call's
+        /// own references (one operand may appear more than once), wide
+        /// enough and of the result's element width. Otherwise a fresh leaf.
+        inline fn prepareResult(evaluator: *Machine, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) error{OutOfMemory}!Result {
+            const declared = shape.?;
+            inline for (declared.overwritable) |position| reuse: {
+                switch (ownership) {
+                    .all => {},
+                    .first => if (position != 0) break :reuse,
+                    .none => break :reuse,
+                }
+                if (comptime @hasDecl(Spec, "mayOverwrite")) if (!Spec.mayOverwrite(params, position)) break :reuse;
+                const operand = operands[position];
+                if (operand != .list) break :reuse;
+                // The list may appear at several positions; the loop's
+                // promise covers it only if it does at every one of them.
+                var references: u32 = 0;
+                var covered = true;
+                inline for (operands, 0..) |other, other_position| {
+                    if (other == .list and other.list == operand.list) {
+                        references += 1;
+                        if (comptime !contains(declared.overwritable, other_position)) covered = false;
+                        if (comptime @hasDecl(Spec, "mayOverwrite")) {
+                            if (!Spec.mayOverwrite(params, other_position)) covered = false;
+                        }
+                    }
+                }
+                if (!covered) break :reuse;
+                // Inside pervasion the other operands are the structure's.
+                if (ownership == .first and references != 1) break :reuse;
+                if (adopt(declared.kind, operand, references, length)) |claimed| {
+                    var result = claimed;
+                    result.adopted = position;
+                    return result;
+                }
+            }
+            return allocate(declared.kind, evaluator, length);
+        }
+
+        /// The positions left to compute once the output is prepared.
+        fn workLength(params: Spec.Params, output: *const Spec.Output, length: usize) usize {
+            if (comptime shape == null or !@hasDecl(Spec, "positions")) return length;
+            return Spec.positions(params, resultOf(output).aliased(), length);
+        }
+
+        fn contains(comptime positions: []const usize, comptime position: usize) bool {
+            for (positions) |candidate| if (candidate == position) return true;
+            return false;
+        }
+
+        fn resultOf(output: *const Spec.Output) *const Result {
+            if (comptime Spec.Output == Result) return output;
+            return Spec.leafResult(@constCast(output));
+        }
+
         /// Runs the kernel. When the remaining budget covers `length`, every
         /// range runs here as one, charged as one, with the operands read
         /// under the caller's references, which the caller releases after
@@ -365,19 +454,21 @@ pub fn Kernel(comptime Spec: type) type {
             // SAFETY: the loop below writes every element before any is read.
             var operands: Operands = undefined;
             inline for (&operands, owners) |*operand, owner| operand.* = owner.borrow();
-            var output = try Spec.prepare(evaluator, operands, params, length);
-            if (comptime stepwise) return runStepwise(evaluator, owners, operands, params, output, length);
-            if (length > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, .init(length));
+            var output = try prepareOutput(evaluator, operands, .all, params, length);
+            const work = workLength(params, &output, length);
+            if (comptime stepwise) return runStepwise(evaluator, owners, operands, params, output, work);
+            if (work > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, .init(work));
             // An unfinished result is abandoned exactly as its `heap.Owned`
             // disposal would abandon it in a driver.
             errdefer output.retire(evaluator.releaseDomain());
             const context = Context{ .evaluator = evaluator };
-            try context.advance(length);
-            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = length }, context);
+            try context.advance(work);
+            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, context);
             return publish(evaluator, owners, &output);
         }
 
         fn adoptedOperand(output: *const Spec.Output) ?usize {
+            if (comptime shape != null) return resultOf(output).adopted;
             return if (@hasDecl(Spec, "adopted")) Spec.adopted(output) else null;
         }
 
@@ -435,7 +526,7 @@ pub fn Kernel(comptime Spec: type) type {
         fn publish(evaluator: *Machine, owners: Owners, output: *Spec.Output) MachineError!void {
             const consumed = adoptedOperand(output);
             const result = Spec.finish(output);
-            if (comptime @hasDecl(Spec, "adopted")) if (consumed) |position| {
+            if (comptime Spec.arity != 0) if (consumed) |position| {
                 _ = owners[position].take();
             };
             return evaluator.pushOwned(result);
@@ -476,12 +567,13 @@ pub fn Kernel(comptime Spec: type) type {
             length: usize,
         ) MachineError!NestedOutcome {
             comptime std.debug.assert(!stepwise); // Pervasion's leaves read every position, once.
-            var output = try Spec.prepare(evaluator, operands, params, length);
-            if (length > evaluator.remainingKernelFuel()) return .{ .frame = try boxDriver(evaluator, operands, root, params, output, length) };
+            var output = try prepareOutput(evaluator, operands, if (root != null) .first else .none, params, length);
+            const work = workLength(params, &output, length);
+            if (work > evaluator.remainingKernelFuel()) return .{ .frame = try boxDriver(evaluator, operands, root, params, output, work) };
             errdefer output.retire(evaluator.releaseDomain());
             const context = Context{ .evaluator = evaluator };
-            try context.advance(length);
-            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = length }, context);
+            try context.advance(work);
+            try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, context);
             const consumed = adoptedOperand(&output);
             const result = Spec.finish(&output);
             if (consumed) |position| {
@@ -667,3 +759,86 @@ pub const Context = struct {
         return self.evaluator.conformError(left, right);
     }
 };
+
+/// What a kernel declares about its one leaf result so the executor can
+/// prepare it: the result's representation, and the operands whose buffers
+/// the result may occupy. An operand is overwritable when the kernel's loop
+/// never reads one of its positions after storing the result's position of
+/// the same index, and writes nothing past the result's length: elementwise
+/// operations, scans, and folds into a prefix all qualify.
+pub const ResultShape = struct {
+    kind: value.HeapKind,
+    overwritable: []const usize,
+};
+
+/// A kernel's leaf result as the executor prepared it: a fresh buffer, or an
+/// operand's buffer taken over in place. The kernel writes through it either
+/// way; `aliased` tells a loop that must read a position's operands before
+/// storing it that they share storage.
+pub fn LeafResult(comptime kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const Element = heap.LeafElement(kind);
+
+        storage: union(enum) {
+            fresh: heap.LeafWriter(kind),
+            reuse: heap.UniqueLeafAdoption(kind),
+        },
+        /// The operand whose buffer this is, whose reference becomes the
+        /// result's when it is published.
+        adopted: ?usize = null,
+
+        pub fn aliased(self: *const Self) bool {
+            return self.storage == .reuse;
+        }
+
+        /// Positions `offset..offset + count`, writable in place.
+        pub fn range(self: *Self, offset: usize, count: usize) []Element {
+            return switch (self.storage) {
+                .fresh => |*writer| writer.unpublishedRange(offset, count),
+                .reuse => |*adoption| adoption.inPlaceRange(offset, count),
+            };
+        }
+
+        /// Stores `items` at `offset`. Over an operand, `items` may be that
+        /// operand's own later positions: a kernel only declares an operand
+        /// overwritable when it moves elements to the same or a lower index.
+        pub fn store(self: *Self, offset: usize, items: []const Element) void {
+            switch (self.storage) {
+                .fresh => |*writer| writer.writeRange(offset, items),
+                .reuse => |*adoption| adoption.writeRange(offset, items),
+            }
+        }
+
+        pub fn finish(self: *Self) Value {
+            return switch (self.storage) {
+                inline else => |*capability| capability.finish(),
+            };
+        }
+
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            switch (self.storage) {
+                .fresh => |*writer| writer.retirePartial(releases),
+                // The operand's reference is still the caller's; positions
+                // already stored hold results, and only it is released.
+                .reuse => |*adoption| adoption.abandon(),
+            }
+        }
+    };
+}
+
+/// The one decision that lets a result take over an operand's buffer: the
+/// operand must be a list the caller holds through exactly `references` of
+/// its own references, with room for `length` elements of the result's width.
+/// Every producer that can write its result over an input asks here, whether
+/// it runs as a `Kernel` or not.
+pub fn adopt(comptime kind: value.HeapKind, operand: Value, references: u32, length: usize) ?LeafResult(kind) {
+    if (operand != .list) return null;
+    const claimed = heap.UniqueLeafAdoption(kind).claimHeld(operand.list, length, references) orelse return null;
+    return .{ .storage = .{ .reuse = claimed } };
+}
+
+/// A fresh result of `length` elements.
+pub fn allocate(comptime kind: value.HeapKind, evaluator: *Machine, length: usize) error{OutOfMemory}!LeafResult(kind) {
+    return .{ .storage = .{ .fresh = try .init(evaluator.allocator(), length) } };
+}
