@@ -8,6 +8,7 @@
 //! inspects interpreter representation.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
+const test_heap = @import("test_heap.zig");
 const session = @import("../session.zig");
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
@@ -229,7 +230,7 @@ test "unit inputs: a runtime-built body acquires no attribution" {
     // runtime-built bodies in one Unit so the measurement excludes
     // per-source archive retention; ten times the cycles must not retain ten
     // times the settled memory.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     {
         var runtime_inputs8 = try runtime_fixture.Fixture.init();
         defer runtime_inputs8.deinit();

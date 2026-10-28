@@ -10,18 +10,21 @@
 //!
 //! | allocator | where | provides | costs |
 //! |---|---|---|---|
-//! | `SessionHeap` (this file) | suites that only run source through a session | leak detection, double/invalid-free detection | no allocation site on a leak |
-//! | `std.testing.allocator` | tests that hand host-built values to a session | all of the above **plus the allocation site** | ~267ms per session bootstrap |
+//! | `SessionHeap` (this file) | suites that only run source through a session | leak detection, double/invalid-free detection | none beyond the checks |
+//! | `std.testing.allocator` | tests that hand host-built values to a session | the same checks, plus write-after-free detection | none beyond the checks |
 //! | `DebugAllocator{.enable_memory_limit}` | `module_test`, `concurrency_test` | `total_requested_bytes`, and a settable `requested_memory_limit` to force failure at a budget | as above |
 //! | `smp_allocator` + `checkAllAllocationFailures` | `oom_test` | **failure injection at every ordinal, over an initialized Session** | re-runs the probe once per allocation |
 //! | `std.testing.allocator` + `checkAllAllocationFailures` | component probes beside their component | the same injection, without a Session | as above |
 //! | `page_allocator` | `source_audit` | no bookkeeping; it never frees | nothing to assert |
 //!
-//! The trace cost is not incidental. `Session.init` replays the embedded
-//! prelude — thousands of small allocations — and `std.testing.allocator`
-//! captures a stack trace on every one: ~267ms a session against ~14ms
-//! without. Turning off `safety` recovers almost nothing (~190ms); the
-//! traces are the whole cost.
+//! No allocator here records allocation sites by default. `Session.init`
+//! replays the embedded prelude — thousands of small allocations — and a
+//! traced allocator captures a stack trace on every one: ~267ms a session
+//! against ~14ms without. Turning off `safety` recovers almost nothing
+//! (~190ms); the traces are the whole cost. One build option,
+//! `-Dalloc-trace-frames`, sets the frame count for `std.testing.allocator`
+//! (through `test/test_runner.zig`), every `DebugAllocator` in the tree
+//! (through `stack_trace_frames` below), and the Debug CLI. It defaults to 0.
 //!
 //! ## Putting a test in the wrong place produces a false negative
 //!
@@ -46,12 +49,11 @@
 //!   it against a fixed number instead of a measured delta passes for the
 //!   wrong reason.
 //! - **A leak-attribution need is not a leak-detection need.** Every
-//!   allocator here detects leaks. Only `std.testing.allocator` says where
-//!   one came from. Reach for it when a test exists *because* something
-//!   leaked before; otherwise take the default and raise
-//!   `stack_trace_frames` below when you actually have a leak to chase —
-//!   one edit restores attribution across every suite at once, which is
-//!   what you want, since the leak is never in the suite you predicted.
+//!   allocator here detects leaks, and none says where one came from until
+//!   asked. When you have a leak to chase, build with
+//!   `-Dalloc-trace-frames=7`: that restores attribution across every suite
+//!   at once, which is what you want, since the leak is never in the suite
+//!   you predicted.
 //!
 //! ## The rule the compiler cannot check
 //!
@@ -77,9 +79,9 @@
 //! test rather than shrinking the proof.
 const std = @import("std");
 
-/// Raise to restore allocation-site attribution in every suite that uses
-/// this heap. Costs roughly 19x on session bootstrap; leave at 0 otherwise.
-pub const stack_trace_frames = 0;
+/// Allocation-site attribution for every test allocator, from
+/// `-Dalloc-trace-frames`. Costs roughly 19x on session bootstrap.
+pub const stack_trace_frames = @import("alloc_options").trace_frames;
 
 pub const SessionHeap = std.heap.DebugAllocator(.{ .stack_trace_frames = stack_trace_frames });
 

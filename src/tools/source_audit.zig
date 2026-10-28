@@ -173,6 +173,7 @@ const repository_verification_files = [_][]const u8{
     "test/idiom_differential.zig",
     "test/reference_snapshots.zig",
     "test/scheduler_shell_property.zig",
+    "test/test_runner.zig",
     "test/native/sample.zig",
     "test/native/ports.zig",
     "test/native/tutorial.zig",

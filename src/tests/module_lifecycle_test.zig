@@ -6,6 +6,7 @@
 //! through build-file name routing; the rest run in the ordinary suite.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
+const test_heap = @import("test_heap.zig");
 const session = @import("../session.zig");
 
 test "concurrency: map artifact auto-loads converge through one loading lease" {
@@ -404,7 +405,7 @@ const churn_cycle = "[] ((\"a module string\" [1 2 3] {k v}) `peek def) `churn @
     "churn.peek pop pop pop `churn undefm";
 
 test "concurrency: a cancelled undefm leaves nothing stranded" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -456,7 +457,7 @@ test "concurrency: a cancelled undefm leaves nothing stranded" {
 }
 
 test "concurrency: repeated construct remove cycles keep settled memory bounded" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -537,7 +538,7 @@ test "concurrency: applying an escaped quotation races reload and removal" {
 // load-bearing: the TSan and 8-worker tiers select on it.
 
 test "concurrency: a resolver racing an image's last release never dereferences its scope" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -569,7 +570,7 @@ test "concurrency: a resolver racing an image's last release never dereferences 
 }
 
 test "concurrency: a resolver racing environment teardown resolves without a dereference" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();

@@ -1838,7 +1838,7 @@ test "spans: every re-scope step is one budget unit, publication included" {
 }
 
 test "spans: settled lineage storage tracks only live copies" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
     {
         var fixture: ArchiveFixture = undefined;
         try fixture.init(counting.allocator());

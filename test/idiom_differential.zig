@@ -11,7 +11,7 @@ const allocator = std.testing.allocator;
 /// an allocation site — which the failing case's logged source already gives.
 /// Source strings stay on `std.testing.allocator`, where the volume is small
 /// and the attribution is worth having.
-const SessionHeap = std.heap.DebugAllocator(.{ .stack_trace_frames = 0 });
+const SessionHeap = std.heap.DebugAllocator(.{ .stack_trace_frames = @import("alloc_options").trace_frames });
 
 fn retireHeap(heap: *SessionHeap) void {
     if (heap.deinit() == .leak) std.debug.panic("idiom differential leaked session memory", .{});

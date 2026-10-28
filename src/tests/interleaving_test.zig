@@ -6,6 +6,7 @@
 //! executor chooses: which ready entry runs next and whether a turn serves
 //! ready work or retirement.
 const std = @import("std");
+const test_heap = @import("test_heap.zig");
 const session = @import("../session.zig");
 const runtime_fixture = @import("runtime_fixture.zig");
 
@@ -42,7 +43,7 @@ const programs = [_][]const u8{
 };
 
 fn render(config: session.Config, source: []const u8) ![]u8 {
-    var counting: std.heap.DebugAllocator(.{}) = .init;
+    var counting: std.heap.DebugAllocator(.{ .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     const rendered = blk: {
         var runtime_inputs = try runtime_fixture.Fixture.init();

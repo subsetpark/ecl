@@ -1,9 +1,31 @@
 const std = @import("std");
 const native_build = @import("src/native/build_helper.zig");
 
+/// Every non-fuzz test artifact runs under test/test_runner.zig, which keeps
+/// Zig's checked testing allocator but records only the allocation traces
+/// `-Dalloc-trace-frames` asks for.
+fn addEclTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
+    var with_runner = options;
+    with_runner.test_runner = .{ .path = b.path("test/test_runner.zig"), .mode = .simple };
+    with_runner.root_module.addImport("alloc_options", alloc_options);
+    return b.addTest(with_runner);
+}
+
+/// The one allocation-tracing control for the CLI and every test allocator.
+/// Set by `-Dalloc-trace-frames`; see agent-guides/testing.md.
+// SAFETY: `build` assigns this first, before any helper that reads it runs.
+var alloc_options: *std.Build.Module = undefined;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const alloc_values = b.addOptions();
+    alloc_values.addOption(usize, "trace_frames", b.option(
+        usize,
+        "alloc-trace-frames",
+        "Allocation stack-trace frames recorded by the Debug CLI and every test allocator (default 0)",
+    ) orelse 0);
+    alloc_options = alloc_values.createModule();
     const git_tsan = b.option(bool, "git-tsan", "Instrument the executable and Git extension for the Docker TSan gate") orelse false;
     const runtime_linkage: ?std.builtin.LinkMode =
         if (target.result.os.tag == .linux) .dynamic else null;
@@ -257,6 +279,7 @@ pub fn build(b: *std.Build) void {
     const git_extension_step = b.step("git-extension", "Build the SDK-only HTTPS Git snapshot extension");
     if (git_extension) |extension| git_extension_step.dependOn(native_build.installExtension(b, extension, "extensions/git"));
     exe_mod.addImport("ecl-internal", internal_mod);
+    exe_mod.addImport("alloc_options", alloc_options);
     const exe = b.addExecutable(.{
         .name = "ecl",
         .root_module = exe_mod,
@@ -381,7 +404,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(bool, "instrument_root_execution", false);
     configureRuntime(test_mod, native_abi, native_sdk, test_options);
     addTestInputs(test_mod, &test_imports, &test_fixture_inputs);
-    const tests = b.addTest(.{ .root_module = test_mod });
+    const tests = addEclTest(b, .{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&fixture_files.step);
@@ -428,7 +451,7 @@ pub fn build(b: *std.Build) void {
     const pkg_command_step = b.step("test-pkg-application", "Run the package application's command acceptance through ECL tests");
     pkg_command_step.dependOn(&pkg_command_acceptance.step);
     test_step.dependOn(&pkg_command_acceptance.step);
-    const native_runtime_tests = b.addTest(.{
+    const native_runtime_tests = addEclTest(b, .{
         .root_module = test_mod,
         .filters = &.{ "native:", "concurrency: native shutdown" },
     });
@@ -441,7 +464,7 @@ pub fn build(b: *std.Build) void {
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
     const port_filter = b.option([]const u8, "port-test-filter", "Run matching public port behavior tests");
-    const port_tests = b.addTest(.{ .root_module = test_mod, .filters = if (port_filter) |filter| &.{filter} else &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
+    const port_tests = addEclTest(b, .{ .root_module = test_mod, .filters = if (port_filter) |filter| &.{filter} else &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
     port_tests.linkage = runtime_linkage;
     const run_port_tests = b.addRunArtifact(port_tests);
     run_port_tests.step.dependOn(&fixture_files.step);
@@ -452,7 +475,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     native_acceptance_mod.addOptions("native_runtime_options", native_runtime_options);
-    const native_acceptance_tests = b.addTest(.{ .root_module = native_acceptance_mod });
+    const native_acceptance_tests = addEclTest(b, .{ .root_module = native_acceptance_mod });
     const run_native_acceptance = b.addRunArtifact(native_acceptance_tests);
     run_native_acceptance.step.dependOn(&fixture_files.step);
     const native_acceptance_step = b.step(
@@ -561,7 +584,7 @@ pub fn build(b: *std.Build) void {
     });
     configureRuntime(oom_mod, native_abi, native_sdk, test_options);
     addTestInputs(oom_mod, &.{.{ .name = "native-instance", .module = native_instance }}, &host_fixture_inputs);
-    const oom_tests = b.addTest(.{
+    const oom_tests = addEclTest(b, .{
         .root_module = oom_mod,
         // Compile one stable artifact for every OOM family. Runtime selection
         // below keeps family and ordinal shards independent without changing
@@ -725,7 +748,7 @@ pub fn build(b: *std.Build) void {
     });
     e2e_mod.addOptions("build_options", e2e_options);
     e2e_mod.addImport("minish", minish);
-    const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
+    const e2e_tests = addEclTest(b, .{ .root_module = e2e_mod });
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
     run_e2e_tests.step.dependOn(&fixture_files.step);
     test_step.dependOn(&run_e2e_tests.step);
@@ -741,7 +764,7 @@ pub fn build(b: *std.Build) void {
     });
     scheduler_shell_mod.addOptions("build_options", e2e_options);
     scheduler_shell_mod.addImport("minish", minish);
-    const scheduler_shell_tests = b.addTest(.{ .root_module = scheduler_shell_mod });
+    const scheduler_shell_tests = addEclTest(b, .{ .root_module = scheduler_shell_mod });
     const run_scheduler_shell_tests = b.addRunArtifact(scheduler_shell_tests);
     const scheduler_shell_step = b.step(
         "test-scheduler-shell",
@@ -753,7 +776,7 @@ pub fn build(b: *std.Build) void {
     // paying for the whole run. Name fragments select tests by their fully
     // qualified name: `zig build test-kernels` covers the kernel, capability,
     // idiom, and combinator surfaces.
-    const kernel_slice_tests = b.addTest(.{
+    const kernel_slice_tests = addEclTest(b, .{
         .root_module = test_mod,
         .filters = &.{
             "typed kernels",
@@ -786,7 +809,7 @@ pub fn build(b: *std.Build) void {
         worker_options.addOption(bool, "instrument_root_execution", false);
         configureRuntime(worker_test_mod, native_abi, native_sdk, worker_options);
         addTestInputs(worker_test_mod, &test_imports, &test_fixture_inputs);
-        const worker_tests = b.addTest(.{
+        const worker_tests = addEclTest(b, .{
             .root_module = worker_test_mod,
             .filters = &.{"concurrency:"},
         });
@@ -822,7 +845,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "native-instance", .module = tsan_native.instance },
     };
     addTestInputs(tsan_mod, &tsan_imports, &test_fixture_inputs);
-    const tsan_tests = b.addTest(.{
+    const tsan_tests = addEclTest(b, .{
         .root_module = tsan_mod,
         .filters = &.{
             "invocation effects:",
@@ -875,7 +898,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     differential_mod.addImport("ecl-internal", internal_mod);
-    const differential_tests = b.addTest(.{ .root_module = differential_mod });
+    const differential_tests = addEclTest(b, .{ .root_module = differential_mod });
     const run_differential = b.addRunArtifact(differential_tests);
     const differential_step = b.step("differential", "Compare automatic and generic idiom execution");
     differential_step.dependOn(&run_differential.step);
@@ -888,7 +911,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     reference_mod.addOptions("reference_options", reference_options);
-    const reference_tests = b.addTest(.{ .root_module = reference_mod });
+    const reference_tests = addEclTest(b, .{ .root_module = reference_mod });
     const run_reference_tests = b.addRunArtifact(reference_tests);
     const reference_step = b.step(
         "test-snapshots",
@@ -912,7 +935,7 @@ pub fn build(b: *std.Build) void {
         // OOM, differential, TSan, and lint matrices; replaying them here
         // would add no evidence. This target owns only the M13-specific
         // release assertions and the architecture audit they rely on.
-        const acceptance_unit_tests = b.addTest(.{
+        const acceptance_unit_tests = addEclTest(b, .{
             .root_module = test_mod,
             .filters = &.{"acceptance:"},
         });
@@ -920,7 +943,7 @@ pub fn build(b: *std.Build) void {
         const run_acceptance_unit_tests = b.addRunArtifact(acceptance_unit_tests);
         run_acceptance_unit_tests.step.dependOn(&fixture_files.step);
 
-        const acceptance_e2e_tests = b.addTest(.{
+        const acceptance_e2e_tests = addEclTest(b, .{
             .root_module = e2e_mod,
             .filters = &.{
                 "soul test executes the installed artifact",
@@ -967,7 +990,7 @@ pub fn build(b: *std.Build) void {
         "Semantically analyze every test root without running or linking it",
     );
     for (analyzed_roots) |analyzed| {
-        const analysis = b.addTest(.{ .root_module = analyzed });
+        const analysis = addEclTest(b, .{ .root_module = analyzed });
         // Nothing asks for its binary, so this is analysis only: the expensive
         // codegen and link stages never run. Do not impose runtime linkage:
         // pure-Zig test roots have no shared library to satisfy -dynamic.
@@ -982,7 +1005,7 @@ pub fn build(b: *std.Build) void {
     // and `pkg sync:` / `pkg store:` (a Python TLS process). Those cases still
     // compile through the analyzed roots; process startup would exceed the
     // measured fast budget.
-    const precommit_tests = b.addTest(.{
+    const precommit_tests = addEclTest(b, .{
         .root_module = test_mod,
         .filters = &.{
             // Whole verification sources whose every test is fast.
@@ -1404,6 +1427,7 @@ fn configureRuntime(
 ) void {
     // Every runtime root reaches the ports (libc) and first-party stdlib (SDK).
     module.link_libc = true;
+    module.addImport("alloc_options", alloc_options);
     module.addImport("native-abi", abi);
     module.addImport("ecl-native", sdk);
     const net = module.owner.createModule(.{

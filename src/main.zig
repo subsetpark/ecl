@@ -49,7 +49,23 @@ const Startup = struct {
     module_map: ?[]const u8 = null,
 };
 
-fn entry(process: std.process.Init) AppError!u8 {
+// Debug builds otherwise inherit `std.start`'s checked allocator, which unwinds
+// seven frames of DWARF on every allocation. On macOS that dominates any run of
+// the installed package application, so the CLI keeps the checks but records
+// only the allocation traces `-Dalloc-trace-frames` asks for.
+const own_debug_allocator = @import("builtin").mode == .debug;
+const alloc_trace_frames = @import("alloc_options").trace_frames;
+
+fn entry(inherited: std.process.Init) AppError!u8 {
+    var checked: ?std.heap.SafeAllocator = null;
+    var process = inherited;
+    if (own_debug_allocator) {
+        checked = .init(std.heap.page_allocator, .{ .stack_trace_frames = alloc_trace_frames });
+        process.gpa = checked.?.allocator();
+    }
+    defer if (checked) |*allocator| {
+        _ = allocator.deinit();
+    };
     const cwd = std.Io.Dir.cwd().realPathFileAlloc(process.io, ".", process.gpa) catch return error.Io;
     defer process.gpa.free(cwd);
     const init: Startup = .{ .process = process, .cwd = cwd, .environ = try environSnapshot(process) };

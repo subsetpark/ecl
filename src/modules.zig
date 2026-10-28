@@ -1018,7 +1018,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
     // 52KB per cycle against an expected 40 bytes: it was sampling deferred
     // retirement backlog rather than settled memory. Absolute settled-memory bounds
     // are only assertable where the drains are controllable.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var host = heap.HostOwner.init(allocator);
@@ -1077,7 +1077,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
     // `scheduleWord`'s pin covers the frame. So the borrow's necessity is stated
     // here as an API fact instead, where the drop can be constructed exactly and
     // the verdict is the same on every run.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var host = heap.HostOwner.init(allocator);
@@ -1140,7 +1140,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
     // The strawman the stochastic tests could not express: identical to the test
     // above except that no borrow is taken. If the contents survived here too,
     // the borrow above would be proving nothing about the borrow.
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var host = heap.HostOwner.init(allocator);

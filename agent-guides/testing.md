@@ -175,11 +175,12 @@ reason before selecting the matrix.
     baseline, never a fixed number, and set `requested_memory_limit` to force failure at a
     budget. Do not move these tests onto a shared session heap: it makes the assertion
     unwriteable rather than wrong.
-  - **Leak detection is universal; leak attribution is not.** Every test allocator detects
-    leaks. Only `std.testing.allocator` reports the allocation site, at about 19x on session
-    bootstrap because it traces every allocation. Default to the traceless session heap and
-    raise `stack_trace_frames` when you actually have a leak to chase—one edit restores
-    attribution everywhere, and the leak is never in the suite you predicted.
+  - **Leak detection is universal; leak attribution is opt-in.** Every test allocator detects
+    leaks, and none records allocation sites by default: on macOS each trace is a DWARF
+    unwind, about 19x on session bootstrap. When you have a leak to chase, rerun with
+    `-Dalloc-trace-frames=7`. That one build option sets the frame count for
+    `std.testing.allocator`, every `DebugAllocator` in the tree, and the Debug CLI, so it
+    restores attribution everywhere, and the leak is never in the suite you predicted.
 - A session must own every value it will free, and no compiler checks it. Building a heap
   value with one allocator and handing it to a session backed by another (define,
   pushOwned, publishTop, publishModule) aborts with “Invalid free” deep inside
