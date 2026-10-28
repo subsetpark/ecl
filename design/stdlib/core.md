@@ -744,6 +744,21 @@ storage is proportional to recursion depth.
 An empty `post` quotation does not eliminate the retained recursion level.
 
 
+### literal
+`( value -- form )` — Return the form that pushes a value when a quotation
+runs it. A symbol becomes its quoted occurrence, so `` `x literal `` is
+`` `x `` and running it pushes `x` instead of executing it. Any other value
+already pushes itself and is returned unchanged. Wrap the form to get a
+quotation: `` v literal wrap `` pushes `v` when called.
+
+#### Examples
+
+```ecl
+`x literal wrap call
+# => x
+```
+
+
 ### load
 `( path -- )` — Read and evaluate a source file as one transactional unit
 in the calling session.
@@ -1197,8 +1212,6 @@ extends). Each-left/each-right are `partial` compositions.
 ### append
 
 ### compose
-
-### literal
 
 ### max-of
 

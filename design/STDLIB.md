@@ -728,6 +728,20 @@ explicit continuation per descent rather than using the host stack; its live
 storage is proportional to recursion depth.
 An empty `post` quotation does not eliminate the retained recursion level.
 
+### literal
+`( value -- form )` — Return the form that pushes a value when a quotation
+runs it. A symbol becomes its quoted occurrence, so `` `x literal `` is
+`` `x `` and running it pushes `x` instead of executing it. Any other value
+already pushes itself and is returned unchanged. Wrap the form to get a
+quotation: `` v literal wrap `` pushes `v` when called.
+
+#### Examples
+
+```ecl
+`x literal wrap call
+# => x
+```
+
 ### load
 `( path -- )` — Read and evaluate a source file as one transactional unit
 in the calling session.
@@ -793,6 +807,16 @@ so this is a load-class word for trusted source, not a conversion: use `int`,
 ```ecl
 "[1 2]" parse first
 # => [1 2]
+```
+
+### partial
+`( value quotation -- quotation )` — Safe partial application: return a quotation that pushes an inert captured value before running another quotation. Even a captured word remains data. `3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as `` `w ``.
+
+#### Examples
+
+```ecl
+4 3 (+) partial call
+# => 7
 ```
 
 ### pop
@@ -1165,13 +1189,17 @@ extends). Each-left/each-right are `partial` compositions.
 ### compose
 `( left right -- quotation )` — Concatenate two quotations in execution order.
 
-### literal
-`( value -- quotation )` — Return a plain quotation that pushes the exact captured value as inert data when called, without executing or resolving it.
-
-Every value but a symbol already pushes itself when run, so the result is `(x)`. A symbol would execute, so it is quoted as `((x) core.first)`, which pushes it.
+### find
+`( sequence needle -- index )` — Return the index of the first element that returns 1 from `match?` against the needle, or the sequence length when no element matches. Defined in ecl.
 
 ### scan1
 `( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.
+
+### set
+Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal wrap swap def`, so `v `name set` is observationally `v literal wrap `name def`: the stored body is `(v)`, or `` (`v) `` for a symbol. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested in the body and remain captured data.
+
+### setp
+Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a private module constant word; an optional annotation may precede the value. Defined in ecl as `swap literal wrap swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.
 
 ### uncons
 `( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
@@ -1209,22 +1237,6 @@ Every value but a symbol already pushes itself when run, so the result is `(x)`.
 # => [1 11 21 31]
 ```
 
-### partial
-`( value quotation -- quotation )` — Safe partial application: return a quotation that pushes an inert captured value before running another quotation. Even a captured word remains data. `3 (+) partial` is `(3 +)`, and a captured word `w` is prefixed as `((w) first)`.
-
-#### Examples
-
-```ecl
-4 3 (+) partial call
-# => 7
-```
-
-### set
-Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v `name set` is observationally `v literal `name def`: the stored body is `((v) first)`. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested by `literal` and remain captured data.
-
-### setp
-Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a private module constant word; an optional annotation may precede the value. Defined in ecl as `swap literal swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.
-
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial elements and last element.
 
@@ -1244,9 +1256,6 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 ### clamp
 `( value lower upper -- bounded )` — **Pervasive** by composition. Constrain a value to the inclusive interval between lower and upper.
 
-### find
-`( sequence needle -- index )` — Return the index of the first element that returns 1 from `match?` against the needle, or the sequence length when no element matches. Defined in ecl.
-
 ### or
 `( x y -- bool )` — **Pervasive.** Compute boolean disjunction over 0 and 1 values. Both operands are already evaluated; there is no short-circuiting. Defined in ecl.
 
@@ -1260,7 +1269,7 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 `( x y z -- z x y )` — Rotate the top three stack values upward, from x y z to z x y.
 
 ### with
-`( values quotation -- quotation )` — Return a quotation that pushes every value from a list, in order and inertly, before running another quotation. Calling the result starts with the list's elements as separate stack values. Defined in ecl as `((literal) each) dip append raze`.
+`( values quotation -- quotation )` — Return a quotation that pushes every value from a list, in order and inertly, before running another quotation. Calling the result starts with the list's elements as separate stack values. Defined in ecl as `((literal) each) dip cat`.
 
 This is ordinary quotation composition and constructs nothing. It is not a unit's seed operand: the flattened quotation it returns is a runtime-built body, so `@defm` gives it no reader attribution. Unit constructors instead take their initial values and body as two separate operands, preserving the exact body for attribution.
 

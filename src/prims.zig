@@ -32,6 +32,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Return whether two complete values are structurally equal." },
         .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value kind as a symbol." },
         .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Execute a word through ordinary name resolution and dispatch." },
+        .{ .name = "literal", .primitive = literal, .effect = "value -- form", .doc = "Return the form that pushes a value when a quotation runs it: a symbol's quoted occurrence, or any other value itself." },
         .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "Parse source text into an unevaluated quotation." },
         .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, a symbol spelling, " ++
             "a char as a one-element string, or a byte list decoded as UTF-8." },
@@ -193,6 +194,18 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .address => "address",
     };
     try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
+}
+/// Every value but a symbol pushes itself when a quotation runs it; a symbol
+/// would execute, so its form is its quoted occurrence, linked as written.
+fn literal(evaluator: *Machine) MachineError!void {
+    try evaluator.require(1);
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const form: Value = switch (item.borrow()) {
+        .symbol => |word| .{ .symbol = .{ .name = word.name, .slot = word.slot | value.quote_flag } },
+        else => item.take(),
+    };
+    return evaluator.pushOwned(form);
 }
 fn execute(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();

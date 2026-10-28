@@ -114,7 +114,7 @@
   if
   result `err dict.has? and
   result handler pair (recover) with
-  result literal
+  result wrap
   if) `recover-kinds def
 
  ### def either

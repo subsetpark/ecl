@@ -387,7 +387,7 @@
 
  ### defp fill-matches
  (indices missing -- indices : "Use the appended fill row when a left key has no matches.")
- (|indices missing| indices len 0 = missing (wrap) partial indices literal if) `fill-matches defp
+ (|indices missing| indices len 0 = missing (wrap) partial indices wrap if) `fill-matches defp
 
  ### defp join-columns
  (left right-columns extra matches -- table :

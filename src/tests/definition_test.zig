@@ -440,10 +440,10 @@ test "long annotation traversal and reflection observe cancellation" {
 }
 
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
-// The merge makes `v 'name set` observationally `v literal 'name def`:
+// The merge makes `v 'name set` observationally `v literal wrap 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
 // a "value" is a word whose body is the literal capture: `(v)`, or
-// `((v) first)` for a word `v`. Since M11 made source annotations optional
+// `(`v)` for a word `v`. Since M11 made source annotations optional
 // everywhere, the sugar synthesizes no metadata at all and the equivalence is
 // exact.
 

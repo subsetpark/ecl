@@ -210,8 +210,8 @@ const reverse_pattern = [_]PatternAtom{
 };
 const dip_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
-    .{ .word = .{ .spelling = "literal", .binding = .source } },
-    .{ .word = .{ .spelling = "compose", .binding = .source } },
+    .{ .word = .{ .spelling = "literal" } },
+    .{ .word = .{ .spelling = "append", .binding = .source } },
     .{ .word = .{ .spelling = "call" } },
 };
 const str_format_pattern = [_]PatternAtom{

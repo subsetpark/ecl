@@ -1317,16 +1317,16 @@ representations but expose the same binding model.
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
 - ``annotation? value `name set`` binds a constant. It is sugar, defined in ecl
-  as `swap literal swap def`: the value is captured with `literal`, so the
-  published body is `(value)`, or `((value) first)` when the value is a word.
+  as `swap literal wrap swap def`: the value is captured with `literal`, so the
+  published body is `(value)`, or ``(`value)`` when the value is a word.
   Reference applies that body and pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. ``v `name set`` is therefore
-  observationally ``v literal `name def``: the sugar synthesizes no
+  observationally ``v literal wrap `name def``: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
   present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `literal` plus `def` spelling. `set`
+  distinguishes it from the corresponding `literal wrap` plus `def` spelling. `set`
   assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the

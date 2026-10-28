@@ -1345,7 +1345,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] ((-- value) 40 literal `k def) `m @defm m.k `m.k which",
+        "[] ((-- value) 40 literal wrap `k def) `m @defm m.k `m.k which",
     });
     defer constant.deinit();
     try constant.expect(.{

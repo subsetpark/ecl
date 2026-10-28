@@ -169,7 +169,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     // spellings expose the same literal-capture body.
     try expectStack(
         &runtime,
-        "42 `answer set 42 literal `spelled def answer spelled match?",
+        "42 `answer set 42 literal wrap `spelled def answer spelled match?",
         "1",
     );
     try expectOk(&runtime, "`answer see `spelled see `answer which");
