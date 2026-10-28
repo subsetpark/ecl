@@ -2047,8 +2047,15 @@ pub const Env = enum(usize) {
         name: u32,
     ) error{OutOfMemory}!SlotId {
         const backing = self.privateState();
-        // `core.x` is core's `x` in every root: link it to core's own slot
-        // rather than to a slot the root would never bind.
+        // `core.x` is core's `x` in every root, core included: link it to
+        // core's own slot rather than to a slot no root ever binds. In core
+        // itself that is the prelude's reading of every quote, `(x)
+        // core.first`, which otherwise resolved through the registry on
+        // every call.
+        if (try intern.coreQualifiedName(name)) |unqualified| {
+            if (root.core or environment == &backing.core)
+                return self.linkSlot(root, environment, unqualified);
+        }
         if (!root.core and environment != &backing.core) {
             if (try intern.coreQualifiedName(name)) |unqualified|
                 return self.linkSlot(&backing.core_cell, &backing.core, unqualified);
