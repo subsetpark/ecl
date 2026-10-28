@@ -445,9 +445,10 @@ test "reader yields inside lexical locals span and top-form traversals" {
     defer allocator.free(forms_source);
     try expectReadNeedsSteps(forms_source, 65_536);
 
-    // Lexing and span publication alone stay below one quantum. The
-    // specialization/profile and storage copies must supply the safe point.
-    const constructed_string = try repeatedSource(allocator, "\"", "a", 15_000, "\"");
+    // Lexing and span publication alone stay below one quantum. The scan and
+    // the copy into storage must supply the safe point: each charges one unit
+    // a byte, so a plain string past half a quantum needs more than one.
+    const constructed_string = try repeatedSource(allocator, "\"", "a", 40_000, "\"");
     defer allocator.free(constructed_string);
     try expectReadNeedsSteps(constructed_string, 65_536);
 
@@ -455,9 +456,10 @@ test "reader yields inside lexical locals span and top-form traversals" {
     defer allocator.free(constructed_list);
     try expectReadNeedsSteps(constructed_list, 65_536);
 
-    // The string itself materializes below the boundary; structurally
-    // hashing it as a dictionary key crosses the remaining poll budget.
-    const hashed_key = try repeatedSource(allocator, "{\"", "a", 12_000, "\" 1}");
+    // The string itself materializes below the boundary (two units a byte
+    // for its scan and copy); structurally hashing it as a dictionary key
+    // crosses the remaining poll budget.
+    const hashed_key = try repeatedSource(allocator, "{\"", "a", 30_000, "\" 1}");
     defer allocator.free(hashed_key);
     try expectReadNeedsSteps(hashed_key, 65_536);
 }

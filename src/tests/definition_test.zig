@@ -640,3 +640,28 @@ test "quotes: one quoted occurrence that pushes its symbol" {
         .{ .name = "dict entry", .source = "{`a 1}", .kind = "parse" },
     });
 }
+
+test "strings: plain text and escapes read the same however long the run" {
+    // 148 plain characters, past the tokenizer's 64-byte run and the reader's
+    // 16-byte scan lanes.
+    const long = "abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 ";
+    try support.expectStacks(&.{
+        .{ .name = "empty", .source = "\"\" len", .expected = "0" },
+        .{ .name = "long plain", .source = "\"" ++ long ++ "\" len", .expected = "148" },
+        // An escape or a non-ASCII character late in a long run takes the
+        // codepoint route from the start.
+        .{ .name = "late escape", .source = "\"" ++ long ++ "\\n\" len", .expected = "149" },
+        .{ .name = "late quote escape", .source = "\"" ++ long ++ "\\\"\" last", .expected = "\\u{22}" },
+        .{ .name = "late non-ASCII", .source = "\"" ++ long ++ "\u{e9}\" last", .expected = "\\\u{e9}" },
+        .{ .name = "multiple lines", .source = "\"one\ntwo\" len", .expected = "7" },
+        .{ .name = "same value", .source = "\"plain\" \"pl\\u{61}in\" match?", .expected = "1" },
+    });
+    // Positions after a long string are counted per character.
+    try support.expectErrors(&.{.{
+        .name = "position after a long string",
+        .source = "\"" ++ long ++ "\" nope",
+        .kind = "undefined-word",
+        .word = "nope",
+        .data = &.{.{ .name = "col", .expected = .{ .int = 152 } }},
+    }});
+}

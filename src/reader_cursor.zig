@@ -287,6 +287,8 @@ const Tokenizer = struct {
                 return .pending;
             },
             .string => {
+                // A run of plain text moves in one step, a bounded block of it.
+                if (!self.string_escaped and self.cursor.skipStringRun(64) != 0) return .pending;
                 const next = self.cursor.peek() orelse return .{ .incomplete = .{
                     .message = if (self.string_escaped)
                         "unclosed string escape"
@@ -644,6 +646,10 @@ const StringBuilder = struct {
         }
     };
     const State = union(enum) {
+        /// Checking whether the body is plain ASCII with no escapes, the
+        /// common case, which copies straight into a one-byte string.
+        ascii_scan: struct { index: usize = 0 },
+        ascii_fill: struct { index: usize = 0, builder: heap.AnyListBuilder },
         parsing: Parsing,
         gather: struct {
             parsing: Parsing,
@@ -663,6 +669,8 @@ const StringBuilder = struct {
             allocator: std.mem.Allocator,
         ) void {
             switch (self.*) {
+                .ascii_scan => {},
+                .ascii_fill => |*fill| fill.builder.retirePartial(releases),
                 .parsing => |*parsing| parsing.retire(releases),
                 .gather => |*gather| {
                     allocator.free(gather.codepoints);
@@ -686,11 +694,29 @@ const StringBuilder = struct {
             .allocator = allocator,
             .token = token,
             .provenance_namespace = provenance_namespace,
-            .state = .{ .parsing = .{
-                .cursor = .{ .source = token.bytes, .line = token.span.line, .col = token.span.col + 1 },
-                .codepoints = .init(allocator),
-            } },
+            .state = .{ .ascii_scan = .{} },
         };
+    }
+    fn beginParsing(self: *StringBuilder) void {
+        self.state = .{ .parsing = .{
+            .cursor = .{ .source = self.token.bytes, .line = self.token.span.line, .col = self.token.span.col + 1 },
+            .codepoints = .init(self.allocator),
+        } };
+    }
+    /// The length of the run at the front of `bytes` that a string literal
+    /// stores as written: ASCII other than the escape character.
+    fn plainPrefix(bytes: []const u8) usize {
+        const lanes = 16;
+        const Lane = @Vector(lanes, u8);
+        const high: Lane = @splat(0x80);
+        const escape: Lane = @splat('\\');
+        var index: usize = 0;
+        while (bytes.len - index >= lanes) : (index += lanes) {
+            const lane: Lane = bytes[index..][0..lanes].*;
+            if (@reduce(.Or, lane >= high) or @reduce(.Or, lane == escape)) break;
+        }
+        while (index != bytes.len and bytes[index] < 0x80 and bytes[index] != '\\') index += 1;
+        return index;
     }
     fn deinit(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
         self.retire(releases);
@@ -779,6 +805,41 @@ const StringBuilder = struct {
         work: *poll.WorkBudget,
     ) (error{ OutOfMemory, Parse })!ScalarProgress {
         return switch (self.state) {
+            // Both the scan and the copy take one budget unit a byte, a block
+            // at a time, as the codepoint route takes one a codepoint. Each
+            // call has paid for one unit already, so it always moves.
+            .ascii_scan => |*scan| result: {
+                const body = self.token.bytes;
+                const end = scan.index + work.chunk(body.len - scan.index);
+                const plain = scan.index + plainPrefix(body[scan.index..end]);
+                if (plain != end) {
+                    self.beginParsing();
+                    break :result .pending;
+                }
+                scan.index = end;
+                if (end != body.len) break :result .pending;
+                // Built before the state changes, so a failed allocation leaves
+                // the scan state rather than a fill state with no builder.
+                const builder = try heap.AnyListBuilder.initCode(
+                    self.allocator,
+                    .leaf_char1,
+                    body.len,
+                    list.initialCapacity(body.len),
+                    self.provenance_namespace,
+                );
+                self.state = .{ .ascii_fill = .{ .builder = builder } };
+                break :result .pending;
+            },
+            .ascii_fill => |*fill| result: {
+                const body = self.token.bytes;
+                const end = fill.index + work.chunk(body.len - fill.index);
+                fill.builder.writeAscii(fill.index, body[fill.index..end]);
+                fill.index = end;
+                if (end != body.len) break :result .pending;
+                const header = fill.builder.finish();
+                self.state = .complete;
+                break :result .{ .complete = .{ .list = header } };
+            },
             .parsing => |*parsing| switch (try self.parseOne(parsing, diag)) {
                 .pending => .pending,
                 .complete => result: {
