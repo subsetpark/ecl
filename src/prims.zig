@@ -198,7 +198,8 @@ fn execute(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const word = switch (item.borrow()) {
-        .symbol => |word| word,
+        // `execute` runs the word a symbol names, quoted occurrence or not.
+        .symbol => |word| value.Symbol{ .name = word.name, .slot = env.unquoted(word.slot) },
         else => return evaluator.typeError("a symbol"),
     };
     try evaluator.executeWord(word);

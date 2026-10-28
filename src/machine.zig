@@ -5852,9 +5852,10 @@ pub const Machine = struct {
         return entry;
     }
 
-    pub fn executeWord(self: *Machine, occurrence: value.Symbol) MachineError!void {
-        // `execute` runs the word a symbol names, quoted occurrence or not.
-        const word: value.Symbol = .{ .name = occurrence.name, .slot = env.unquoted(occurrence.slot) };
+    /// Runs an unquoted occurrence: `dispatch` pushes a quoted one instead,
+    /// and `execute` strips the quote before calling here.
+    pub fn executeWord(self: *Machine, word: value.Symbol) MachineError!void {
+        std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         // A session or core word resolved before in this unit's view.
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
@@ -6620,14 +6621,13 @@ fn poll(self: *Machine) MachineError!void {
 }
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
-        // A quoted occurrence pushes its symbol, linked as written and
-        // unmarked: the value `(x) first` pushes.
-        .symbol => |reference| if (env.isQuoted(reference.slot))
-            return self.pushBorrowed(.{ .symbol = .{ .name = reference.name, .slot = env.unquoted(reference.slot) } })
-        else
-            reference,
+        .symbol => |reference| reference,
         .int, .float, .char, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
     };
+    // A quoted occurrence pushes its symbol, linked as written and unmarked:
+    // the value `(x) first` pushes.
+    if (env.isQuoted(word.slot))
+        return self.pushBorrowed(.{ .symbol = .{ .name = word.name, .slot = env.unquoted(word.slot) } });
     try self.executeWord(word);
 }
 
