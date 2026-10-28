@@ -596,3 +596,23 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
         output.written(),
     );
 }
+
+test "seedless unit constructors start on an empty stack" {
+    try support.expectStacks(&.{
+        .{ .name = "@attempt!", .source = "9 (stack len) @attempt! `ok at", .expected = "9 [0]" },
+        .{ .name = "@attempt! failure", .source = "(1 `x raise) @attempt! `err at `kind at", .expected = "type" },
+        .{ .name = "@spawn!", .source = "9 (stack len) @spawn! task.await `ok at", .expected = "9 [0]" },
+        .{ .name = "@each!", .source = "9 (1 2 3) (stack len nip 10 *) @each!", .expected = "9 [10 10 10]" },
+        .{ .name = "@defm!", .source = "9 (stack len `depth set) `m @defm! m.depth", .expected = "9 0" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "@attempt! underflow", .source = "@attempt!", .kind = "underflow", .word = "@attempt!" },
+        .{ .name = "@attempt! body type", .source = "1 @attempt!", .kind = "type", .word = "@attempt!" },
+        .{ .name = "@spawn! underflow", .source = "@spawn!", .kind = "underflow", .word = "@spawn!" },
+        .{ .name = "@give! underflow", .source = "() @give!", .kind = "underflow", .word = "@give!" },
+        .{ .name = "@defm! underflow", .source = "`m @defm!", .kind = "underflow", .word = "@defm!" },
+        .{ .name = "@defm! name domain", .source = "() `core @defm!", .kind = "domain", .word = "@defm!" },
+        .{ .name = "@spawn! in construction", .source = "((1) @spawn! pop) `m @defm!", .kind = "domain", .word = "@spawn!" },
+        .{ .name = "@attempt! isolation", .source = "1 (pop) @attempt! `err at raise", .kind = "underflow", .word = "pop" },
+    });
+}

@@ -1179,10 +1179,12 @@ constant-continuation choices for iterative and tail-recursive shapes.
 #### The `@` spelling convention
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
-— one unit per application for `@each`. There are four: `@attempt`, `@spawn`,
-`@each`, and `@defm`. Each takes an explicit seed-values list and a body
-quotation as separate operands. An empty seed list is written `[]`; no
-constructor reads the ambient stack across its unit boundary. `@each` also
+— one unit per application for `@each`. The seeded constructors, `@attempt`,
+`@spawn`, `@give`, `@each`, and `@defm`, take an explicit seed-values list and a
+body quotation as separate operands. An empty seed list is written `[]`, or the
+operand is omitted by the constructor's seedless twin, spelled with a trailing
+`!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the ambient stack
+across its unit boundary. `@each` also
 places the iterated element deepest in each child stack, beneath the shared
 seed values.
 
@@ -1192,15 +1194,15 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `load`, `undefm` — they publish or retire without taking a
-  quotation.
+- `import`, `importp`, `load`, `undefm` — they publish or retire without
+  taking a quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
 `@` is an ordinary word character that the reader does not reserve: a user's
-`@retry` lexes and defines normally. The convention is enforced for first-party
-vocabulary by the source audit and is the recommended spelling for any
-user-defined word that wraps its quotation in a unit.
+`@retry` lexes and defines normally. First-party vocabulary follows the
+convention, and it is the recommended spelling for any user-defined word that
+wraps its quotation in a unit.
 
 #### The `*name*` spelling convention
 
@@ -1229,7 +1231,8 @@ values (body) `name @defm
 
 Both `values` and the body must be lists. The new unit's operand stack is
 initialized from the values list in list order, and then the body runs. `[]`
-is the explicit no-seed operand. Seeds are inert stack values and contribute no
+is the explicit no-seed operand, and each `!` twin (`(q) @attempt!`,
+``(body) `name @defm!``, and so on) is exactly its constructor applied to `[]`. Seeds are inert stack values and contribute no
 code to the body: even when a seed is itself a reader-built quotation, none of
 its contents
 is part of the construction body's text. `@each` puts the iterated element
@@ -1335,7 +1338,7 @@ representations but expose the same binding model.
   reveals core's binding for the name; it never mutates core. The name must be
   unqualified and non-reserved, under the same namespace validation as `def`.
 - Definitions happen only at root level. `def`, `defp`, `set`, `setp`,
-  `unset`, `undef`, and `import` write the current root, which is the session
+  `unset`, `undef`, `import`, and `importp` write the current root, which is the session
   for top-level code, the image for a module's construction body, and the
   module's own image inside a module word. A word body without a module home
   writes the root of the activation that called it. Inside a combinator
@@ -1343,8 +1346,8 @@ representations but expose the same binding model.
   `unfold`, `infra`, and the words built on them), inside `@attempt`, and
   inside a task, every one of these is `` `domain ``. Values local to a body
   belong on the stack or in locals.
-- `defp`/`setp` are the private forms, legal only inside a module body
-  (see Modules); at top level they are errors.
+- `defp`/`setp`/`importp` are the private forms, legal only inside a module
+  body (see Modules); at top level they are errors.
 - Because `set`/`setp` are sugar, their failures are raised by the words
   they call: an underflowing `set` is `` `underflow `` from `swap`, and a
   non-symbol or reserved name is raised by `def`/`defp`. The error kind is
@@ -1979,6 +1982,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   definition whose effect and documentation are copied from the original.
   Naming a binding that already exists replaces only that binding; importing
   selected names never splices an entire module or emits shadow notices.
+  `importp` is the private form: the same request publishes module-private
+  forwarding words, so the importing module uses them without re-exporting
+  them.
   Dotted words split at their final dot and give qualified access with
   no import. `qualify` validates a module-name symbol, which may be `` `core ``,
   and an unqualified binding-name symbol and constructs the corresponding

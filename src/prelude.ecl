@@ -411,6 +411,13 @@
   1 and those that returned 0. Defined in ecl.")
 (|l q| l q each l over where at swap not l swap where at) `partition def
 
+### def @each!
+(sequence quotation -- results :
+ "*Unit constructor*, one fresh unit per element, contract `( a -- b )` enforced per element.
+  `@each` with no shared values: each child's stack starts with its element alone, so `list (q)
+  @each!` is `list [] (q) @each`. Defined in ecl over `@each`.")
+(|sequence quotation| sequence [] quotation @each) `@each! def
+
 ### def bi
 (x p q -- ... :
  "*Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results

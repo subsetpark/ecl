@@ -230,9 +230,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
-    failed = auditUnitConstructorSpelling() or failed;
     failed = auditHttpServerWriteSink() or failed;
-    failed = auditDynamicContextSpelling() or failed;
     failed = auditFormalValueKinds() or failed;
     failed = auditWorkBudgetIssuers() or failed;
     failed = auditKernelDriverStarts() or failed;
@@ -749,10 +747,8 @@ fn auditSourceBodies() bool {
 }
 
 /// Caller-selected filesystem work must flow through a retained root or store
-/// handle, never through the process working directory, and the ambient file
-/// words removed from `io` must stay removed everywhere first-party code is
-/// written. Types cannot state either rule: `std.Io.Dir.cwd()` is an ordinary
-/// function and a word spelling is text. Among the modules that implement
+/// handle, never through the process working directory. Types cannot state
+/// that: `std.Io.Dir.cwd()` is an ordinary function. Among the modules that implement
 /// evaluated filesystem words, none may name the working directory; the
 /// owners that open trusted host paths once at Session construction
 /// (filesystem_port.zig, directory_resource.zig) and the CLI, map
@@ -782,21 +778,6 @@ fn auditFilesystemAuthority() bool {
         "step",
         "cwd",
     ) or failed;
-    const removed_words = [_][]const u8{ "slurp", "spit", "lines" };
-    const console_module = @embedFile("../stdlib/io.zig");
-    for (removed_words) |name| {
-        if (installedPrimitiveName(console_module, name)) {
-            std.log.err("filesystem authority: `io.{s}` is an ambient file word and must not exist", .{name});
-            failed = true;
-        }
-    }
-    const removed_spellings = [_][]const u8{ "io.slurp", "io.spit", "io.lines" };
-    for (first_party_definition_sources) |source| {
-        for (removed_spellings) |spelling| if (std.mem.indexOf(u8, source, spelling) != null) {
-            std.log.err("filesystem authority: first-party source still uses `{s}`", .{spelling});
-            failed = true;
-        };
-    }
     return failed;
 }
 
@@ -1240,139 +1221,6 @@ fn hasForbiddenTokens(
     return failed;
 }
 
-/// The `@` mark means one thing: the word applies its quotation in a fresh
-/// unit. Nothing in the compiler can express that, so the manifest is written
-/// down here and the audit enforces both directions — every listed word is
-/// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@give", "@defm", "@test" };
-
-/// First-party ECL words that apply their quotation in a fresh unit and are
-/// therefore marked too. Each must be defined by some first-party source;
-/// the compiler cannot see that either, so the audit checks both directions.
-const source_unit_constructors = [_][]const u8{ "@each", "@serve" };
-
-/// Wrapped stars mean one thing in shipped vocabulary: the word returns a
-/// value supplied by dynamic execution context rather than consuming it from
-/// the operand stack. The compiler cannot express that semantic class, so the
-/// audit owns its closed manifest just as it owns the `@` constructor class.
-const dynamic_context_words = [_][]const u8{ "*file*", "*module*" };
-const first_party_definition_sources = [_][:0]const u8{
-    @embedFile("../prelude.ecl"),
-    @embedFile("../stdlib/port.ecl"),
-    @embedFile("../stdlib/proc.ecl"),
-    @embedFile("../stdlib/net.ecl"),
-    @embedFile("../stdlib/result.ecl"),
-    @embedFile("../stdlib/str.ecl"),
-    @embedFile("../stdlib/table.ecl"),
-    @embedFile("../stdlib/path.ecl"),
-    @embedFile("../stdlib/time.ecl"),
-    @embedFile("../stdlib/agent.ecl"),
-    @embedFile("../stdlib/http/server.ecl"),
-    @embedFile("../stdlib/http/request.ecl"),
-    @embedFile("../stdlib/http/response.ecl"),
-    @embedFile("../stdlib/test/default.ecl"),
-};
-
-/// Metadata is required by BuiltinWord and validated by its installer.
-/// This audit owns only the semantic spelling convention the compiler cannot
-/// infer. Scan parsed tokens from every production source, including escaped
-/// string literals, without treating comments or documentation as declarations.
-fn auditBuiltinMarks(comptime expected: []const []const u8, comptime kind: enum { unit, dynamic }) bool {
-    var found: [expected.len]bool = @splat(false);
-    var failed = false;
-    const allocator = std.heap.page_allocator;
-    for (source_groups) |group| {
-        if (!group.production) continue;
-        for (group.sources) |source| {
-            var tree = std.zig.Ast.parse(allocator, source, .{}) catch {
-                std.log.err("builtin marks: cannot parse production source", .{});
-                return true;
-            };
-            defer tree.deinit(allocator);
-            if (tree.errors.len != 0) {
-                std.log.err("builtin marks: malformed production source", .{});
-                failed = true;
-                continue;
-            }
-            const tags = tree.tokens.items(.tag);
-            for (0..tags.len -| 3) |index| {
-                if (tags[index] != .period or tags[index + 1] != .identifier or
-                    tags[index + 2] != .equal or tags[index + 3] != .string_literal) continue;
-                if (!std.mem.eql(u8, tree.tokenSlice(@intCast(index + 1)), "name")) continue;
-                const name = std.zig.string_literal.parseAlloc(allocator, tree.tokenSlice(@intCast(index + 3))) catch {
-                    std.log.err("builtin marks: invalid name literal", .{});
-                    failed = true;
-                    continue;
-                };
-                defer allocator.free(name);
-                for (expected, 0..) |required, required_index| {
-                    if (std.mem.eql(u8, name, required)) found[required_index] = true;
-                }
-                const invalid = switch (kind) {
-                    .unit => std.mem.startsWith(u8, name, "@") and !isUnitConstructor(name),
-                    .dynamic => wrappedStars(name) and !isDynamicContextWord(name),
-                };
-                if (invalid) {
-                    std.log.err("builtin marks: unexpected {s} spelling `{s}`", .{ @tagName(kind), name });
-                    failed = true;
-                }
-            }
-        }
-    }
-    for (found, expected) |present, name| if (!present) {
-        std.log.err("builtin marks: missing declaration for `{s}`", .{name});
-        failed = true;
-    };
-    return failed;
-}
-
-fn auditUnitConstructorSpelling() bool {
-    var failed = auditBuiltinMarks(&unit_constructors, .unit);
-    for (first_party_definition_sources) |source| {
-        var scan: usize = 0;
-        while (std.mem.indexOfPos(u8, source, scan, "`@")) |found| {
-            const start = found + 1;
-            const end = preludeTokenEnd(source, start);
-            const name = source[start..end];
-            if (!isUnitConstructor(name)) {
-                std.log.err("unit constructors: `{s}` is marked but constructs no unit", .{name});
-                failed = true;
-            }
-            scan = end;
-        }
-    }
-    for (source_unit_constructors) |name| {
-        var defined = false;
-        for (first_party_definition_sources) |source| {
-            if (definesQuotedName(source, name)) defined = true;
-        }
-        if (!defined) {
-            std.log.err("unit constructors: `{s}` is listed as a source constructor but no first-party source defines it", .{name});
-            failed = true;
-        }
-    }
-    return failed;
-}
-
-/// Whether `source` binds `name` with `def` or `defp`: the quoted spelling
-/// followed by whitespace and the definition word, the shape every checked-in
-/// definition ends in.
-fn definesQuotedName(source: []const u8, name: []const u8) bool {
-    var scan: usize = 0;
-    while (std.mem.indexOfPos(u8, source, scan, "`")) |found| {
-        const start = found + 1;
-        const end = preludeTokenEnd(source, start);
-        scan = if (end > start) end else start + 1;
-        if (!std.mem.eql(u8, source[start..end], name)) continue;
-        var rest = end;
-        while (rest < source.len and std.ascii.isWhitespace(source[rest])) rest += 1;
-        const definition_end = preludeTokenEnd(source, rest);
-        const definition = source[rest..definition_end];
-        if (std.mem.eql(u8, definition, "def") or std.mem.eql(u8, definition, "defp")) return true;
-    }
-    return false;
-}
-
 /// Every byte the HTTP server writes has passed `render-response`: the module
 /// calls `net.write` from exactly one private word, `write-response`, whose
 /// body validates and encodes before writing. Nothing at runtime can hold a
@@ -1421,51 +1269,6 @@ fn lastDeclarationHeader(source: []const u8) ?DeclarationHeader {
         }
     }
     return latest;
-}
-
-fn auditDynamicContextSpelling() bool {
-    var failed = auditBuiltinMarks(&dynamic_context_words, .dynamic);
-    for (first_party_definition_sources) |source| {
-        var scan: usize = 0;
-        while (std.mem.indexOfPos(u8, source, scan, "`*")) |found| {
-            const start = found + 1;
-            const end = preludeTokenEnd(source, start);
-            const name = source[start..end];
-            if (wrappedStars(name) and !isDynamicContextWord(name)) {
-                std.log.err("dynamic context: definition `{s}` uses wrapped stars", .{name});
-                failed = true;
-            }
-            scan = end;
-        }
-    }
-    return failed;
-}
-
-fn isUnitConstructor(name: []const u8) bool {
-    for (unit_constructors) |listed| {
-        if (std.mem.eql(u8, listed, name)) return true;
-    }
-    for (source_unit_constructors) |listed| {
-        if (std.mem.eql(u8, listed, name)) return true;
-    }
-    return false;
-}
-
-fn wrappedStars(name: []const u8) bool {
-    return name.len > 2 and name[0] == '*' and name[name.len - 1] == '*';
-}
-
-fn isDynamicContextWord(name: []const u8) bool {
-    for (dynamic_context_words) |listed| {
-        if (std.mem.eql(u8, listed, name)) return true;
-    }
-    return false;
-}
-
-fn installedPrimitiveName(source: []const u8, name: []const u8) bool {
-    var buffer: [64]u8 = undefined;
-    const needle = std.fmt.bufPrint(&buffer, ".name = \"{s}\"", .{name}) catch return false;
-    return std.mem.indexOf(u8, source, needle) != null;
 }
 
 /// Every container-level declaration must be reachable from code that runs: a

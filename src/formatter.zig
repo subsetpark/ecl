@@ -1095,8 +1095,8 @@ fn isLiteralValueForm(form_item: *const Form) bool {
         },
     };
 }
-/// `values (body) 'name @defm`: the fixed-arity registration shape that earns
-/// a navigation header, mirroring definition navigation. A computed name gets
+/// `values (body) 'name @defm` and `(body) 'name @defm!`: the fixed-arity
+/// registration shapes that earn a navigation header, mirroring definition navigation. A computed name gets
 /// no header, exactly as a definition does. A phrase using ordinary `with`
 /// composition is not constructor metadata and therefore earns no registration
 /// header.
@@ -1112,8 +1112,9 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
     if (!sequence.definitions) return null;
     const head = sequence.parts[start].form;
     if (!isListForm(head) or isAnnotationCandidate(head)) return null;
-    // The header belongs to the whole phrase, so a registration is claimed by
-    // its values list rather than by the body that follows it.
+    // The header belongs to the whole phrase, so a seeded registration is
+    // claimed by its values list rather than by the body that follows it; a
+    // seedless one is claimed by its body.
     var body_seen = false;
     var body = start;
     var named: ?[]const u8 = null;
@@ -1129,12 +1130,12 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
                     continue;
                 },
             };
-            if (named) |name| return if (std.mem.eql(u8, bytes, "@defm")) .{
-                .name = name,
-                .body = body,
-                .terminator = part_index,
-            } else null;
-            if (!body_seen) return null;
+            if (named) |name| {
+                const seeded = std.mem.eql(u8, bytes, "@defm");
+                if (!seeded and !std.mem.eql(u8, bytes, "@defm!")) return null;
+                if (seeded != body_seen) return null;
+                return .{ .name = name, .body = body, .terminator = part_index };
+            }
             if (bytes.len < 2 or bytes[0] != '`' or !lexer.validSymbolSource(bytes[1..])) return null;
             named = bytes[1..];
         },

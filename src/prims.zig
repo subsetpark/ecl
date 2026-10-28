@@ -44,6 +44,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a numeric-literal string." },
         .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char or string unchanged, the char with an int's codepoint, or the string whose chars have a list's codepoints." },
         .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn task.await`." },
+        .{ .name = "@attempt!", .primitive = attemptSeedless, .effect = "quotation -- result", .doc = "Run a body on an empty stack in a fresh unit and return an ok or error result dictionary; `[] q @attempt`." },
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dictionary." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "Return the process arguments as a list of strings." },
         .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Request root-session termination with the given exit status." },
@@ -708,6 +709,11 @@ const NumericParseDriver = struct {
 };
 fn attempt(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
+    defer input.deinit(evaluator.releaseDomain());
+    try evaluator.attemptOwned(input.move());
+}
+fn attemptSeedless(evaluator: *Machine) MachineError!void {
+    var input = try evaluator.popSeedlessUnitInput();
     defer input.deinit(evaluator.releaseDomain());
     try evaluator.attemptOwned(input.move());
 }

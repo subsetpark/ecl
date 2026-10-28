@@ -493,6 +493,26 @@ test "module: import inside a module body binds module-locally" {
     try expectErrorContains(&runtime, "x", &.{ "kind undefined-word", "word x" });
 }
 
+test "module: importp binds a module-private forwarding word" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] ((-- n : \"One.\") (1) `x def) `src @defm " ++
+        "(`src (x) importp (x 1 +) `y def) `holder @defm! holder.y");
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+    try expectErrorContains(&runtime, "holder.x", &.{ "kind undefined-word", "name holder.x" });
+    try expectErrorContains(&runtime, "x", &.{ "kind undefined-word", "word x" });
+    try expectErrorContains(&runtime, "`src (x) importp", &.{ "kind domain", "word importp" });
+    try expectErrorContains(&runtime, "(`src (missing) importp) `bad @defm!", &.{
+        "kind undefined-word",
+        "name src.missing",
+    });
+    try expectErrorContains(&runtime, "bad.y", &.{"kind undefined-word"});
+}
+
 test "scope: an undefined word names the chain it searched" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);

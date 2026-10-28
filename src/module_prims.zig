@@ -20,10 +20,12 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "Validate a module name, then evaluate a module body with an explicit initial stack in a fresh unit and register the result under that name." },
+        .{ .name = "@defm!", .primitive = defmSeedless, .effect = "body module-name --", .doc = "Validate a module name, then evaluate a module body on an empty stack in a fresh unit and register the result under that name; `[] body name @defm`." },
         .{ .name = "undefm", .primitive = undefmWord, .effect = "module-name --", .doc = "Remove the module registered under a canonical name or alias." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
-        .{ .name = "import", .primitive = importWord, .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
+        .{ .name = "import", .primitive = importAs(.public), .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
+        .{ .name = "importp", .primitive = importAs(.private), .effect = "module-name q --", .doc = "Import a list of public module attributes as private module words under their own names, preserving effects and documentation; legal only in a module root." },
         .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register a short alias for a qualified module name." },
         .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Construct an executable qualified word without reparsing source text." },
         .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
@@ -37,7 +39,17 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 fn defmWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(3);
     const name = try evaluator.popSymbol();
-    var input = try evaluator.popUnitInput();
+    try startDefm(evaluator, name, try evaluator.popUnitInput());
+}
+
+fn defmSeedless(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    const name = try evaluator.popSymbol();
+    try startDefm(evaluator, name, try evaluator.popSeedlessUnitInput());
+}
+
+fn startDefm(evaluator: *Machine, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
+    var input = popped;
     errdefer input.deinit(evaluator.releaseDomain());
     try evaluator.startDriver(DefmDriver{
         .input = .init(input.move()),
@@ -154,9 +166,19 @@ const UndefmDriver = struct {
     }
 };
 
-fn importWord(evaluator: *Machine) MachineError!void {
+fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
+    return struct {
+        fn run(evaluator: *Machine) MachineError!void {
+            return importWord(evaluator, visibility);
+        }
+    }.run;
+}
+
+fn importWord(evaluator: *Machine, visibility: env.Visibility) MachineError!void {
     try evaluator.require(2);
-    _ = try evaluator.definitionScope();
+    const scope = try evaluator.definitionScope();
+    if (visibility == .private and scope.publisher() != .module)
+        return evaluator.fail(.domain, "importp is legal only in a module root");
     var requested = try evaluator.popList();
     errdefer requested.deinit();
     const module_id = try evaluator.popSymbol();
@@ -167,6 +189,7 @@ fn importWord(evaluator: *Machine) MachineError!void {
         module_id,
         requested.take(),
         prepared,
+        visibility,
     ));
 }
 fn aliasModule(evaluator: *Machine) MachineError!void {
@@ -194,6 +217,7 @@ const ImportDriver = struct {
     requested: heap.Owned(Value),
     prepared: heap.Owned([]ImportName),
     scope: *env.Scope,
+    visibility: env.Visibility,
     module_validation: intern.ModuleNameCursor,
     module_name: ?intern.ModuleName = null,
     prepare_index: usize = 0,
@@ -214,12 +238,14 @@ const ImportDriver = struct {
         module_id: u32,
         requested: Value,
         prepared: []ImportName,
+        visibility: env.Visibility,
     ) ImportDriver {
         return .{
             .module_id = module_id,
             .requested = .init(requested),
             .prepared = .init(prepared),
             .scope = evaluator.currentScope(),
+            .visibility = visibility,
             .module_validation = .init(module_id),
         };
     }
@@ -367,7 +393,7 @@ const ImportDriver = struct {
                 // line of ordinary source could trigger.
                 self.publisher = .init(try self.scope.publishWordCursor(requested.binding, .{
                     .body = body,
-                    .visibility = .public,
+                    .visibility = self.visibility,
                     .effect = lease.spec().effect,
                     .doc = lease.spec().doc,
                 }));
