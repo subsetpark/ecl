@@ -215,13 +215,19 @@ pub const LowerCursor = struct {
             .top => {
                 if (body_state.index == self.body.len) return true;
                 switch (self.body[body_state.index].value) {
-                    .symbol => |id| body_state.work = .{ .lookup_top = body_state.locals.rawLookup(
-                        @fromBackingInt(@intCast(id.name)),
-                    ) },
+                    // A quoted occurrence pushes its symbol: `` (|x| `x) ``
+                    // quotes `x` rather than reading the local.
+                    .symbol => |id| if (env.isQuoted(id.slot)) {
+                        self.local_indices[body_state.index] = null;
+                        body_state.index += 1;
+                    } else {
+                        body_state.work = .{ .lookup_top = body_state.locals.rawLookup(
+                            @fromBackingInt(@intCast(id.name)),
+                        ) };
+                    },
                     // A local is an occurrence at the body's own level. A
                     // nested list or dict is data whose symbols are the
-                    // symbols they spell: `(|x| [x])` lists the symbol `x`,
-                    // and `` (|x| `x) `` quotes it.
+                    // symbols they spell: `(|x| [x])` lists the symbol `x`.
                     .int, .float, .char, .list, .dict, .task, .port, .address => {
                         self.local_indices[body_state.index] = null;
                         body_state.index += 1;

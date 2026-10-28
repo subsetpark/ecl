@@ -618,3 +618,25 @@ test "seedless unit constructors start on an empty stack" {
         .{ .name = "@attempt! isolation", .source = "1 (pop) @attempt! `err at raise", .kind = "underflow", .word = "pop" },
     });
 }
+
+test "quotes: one quoted occurrence that pushes its symbol" {
+    try support.expectStacks(&.{
+        // As data a quote is its symbol: one element, equal to the bare one.
+        .{ .name = "shape", .source = "(`a) len [`a `b] len", .expected = "1 2" },
+        .{ .name = "equality", .source = "[`a `b] [a b] match? (`a) first (a) first match?", .expected = "1 1" },
+        .{ .name = "push", .source = "`a type (`a) call (a) first match?", .expected = "symbol 1" },
+        // The quote prints as itself and reads back as the same occurrence.
+        .{ .name = "printing", .source = "(`a b `'c d') str", .expected = "\"(`a b `'c d')\"" },
+        .{ .name = "round trip", .source = "(`a b) str parse first first wrap call", .expected = "a" },
+        // The mark travels with the occurrence; `execute` runs the word.
+        .{ .name = "extracted occurrence", .source = "(`a) first wrap call 1 2 (`swap) first execute", .expected = "a 2 1" },
+        // A quote in a locals body is the symbol, not the local.
+        .{ .name = "locals", .source = "5 (|x| `x x) call", .expected = "x 5" },
+        .{ .name = "module body", .source = "[] ((|a| `a) `w def) `quoting @defm 5 quoting.w", .expected = "a" },
+        // A quoted operation pushes its symbol; no idiom takes it as the word.
+        .{ .name = "no idiom", .source = "[1 2] (pop `+) each", .expected = "(+ +)" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "dict entry", .source = "{`a 1}", .kind = "parse" },
+    });
+}

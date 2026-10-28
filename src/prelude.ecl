@@ -155,7 +155,7 @@
   executing or resolving it.
 
   Every value but a symbol already pushes itself when run, so the result is `(x)`. A symbol would
-  execute, so it is quoted as `((x) core.first)`, the quote's own expansion.")
+  execute, so it is quoted as `((x) core.first)`, which pushes it.")
 (dup type `symbol match? (wrap (core.first) cons) (wrap) if) `literal def
 
 ### def scan1

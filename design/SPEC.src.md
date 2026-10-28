@@ -176,11 +176,13 @@ characters. An atom is classified whole-token, in this order:
    names `\space`, `\tab`, `\newline`, or `\u{...}` with one to six hex
    digits naming a Unicode scalar value (surrogate halves and values above
    U+10FFFF are parse errors).
-3. **Quote** — `` ` `` followed by a symbol. It is reader sugar for the two
-   forms `(symbol) core.first`, so `` `foo `` and `(foo) first` push the
-   same value. The expansion is literal wherever it appears, so `` [`a `b] ``
-   is the four-element list `((a) core.first (b) core.first)`; only `{ }`
-   rejects a quote, since the expansion would break its key/value pairing.
+3. **Quote** — `` ` `` followed by a symbol. It reads as one quoted occurrence
+   of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
+   push the same value. As data the occurrence is the symbol itself, so
+   `` [`a `b] `` is a two-element list equal to `[a b]`; the quote is
+   occurrence metadata, like a symbol's link, and travels with the occurrence
+   when lists are copied or spliced. `{ }` rejects a quote, since dict entries
+   are data and never run.
    `` ` `` is reserved token-initially and banned inside symbols.
 4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
@@ -272,11 +274,12 @@ A symbol is one kind of value whether it was written bare or built at
 runtime: `(dup) first` and `` `dup `` yield the same symbol, and `{dup 1}`
 stores it as a key. The position of a symbol in a list, not its value,
 decides what running the list does with it: `(dup) call` executes `dup`,
-while `` (`dup) call `` runs the quote's expansion `(dup) core.first` and
-pushes the symbol. Symbols print bare, delimited as `'...'` only when the
-bare spelling would not read back as the same symbol. Resolution and
-provenance metadata belong to stored symbol occurrences rather than their
-values and never distinguish two symbols.
+while `` (`dup) call `` runs a quoted occurrence and pushes the symbol. Symbols
+print bare, delimited as `'...'` only when the bare spelling would not read
+back as the same symbol, and a quoted occurrence prints with its quote, so
+`` (`dup) `` prints as `` (`dup) ``. Resolution, provenance, and quotation
+belong to stored symbol occurrences rather than their values and never
+distinguish two symbols.
 
 A quotation, vector, and matrix row are list roles. A homogeneous list of
 atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
@@ -304,8 +307,8 @@ Printing never exposes storage specialization. A non-string list uses `[...]`
 when its value has canonical array shape—a homogeneous flat vector of
 numbers or chars, or a rectangular nesting of such vectors—and `(...)`
 otherwise. A vector of symbols has a quotation's shape and prints with
-`(...)` however it was built, and a quotation prints its quote expansions,
-so `` (`x) `` prints as `((x) core.first)`. Both delimiters read as the same
+`(...)` however it was built, and a quoted occurrence prints as its quote,
+so `` (`x) `` prints as `` (`x) ``. Both delimiters read as the same
 list kind.
 Thus `(1 2 3)` prints as `[1 2 3]`, `[dup swap]` prints as `(dup swap)`, and
 the ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings

@@ -102,6 +102,8 @@ pub const RenderCursor = struct {
                     // A lowered locals operation shows its count or index
                     // before its name; the reader does not read this back.
                     if (env.localOperand(id.slot)) |operand| try self.writeFmt(writer, "{d} ", .{operand});
+                    // A quoted occurrence prints as the quote that reads it back.
+                    if (env.isQuoted(id.slot)) try self.writeByte(writer, '`');
                     const spelling = intern.get(id.name);
                     if (lexer.spellingReadsBare(spelling)) {
                         try self.pushBytes(spelling);

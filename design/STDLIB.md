@@ -532,9 +532,7 @@ given status.
 
 ### first
 `( list -- value )` — Return the first element of a nonempty list; an empty
-list is `` `domain ``. A kernel builtin rather than a prelude word, because the
-reader's quote `` `x `` expands to `(x) core.first` and the prelude's own first
-quote runs before any prelude word exists.
+list is `` `domain ``.
 
 ```ecl
 (dup swap) first
@@ -1170,7 +1168,7 @@ extends). Each-left/each-right are `partial` compositions.
 ### literal
 `( value -- quotation )` — Return a plain quotation that pushes the exact captured value as inert data when called, without executing or resolving it.
 
-Every value but a symbol already pushes itself when run, so the result is `(x)`. A symbol would execute, so it is quoted as `((x) core.first)`, the quote's own expansion.
+Every value but a symbol already pushes itself when run, so the result is `(x)`. A symbol would execute, so it is quoted as `((x) core.first)`, which pushes it.
 
 ### scan1
 `( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.

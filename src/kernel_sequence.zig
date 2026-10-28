@@ -41,9 +41,8 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
         .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
         .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into pieces that begin at each nondecreasing start index and end at the next; elements before the first start are dropped." },
         .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty list is returned unchanged." },
-        // `first` is a builtin rather than a prelude word because the
-        // reader's quote expands to `(x) core.first`, so it must exist before
-        // the first quoted name in the prelude runs.
+        // `first` is a builtin rather than a prelude word: `literal` quotes a
+        // symbol as `((x) core.first)` before any prelude word could define it.
         .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list." },
         .reverse, .rest => null,
     };

@@ -338,10 +338,11 @@ name plus a resolution slot. The slot is metadata: the reader links it for
 the root the text was written in, `symbol`, `intern`, and `qualify` link it
 for the root of the activation that builds the symbol, and a symbol the
 implementation builds for itself (an error-dict key, a trace entry) leaves
-zero and means core. Equality, hashing, and printing ignore it.
-Nothing else distinguishes "code" from "data": the reader's quote is the two
-forms `(x) core.first`, which is why `first` is a kernel builtin rather than a
-prelude word, and a locals declaration rewrites only its body's own top-level
+zero and means core. Equality and hashing ignore it. A quoted occurrence, the
+reader's `` `x ``, carries a quote flag above every id beside its ordinary
+link: dispatch pushes the symbol with the link and without the flag, and the
+printer writes the flag as the quote. Nothing else distinguishes "code" from
+"data": a locals declaration rewrites only its body's own unquoted top-level
 occurrences, since a symbol inside a nested list or dict is the symbol it
 spells. A symbol list is always a generic spine, since no leaf holds a slot.
 A `core.`-qualified

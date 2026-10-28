@@ -5779,7 +5779,7 @@ pub const Machine = struct {
     /// so this never records a failure: an unlinked word, or one whose root
     /// has retired, is simply not a match, and generic execution reports it.
     pub fn peekSlotWord(self: *Machine, word: value.Symbol, out: *Resolution) bool {
-        if (word.slot == 0 or env.localOperand(word.slot) != null) return false;
+        if (word.slot == 0 or env.localOperand(word.slot) != null or env.isQuoted(word.slot)) return false;
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
@@ -5852,7 +5852,9 @@ pub const Machine = struct {
         return entry;
     }
 
-    pub fn executeWord(self: *Machine, word: value.Symbol) MachineError!void {
+    pub fn executeWord(self: *Machine, occurrence: value.Symbol) MachineError!void {
+        // `execute` runs the word a symbol names, quoted occurrence or not.
+        const word: value.Symbol = .{ .name = occurrence.name, .slot = env.unquoted(occurrence.slot) };
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         // A session or core word resolved before in this unit's view.
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
@@ -6618,7 +6620,12 @@ fn poll(self: *Machine) MachineError!void {
 }
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
-        .symbol => |reference| reference,
+        // A quoted occurrence pushes its symbol, linked as written and
+        // unmarked: the value `(x) first` pushes.
+        .symbol => |reference| if (env.isQuoted(reference.slot))
+            return self.pushBorrowed(.{ .symbol = .{ .name = reference.name, .slot = env.unquoted(reference.slot) } })
+        else
+            reference,
         .int, .float, .char, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
     };
     try self.executeWord(word);

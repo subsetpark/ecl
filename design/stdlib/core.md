@@ -530,9 +530,7 @@ given status.
 
 ### first
 `( list -- value )` — Return the first element of a nonempty list; an empty
-list is `` `domain ``. A kernel builtin rather than a prelude word, because the
-reader's quote `` `x `` expands to `(x) core.first` and the prelude's own first
-quote runs before any prelude word exists.
+list is `` `domain ``.
 
 ```ecl
 (dup swap) first

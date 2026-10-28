@@ -1718,9 +1718,21 @@ pub const image_root_flag: u32 = 1 << 31;
 /// drop. It names no slot. Directory and scope ids stay below it.
 pub const local_operand_flag: u32 = 1 << 30;
 
+/// See `value.quote_flag`. Directory and scope ids stay below it, and a locals
+/// operation never carries it.
+pub const quote_flag: u32 = value.quote_flag;
+
+/// Whether an occurrence is quoted.
+pub const isQuoted = value.isQuotedSlot;
+
+/// The link of an occurrence, without any quote flag.
+pub fn unquoted(raw: u32) u32 {
+    return if (isQuoted(raw)) raw & ~quote_flag else raw;
+}
+
 /// The slot field of a locals operation with `operand`.
 pub fn localOperandSlot(operand: u32) u32 {
-    std.debug.assert(operand < local_operand_flag);
+    std.debug.assert(operand < quote_flag);
     return local_operand_flag | operand;
 }
 
@@ -1741,7 +1753,10 @@ pub const WordTarget = union(enum) {
     /// live.
     image: ScopeId,
 };
-pub fn wordTarget(raw: u32) WordTarget {
+/// A quoted occurrence's target is its link's: the flag says how it runs, not
+/// where its name resolves.
+pub fn wordTarget(raw_occurrence: u32) WordTarget {
+    const raw = unquoted(raw_occurrence);
     if (raw == 0) return .unlinked;
     if (raw & image_root_flag != 0) return .{ .image = @fromBackingInt(raw & ~image_root_flag) };
     if (localOperand(raw)) |operand| return .{ .local = operand };

@@ -1096,8 +1096,8 @@ test "module: core-qualified words link to core's slot wherever they are written
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // A module that shadows `first` still quotes through core's `first`,
-    // since the reader's quote expands to `core.first`.
+    // A module that shadows `first` still quotes: a quote pushes its symbol
+    // without running any `first`, and `core.first` is core's wherever written.
     try expectOk(&runtime, "[] ((pop 99) `first def (`k) `go def ((1 2) core.first) `head def) `shadow @defm");
     try expectOk(&runtime, "shadow.go `k match? shadow.head 1 = and (7 8) shadow.first 99 = and " ++
         "{kind user msg \"core-qualified words resolve in core\"} assert");

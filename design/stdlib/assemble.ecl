@@ -36,9 +36,9 @@
 ### def definitions
 (forms -- names bodies :
  "Return the name and body quotation of every def or defp form in a definition list, in source
-  order. A registration reads `(body) (name) core.first def`, the quote's expansion.")
+  order. A registration reads `(body) name def`, its name one quoted symbol.")
 (dup (definition-word?) each where
- (|forms indices| forms indices 2 - at (first chars) each forms indices 3 - at)
+ (|forms indices| forms indices 1 - at (chars) each forms indices 2 - at)
  call) `definitions def
 
 ### def adjacency
@@ -126,10 +126,10 @@
  "Render the effect and documentation of the public definition whose `def` word sits at an index, as
   a [name text] pair. The documentation is the binding's canonical docstring.")
 (|forms index qualifier|
- forms index 2 - at first chars
- forms index 4 - 0 max at
- index 4 >= over annotation? and (effect-text) (pop "") if
- qualifier forms index 2 - at first chars cat intern doc cat
+ forms index 1 - at chars
+ forms index 3 - 0 max at
+ index 3 >= over annotation? and (effect-text) (pop "") if
+ qualifier forms index 1 - at chars cat intern doc cat
  pair) `public-entry def
 
 ### def public-docs
@@ -145,8 +145,8 @@
  "Return the module name a source registers with the ranks and rendered documentation of its
   definitions.")
 (source-forms
- dup dup len 3 - at first chars
- swap dup len 4 - at
+ dup dup len 2 - at chars
+ swap dup len 3 - at
  (|name body|
   name
   body definitions ranks
