@@ -725,24 +725,6 @@ pub fn toOwnedStackDisplayString(
     };
 }
 
-pub fn print(item: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    printWithAllocator(std.heap.smp_allocator, item, writer) catch |err| switch (err) {
-        error.OutOfMemory => return error.WriteFailed,
-        error.WriteFailed => return error.WriteFailed,
-    };
-}
-
-pub fn printWithAllocator(
-    allocator: std.mem.Allocator,
-    item: Value,
-    writer: *std.Io.Writer,
-) (error{OutOfMemory} || std.Io.Writer.Error)!void {
-    var cursor = try RenderCursor.init(allocator, item);
-    defer cursor.deinit();
-    var work = poll_api.unbounded();
-    return poll_api.driveVoidFallible(&cursor, .{ writer, &work });
-}
-
 pub fn toOwnedString(
     allocator: std.mem.Allocator,
     item: Value,
@@ -908,7 +890,7 @@ test "canonical printer renders the public value syntax" {
     try expectPrint("\"\"", empty_string);
 
     const a = try intern.intern("a");
-    const dictionary = try dict.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = .{ .name = a } }, .{ .int = 1 } }});
+    const dictionary = try dict.testing.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = .{ .name = a } }, .{ .int = 1 } }});
     defer cleanup.releaseValue(dictionary);
     try expectPrint("{a 1}", dictionary);
 }
@@ -948,11 +930,13 @@ test "float rendering covers decimal extremes and round-trips finite bits" {
     // the printer's own scalar staging buffer.
     var short_buffer: [8]u8 = undefined;
     var short_writer = std.Io.Writer.fixed(&short_buffer);
-    try std.testing.expectError(error.WriteFailed, printWithAllocator(
-        allocator,
-        .{ .float = std.math.floatMax(f64) },
-        &short_writer,
-    ));
+    var short_cursor = try RenderCursor.init(allocator, .{ .float = std.math.floatMax(f64) });
+    defer short_cursor.deinit();
+    var short_work = poll_api.testing.budget(std.math.maxInt(usize));
+    try std.testing.expectError(
+        error.WriteFailed,
+        poll_api.driveVoidFallible(&short_cursor, .{ &short_writer, &short_work }),
+    );
     const Probe = struct {
         fn run(failing: std.mem.Allocator) !void {
             const canonical = try toOwnedString(failing, .{ .float = std.math.floatMax(f64) });
@@ -988,7 +972,7 @@ test "display rendering elides huge leaves without changing canonical strings" {
 
     var integers: [display_list_limit + 1]i64 = undefined;
     for (&integers, 0..) |*item, index| item.* = @intCast(index);
-    const leaf = try list.fromI64Slice(allocator, &integers);
+    const leaf = try list.testing.fromI64Slice(allocator, &integers);
     defer cleanup.releaseValue(leaf);
 
     const displayed = try toOwnedDisplayString(allocator, leaf);

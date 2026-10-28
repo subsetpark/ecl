@@ -292,6 +292,9 @@ fn findScope(owned: *const Backing, name: []const u8) ?ScopeId {
     return null;
 }
 fn ownedText(allocator: std.mem.Allocator, item: Value) Error![]u8 {
+    // Every codepoint encodes to at least one byte, so an overlong string
+    // fails here before the encoder walks it.
+    if (item == .list and item.list.length() > 4096) return error.Invalid;
     const bytes = try data.ownedUtf8(allocator, item);
     errdefer allocator.free(bytes);
     if (bytes.len == 0 or bytes.len > 4096) return error.Invalid;
@@ -369,4 +372,32 @@ fn matchSegment(pattern: []const u8, text: []const u8) bool {
     }
     while (pattern_index < pattern.len and pattern[pattern_index] == '*') pattern_index += 1;
     return pattern_index == pattern.len;
+}
+
+fn validationAllocation(document: []const u8) !usize {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var host = heap.HostOwner.init(counting.allocator());
+    defer host.cleanup().drain();
+    try std.testing.expectError(
+        error.Invalid,
+        validate(host.cleanup(), std.testing.io, document, "/maps/ecl.modules", true),
+    );
+    return counting.allocated_bytes;
+}
+
+test "overlong map text fails without encoding it" {
+    const allocator = std.testing.allocator;
+    const length = 1 << 16;
+    const text = try allocator.alloc(u8, length);
+    defer allocator.free(text);
+    @memset(text, 'a');
+    // The same document with an unsupported format is read and then rejected
+    // before any text field is decoded; rejecting the overlong reference must
+    // not add an encoded copy on top of that.
+    const read_only = try std.fmt.allocPrint(allocator, "{{format 2 map \"{s}\"}}", .{text});
+    defer allocator.free(read_only);
+    const reference = try std.fmt.allocPrint(allocator, "{{format 1 map \"{s}\"}}", .{text});
+    defer allocator.free(reference);
+    const baseline = try validationAllocation(read_only);
+    try std.testing.expect(try validationAllocation(reference) < baseline + length / 2);
 }

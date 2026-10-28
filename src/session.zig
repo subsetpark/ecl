@@ -1212,7 +1212,7 @@ fn dictSymbol(
 ) ![]const u8 {
     const dict = @import("dict.zig");
     const key = try intern.intern(name);
-    const found = (try dict.symbolField(allocator, dictionary, key)).?;
+    const found = (try dict.testing.symbolField(allocator, dictionary, key)).?;
     return intern.get(found.symbol.name);
 }
 
@@ -1541,9 +1541,9 @@ test "parse diagnostics preserve source names beyond the inline error budget" {
     defer session.release(error_value);
     const dict = @import("dict.zig");
     const data_key = try intern.intern("data");
-    const data_value = (try dict.symbolField(allocator, error_value, data_key)).?;
+    const data_value = (try dict.testing.symbolField(allocator, error_value, data_key)).?;
     const source_key = try intern.intern("source");
-    const source_value = (try dict.symbolField(
+    const source_value = (try dict.testing.symbolField(
         allocator,
         data_value,
         source_key,

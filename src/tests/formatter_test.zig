@@ -53,7 +53,7 @@ fn expectParseEquivalent(source: []const u8) !void {
     defer reparsed.deinit();
     try std.testing.expectEqual(original.values().len, reparsed.values().len);
     for (original.values(), reparsed.values()) |before, after| {
-        try std.testing.expect(try equal.matchWithAllocator(allocator, before, after));
+        try std.testing.expect(try equal.testing.match(allocator, before, after));
     }
 }
 

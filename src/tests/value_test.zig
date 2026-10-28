@@ -20,9 +20,9 @@ fn valueLaws(recipe: testgen.ValueRecipe) !void {
     const b = try testgen.valueFromRecipe(allocator, cleanup.domain(), recipe, 4, .allowed, 0xa7);
     defer cleanup.releaseValue(b);
 
-    try std.testing.expect(equal.match(a, a));
-    try std.testing.expectEqual(equal.match(a, b), equal.match(b, a));
-    if (equal.match(a, b)) try std.testing.expectEqual(equal.hash(a), equal.hash(b));
+    try std.testing.expect(try equal.testing.match(allocator, a, a));
+    try std.testing.expectEqual(try equal.testing.match(allocator, a, b), try equal.testing.match(allocator, b, a));
+    if (try equal.testing.match(allocator, a, b)) try std.testing.expectEqual(try equal.testing.hash(allocator, a), try equal.testing.hash(allocator, b));
 
     const first = try printer.toOwnedString(allocator, a);
     defer allocator.free(first);
@@ -46,8 +46,8 @@ fn numericAndDictLaws(encoded: u64) !void {
     const integer: i32 = @bitCast(@as(u32, @truncate(encoded)));
     const int_value = Value{ .int = integer };
     const float_value = Value{ .float = @floatFromInt(integer) };
-    try std.testing.expect(equal.match(int_value, float_value));
-    try std.testing.expectEqual(equal.hash(int_value), equal.hash(float_value));
+    try std.testing.expect(try equal.testing.match(allocator, int_value, float_value));
+    try std.testing.expectEqual(try equal.testing.hash(allocator, int_value), try equal.testing.hash(allocator, float_value));
 
     const pairs = [_]dict.Pair{
         .{ .{ .int = 1 }, .{ .char = testgen.codepoint(@truncate(encoded >> 32)) } },
@@ -55,12 +55,12 @@ fn numericAndDictLaws(encoded: u64) !void {
         .{ .{ .int = 3 }, .{ .symbol = .{ .name = try testgen.internedId(@truncate(encoded >> 40)) } } },
     };
     const reversed = [_]dict.Pair{ pairs[2], pairs[1], pairs[0] };
-    const first = try dict.fromPairs(allocator, cleanup.domain(), &pairs);
+    const first = try dict.testing.fromPairs(allocator, cleanup.domain(), &pairs);
     defer cleanup.releaseValue(first);
-    const second = try dict.fromPairs(allocator, cleanup.domain(), &reversed);
+    const second = try dict.testing.fromPairs(allocator, cleanup.domain(), &reversed);
     defer cleanup.releaseValue(second);
-    try std.testing.expect(equal.match(first, second));
-    try std.testing.expectEqual(equal.hash(first), equal.hash(second));
+    try std.testing.expect(try equal.testing.match(allocator, first, second));
+    try std.testing.expectEqual(try equal.testing.hash(allocator, first), try equal.testing.hash(allocator, second));
 }
 
 test "numeric and dict ordering laws shrink to integers" {

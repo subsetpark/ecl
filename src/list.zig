@@ -460,41 +460,43 @@ pub fn fromValuesGeneric(
     return result;
 }
 
-pub fn fromI64Slice(
-    allocator: std.mem.Allocator,
-    source: []const i64,
-) error{OutOfMemory}!Value {
-    var cursor = I64Materializer.init(allocator, source);
-    var work = poll.unbounded();
-    const result = try poll.driveFallible(Value, &cursor, .{&work});
-    cursor.deinit();
-    return result;
-}
+/// Blocking constructors from host slices. They drive a materializer to
+/// completion in one call, so they exist only in test builds; production code
+/// drives the materializer against its owner's budget.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub fn fromI64Slice(
+        allocator: std.mem.Allocator,
+        source: []const i64,
+    ) error{OutOfMemory}!Value {
+        var cursor = I64Materializer.init(allocator, source);
+        const result = try poll.testing.driveInSlices(Value, &cursor, std.math.maxInt(usize));
+        cursor.deinit();
+        return result;
+    }
 
-pub fn fromU8Slice(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-) error{OutOfMemory}!Value {
-    var cursor = ByteListMaterializer.init(allocator, source);
-    var work = poll.unbounded();
-    const result = try poll.driveFallible(Value, &cursor, .{&work});
-    cursor.deinit();
-    return result;
-}
+    pub fn fromU8Slice(
+        allocator: std.mem.Allocator,
+        source: []const u8,
+    ) error{OutOfMemory}!Value {
+        var cursor = ByteListMaterializer.init(allocator, source);
+        const result = try poll.testing.driveInSlices(Value, &cursor, std.math.maxInt(usize));
+        cursor.deinit();
+        return result;
+    }
 
-/// ECL has no NaN value; every boundary that turns outside bits into floats
-/// rejects one, so a caller here never holds one.
-pub fn fromF64Slice(
-    allocator: std.mem.Allocator,
-    source: []const f64,
-) error{OutOfMemory}!Value {
-    for (source) |item| std.debug.assert(!std.math.isNan(item));
-    var cursor = F64Materializer.init(allocator, source);
-    var work = poll.unbounded();
-    const result = try poll.driveFallible(Value, &cursor, .{&work});
-    cursor.deinit();
-    return result;
-}
+    /// ECL has no NaN value; every boundary that turns outside bits into floats
+    /// rejects one, so a caller here never holds one.
+    pub fn fromF64Slice(
+        allocator: std.mem.Allocator,
+        source: []const f64,
+    ) error{OutOfMemory}!Value {
+        for (source) |item| std.debug.assert(!std.math.isNan(item));
+        var cursor = F64Materializer.init(allocator, source);
+        const result = try poll.testing.driveInSlices(Value, &cursor, std.math.maxInt(usize));
+        cursor.deinit();
+        return result;
+    }
+} else struct {};
 
 pub fn fromCodepoints(
     allocator: std.mem.Allocator,
@@ -579,11 +581,11 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.releaseValue(parent);
     const generic = try fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(generic);
-    const ints = try fromI64Slice(allocator, &.{ 1, 2 });
+    const ints = try testing.fromI64Slice(allocator, &.{ 1, 2 });
     defer cleanup.releaseValue(ints);
-    const bytes = try fromU8Slice(allocator, &.{ 0, 255 });
+    const bytes = try testing.fromU8Slice(allocator, &.{ 0, 255 });
     defer cleanup.releaseValue(bytes);
-    const floats = try fromF64Slice(allocator, &.{ 1.0, 2.0 });
+    const floats = try testing.fromF64Slice(allocator, &.{ 1.0, 2.0 });
     defer cleanup.releaseValue(floats);
     const chars = try fromCodepoints(allocator, &.{ 'a', 0x100, 0x10000 });
     defer cleanup.releaseValue(chars);

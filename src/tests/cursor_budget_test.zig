@@ -161,7 +161,7 @@ const ValueListAdapter = struct {
         cursor.retire(fixture.releases());
     }
     fn eql(a: Outcome, b: Outcome) !bool {
-        return equal.matchWithAllocator(allocator, a, b);
+        return equal.testing.match(allocator, a, b);
     }
     fn releaseOutcome(fixture: *Fixture, outcome: Outcome) void {
         fixture.release(outcome);
@@ -240,7 +240,7 @@ const DictAdapter = struct {
     fn eql(a: Outcome, b: Outcome) !bool {
         return switch (a) {
             .duplicate => b == .duplicate,
-            .built => |left| b == .built and try equal.matchWithAllocator(allocator, left, b.built),
+            .built => |left| b == .built and try equal.testing.match(allocator, left, b.built),
         };
     }
     fn releaseOutcome(fixture: *Fixture, outcome: Outcome) void {
@@ -289,7 +289,7 @@ const FindAdapter = struct {
     }
     fn eql(a: Outcome, b: Outcome) !bool {
         if (a == null or b == null) return a == null and b == null;
-        return equal.matchWithAllocator(allocator, a.?, b.?);
+        return equal.testing.match(allocator, a.?, b.?);
     }
     fn releaseOutcome(_: *Fixture, _: Outcome) void {}
 };
@@ -543,7 +543,7 @@ fn dictProperties(recipe: testgen.ValueRecipe) anyerror!void {
     for (keys, pairs, 0..) |key, *pair, index| pair.* = .{ key, .{ .int = @intCast(index) } };
     // Duplicate detection compares keys structurally, pairwise when small.
     const bound = 8 * weightOf(keys) * (keys.len + 1) + 64;
-    const reference: DictBuild = if (dict.fromPairs(allocator, fixture.releases(), pairs)) |built|
+    const reference: DictBuild = if (dict.testing.fromPairs(allocator, fixture.releases(), pairs)) |built|
         .{ .built = built }
     else |err| switch (err) {
         error.DuplicateKey => .duplicate,
@@ -558,7 +558,7 @@ fn dictProperties(recipe: testgen.ValueRecipe) anyerror!void {
         .duplicate => return,
     };
     const probe = if (keys.len == 0) Value{ .int = 0 } else keys[recipe.bytes[recipe.bytes.len - 1] % keys.len];
-    const found = try dict.getWithAllocator(allocator, dictionary, probe);
+    const found = try dict.testing.get(allocator, dictionary, probe);
     try checkCursor(
         FindAdapter,
         &fixture,
@@ -570,7 +570,7 @@ fn dictProperties(recipe: testgen.ValueRecipe) anyerror!void {
     // Select an integer outside the dictionary, including when generated
     // keys themselves are integers. At most keys.len + 1 probes suffice.
     var absent: Value = .{ .int = 0 };
-    while (try dict.getWithAllocator(allocator, dictionary, absent) != null) absent.int += 1;
+    while (try dict.testing.get(allocator, dictionary, absent) != null) absent.int += 1;
     try checkCursor(
         FindAdapter,
         &fixture,
@@ -592,8 +592,8 @@ fn equalityProperties(recipe: testgen.ValueRecipe) anyerror!void {
     const b = try testgen.valueFromRecipe(allocator, fixture.releases(), recipe, 3, .allowed, salt);
     defer fixture.release(b);
     const bound = 8 * (weight(a) + weight(b)) + 16;
-    try checkCursor(MatchAdapter, &fixture, .{ .a = a, .b = b }, try equal.matchWithAllocator(allocator, a, b), bound, seedOf(recipe));
-    try checkCursor(HashAdapter, &fixture, a, try equal.hashWithAllocator(allocator, a), 8 * weight(a) + 16, seedOf(recipe));
+    try checkCursor(MatchAdapter, &fixture, .{ .a = a, .b = b }, try equal.testing.match(allocator, a, b), bound, seedOf(recipe));
+    try checkCursor(HashAdapter, &fixture, a, try equal.testing.hash(allocator, a), 8 * weight(a) + 16, seedOf(recipe));
 }
 
 fn textProperties(recipe: testgen.ValueRecipe) anyerror!void {
@@ -675,10 +675,10 @@ test "cursor budget: absent keys finish in linear and indexed dictionaries at bo
         for (pairs[0..count], 0..) |*pair, index| pair.* = .{
             .{ .int = @intCast(index) }, .{ .int = @intCast(index + 100) },
         };
-        const dictionary = try dict.fromPairs(allocator, fixture.releases(), pairs[0..count]);
+        const dictionary = try dict.testing.fromPairs(allocator, fixture.releases(), pairs[0..count]);
         defer fixture.release(dictionary);
         const absent: Value = .{ .int = @intCast(count) };
-        try std.testing.expectEqual(null, try dict.getWithAllocator(allocator, dictionary, absent));
+        try std.testing.expectEqual(null, try dict.testing.get(allocator, dictionary, absent));
         try checkCursor(FindAdapter, &fixture, .{ .dictionary = dictionary, .key = absent }, null, 8 * count + 24, count);
     }
 }

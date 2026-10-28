@@ -90,7 +90,7 @@ fn namesOwned(environment: anytype, allocator: std.mem.Allocator) ![]u32 {
 }
 
 fn errorField(allocator: std.mem.Allocator, error_value: value.Value, name: []const u8) !?value.Value {
-    return dict.symbolField(allocator, error_value, try intern.intern(name));
+    return dict.testing.symbolField(allocator, error_value, try intern.intern(name));
 }
 
 test "session: transferred quotation provenance is absent from another archive" {

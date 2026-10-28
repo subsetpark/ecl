@@ -134,16 +134,16 @@ fn compareTotalFailure(source: []const u8) !void {
     for ([_][]const u8{ "kind", "msg", "word" }) |name| {
         const key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern(name) } };
         try expectValueEquivalent(
-            (try ecl.dict.get(generic_failure, key)).?,
-            (try ecl.dict.get(automatic_failure, key)).?,
+            (try ecl.dict.testing.get(std.testing.allocator, generic_failure, key)).?,
+            (try ecl.dict.testing.get(std.testing.allocator, automatic_failure, key)).?,
         );
     }
     const data_key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern("data") } };
     const index_key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern("index") } };
-    const generic_data = (try ecl.dict.get(generic_failure, data_key)).?;
-    const automatic_data = (try ecl.dict.get(automatic_failure, data_key)).?;
-    const generic_index = try ecl.dict.get(generic_data, index_key);
-    const automatic_index = try ecl.dict.get(automatic_data, index_key);
+    const generic_data = (try ecl.dict.testing.get(std.testing.allocator, generic_failure, data_key)).?;
+    const automatic_data = (try ecl.dict.testing.get(std.testing.allocator, automatic_failure, data_key)).?;
+    const generic_index = try ecl.dict.testing.get(std.testing.allocator, generic_data, index_key);
+    const automatic_index = try ecl.dict.testing.get(std.testing.allocator, automatic_data, index_key);
     try std.testing.expectEqual(generic_index != null, automatic_index != null);
     if (generic_index) |expected| try expectValueEquivalent(expected, automatic_index.?);
 }
@@ -588,8 +588,8 @@ fn compareModes(source: []const u8, exact_errors: bool) !void {
             for ([_][]const u8{ "kind", "msg" }) |name| {
                 const key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern(name) } };
                 try expectValueEquivalent(
-                    (try ecl.dict.get(generic.failure.?, key)).?,
-                    (try ecl.dict.get(automatic_failure, key)).?,
+                    (try ecl.dict.testing.get(std.testing.allocator, generic.failure.?, key)).?,
+                    (try ecl.dict.testing.get(std.testing.allocator, automatic_failure, key)).?,
                 );
             }
             return;
