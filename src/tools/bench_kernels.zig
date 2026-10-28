@@ -208,14 +208,157 @@ fn measure(io: std.Io, case: Case) !Measurement {
     };
 }
 
+/// The stored classes a numeric operand can have, each as source that builds a
+/// leaf of `n` elements of that class. The values keep every operation in the
+/// matrix clear of faults, so each case times its loop rather than a replay.
+const MatrixClass = struct { name: []const u8, leaf: []const u8 };
+
+const matrix_classes = [_]MatrixClass{
+    .{ .name = "byte", .leaf = "{d} range 2 mod 0 =" },
+    .{ .name = "char1", .leaf = "{d} range 90 mod 32 + char" },
+    .{ .name = "char2", .leaf = "{d} range 500 mod 1000 + char" },
+    .{ .name = "char4", .leaf = "{d} range 500 mod 70000 + char" },
+    .{ .name = "int", .leaf = "{d} range 1000 mod" },
+    .{ .name = "real", .leaf = "{d} range 1000 mod 0.5 *" },
+};
+
+const matrix_scalars = [_]MatrixClass{
+    .{ .name = "int scalar", .leaf = "7" },
+    .{ .name = "real scalar", .leaf = "2.5" },
+};
+
+/// One operation per loop policy: infallible vector arithmetic, checked vector
+/// arithmetic, a 0/1 result, and a selection.
+const matrix_operations = [_][]const u8{ "+%", "+", "=", "max" };
+
+/// One size whose operands and result stay in the first-level cache, and one
+/// whose streams go to memory.
+const matrix_sizes = [_]usize{ 4_096, 4_194_304 };
+
+/// Elements per timed run, so that both sizes run long enough to time.
+const matrix_elements_per_run: usize = 1 << 25;
+const matrix_repeats = 5;
+
+/// Reductions over one leaf, each phrase leaving the stack as it found it.
+const matrix_reductions = [_][]const u8{ "dup 0 (+) fold pop", "dup 0 (+) scan pop", "dup 0 (max) fold pop" };
+
+/// Times `phrase` per element through a Session: the minimum over
+/// `matrix_repeats` runs of a loop that applies it to what `setup` left. Null
+/// when the phrase fails.
+fn measureMatrixCase(io: std.Io, setup: []const u8, phrase: []const u8, size: usize) !?f64 {
+    var output = std.Io.Writer.Discarding.init(&.{});
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", std.heap.smp_allocator);
+    defer std.heap.smp_allocator.free(cwd);
+    const inputs: ecl.session.RuntimeInputs = .{
+        .io = io,
+        .output = &output.writer,
+        .diagnostics = &output.writer,
+        .initial_cwd = cwd,
+        .environ = &.{},
+        .standard_input = .program_source,
+        .clock = .{ .wall = .{ .fixed = 0 } },
+    };
+    var runtime = try ecl.session.Session.init(std.heap.smp_allocator, &.{}, inputs, .default, .evaluate);
+    defer runtime.deinit();
+
+    switch (try runtime.runUnit("<bench-setup>", setup)) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.SetupFailed;
+        },
+        .incomplete => return error.SetupFailed,
+    }
+    const iterations = @max(1, matrix_elements_per_run / size);
+    const workload = try std.fmt.allocPrint(std.heap.smp_allocator, "{d} ({s}) times", .{ iterations, phrase });
+    defer std.heap.smp_allocator.free(workload);
+    var best: ?u64 = null;
+    for (0..matrix_repeats) |_| {
+        const started = std.Io.Timestamp.now(io, .awake);
+        const outcome = try runtime.runUnit("<bench-workload>", workload);
+        const elapsed: u64 = @intCast(@max(started.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds, 0));
+        switch (outcome) {
+            .ok => {},
+            .err => |failure| {
+                runtime.release(failure);
+                return null;
+            },
+            .incomplete => return null,
+        }
+        best = if (best) |previous| @min(previous, elapsed) else elapsed;
+    }
+    return @as(f64, @floatFromInt(best.?)) / @as(f64, @floatFromInt(iterations * size));
+}
+
+/// Every stored class against every stored class and both scalar classes, for
+/// each operation and size, and each reduction over each class: the evidence
+/// for which class pairs earn a loop of their own. Compare two builds'
+/// tables; the counters above do not apply here.
+fn classMatrix(io: std.Io, out: *std.Io.Writer) !void {
+    try out.print("{s: <36} {s: >9} {s: >10}\n", .{ "case", "n", "ns/elem" });
+    try out.flush();
+    for (matrix_sizes) |size| {
+        for (matrix_operations) |operation| {
+            inline for (matrix_classes) |left_class| {
+                const left = try std.fmt.allocPrint(std.heap.smp_allocator, left_class.leaf, .{size});
+                defer std.heap.smp_allocator.free(left);
+                inline for (matrix_classes ++ matrix_scalars) |right_class| {
+                    const right = if (comptime std.mem.indexOfScalar(u8, right_class.leaf, '{') != null)
+                        try std.fmt.allocPrint(std.heap.smp_allocator, right_class.leaf, .{size})
+                    else
+                        try std.heap.smp_allocator.dupe(u8, right_class.leaf);
+                    defer std.heap.smp_allocator.free(right);
+                    const setup = try std.fmt.allocPrint(std.heap.smp_allocator, "{s} {s}", .{ left, right });
+                    defer std.heap.smp_allocator.free(setup);
+                    const phrase = try std.fmt.allocPrint(std.heap.smp_allocator, "over over {s} pop", .{operation});
+                    defer std.heap.smp_allocator.free(phrase);
+                    const label = try std.fmt.allocPrint(std.heap.smp_allocator, "{s} {s} {s}", .{ left_class.name, right_class.name, operation });
+                    defer std.heap.smp_allocator.free(label);
+                    try reportMatrixCase(out, label, size, measureMatrixCase(io, setup, phrase, size));
+                }
+            }
+        }
+        for (matrix_reductions) |reduction| {
+            inline for (matrix_classes) |class| {
+                const setup = try std.fmt.allocPrint(std.heap.smp_allocator, class.leaf, .{size});
+                defer std.heap.smp_allocator.free(setup);
+                const label = try std.fmt.allocPrint(std.heap.smp_allocator, "{s} {s}", .{ class.name, reduction });
+                defer std.heap.smp_allocator.free(label);
+                try reportMatrixCase(out, label, size, measureMatrixCase(io, setup, reduction, size));
+            }
+        }
+    }
+}
+
+fn reportMatrixCase(out: *std.Io.Writer, label: []const u8, size: usize, result: anyerror!?f64) !void {
+    if (result) |measured| {
+        if (measured) |nanoseconds| {
+            try out.print("{s: <36} {d: >9} {d: >10.3}\n", .{ label, size, nanoseconds });
+        } else {
+            try out.print("{s: <36} {d: >9} {s: >10}\n", .{ label, size, "-" });
+        }
+    } else |err| {
+        try out.print("{s: <36} {d: >9} {s: >10}\n", .{ label, size, @errorName(err) });
+    }
+    try out.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     defer args.deinit();
     _ = args.skip();
-    const explicit_simd_only = if (args.next()) |argument|
-        std.mem.eql(u8, argument, "--explicit-simd-only")
-    else
-        false;
+    const argument = args.next();
+    const explicit_simd_only = if (argument) |text| std.mem.eql(u8, text, "--explicit-simd-only") else false;
+    if (argument) |text| if (std.mem.eql(u8, text, "--class-matrix")) {
+        var matrix_buffer: [4096]u8 = undefined;
+        var matrix_stdout = std.Io.File.stdout().writerStreaming(init.io, &matrix_buffer);
+        try matrix_stdout.interface.print("optimize: {s}\ntarget: {s}-{s}\n\n", .{
+            @tagName(@import("builtin").mode),
+            @tagName(@import("builtin").cpu.arch),
+            @tagName(@import("builtin").os.tag),
+        });
+        return classMatrix(init.io, &matrix_stdout.interface);
+    };
 
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);

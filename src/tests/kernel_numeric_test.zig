@@ -49,6 +49,71 @@ test "numeric: characters are codepoints in arithmetic and comparison" {
     });
 }
 
+test "numeric: stored widths compute and fault as ints across blocks" {
+    // 300 elements span two 256-element blocks, so each case reads past the
+    // first block of a widened operand.
+    try helper.expectStacks(&.{
+        .{
+            .name = "char leaves against int leaves and each other",
+            .source = "300 range 1000 + char 300 range + 299 at " ++
+                "300 range 65 + char 300 range 1000 + char - 299 at " ++
+                "300 range 2 mod 0 = 300 range 70000 + char < 0 (+) fold",
+            .expected = "1598 -935 300",
+        },
+        .{
+            .name = "a char leaf against a real scalar, and inside a spine",
+            .source = "300 range 1000 + char 0.5 * 299 at " ++
+                "300 range 1000 + char wrap 300 range wrap + 0 at 299 at",
+            .expected = "649.5 1598",
+        },
+        .{
+            .name = "a byte mask over a char leaf may take over the mask",
+            .source = "300 range 2 mod 0 = 300 range 2 mod char or 0 (+) fold",
+            .expected = "300",
+        },
+        .{
+            .name = "row folds and reductions over stored widths",
+            .source = "300 range 1000 + char wrap 300 range 70000 + char wrap cat " ++
+                "300 range 2 mod 0 = wrap cat (+) fold1 299 at " ++
+                "300 range 2 mod 0 = 0 (+) fold " ++
+                "300 range 1000 + char 0 (+) scan 299 at " ++
+                "300 range 1000 + char 0.5 (+) fold",
+            .expected = "71598 150 344850 344850.5",
+        },
+    });
+    try helper.expectErrors(&.{
+        .{
+            .name = "a char leaf against an int scalar faults in its second block",
+            .source = "300 range 1000 + char 9223372036854774552 +",
+            .kind = "overflow",
+            .word = "+",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+        .{
+            .name = "a char leaf against an int leaf faults in its second block",
+            .source = "300 range 1000 + char 300 range 9223372036854774296 + +",
+            .kind = "overflow",
+            .word = "+",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+        .{
+            .name = "a byte mask taken over reports the stored operand's fault",
+            .source = "300 range 2 mod 0 = 300 range 2 mod 300 range 256 = 2 * + char and",
+            .kind = "type",
+            .word = "and",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+        .{
+            .name = "a row fold over a char row faults in its second block",
+            .source = "300 range 9223372036854774296 + wrap 300 range 1000 + char wrap cat " ++
+                "300 range wrap cat (+) fold1",
+            .kind = "overflow",
+            .word = "+",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+    });
+}
+
 test "numeric: transcendental non-finite edges" {
     try helper.expectStacks(&.{
         .{
