@@ -17,7 +17,9 @@ const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@spawn", .primitive = spawn, .effect = "values quotation -- task", .doc = "Run a quotation with an explicit initial stack concurrently in a fresh child unit." },
+        .{ .name = "@spawn!", .primitive = spawnSeedless, .effect = "quotation -- task", .doc = "Run a quotation on an empty stack concurrently in a fresh child unit; `[] q @spawn`." },
         .{ .name = "@give", .primitive = give, .effect = "ports values quotation -- task", .doc = "Run a quotation concurrently in a fresh child unit that owns the given ports: the child unit closes them when it ends, and the calling unit no longer does." },
+        .{ .name = "@give!", .primitive = giveSeedless, .effect = "ports quotation -- task", .doc = "Run a quotation concurrently in a fresh child unit that owns the given ports, with no further values; `ports [] q @give`." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -80,7 +82,16 @@ fn refuseDuringConstruction(evaluator: *Machine, comptime constructor: []const u
 
 fn spawn(evaluator: *Machine) MachineError!void {
     try refuseDuringConstruction(evaluator, "@spawn");
-    var input = try evaluator.popUnitInput();
+    try spawnInput(evaluator, try evaluator.popUnitInput());
+}
+
+fn spawnSeedless(evaluator: *Machine) MachineError!void {
+    try refuseDuringConstruction(evaluator, "@spawn!");
+    try spawnInput(evaluator, try evaluator.popSeedlessUnitInput());
+}
+
+fn spawnInput(evaluator: *Machine, popped: machine.OwnedUnitInput) MachineError!void {
+    var input = popped;
     defer input.deinit(evaluator.releaseDomain());
     const borrowed = input.borrow();
     const task = try spawnTask(
@@ -237,14 +248,15 @@ const GiveDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     moved: Value,
-    seeds: Value,
+    /// Null for `@give!`, which takes no values operand.
+    seeds: ?Value,
     body: Value,
     cursor: GiveCursor,
 
     pub fn deinit(self: *GiveDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         _ = allocator;
         releases.releaseValue(self.body);
-        releases.releaseValue(self.seeds);
+        if (self.seeds) |seeds| releases.releaseValue(seeds);
         releases.releaseValue(self.moved);
     }
 
@@ -262,16 +274,19 @@ const GiveDriver = struct {
 
     fn spawn(self: *GiveDriver, evaluator: *Machine) MachineError!Value {
         const moved_count = self.cursor.count;
-        const seed_count: usize = @intCast(self.seeds.list.length());
+        const seed_count: usize = if (self.seeds) |seeds| @intCast(seeds.list.length()) else 0;
         // The child starts on the given ports, deepest, then the ordinary
         // values. Both lists are seeded in bounded slices by the child's seed
         // driver, so no concatenated copy is built here.
         const stack: machine.InitialStack = if (moved_count == 0 and seed_count == 0)
             .empty
         else if (moved_count == 0)
-            .{ .borrowed_seeds = self.seeds.list }
+            .{ .borrowed_seeds = self.seeds.?.list }
+        else if (seed_count == 0)
+            // Ports alone seed exactly as an explicit values list would.
+            .{ .borrowed_seeds = self.moved.list }
         else
-            .{ .borrowed_pair = .{ .deep = self.moved.list, .seeds = self.seeds.list } };
+            .{ .borrowed_pair = .{ .deep = self.moved.list, .seeds = self.seeds.?.list } };
         return scheduler(evaluator).spawn(scope(evaluator), .{
             .parent_unit = evaluator.unit,
             .site = .{ .inherited = .{
@@ -303,9 +318,23 @@ fn give(evaluator: *Machine) MachineError!void {
     try refuseDuringConstruction(evaluator, "@give");
     try evaluator.require(3);
     var body = try evaluator.popQuotation();
-    errdefer body.deinit();
+    defer body.deinit();
     var seeds = try evaluator.popList();
-    errdefer seeds.deinit();
+    defer seeds.deinit();
+    try giveInput(evaluator, &body, &seeds);
+}
+
+fn giveSeedless(evaluator: *Machine) MachineError!void {
+    try refuseDuringConstruction(evaluator, "@give!");
+    try evaluator.require(2);
+    var body = try evaluator.popQuotation();
+    defer body.deinit();
+    try giveInput(evaluator, &body, null);
+}
+
+/// Takes the body and seeds only once the driver owns them; on failure the
+/// callers' owners still release them.
+fn giveInput(evaluator: *Machine, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue) MachineError!void {
     var moved = try evaluator.popList();
     errdefer moved.deinit();
 
@@ -319,7 +348,7 @@ fn give(evaluator: *Machine) MachineError!void {
     const moved_list = moved.take();
     driver.* = .{
         .moved = moved_list,
-        .seeds = seeds.take(),
+        .seeds = if (seeds) |owned| owned.take() else null,
         .body = body.take(),
         .cursor = .{
             .origin = evaluator.unit.task_scope.?,

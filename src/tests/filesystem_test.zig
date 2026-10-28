@@ -595,6 +595,8 @@ test "fs: directory resources own confined descriptors and close with their scop
     try runCase(options, .{ .worker_pool = 4 }, "[] (`root \".\" fs.child-dir) @spawn task.await `ok at first wrap (\"file\" fs.read-text) @attempt `err at `kind at " ++
         "`root \".\" fs.child-dir `d set d wrap [] (port.close) @give task.await `ok at len " ++
         "[] (d \"file\" fs.read-text) @attempt `err at `kind at", .{ .stack = "io 0 io" });
+    try runCase(options, .{ .worker_pool = 4 }, "`root \".\" fs.child-dir wrap (stack len nip) @give! task.await `ok at " ++
+        "`root \".\" fs.child-dir `d set d wrap (port.close) @give! task.await `ok at len [] (d \"file\" fs.read-text) @attempt `err at `kind at", .{ .stack = "[1] 0 io" });
 }
 
 test "fs: stat lstat exists and list describe entries exactly" {

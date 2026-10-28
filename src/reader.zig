@@ -24,8 +24,14 @@ pub const LexicalContext = implementation.LexicalContext;
 /// it, rather than re-deriving the answer from a second scanner.
 pub const PendingUnit = implementation.PendingUnit;
 
+/// The module constructors whose operands end in a literal name.
+pub fn isRegistrationWord(bytes: []const u8) bool {
+    const std = @import("std");
+    return std.mem.eql(u8, bytes, "@defm") or std.mem.eql(u8, bytes, "@defm!");
+}
+
 /// Inert inspection of already parsed top-level forms. Feed each form once,
-/// in source order. Only a literal symbol immediately preceding `@defm` is
+/// in source order. Only a literal symbol immediately preceding `@defm` or `@defm!` is
 /// discoverable; nested quotations and computed names are not declarations
 /// visible to discovery. Names are returned verbatim, including duplicates:
 /// namespace and export validation belong to the consumer's schema.
@@ -49,7 +55,7 @@ pub const DeclarationScan = struct {
             } else null;
         }
         self.previous_first = is_first;
-        if (form == .symbol and std.mem.eql(u8, intern.get(form.symbol.name), "@defm")) return declared;
+        if (form == .symbol and isRegistrationWord(intern.get(form.symbol.name))) return declared;
         return null;
     }
 };

@@ -155,6 +155,17 @@ Errors.
 # => {ok [1 5]}
 ```
 
+### @attempt!
+`( quotation -- result )` — *Unit constructor.* `@attempt` with no values
+operand: the quotation runs on an empty stack, exactly as `[] (q) @attempt`.
+
+#### Examples
+
+```ecl
+(40 2 +) @attempt!
+# => {ok [42]}
+```
+
 ### @defm
 ``( values body `module-name -- )`` — *Unit constructor.* The one module
 constructor. Validate the name first: a non-symbol is `` `type ``; an invalid
@@ -167,6 +178,12 @@ after the body has run.
 The name is last, matching `def` and `set`: the bound name sits nearest
 the defining word. Registration is therefore ``values (body) `name @defm``. See
 Modules.
+
+### @defm!
+``( body `module-name -- )`` — *Unit constructor.* `@defm` with no values
+operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``.
+Module discovery and the formatter's `### module` header recognize this form
+too.
 
 ### @give
 `( ports values quotation -- task )` — *Unit constructor.* Like `@spawn`, and
@@ -201,6 +218,11 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => {ok [1]}
 ```
 
+### @give!
+`( ports quotation -- task )` — *Unit constructor.* `@give` with no values
+operand: the child stack is the given ports alone, exactly as
+`ports [] (q) @give`.
+
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack
 from the explicit values list and run the quotation concurrently. Use `[]` for
@@ -213,6 +235,17 @@ body defines words and starts no tasks (see Modules). See
 
 ```ecl
 [] (40 2 +) @spawn task.await
+# => {ok [42]}
+```
+
+### @spawn!
+`( quotation -- task )` — *Unit constructor.* `@spawn` with no values operand:
+the quotation runs on an empty stack, exactly as `[] (q) @spawn`.
+
+#### Examples
+
+```ecl
+(40 2 +) @spawn! task.await
 # => {ok [42]}
 ```
 
@@ -607,6 +640,12 @@ non-symbol item is `` `type ``; an invalid module or attribute name is `` `domai
 Each imported binding dispatches through the module, preserves the original's
 effect and documentation, and may replace an existing local binding. `see`
 renders its one-word forwarding quotation.
+
+### importp
+`( module-name q -- )` — `import`, publishing each forwarding binding as a
+private module word: the importing module's words use it, but it is not part
+of that module's public surface. Legal only inside a module body; elsewhere it
+is `` `domain ``.
 
 ### in?
 `( value list -- bool )` — Membership. Pervades over the sought value —
@@ -1283,6 +1322,16 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ```ecl
 [1 2 3 4] (2 mod 0 =) partition pair
 # => [[2 4] [1 3]]
+```
+
+### @each!
+`( sequence quotation -- results )` — *Unit constructor*, one fresh unit per element, contract `( a -- b )` enforced per element. `@each` with no shared values: each child's stack starts with its element alone, so `list (q) @each!` is `list [] (q) @each`. Defined in ecl over `@each`.
+
+#### Examples
+
+```ecl
+[1 2 3] (10 *) @each!
+# => [10 20 30]
 ```
 
 ### bi

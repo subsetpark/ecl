@@ -4924,6 +4924,12 @@ pub const Machine = struct {
             seeds.take().list;
         return OwnedUnitInput.init(seed_header, body.take().list);
     }
+    /// The `!` constructors take no values operand: the input is exactly the
+    /// empty-seed representation `[] body` would decode to.
+    pub fn popSeedlessUnitInput(self: *Machine) MachineError!OwnedUnitInput {
+        var body = try self.popQuotation();
+        return OwnedUnitInput.init(null, body.take().list);
+    }
     pub fn popString(self: *Machine) MachineError!heap.OwnedValue {
         return self.popChecked("a string", struct {
             fn accepts(item: Value) bool {
