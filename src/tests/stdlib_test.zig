@@ -95,8 +95,9 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
 test "stdlib: an imported standard-library builtin is that builtin under its import's contract" {
     // `dict` imports its kernels from `dict.core`, as a session may. The
     // binding is the builtin itself, so a failure inside it names the
-    // attribute's qualified name with no forwarding frame, while the imported
-    // name's declared effect still guards the call.
+    // attribute's qualified name with no forwarding frame. A standard-library
+    // word's effect is not checked at the boundary, so too few values are the
+    // builtin's own underflow; a user module's effect is still a contract.
     try support.expectStacks(&.{
         .{
             .name = "a kernel failure names the kernel",
@@ -110,9 +111,15 @@ test "stdlib: an imported standard-library builtin is that builtin under its imp
             .expected = "dict.core.get (dict.core.get) 5",
         },
         .{
-            .name = "the declared effect names the imported word",
+            .name = "too few values are the kernel's underflow",
             .source = "[] ({a 1} dict.get) @attempt `err at dup `kind at swap `word at",
-            .expected = "contract dict.get",
+            .expected = "underflow dict.core.get",
+        },
+        .{
+            .name = "a user module's effect is still a contract",
+            .source = "[] ((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
+                "[] (checked.w) @attempt `err at dup `kind at swap `word at",
+            .expected = "contract checked.w",
         },
     });
 }

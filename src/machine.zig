@@ -6907,7 +6907,13 @@ const QualifiedRegistrationDriver = struct {
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home();
-    const cross_home_effect = if (cross_home) resolved.lease.spec().effect else null;
+    // A module word's declared effect is a contract checked where a call
+    // crosses into its module, except a standard-library word's: the
+    // implementation is the standard library's author, so its effects are
+    // reflective metadata, and its arity failures are those of the code it
+    // runs.
+    const checked = cross_home and resolved.origin != .standard_library;
+    const cross_home_effect = if (checked) resolved.lease.spec().effect else null;
     switch (resolved.lease.spec().binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
@@ -6941,14 +6947,14 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             );
         },
         .builtin => |primitive| {
-            // The declared effect is the called word's contract, so its check
+            // A declared effect is the called word's contract, so its check
             // names that word; a failure inside the builtin names the
             // builtin, which an import reports by its qualified name.
             if (cross_home_effect) |effect| try self.beginInvocation(effect, resolved.trace_word);
             try invokeBuiltin(self, resolved.lease.spec().reports_as orelse resolved.trace_word, primitive);
         },
         .native => |callable| {
-            if (cross_home) {
+            if (checked) {
                 const effect = cross_home_effect orelse
                     return self.fail(.domain, "module word has no effect declaration");
                 try self.beginInvocation(effect, resolved.trace_word);

@@ -171,7 +171,9 @@ test "invocation effects: task completion precedes caller continuation" {
         "42",
     );
     try support.expectErrors(&.{
-        .{ .name = "entry contract", .source = "task.await", .kind = "contract", .word = "task.await" },
+        // A standard-library word has no boundary effect check: too few
+        // values are the builtin's own underflow.
+        .{ .name = "entry underflow", .source = "task.await", .kind = "underflow", .word = "task.await" },
         .{ .name = "primitive failure", .source = "3 task.await", .kind = "type", .word = "task.await" },
         .{ .name = "driver failure", .source = "[3] task.await-any", .kind = "type", .word = "task.await-any" },
     });

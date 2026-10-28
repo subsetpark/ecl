@@ -1382,7 +1382,10 @@ four forms as top-level `def`: no annotation, effect only, documentation
 only, or both. A top-level effect is reflective metadata only; a module
 word's declared effect is a live contract, checked dynamically against the
 observed effect when application crosses a module boundary (violation:
-`` `contract ``). An omitted module effect means there is no such check.
+`` `contract ``). An omitted module effect means there is no such check, and
+so does a standard-library word's: the standard library's effects are
+reflective metadata, and a call with too few values fails inside the word,
+as the code it runs reports it.
 This source-language relaxation does not weaken the native ABI, whose
 `Call` effect and documentation remain mandatory; the shipped prelude
 keeps its stronger repository policy requiring meaningful documentation.
@@ -1982,10 +1985,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   definition whose effect and documentation are copied from the original.
   An attribute that a standard-library module binds to a host builtin is
   bound directly instead: no other module can register a standard-library
-  name, so resolving the attribute once finds what every call would. Its
-  declared effect is checked under the imported name, and a failure inside
-  the builtin names the attribute's qualified name, as a forwarding call
-  would; no forwarding frame appears in a trace.
+  name, so resolving the attribute once finds what every call would. A
+  failure inside the builtin names the attribute's qualified name, as a
+  forwarding call would; no forwarding frame appears in a trace.
   Naming a binding that already exists replaces only that binding; importing
   selected names never splices an entire module or emits shadow notices.
   `importp` is the private form: the same request publishes module-private

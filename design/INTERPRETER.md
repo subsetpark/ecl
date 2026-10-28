@@ -354,7 +354,8 @@ An `import` of a standard-library builtin binds that builtin in the importing
 root rather than a forwarding body. The binding records the attribute's
 qualified name as the name its failures report, so a call reaches the host
 operation in one dispatch while its diagnostics stay those of the forwarding
-call; the imported name's declared effect still guards the call. This is sound
+call. A standard-library binding carries no boundary effect check, so the
+call is the builtin and nothing else. This is sound
 only because a standard-library module name has exactly one registration for
 the life of the process.
 
