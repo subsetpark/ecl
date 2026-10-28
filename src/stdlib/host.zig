@@ -6,8 +6,8 @@ const machine = @import("../machine.zig");
 const storage = @import("../kernel_storage.zig");
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "cwd", .effect = "-- path", .doc = "Return the Session's absolute startup directory as UTF-8 text.", .primitive = cwd },
-    .{ .name = "executable", .effect = "-- path", .doc = "Return the operating system's absolute path to the current executable as UTF-8 text; report io if unavailable.", .primitive = executable },
+    .{ .name = "cwd", .effect = "-- path", .doc = "Return the absolute startup directory captured by the Session host as UTF-8 text. This does not consult `PWD` or change the working directory.", .primitive = cwd },
+    .{ .name = "executable", .effect = "-- path", .doc = "Ask the operating system for the current executable's absolute path and return UTF-8 text. This does not consult `PATH` or trust the executable name supplied in the argument vector. Raise `` `io `` when the host cannot provide the path or it is not UTF-8. This is an observation, not an open-file identity: subsequent deletion or replacement can make the path unavailable or stale. Neither metadata operation grants authority beyond the existing filesystem and process facilities. Text construction is cancellable.", .primitive = executable },
 };
 
 const Query = enum { cwd, executable };

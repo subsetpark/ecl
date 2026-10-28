@@ -27,18 +27,19 @@ const member_slots = 1 << 18;
 const tar_block_bytes = 512;
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "open-tgz", .doc = "( bytes -- archive ) Validate a gzip tar for scope-owned member inspection.", .primitive = openTgz },
-    .{ .name = "next-member", .doc = "( archive -- metadata ) Advance to the next member, or return an empty dictionary at end.", .primitive = nextMember },
-    .{ .name = "read-member", .doc = "( archive maximum -- bytes ) Stream up to 65536 bytes from the selected member; empty bytes denote end.", .primitive = readMember },
+    .{ .name = "open-tgz", .effect = "bytes -- archive", .doc = "Validate a gzip tar with the same hostile-input parser and limits as `unpack-tgz`, then return a scope-owned archive resource without filesystem writes. No manifest or package identity is required. The resource retains the validated uncompressed document until `port.close` or scope exit; cleanup is joined and advances incrementally through member storage. The limits apply per document. Scope ownership governs lifetime and joined cleanup; it does not impose an aggregate heap budget on retained archives.", .primitive = openTgz },
+    .{ .name = "next-member", .effect = "archive -- metadata", .doc = "Select the next archive member and return `{path string kind symbol size int}` in archive order. Kinds are `` `file `` and `` `directory ``; size is the content length in bytes. `{}` denotes stable end. Advancing skips unread contents of the previous member. Metadata owns its path independently of later cursor operations or closure.", .primitive = nextMember },
+    .{ .name = "read-member", .effect = "archive maximum -- bytes", .doc = "Read up to `maximum` bytes from the selected member, advancing its content position. The maximum must be an integer from 1 through 65,536. `[]` denotes end of that member, a directory, or no selected member. Reads copy bounded chunks into independently owned values; concurrent reads consume distinct chunks, with unspecified completion order. Coordinate member advancement with reads when using the archive across tasks. Operations on a closed archive raise `` `io ``.", .primitive = readMember },
     .{
         .name = "sha256",
-        .doc = "( bytes -- lowercase-hex ) Hash an integer byte list with SHA-256.",
+        .effect = "bytes -- lowercase-hex",
+        .doc = "Return the SHA-256 digest of an integer byte list. Every item must be an integer in `0..255`; strings are not byte vectors and are not coerced.",
         .primitive = sha256,
     },
     .{
         .name = "unpack-tgz",
-        .doc = "( bytes root destination -- regular-file-paths ) Validate and atomically " ++
-            "extract a gzip tar into a previously absent destination beneath a root.",
+        .effect = "bytes root destination -- regular-file-paths",
+        .doc = "Validate and atomically unpack a gzip-compressed tar byte list beneath a previously absent `destination`, a canonical relative path under a named Session filesystem root or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its directory lease until publication or rollback completes. The destination must name a child entry, not `.`. Return normalized regular-file paths in archive order. Unsafe, linked, special, duplicate, malformed, or over-limit members are `` `domain ``; invalid byte items are `` `domain ``; wrong container kinds are `` `type ``; an unknown root or a non-canonical destination is `` `domain `` carrying the `fs` failure data; an exhausted operation quota is `` `overflow ``; filesystem and destination conflicts are `` `io ``. Failure never publishes a partial destination. See the environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives) for the complete format, limit, containment, and publication contract.",
         .primitive = unpackTgz,
     },
 };

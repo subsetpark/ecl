@@ -91,27 +91,3 @@ Bytes are ordinary integer lists whose elements are all in `0...255`. Process
 streams do not decode Unicode. A port is an opaque identity capability that
 prints `<port:N>` and has type `` `port ``; it exposes no PID and cannot be passed
 through JSON. Native words can view and forward its opaque identity.
-
-### close-input
-
-### kill
-
-### read-stderr
-
-### read-stdout
-
-### run
-
-### spawn
-
-### stderr
-
-### stdin
-
-### stdout
-
-### terminate
-
-### wait
-
-### write

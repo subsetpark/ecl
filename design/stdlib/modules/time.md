@@ -10,14 +10,6 @@ in which every day has exactly 86,400,000 milliseconds. The representable
 range runs from `-292275055-05-16T16:47:04.192` through
 `292278994-08-17T07:12:55.807`. Nothing in this module reads a clock.
 
-### add
-
-### cmp
-
-### days
-
-### diff
-
 ### format
 
 #### Examples
@@ -27,14 +19,6 @@ range runs from `-292275055-05-16T16:47:04.192` through
 # => "1970-01-01T00:00:00.000Z"
 ```
 
-### from-unix
-
-### from-utc
-
-### hours
-
-### minutes
-
 ### parse
 
 #### Examples
@@ -43,10 +27,6 @@ range runs from `-292275055-05-16T16:47:04.192` through
 "2024-02-29T12:34:56.789+05:30" time.parse time.format
 # => "2024-02-29T07:04:56.789Z"
 ```
-
-### seconds
-
-### to-unix
 
 ### to-utc
 

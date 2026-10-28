@@ -9,7 +9,7 @@ const Value = @import("../value.zig").Value;
 pub const words = [_]env.BuiltinWord{.{
     .name = "declarations",
     .effect = "quotation -- list",
-    .doc = "Inspect parsed source without execution; return literal top-level @defm names as symbols in source order, preserving duplicates. Computed and nested registrations are omitted. Use parse first for source text.",
+    .doc = "Inspect parsed source without executing it. Return the symbols immediately preceding top-level `@defm` words, in source order. Preserve duplicate names and report literal spellings without validating namespace or export policy. Ignore computed names and declarations inside quotations, lists, dictionaries, strings, or comments. This reports syntactic declarations, not proof that executing the source would register a module. Like other quotation operations, this accepts a list (`` `type `` otherwise). Use `parse` to inspect text, with its ordinary parse failures. Inspection is cancellable.",
     .primitive = declarations,
 }};
 

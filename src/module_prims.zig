@@ -10,6 +10,7 @@ const modules = @import("modules.zig");
 const definition_prims = @import("definition_prims.zig");
 const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
+const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -19,17 +20,19 @@ const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "Validate a module name, then evaluate a module body with an explicit initial stack in a fresh unit and register the result under that name." },
-        .{ .name = "@defm!", .primitive = defmSeedless, .effect = "body module-name --", .doc = "Validate a module name, then evaluate a module body on an empty stack in a fresh unit and register the result under that name; `[] body name @defm`." },
-        .{ .name = "undefm", .primitive = undefmWord, .effect = "module-name --", .doc = "Remove the module registered under a canonical name or alias." },
-        .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
-        .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name dynamically supplied by the current module activation." },
-        .{ .name = "import", .primitive = importAs(.public), .effect = "module-name q --", .doc = "Import a list of public module attributes under their own names, preserving effects and documentation." },
-        .{ .name = "importp", .primitive = importAs(.private), .effect = "module-name q --", .doc = "Import a list of public module attributes as private module words under their own names, preserving effects and documentation; legal only in a module root." },
-        .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register a short alias for a qualified module name." },
-        .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Construct an executable qualified word without reparsing source text." },
+        .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "*Unit constructor.* The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.\n\nThe name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``values (body) `name @defm``. See Modules." },
+        .{ .name = "@defm!", .primitive = defmSeedless, .effect = "body module-name --", .doc = "*Unit constructor.* `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too." },
+        .{ .name = "undefm", .primitive = undefmWord, .effect = "module-name --", .doc = "Remove the module currently registered under a canonical name or unqualified alias, resolved exactly as ordinary registry lookup resolves it. An unregistered name is `` `undefined-word ``. Removal strips every alias targeting the module in the same publish; an already-dispatched call finishes under the generation it resolved. See [Modules](SPEC.md#modules)." },
+        .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file." },
+        .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name selected by the current module activation. The same image registered under different names reports the name through which it was called; an alias reports its target's canonical name. `` `domain `` at top level, during module construction, or through an escaped quotation whose image has no invoking registration." },
+        .{ .name = "import", .primitive = importAs(.public), .effect = "module-name q --", .doc = "Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported binding dispatches through the module, preserves the original's effect and documentation, and may replace an existing local binding. `see` renders its one-word forwarding quotation." },
+        .{ .name = "importp", .primitive = importAs(.private), .effect = "module-name q --", .doc = "`import`, publishing each forwarding binding as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body; elsewhere it is `` `domain ``." },
+        .{ .name = "alias", .primitive = aliasModule, .effect = "short name --", .doc = "Register an unqualified short registry name for a canonical, possibly dotted module name. Aliases and module names may not collide in either direction." },
+        .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Validate a canonical module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed." },
         .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
-        .{ .name = "load", .primitive = load, .effect = "path --", .doc = "Read and evaluate a source file as one transactional unit." },
+        .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``." },
+        .{ .name = "stdlib", .primitive = stdlibWord, .effect = "-- names", .doc = "Return the names of the embedded standard-library modules as a list of symbols in codepoint order." },
+        .{ .name = "load", .primitive = load, .effect = "path --", .doc = "Read and evaluate a source file as one transactional unit in the calling session." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -553,6 +556,173 @@ const QualifyDriver = struct {
 };
 fn words(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(WordsDriver.init(evaluator));
+}
+
+fn exportsWord(evaluator: *Machine) MachineError!void {
+    const requested = try evaluator.popSymbol();
+    try evaluator.startDriver(ExportsDriver.init(evaluator, requested));
+}
+
+/// Collect one module's public names, or core's, then sort them and build the
+/// symbol list. A cold module rewinds this call behind the ordinary qualified
+/// auto-load, so the replay finds it registered.
+const ExportsDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    allocator: std.mem.Allocator,
+    requested: u32,
+    found: heap.Owned(poll_api.ChunkList(u32)),
+    state: heap.Owned(State),
+
+    const State = union(enum) {
+        validate: intern.ModuleNameCursor,
+        acquire: struct {
+            name: intern.ModuleName,
+            cursor: heap.Owned(machine.ModuleLookupCursor),
+        },
+        module_names: struct {
+            generation: heap.Owned(modules.GenerationLease),
+            cursor: heap.Owned(modules.ModulePublicNameCursor),
+        },
+        core_names: heap.Owned(reflection.VisibleNameCursor),
+        sort: heap.Owned(reflection.SortedUniqueNameCursor),
+        fill: struct {
+            names: heap.Owned(reflection.SortedUniqueNames),
+            values: heap.Owned(heap.OwnedValueBuffer),
+        },
+        build: heap.Owned(list.ValueMaterializer),
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .validate => {},
+                .acquire => |*acquire| acquire.cursor.deinit(releases, allocator),
+                .module_names => |*names| {
+                    names.cursor.deinit(releases, allocator);
+                    names.generation.deinit(releases, allocator);
+                },
+                .core_names => |*cursor| cursor.deinit(releases, allocator),
+                .sort => |*cursor| cursor.deinit(releases, allocator),
+                .fill => |*fill| {
+                    fill.values.deinit(releases, allocator);
+                    fill.names.deinit(releases, allocator);
+                },
+                .build => |*materializer| materializer.deinit(releases, allocator),
+            }
+        }
+    };
+
+    fn init(evaluator: *Machine, requested: u32) ExportsDriver {
+        const core_requested = intern.isReservedRegistryBytes(intern.get(requested));
+        return .{
+            .allocator = evaluator.allocator(),
+            .requested = requested,
+            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator())),
+            .state = .init(if (core_requested)
+                .{ .core_names = .init(reflection.VisibleNameCursor.init(
+                    .{ .environment = evaluator.currentEnv().coreView() },
+                    evaluator.currentEnv().coreView(),
+                    evaluator.unit.bindingPin(),
+                )) }
+            else
+                .{ .validate = .init(requested) }),
+        };
+    }
+
+    fn replace(self: *ExportsDriver, evaluator: *Machine, next: State) void {
+        self.state.borrowMut().deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.state.borrowMut().* = next;
+    }
+
+    fn startSort(self: *ExportsDriver, evaluator: *Machine) MachineError!void {
+        const cursor = try reflection.SortedUniqueNameCursor.init(self.allocator, self.found.borrowMut());
+        self.replace(evaluator, .{ .sort = .init(cursor) });
+    }
+
+    pub fn advance(evaluator: *Machine, self: *ExportsDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.state.borrowMut().*) {
+            .validate => |*validation| switch (validation.advance()) {
+                .pending => {},
+                .complete => |name| {
+                    const module_name = name orelse
+                        return evaluator.fail(.domain, "exports requires a valid module name");
+                    self.replace(evaluator, .{ .acquire = .{
+                        .name = module_name,
+                        .cursor = .init(machine.ModuleLookupCursor.atCurrent(evaluator, module_name)),
+                    } });
+                },
+            },
+            .acquire => |*acquire| switch (acquire.cursor.borrowMut().advance()) {
+                .pending => {},
+                .complete => |maybe_generation| if (maybe_generation) |generation| {
+                    const names = generation.publicNameCursor();
+                    self.replace(evaluator, .{ .module_names = .{
+                        .generation = .init(generation),
+                        .cursor = .init(names),
+                    } });
+                } else {
+                    const requested = self.requested;
+                    const module_name = acquire.name;
+                    evaluator.retireDriver(self);
+                    return evaluator.retryQualifiedOperandAfterLoad(
+                        requested,
+                        .{ .unregistered_module = module_name },
+                    );
+                },
+            },
+            .module_names => |*names| switch (names.cursor.borrowMut().advance()) {
+                .pending => {},
+                .complete => try self.startSort(evaluator),
+                .item => |name| try self.found.borrowMut().append(name),
+            },
+            .core_names => |*cursor| switch (cursor.borrowMut().advance()) {
+                .pending => {},
+                .complete => try self.startSort(evaluator),
+                .item => |name| try self.found.borrowMut().append(name),
+            },
+            .sort => |*cursor| switch (try cursor.borrowMut().advance(work)) {
+                .pending => {},
+                .complete => |names| {
+                    var owned_names = heap.Owned(reflection.SortedUniqueNames).init(names);
+                    errdefer owned_names.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    const values = try heap.OwnedValueBuffer.init(
+                        evaluator.releaseDomain(),
+                        owned_names.borrow().items().len,
+                    );
+                    self.replace(evaluator, .{ .fill = .{
+                        .names = .init(owned_names.take()),
+                        .values = .init(values),
+                    } });
+                },
+            },
+            .fill => |*fill| {
+                const names = fill.names.borrow().items();
+                const filled = fill.values.borrow().len();
+                if (filled != names.len) {
+                    fill.values.borrowMut().appendOwned(.{ .symbol = .{ .name = names[filled] } });
+                    continue;
+                }
+                const materializer = list.ValueMaterializer.initOwned(self.allocator, fill.values.take());
+                self.replace(evaluator, .{ .build = .init(materializer) });
+            },
+            .build => |*materializer| switch (try materializer.borrowMut().advance(work)) {
+                .pending => {},
+                .complete => |result| return .{ .output = result },
+            },
+        };
+        return .stepped;
+    }
+};
+
+fn stdlibWord(evaluator: *Machine) MachineError!void {
+    const names = comptime stdlib.sortedNames();
+    var values: [names.len]Value = undefined;
+    for (names, &values) |name, *slot| slot.* = .{ .symbol = .{ .name = try intern.intern(name) } };
+    return evaluator.pushOwned(try list.fromValues(evaluator.allocator(), &values));
 }
 
 const WordsDriver = struct {

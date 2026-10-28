@@ -122,12 +122,6 @@ again.
 l {read-timeout-ms 5000} (handler) http.server.@serve
 ```
 
-### @serve
-
-### content-length
-
-### parse-headers
-
 ### parse-request-line
 
 #### Examples
@@ -146,5 +140,3 @@ l {read-timeout-ms 5000} (handler) http.server.@serve
 http.server.render-response chars
 # => "HTTP/1.1 200 OK\u{D}\u{A}set-cookie: a=1\u{D}\u{A}set-cookie: b=2\u{D}\u{A}Content-Length: 2\u{D}\u{A}Connection: close\u{D}\u{A}\u{D}\u{A}ok"
 ```
-
-### route

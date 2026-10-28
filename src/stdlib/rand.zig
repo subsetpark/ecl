@@ -5,42 +5,38 @@ const random = @import("../kernel_random.zig");
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "int",
-        .doc = "( state bound -- state result ) Draw one uniform integer below a positive bound.",
+        .effect = "state bound -- state result",
+        .doc = "Draw one unbiased uniform int in `[0, bound)`. A bound below 1 is `` `domain ``.",
         .primitive = random.intForModule,
     },
     .{
         .name = "ints",
-        .doc = "( state count bound -- state results ) Draw uniform integers from counter-addressed state.",
+        .effect = "state count bound -- state results",
+        .doc = "Draw `count` uniform ints in `[0, bound)`, advancing the state by `count`. Each element is addressed by its own counter position, so materialization order cannot change the list.",
         .primitive = random.intsForModule,
     },
     .{
         .name = "float",
-        .doc = "( state -- state result ) Draw one uniform float in the half-open interval [0, 1).",
+        .effect = "state -- state result",
+        .doc = "Draw one uniform float in `[0, 1)`.",
         .primitive = random.floatForModule,
     },
     .{
         .name = "deal",
-        .doc = "( state count pool -- state results ) Draw count distinct integers below a nonnegative pool size, advancing the state by count.",
+        .effect = "state count pool -- state results",
+        .doc = "Draw `count` distinct ints in `[0, pool)` without replacement, advancing the state by `count`. Work and memory follow `count`, never `pool`. A negative count or pool, or a count above the pool, is `` `domain ``; a non-int count or pool is `` `type ``.",
         .primitive = random.dealForModule,
     },
     .{
         .name = "shuffle",
-        .doc = "( state values -- state values ) Return a uniformly selected permutation of a list, advancing the state by its length.",
-        .primitive = random.shuffleForModule,
-    },
-    .{
-        .name = "deal",
-        .doc = "( state count pool -- state results ) Draw count distinct integers below a nonnegative pool size, advancing the state by count.",
-        .primitive = random.dealForModule,
-    },
-    .{
-        .name = "shuffle",
-        .doc = "( state values -- state values ) Return a uniformly selected permutation of a list, advancing the state by its length.",
+        .effect = "state values -- state values",
+        .doc = "Return a uniformly selected permutation of a list, advancing the state by the list's length. Any element kind is permuted and the list keeps its representation. A non-list is `` `type ``.",
         .primitive = random.shuffleForModule,
     },
     .{
         .name = "entropy",
-        .doc = "( -- key ) Read one nondeterministic generator key from the host CSPRNG.",
+        .effect = "-- key",
+        .doc = "Read one int from the host CSPRNG. This is the language's only nondeterministic word, requires host IO, and is `` `io `` without it.",
         .primitive = random.entropyForModule,
     },
 };

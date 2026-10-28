@@ -1335,7 +1335,11 @@ representations but expose the same binding model.
 - `see` prints the resolved binding's combined annotation, when present,
   followed by its body through the standard source formatter. It omits the
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
-  and effect metadata, and `doc` returns documentation.
+  and effect metadata, `doc` returns documentation, and `effect` returns the
+  declared effect as an annotation list, or `()` when none was declared.
+  `` `m exports `` returns module `m`'s public word names as sorted symbols
+  (`` `core exports `` lists core's), and `stdlib` returns the embedded
+  standard-library module names.
 - `` `name unset `` and `` `name undef `` are exact aliases. They remove a binding
   only from the current root and otherwise do nothing. Removing a shadow
   reveals core's binding for the name; it never mutates core. The name must be

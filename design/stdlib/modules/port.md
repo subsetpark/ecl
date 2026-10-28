@@ -90,36 +90,3 @@ fails with `` `cancelled `` without consuming the source.
 Abortive close discards queued messages and unclaimed results; a discarded
 successful result raises `` `io `` if claimed later. Completion observation remains
 repeatable. Existing capabilities in messages share use and retain their owner.
-
-### open
-`( factory config -- resource )` — Initialize a registered resource in the calling scope.
-
-### begin
-`( resource operation request -- exchange )` — Admit an operation with bounded structured parameters.
-
-### endpoint
-`( source selector -- endpoint )` — Borrow an attenuated endpoint supported by its source.
-
-### send
-`( sender message -- )` — Atomically enqueue one bounded structured message, including an empty value.
-
-### receive
-`( receiver -- event )` — Receive {kind message value value} or {kind eof}; one receiver may wait.
-
-### finish
-`( sender -- )` — Finish a message sender after admitted sends, so its receiver sees {kind eof}. Idempotent. Byte endpoints finish with fd.finish.
-
-### await
-`( exchange -- )` — Observe completion without consuming the result or draining output.
-
-### result
-`( exchange -- value )` — Wait and claim a result once; a later claim raises `contract.
-
-### cancel
-`( exchange -- )` — Request cancellation. Completion remains observable.
-
-### shutdown
-`( resource -- )` — Perform registered graceful shutdown and join cleanup. Unsupported resources raise `domain.
-
-### close
-`( resource-or-exchange -- )` — Abort and join cleanup. Idempotent.

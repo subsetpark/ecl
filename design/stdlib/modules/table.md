@@ -4,16 +4,6 @@ Every operation except `valid?` first validates the ordinary column dict as a
 table. See the environment's [table contract](ENVIRONMENT.md#tables) for the
 table convention and frozen error kinds.
 
-### aggregate
-
-### cast
-
-### column
-
-### from-columns
-
-### from-header-rows
-
 ### from-records
 
 #### Examples
@@ -32,18 +22,6 @@ table convention and frozen error kinds.
 # => {"name" ("Ada" "Lin") "score" [10 20]}
 ```
 
-### group-by
-
-### header-rows
-
-### height
-
-### inner-join
-
-### left-join-with
-
-### names
-
 ### records
 
 #### Examples
@@ -52,10 +30,6 @@ table convention and frozen error kinds.
 {"name" ("Ada" "Lin") "score" [10 20]} table.records
 # => ({"name" "Ada" "score" 10} {"name" "Lin" "score" 20})
 ```
-
-### rename
-
-### rows
 
 ### select
 
@@ -66,8 +40,6 @@ table convention and frozen error kinds.
 # => {"score" [10 20]}
 ```
 
-### valid?
-
 ### where
 
 #### Examples
@@ -76,5 +48,3 @@ table convention and frozen error kinds.
 {"name" ("Ada" "Lin") "score" [10 20]} [1 0] table.where
 # => {"name" ("Ada") "score" [10]}
 ```
-
-### with-column

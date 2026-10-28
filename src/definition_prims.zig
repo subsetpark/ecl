@@ -29,13 +29,14 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "def", .primitive = bind(.def), .effect = null, .doc = "Bind a quotation to a public word, with optional effect and documentation metadata." },
-        .{ .name = "defp", .primitive = bind(.defp), .effect = null, .doc = "Bind a quotation to a private module word, with optional effect and documentation metadata." },
-        .{ .name = "test", .primitive = bind(.test_declaration), .effect = null, .doc = "Declare a module-private executable test at a direct module construction root, with optional effect and documentation metadata." },
-        .{ .name = "undef", .primitive = unbind, .effect = "name --", .doc = "Remove a binding from the current scope; do nothing when that scope does not bind the name." },
-        .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding." },
-        .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a word resolves and any bindings it shadows." },
-        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print the standard-formatted annotation and body of a binding." },
+        .{ .name = "def", .primitive = bind(.def), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Bind a quotation to a public word, with optional effect and documentation metadata. See [Definition annotations](SPEC.md#definition-annotations) for the annotation forms and validation; see [Modules](SPEC.md#modules) for module-context requirements." },
+        .{ .name = "defp", .primitive = bind(.defp), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Bind a private module word, with optional effect and documentation metadata. A top-level `defp` is an error." },
+        .{ .name = "test", .primitive = bind(.test_declaration), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names." },
+        .{ .name = "undef", .primitive = unbind, .effect = "name --", .doc = "Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `unset`; removing a local shadow may reveal a parent or core binding." },
+        .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``." },
+        .{ .name = "effect", .primitive = declaredEffect, .effect = "name -- annotation", .doc = "Return the declared stack effect of a resolved binding as an annotation such as `(x y -- z)`, or `()` when it declares none." },
+        .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition." },
+        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of their source unit, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -511,10 +512,10 @@ fn resolveForReflection(
     };
 }
 
-/// Documentation is the only reflection that yields a value. There is no
-/// counterpart for a binding's stored body: nothing lifts a published body out
-/// of the home it resolves against, which is what keeps a quotation's scope
-/// label impossible to re-site.
+/// Documentation and the declared effect are the only reflection that yields
+/// values. There is no counterpart for a binding's stored body: nothing lifts a
+/// published body out of the home it resolves against, which is what keeps a
+/// quotation's scope label impossible to re-site.
 fn installLookup(evaluator: *Machine, requested: u32) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
@@ -579,6 +580,43 @@ const LookupDriver = struct {
                 },
             }
         }
+        return .stepped;
+    }
+};
+
+fn declaredEffect(evaluator: *Machine) MachineError!void {
+    const requested = try evaluator.popSymbol();
+    try evaluator.startDriver(EffectDriver{
+        .requested = requested,
+        .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
+    });
+}
+
+/// Resolve a binding and yield its declared effect: the validated annotation
+/// words `which` and `see` print, shared rather than copied. Effects are
+/// optional, so a binding without one yields `()`, which no declared effect
+/// can equal: even `( -- )` holds its `--`.
+const EffectDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    requested: u32,
+    resolution: heap.Owned(machine.ResolutionCursor),
+    pub fn advance(evaluator: *Machine, self: *EffectDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
+            .pending => {},
+            .complete => |outcome| {
+                var resolved = switch (try resolveForReflection(evaluator, self, self.requested, outcome)) {
+                    .retry => |progress| return progress,
+                    .resolved => |resolution| resolution,
+                };
+                defer resolved.deinit(evaluator.allocator());
+                const declared = resolved.lease.spec().effect orelse
+                    return .{ .output = try list.fromValues(evaluator.allocator(), &.{}) };
+                declared.retain();
+                return .{ .output = .{ .list = declared.header() } };
+            },
+        };
         return .stepped;
     }
 };

@@ -35,7 +35,7 @@ pub const words = [_]env.BuiltinWord{
     },
     .{ .name = "read", .effect = "fd max -- bytes", .doc = "Read at most positive integer `max` bytes, parking until data or EOF. Return exact integer bytes in `0...255`; `[]` means stable EOF, including on later reads. Reads may be shorter than `max`. A wrong resource or non-integer `max` is `` `type ``; `max <= 0` is `` `domain ``; overlapping reads are `` `contract ``; a transport failure is `` `io ``. No text decoding is performed; use `chars`.", .primitive = port_words.read },
     .{ .name = "read-line", .effect = "fd -- bytes", .doc = "Read through the next newline and return those bytes, newline included, so `[]` is unambiguously EOF. At EOF the rest of the stream is the line, and `[]` follows on every later read. Bytes after the newline stay with the endpoint value for its next read of either kind, so read lines through one value. Errors are `read`'s.", .primitive = port_words.readLine },
-    .{ .name = "write", .doc = "( fd bytes -- ) Accept a complete byte list in FIFO order under bounded pressure.", .primitive = port_words.write },
+    .{ .name = "write", .effect = "fd bytes --", .doc = "Accept a complete byte list in FIFO order under bounded pressure.", .primitive = port_words.write },
     .{ .name = "finish", .effect = "fd --", .doc = "Finish an endpoint's write direction after accepted writes drain. Idempotent; later writes are `` `io ``.", .primitive = port_words.finish },
     .{ .name = "bytes?", .effect = "value -- bool", .doc = "Return 1 when the value is a list of integers in `0...255`, what `write` accepts as one piece, and 0 for anything else, including a string.", .primitive = bytesPredicate },
 };

@@ -193,3 +193,16 @@ pub fn names() [modules.len][]const u8 {
     for (modules, &result) |module, *slot| slot.* = module.name;
     return result;
 }
+
+/// Every embedded module name in codepoint order, computed at compile time
+/// for reflection.
+pub fn sortedNames() [modules.len][]const u8 {
+    @setEvalBranchQuota(100_000);
+    var result = names();
+    std.mem.sort([]const u8, &result, {}, struct {
+        fn less(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.order(u8, left, right) == .lt;
+        }
+    }.less);
+    return result;
+}

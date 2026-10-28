@@ -872,7 +872,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `qualify doc
         \\exit: 0
         \\stdout:
-        \\"Construct an executable qualified word without reparsing source text."
+        \\"<411-characters-elided>"
         \\stderr:
         \\<empty>
         \\=== undefm unknown ===
@@ -893,7 +893,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `undefm doc
         \\exit: 0
         \\stdout:
-        \\"Remove the module registered under a canonical name or alias."
+        \\"<359-characters-elided>"
         \\stderr:
         \\<empty>
         \\=== result ok ===

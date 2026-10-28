@@ -126,7 +126,7 @@ test "every primitive exposes meaningful reflective documentation" {
     try expectOk(&runtime, "`over see `call see");
     try std.testing.expectEqualStrings(
         "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
-            "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive>\n",
+            "(quotation -- ... :\n \"*Inline.* Run a quotation on the current stack. A data list pushes its elements.\") <primitive>\n",
         output.written(),
     );
 }
@@ -140,6 +140,33 @@ test "which reports effect metadata without expanding documentation" {
     defer runtime.deinit();
     try expectOk(&runtime, "(x -- y : \"Not part of concise which output.\") (dup *) `square def `square which");
     try std.testing.expectEqualStrings("square -> square def public (x -- y)\n", output.written());
+}
+
+test "effect returns a binding's declared effect, or () when it declares none" {
+    // `bare` is defined first: a list left by an earlier `effect` would be
+    // taken as its optional annotation.
+    try support.expectStack(
+        "(1) `bare def " ++
+            "(x -- y : \"Square.\") (dup *) `square def " ++
+            "(--) (1 pop) `quiet def " ++
+            "`+ effect `dict.get effect `archive.sha256 effect " ++
+            "`square effect `quiet effect `bare effect `def effect",
+        "(x y -- z) (dict key default -- value) (bytes -- lowercase-hex) (x -- y) (--) () ()",
+    );
+}
+
+test "exports lists a module's public words and stdlib the embedded modules" {
+    try support.expectStack(
+        "`archive exports " ++
+            "`core exports (`effect match?) any? " ++
+            "[] ((1) `shown def (2) `hidden defp) `m @defm `m exports " ++
+            "stdlib (`dict match?) any?",
+        "(next-member open-tgz read-member sha256 unpack-tgz) 1 (shown) 1",
+    );
+    try support.expectErrors(&.{
+        .{ .name = "unknown module", .source = "`no-such-module exports", .kind = "undefined-word", .word = "exports" },
+        .{ .name = "invalid module name", .source = "`... exports", .kind = "domain", .word = "exports" },
+    });
 }
 
 test "invocation effects: which reports public task word contracts" {
