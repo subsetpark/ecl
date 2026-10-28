@@ -233,6 +233,15 @@ const ImportDriver = struct {
     forwarding_body: ?heap.Owned(Value) = null,
     publisher: ?heap.Owned(env.Environment.BindCursor) = null,
 
+    /// Whether the attribute being published is a standard-library builtin,
+    /// which binds directly: a standard-library module name is never
+    /// registered again, so resolving its attribute now or at each call finds
+    /// the same builtin, and a forwarding body would only add an activation.
+    fn importsBuiltin(self: *const ImportDriver) bool {
+        if (self.generation.?.borrow().provenance() != .standard_library) return false;
+        return self.resolved.?.borrow().spec().binding == .builtin;
+    }
+
     fn init(
         evaluator: *Machine,
         module_id: u32,
@@ -375,13 +384,24 @@ const ImportDriver = struct {
                     },
                 }
             }
-            if (self.forwarding_body == null) {
+            const direct = self.importsBuiltin();
+            if (!direct and self.forwarding_body == null) {
                 // The forwarding word is written into the importing root.
                 const linker = try evaluator.rootLinker(self.scope);
                 self.forwarding_body = .init(try list.fromValuesGeneric(
                     evaluator.allocator(),
                     &.{.{ .symbol = .{ .name = requested.qualified, .slot = try linker.link(requested.qualified) } }},
                 ));
+                continue;
+            }
+            if (self.publisher == null and direct) {
+                const lease = self.resolved.?.borrow();
+                self.publisher = .init(try self.scope.publishImportedCursor(requested.binding, .{
+                    .primitive = lease.spec().binding.builtin,
+                    .effect = lease.spec().effect,
+                    .doc = lease.spec().doc,
+                    .reports_as = .plain(requested.qualified),
+                }));
                 continue;
             }
             if (self.publisher == null) {
@@ -410,7 +430,7 @@ const ImportDriver = struct {
                 .complete => {
                     self.publisher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.publisher = null;
-                    self.forwarding_body.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    if (self.forwarding_body) |*body| body.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.forwarding_body = null;
                     self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolved = null;

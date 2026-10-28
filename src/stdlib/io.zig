@@ -26,37 +26,44 @@ const Value = machine.Value;
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "pp",
-        .doc = "( value -- ) Pretty-print a value followed by a newline.",
+        .effect = "value --",
+        .doc = "Pretty-print any value plus newline in the display layout of Printing. Best-effort: huge leaves may be elided, so there is no round-trip guarantee. Use core `str` for canonical rendering.",
         .primitive = prims.ioPp,
     },
     .{
         .name = "prin",
-        .doc = "( string -- ) Write a string without adding a newline.",
+        .effect = "string --",
+        .doc = "Write a string's characters as UTF-8 to standard output without adding a newline. Non-string is `` `type ``.",
         .primitive = prims.ioPrin,
     },
     .{
         .name = "print",
-        .doc = "( string -- ) Write a string followed by a newline.",
+        .effect = "string --",
+        .doc = "Write a string followed by a newline to standard output. Semantically `io.prin \"\\n\" io.prin`.",
         .primitive = print,
     },
     .{
         .name = "eprint",
-        .doc = "( string -- ) Write a string followed by a newline to the diagnostics stream, never to standard output.",
+        .effect = "string --",
+        .doc = "Write a string followed by a newline to the Session's diagnostics stream: standard error under the command line, the host's diagnostics writer when embedded, and never standard output. When the host supplies no diagnostics writer the string is dropped and the word succeeds. Non-string is `` `type ``; a failed write is `` `io ``.",
         .primitive = eprint,
     },
     .{
         .name = "inspect",
-        .doc = "( value -- value ) Pretty-print a value while leaving it on the stack.",
+        .effect = "value -- value",
+        .doc = "Pretty-print a value while leaving it on the stack; the pipeline probe. Semantically `dup io.pp`.",
         .primitive = inspect,
     },
     .{
         .name = "debug",
-        .doc = "( value label -- value ) Print a label, colon, and value while leaving the value on the stack.",
+        .effect = "value label -- value",
+        .doc = "Write the string label, `\": \"`, and the value's pretty-printed representation plus newline, leaving the value on the stack. Semantically `io.prin \": \" io.prin io.inspect`; a non-string label is the same `` `type `` failure as `io.prin`.",
         .primitive = debug,
     },
     .{
         .name = "stack",
-        .doc = "Print bottom-up indexed blocks for the visible operand stack without changing it.",
+        .effect = "--",
+        .doc = "Stack-polymorphic; leaves the operand stack unchanged. Print each value in the currently visible operand window as a bottom-up indexed display block. `[0]` is the bottom and the largest index is the top; continuation lines align after the prefix. An isolated quotation sees only values above its isolation floor. An empty visible window writes nothing. Rendering is best-effort and may use the same multiline dictionary, array, and elision layout as `io.pp`.",
         .primitive = prims.ioStack,
     },
 };

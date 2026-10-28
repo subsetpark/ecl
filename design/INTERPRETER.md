@@ -350,6 +350,14 @@ dispatches, caches, and fuses exactly as the plain core word does and only its
 spelling stays qualified; the registry path serves module-qualified names
 alone.
 
+An `import` of a standard-library builtin binds that builtin in the importing
+root rather than a forwarding body. The binding records the attribute's
+qualified name as the name its failures report, so a call reaches the host
+operation in one dispatch while its diagnostics stay those of the forwarding
+call; the imported name's declared effect still guards the call. This is sound
+only because a standard-library module name has exactly one registration for
+the life of the process.
+
 Program construction produces ordinary values and never triggers compilation.
 Concatenating quotations produces another ordinary list that can execute
 immediately. This preserves the language's reflective center and avoids

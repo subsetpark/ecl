@@ -159,6 +159,18 @@ pub const TopPublication = union(enum) {
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     },
+    builtin: ImportedBuiltin,
+};
+
+/// A standard-library builtin that `import` binds directly instead of through
+/// a forwarding body. A standard-library module name can never be registered
+/// again, so its attribute is the same binding however late it is resolved.
+pub const ImportedBuiltin = struct {
+    primitive: PrimitiveImpl,
+    effect: ?ValidatedEffect = null,
+    doc: ?*DocumentationString = null,
+    /// The attribute's qualified name, which a failure inside it reports.
+    reports_as: intern.TraceWord,
 };
 /// One word of a builtin-backed module: a host primitive published under a
 /// module name. The metadata is authored as plain text because these modules
@@ -221,6 +233,8 @@ pub const ModulePublication = union(enum) {
         effect: ?ValidatedEffect = null,
         doc: *DocumentationString,
     },
+    /// An import of a standard-library builtin, public as every import is.
+    imported: ImportedBuiltin,
 };
 
 /// What a trusted definition's body was recognized as, decided once when its
@@ -307,6 +321,10 @@ pub const BindingSpec = struct {
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
     direct_idiom: ?DirectIdiom = null,
+    /// The name a failure inside this builtin reports, when it is not the
+    /// name the call reached it by: an imported builtin reports its
+    /// attribute's qualified name, as a forwarding body would.
+    reports_as: ?intern.TraceWord = null,
     fn fromTop(publication: TopPublication) BindingSpec {
         return switch (publication) {
             .word => |word| .{
@@ -314,6 +332,12 @@ pub const BindingSpec = struct {
                 .source = word.source,
                 .effect = word.effect,
                 .doc = word.doc,
+            },
+            .builtin => |imported| .{
+                .binding = .{ .builtin = imported.primitive },
+                .effect = imported.effect,
+                .doc = imported.doc,
+                .reports_as = imported.reports_as,
             },
         };
     }
@@ -344,6 +368,13 @@ pub const BindingSpec = struct {
                 .origin = origin,
                 .effect = primitive.effect,
                 .doc = primitive.doc,
+            },
+            .imported => |imported| .{
+                .binding = .{ .builtin = imported.primitive },
+                .origin = origin,
+                .effect = imported.effect,
+                .doc = imported.doc,
+                .reports_as = imported.reports_as,
             },
         };
     }
@@ -1302,6 +1333,19 @@ pub const Scope = struct {
                 .effect = definition.effect,
                 .doc = definition.doc,
             } }),
+        };
+    }
+
+    /// Publishes an imported standard-library builtin, in whichever
+    /// publication this scope accepts.
+    pub fn publishImportedCursor(
+        self: *Scope,
+        name: intern.NamespaceName,
+        imported: ImportedBuiltin,
+    ) error{OutOfMemory}!Environment.BindCursor {
+        return switch (self.publisher()) {
+            .module => |module| module.cursor(name, .{ .imported = imported }),
+            .top => |top| top.cursor(name, .{ .builtin = imported }),
         };
     }
 

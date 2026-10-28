@@ -2690,6 +2690,9 @@ repeatable. Existing capabilities in messages share use and retain their owner.
 ### begin
 `( resource operation request -- exchange )` — Admit an operation with bounded structured parameters.
 
+### call
+`( resource operation request -- value )` — Begin an operation, claim its result, and close the exchange. Use only when no additional streaming input or output is required. Close the exchange before returning or re-raising its error.
+
 ### cancel
 `( exchange -- )` — Request cancellation. Completion remains observable.
 
@@ -2716,9 +2719,6 @@ repeatable. Existing capabilities in messages share use and retain their owner.
 
 ### shutdown
 `( resource -- )` — Perform registered graceful shutdown and join cleanup. Unsupported resources raise `domain.
-
-### call
-`( resource operation request -- value )` — Begin an operation, claim its result, and close the exchange. Use only when no additional streaming input or output is required. Close the exchange before returning or re-raising its error.
 
 ## proc
 

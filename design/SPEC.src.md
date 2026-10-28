@@ -1169,6 +1169,12 @@ that name.
   publishes none of the request; malformed operand and name domains are
   `` `type `` and `` `domain ``, respectively. Each binding is a late-bound forwarding
   definition whose effect and documentation are copied from the original.
+  An attribute that a standard-library module binds to a host builtin is
+  bound directly instead: no other module can register a standard-library
+  name, so resolving the attribute once finds what every call would. Its
+  declared effect is checked under the imported name, and a failure inside
+  the builtin names the attribute's qualified name, as a forwarding call
+  would; no forwarding frame appears in a trace.
   Naming a binding that already exists replaces only that binding; importing
   selected names never splices an entire module or emits shadow notices.
   `importp` is the private form: the same request publishes module-private

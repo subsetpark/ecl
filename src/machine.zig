@@ -5861,7 +5861,7 @@ pub const Machine = struct {
             // A cached binding has no home, pin, or generation, so a builtin
             // runs exactly as `executeResolved` would run it.
             switch (cached.route) {
-                .builtin => return invokeBuiltin(self, cached.trace_word, cached.spec.binding.builtin),
+                .builtin => return invokeBuiltin(self, cached.spec.reports_as orelse cached.trace_word, cached.spec.binding.builtin),
                 .source => return enterCachedWord(self, cached),
                 .resolved => {},
             }
@@ -6941,8 +6941,11 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             );
         },
         .builtin => |primitive| {
+            // The declared effect is the called word's contract, so its check
+            // names that word; a failure inside the builtin names the
+            // builtin, which an import reports by its qualified name.
             if (cross_home_effect) |effect| try self.beginInvocation(effect, resolved.trace_word);
-            try invokeBuiltin(self, resolved.trace_word, primitive);
+            try invokeBuiltin(self, resolved.lease.spec().reports_as orelse resolved.trace_word, primitive);
         },
         .native => |callable| {
             if (cross_home) {
