@@ -265,7 +265,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### chars
-`( value -- string )` — Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. Unlike `str`, the result is content rather than representation: `` `foo chars `` is `"foo"`, not `"'foo"`. See [Conversions](SPEC.md#conversions).
+`( value -- string )` — Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. Unlike `str`, the result is content rather than representation: `` (`foo) first chars `` is `"foo"`, while `` (`foo) first str `` is `"`foo"`. See [Conversions](SPEC.md#conversions).
 
 #### Examples
 
@@ -477,7 +477,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
 
 ### import
-`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported binding dispatches through the module, preserves the original's effect and documentation, and may replace an existing local binding. `see` renders its one-word forwarding quotation.
+`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported binding dispatches through the module, preserves the original's effect and documentation, and may replace an existing local binding. `see` renders a forwarding binding as its one-word quotation, and a directly bound standard-library builtin as `<primitive>`.
 
 ### importp
 `( module-name q -- )` — `import`, publishing each forwarding binding as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body; elsewhere it is `` `domain ``.
@@ -1485,10 +1485,10 @@ the source's permission bits under the umask.
 `( writer -- )` — Stop admission, flush the completed stream, and atomically publish its previously absent destination. Publication is serialized against cancellation. Success joins writer cleanup; failure retains unpublished private state for explicit or scope cleanup. No allocation is required after the publication permit is granted.
 
 ### copy
-`( source-root source-path destination-root destination-path -- )` — Copy a regular file, following a final source link within its root, into an absent destination entry; the roots may differ. The copy is staged and published atomically without replacing; an existing destination of any kind is `` `already-exists ``, a non-regular source is `` `not-regular `` or `` `is-directory ``, and the copy keeps the source file's permissions.
+`( source-root source-path destination-root destination-path -- )` — Copy a regular file, following a final source link within its root, into an absent destination entry; the roots may differ. The copy is staged and published atomically without replacing; an existing destination of any kind fails with `` `io `` and reason `` `already-exists ``, a non-regular source fails with `` `io `` and reason `` `not-regular `` or `` `is-directory ``, and the copy keeps the source file's permissions.
 
 ### create-bytes
-`( bytes root path -- )` — Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry is `` `already-exists ``; a missing parent is `` `not-found ``.
+`( bytes root path -- )` — Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry fails with `` `io `` and reason `` `already-exists ``; a missing parent fails with `` `io `` and reason `` `not-found ``.
 
 ### create-text
 `( string root path -- )` — Atomically create an absent regular file holding the string as UTF-8, with the same collision contract as `create-bytes`.
@@ -1503,10 +1503,10 @@ the source's permission bits under the umask.
 `( root path -- lock )` — Acquire an exclusive advisory lock on a regular file, creating an empty file if the path is absent. Existing contents are preserved; final symlinks and non-regular files are rejected. Contention parks the task between attempts and is cancellable. The returned port owns the lock until `port.close` or its owning scope exits. A lock is not a directory resource. The lock file remains after release. Coordinating applications must keep its directory entry in place: replacing or deleting it establishes a different lock identity. Advisory locking coordinates participating applications and does not prevent other filesystem access.
 
 ### lstat
-`( root path -- metadata )` — Describe the final entry without following it: `{kind file size n}` for a regular file, `{kind directory}`, `{kind symlink}`, or `{kind other}`. An absent entry is `` `not-found ``.
+`( root path -- metadata )` — Describe the final entry without following it: `{kind file size n}` for a regular file, `{kind directory}`, `{kind symlink}`, or `{kind other}`. An absent entry fails with `` `io `` and reason `` `not-found ``.
 
 ### mkdir
-`( root path -- )` — Create exactly one absent directory beneath an existing parent. There is no recursive parent creation; an existing entry of any kind is `` `already-exists ``.
+`( root path -- )` — Create exactly one absent directory beneath an existing parent. There is no recursive parent creation; an existing entry of any kind fails with `` `io `` and reason `` `already-exists ``.
 
 ### mkdirs
 `( root path -- )` — Create missing intermediate and final directories. Existing directories are preserved, including contained symlink targets. `.` is a no-op. Every component uses the ordinary confined resolver. Failure or cancellation may leave directories created before that point.
@@ -1533,25 +1533,25 @@ the source's permission bits under the umask.
 `( string root path -- )` — Publish UTF-8 text under the `publish-bytes` contract.
 
 ### read-bytes
-`( root path -- bytes )` — Read one regular file, following a final link within the root, and return its exact bytes as an integer list. The size observed at open is the size read; growth or shrink meanwhile is `` `changed ``. A directory is `` `is-directory ``; a non-regular object is `` `not-regular ``; a file over the transfer limit is `` `overflow ``.
+`( root path -- bytes )` — Read one regular file, following a final link within the root, and return its exact bytes as an integer list. The size observed at open is the size read; growth or shrink meanwhile fails with `` `io `` and reason `` `changed ``. A directory fails with `` `io `` and reason `` `is-directory ``; a non-regular object fails with `` `io `` and reason `` `not-regular ``; a file over the transfer limit is `` `overflow ``.
 
 ### read-text
 `( root path -- string )` — Read one regular file as `read-bytes` does and decode it as UTF-8. Invalid UTF-8 is `` `io `` with reason `` `invalid-utf8 ``.
 
 ### remove-dir
-`( root path -- )` — Remove one empty directory without following a final link. A nonempty directory is `` `not-empty ``; a file or symlink is `` `not-directory ``.
+`( root path -- )` — Remove one empty directory without following a final link. A nonempty directory fails with `` `io `` and reason `` `not-empty ``; a file or symlink fails with `` `io `` and reason `` `not-directory ``.
 
 ### remove-file
-`( root path -- )` — Remove one non-directory entry, including a symlink itself, without following it. A directory is `` `is-directory ``.
+`( root path -- )` — Remove one non-directory entry, including a symlink itself, without following it. A directory fails with `` `io `` and reason `` `is-directory ``.
 
 ### remove-tree
 `( root path -- )` — Recursively remove a directory and its contents. The final entry must be a directory, and `.` is rejected. Symlinks inside the tree are removed without following their targets. Work is incremental and cancellable; failure may leave partially removed contents with temporary entry names. Removal uses bounded descriptor storage and needs no new allocations once the selected directory has been opened.
 
 ### rename
-`( root source-path destination-path -- )` — Rename an entry within one root without replacing. The source may be a regular file, symlink, or directory and is not followed; an existing destination is `` `already-exists ``, and a destination on another device is `` `cross-device `` rather than an emulated copy.
+`( root source-path destination-path -- )` — Rename an entry within one root without replacing. The source may be a regular file, symlink, or directory and is not followed; an existing destination fails with `` `io `` and reason `` `already-exists ``, and a destination on another device fails with `` `io `` and reason `` `cross-device `` rather than an emulated copy.
 
 ### replace-bytes
-`( bytes root path -- )` — Atomically replace an existing regular file with exact bytes. The final entry must be observed as a regular file without following: absence is `` `not-found ``, and a symlink, directory, or other entry is `` `not-regular ``. The replacement is a new inode published by an atomic exchange; the word never becomes create-or-replace.
+`( bytes root path -- )` — Atomically replace an existing regular file with exact bytes. The final entry must be observed as a regular file without following: absence fails with `` `io `` and reason `` `not-found ``, and a symlink, directory, or other entry fails with `` `io `` and reason `` `not-regular ``. The replacement is a new inode published by an atomic exchange; the word never becomes create-or-replace.
 
 ### replace-text
 `( string root path -- )` — Replace an existing regular file with UTF-8 text under the `replace-bytes` contract.
@@ -1563,10 +1563,10 @@ the source's permission bits under the umask.
 `( root destination -- stage )` — Create a private sibling of the destination and return a scope-owned directory resource. The destination parent must exist. Filesystem operations accept the stage as a root. `port.close` or scope exit joins descendant closure and recursive rollback; no destination is published. The staging directory uses mode `0700` under the process umask.
 
 ### stat
-`( root path -- metadata )` — Follow the path, including a final link within the root, and describe the object reached with the same shapes as `lstat`. A dangling link is `` `not-found ``.
+`( root path -- metadata )` — Follow the path, including a final link within the root, and describe the object reached with the same shapes as `lstat`. A dangling link fails with `` `io `` and reason `` `not-found ``.
 
 ### write-chunk
-`( writer bytes -- )` — Append at most 65536 integer bytes. The streaming transfer limit (1 GiB by default) covers the complete stream, including previous chunks. A failed or cancelled append prevents later publication of partial contents.
+`( writer bytes -- )` — Append at most 65536 integer bytes. The streaming transfer limit (1 GiB by default) covers the complete stream, including previous chunks. A failed or cancelled append after writer admission prevents later publication of partial contents; a validation failure before admission does not.
 
 ## host
 
