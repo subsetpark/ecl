@@ -167,6 +167,7 @@ pub const TopPublication = union(enum) {
 /// again, so its attribute is the same binding however late it is resolved.
 pub const ImportedBuiltin = struct {
     primitive: PrimitiveImpl,
+    visibility: Visibility = .public,
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     /// The attribute's qualified name, which a failure inside it reports.
@@ -335,6 +336,7 @@ pub const BindingSpec = struct {
             },
             .builtin => |imported| .{
                 .binding = .{ .builtin = imported.primitive },
+                .visibility = imported.visibility,
                 .effect = imported.effect,
                 .doc = imported.doc,
                 .reports_as = imported.reports_as,

@@ -64,7 +64,7 @@ Conventions:
 `( -- string )` — Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file.
 
 ### \*module\*
-`( -- module-name )` — Return the canonical registration name selected by the current module activation. The same image registered under different names reports the name through which it was called; an alias reports its target's canonical name. `` `domain `` at top level, during module construction, or through an escaped quotation whose image has no invoking registration.
+`( -- module-name )` — Return the canonical registration name selected by the current module activation. The same image registered under different names reports the name through which it was called; an alias reports its target's canonical name. `` `domain `` at top level or through an escaped quotation whose image has no invoking registration.
 
 ### +
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``.
@@ -255,7 +255,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( x -- integer )` — **Pervasive.** Round up; the result is int64, `` `overflow `` outside its range.
 
 ### char
-`( value -- chars )` — Return a char unchanged, the char with an int's codepoint, or the single char of a one-char string. An int outside the Unicode scalar range or a string of any other length is `` `domain ``; any other value is `` `type ``.
+`( value -- chars )` — Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``.
 
 #### Examples
 
@@ -1485,7 +1485,7 @@ the source's permission bits under the umask.
 `( writer -- )` — Stop admission, flush the completed stream, and atomically publish its previously absent destination. Publication is serialized against cancellation. Success joins writer cleanup; failure retains unpublished private state for explicit or scope cleanup. No allocation is required after the publication permit is granted.
 
 ### copy
-`( source-root source-path destination-root destination-path -- )` — Copy a regular file, following a final source link within its root, into an absent destination entry; the roots may differ. The copy is staged and published atomically without replacing; an existing destination of any kind is `` `already-exists ``, a non-regular source is `` `not-regular `` or `` `is-directory ``, and no metadata is preserved.
+`( source-root source-path destination-root destination-path -- )` — Copy a regular file, following a final source link within its root, into an absent destination entry; the roots may differ. The copy is staged and published atomically without replacing; an existing destination of any kind is `` `already-exists ``, a non-regular source is `` `not-regular `` or `` `is-directory ``, and the copy keeps the source file's permissions.
 
 ### create-bytes
 `( bytes root path -- )` — Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry is `` `already-exists ``; a missing parent is `` `not-found ``.

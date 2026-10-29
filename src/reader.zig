@@ -58,7 +58,7 @@ pub const DeclarationScan = struct {
             } else null;
         }
         self.previous_first = is_first;
-        if (form == .symbol and isRegistrationWord(intern.get(form.symbol.name))) return declared;
+        if (form == .symbol and !value_module.isQuotedSlot(form.symbol.slot) and isRegistrationWord(intern.get(form.symbol.name))) return declared;
         return null;
     }
 };

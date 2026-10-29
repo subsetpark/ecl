@@ -84,7 +84,12 @@ pub fn main(init: std.process.Init.Minimal) void {
                 std.debug.print("{s}: FAIL (logged {d} errors)\n", .{ test_fn.name, test_errors });
             }
         } else |err| switch (err) {
-            error.SkipZigTest => skipped += 1,
+            error.SkipZigTest => if (test_errors == 0) {
+                skipped += 1;
+            } else {
+                failed += 1;
+                std.debug.print("{s}: FAIL (logged {d} errors before skipping)\n", .{ test_fn.name, test_errors });
+            },
             else => {
                 failed += 1;
                 std.debug.print("{s}: FAIL ({t})\n", .{ test_fn.name, err });
