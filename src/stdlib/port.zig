@@ -18,17 +18,17 @@ const endpoints = @import("../port_endpoint.zig");
 const exchanges = @import("../port_exchange.zig");
 
 pub const words = [_]env.BuiltinWord{
-    .{ .name = "open", .doc = "( factory config -- resource ) Initialize a registered resource in the calling scope.", .primitive = open },
-    .{ .name = "begin", .doc = "( resource operation request -- exchange ) Admit a registered operation with bounded structured parameters.", .primitive = begin },
-    .{ .name = "endpoint", .effect = "source selector -- endpoint", .doc = "Obtain an attenuated endpoint capability supported by its source.", .primitive = endpoint },
-    .{ .name = "send", .doc = "( sender message -- ) Atomically enqueue a bounded structured message.", .primitive = send },
-    .{ .name = "receive", .doc = "( receiver -- event ) Receive one whole message or an EOF event.", .primitive = receive },
-    .{ .name = "finish", .effect = "writable --", .doc = "Finish input after previously accepted data. Idempotent.", .primitive = finish },
-    .{ .name = "cancel", .effect = "exchange --", .doc = "Request exchange cancellation. Completion remains observable.", .primitive = cancel },
-    .{ .name = "shutdown", .doc = "( resource -- ) Perform registered graceful shutdown and join cleanup.", .primitive = shutdown },
-    .{ .name = "close", .doc = "( port -- ) Abort a resource or exchange and join its cleanup. Idempotent.", .primitive = close },
-    .{ .name = "await", .doc = "( exchange -- ) Observe successful exchange completion or its terminal failure without draining output.", .primitive = awaitExchange },
-    .{ .name = "result", .doc = "( exchange -- value ) Wait and claim an exchange result exactly once. Later claims raise `contract.", .primitive = result },
+    .{ .name = "open", .effect = "factory config -- resource", .doc = "Initialize a registered resource in the calling scope.", .primitive = open },
+    .{ .name = "begin", .effect = "resource operation request -- exchange", .doc = "Admit an operation with bounded structured parameters.", .primitive = begin },
+    .{ .name = "endpoint", .effect = "source selector -- endpoint", .doc = "Borrow an attenuated endpoint supported by its source.", .primitive = endpoint },
+    .{ .name = "send", .effect = "sender message --", .doc = "Atomically enqueue one bounded structured message, including an empty value.", .primitive = send },
+    .{ .name = "receive", .effect = "receiver -- event", .doc = "Receive {kind message value value} or {kind eof}; one receiver may wait.", .primitive = receive },
+    .{ .name = "finish", .effect = "sender --", .doc = "Finish a message sender after admitted sends, so its receiver sees {kind eof}. Idempotent. Byte endpoints finish with fd.finish.", .primitive = finish },
+    .{ .name = "cancel", .effect = "exchange --", .doc = "Request cancellation. Completion remains observable.", .primitive = cancel },
+    .{ .name = "shutdown", .effect = "resource --", .doc = "Perform registered graceful shutdown and join cleanup. Unsupported resources raise `domain.", .primitive = shutdown },
+    .{ .name = "close", .effect = "resource-or-exchange --", .doc = "Abort and join cleanup. Idempotent.", .primitive = close },
+    .{ .name = "await", .effect = "exchange --", .doc = "Observe completion without consuming the result or draining output.", .primitive = awaitExchange },
+    .{ .name = "result", .effect = "exchange -- value", .doc = "Wait and claim a result once; a later claim raises `contract.", .primitive = result },
 };
 
 fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {

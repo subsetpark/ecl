@@ -7,6 +7,7 @@
 //! `ModuleHome`, `Environment`, or any registry internal.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
+const test_heap = @import("test_heap.zig");
 const formatter = @import("../formatter.zig");
 const session = @import("../session.zig");
 const stdlib = @import("../stdlib.zig");
@@ -279,7 +280,7 @@ test "module loader: observation and dispatch require the requested registration
 }
 
 test "module registration: reuse reload removal and delayed calls reclaim boundedly" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();

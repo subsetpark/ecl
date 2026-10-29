@@ -28,14 +28,14 @@ const MachineError = machine.MachineError;
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "parse",
-        .doc = "( text -- value ) Parse RFC 8259 text into ECL values, " ++
-            "mapping null, true, and false to the symbols of those names.",
+        .effect = "text -- value",
+        .doc = "Parse RFC 8259 JSON. Objects become string-keyed dicts, arrays become lists, in-range integral numbers become ints, and other numbers become floats. JSON null and booleans become the ordinary symbols `` `null ``, `` `true ``, and `` `false ``.",
         .primitive = parse,
     },
     .{
         .name = "emit",
-        .doc = "( value -- text ) Render an ECL value as RFC 8259 text, " ++
-            "requiring string or symbol dictionary keys.",
+        .effect = "value -- text",
+        .doc = "Render an ECL value as RFC 8259 JSON. Dict keys must be strings or symbols; the only emitted symbol values are `` `null ``, `` `true ``, and `` `false ``.",
         .primitive = emit,
     },
 };

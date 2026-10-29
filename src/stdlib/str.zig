@@ -12,8 +12,8 @@ const MachineError = machine.MachineError;
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "kind",
-        .effect = "value -- `string|`generic|`other",
-        .doc = "( value -- kind ) `string for a list stored as characters, `generic for a list whose elements must be examined, `other for a value that cannot be a string.",
+        .effect = "value -- kind",
+        .doc = "`string for a list stored as characters, `generic for a list whose elements must be examined, `other for a value that cannot be a string.",
         .primitive = kind,
     },
 };

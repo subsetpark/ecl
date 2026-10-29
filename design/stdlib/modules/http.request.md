@@ -10,16 +10,6 @@ request, read absent headers/query/body using empty defaults, and return
 updated copies; the original is never changed. A word given a malformed
 request dictionary, or a name that is not a string, is `` `type ``.
 
-### header
-
-### header?
-
-### json
-
-### new
-
-### param
-
 ### query
 
 #### Examples
@@ -28,13 +18,3 @@ request dictionary, or a name that is not a string, is `` `type ``.
 "GET" "/?a=1&b=%2Fx&c" http.request.new http.request.query
 # => {"a" "1" "b" "/x" "c" ""}
 ```
-
-### text
-
-### valid?
-
-### with-body
-
-### with-header
-
-### with-param

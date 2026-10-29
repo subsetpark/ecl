@@ -62,13 +62,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "literal values",
-            .source = "(foo) first literal call 42 literal call [1 2] literal call",
+            .source = "(foo) first literal wrap call 42 literal wrap call [1 2] literal wrap call",
             .expected = "foo 42 [1 2]",
         },
         .{
             .name = "literal representation",
-            .source = "(foo) first literal dup type",
-            .expected = "((foo) core.first) list",
+            .source = "(foo) first literal dup type 42 literal type",
+            .expected = "`foo symbol int",
         },
         .{
             .name = "partial application",

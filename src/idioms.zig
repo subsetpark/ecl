@@ -210,8 +210,8 @@ const reverse_pattern = [_]PatternAtom{
 };
 const dip_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
-    .{ .word = .{ .spelling = "literal", .binding = .source } },
-    .{ .word = .{ .spelling = "compose", .binding = .source } },
+    .{ .word = .{ .spelling = "literal" } },
+    .{ .word = .{ .spelling = "append", .binding = .source } },
     .{ .word = .{ .spelling = "call" } },
 };
 const str_format_pattern = [_]PatternAtom{
@@ -571,7 +571,9 @@ fn matchAtoms(
             .int => |expected| if (actual != .int or actual.int != expected) return false,
             .quotation => |inner| if (!matchAtoms(guard, actual, inner, operation, capture, site)) return false,
             .operation => {
-                if (actual != .symbol or !std.mem.eql(u8, intern.get(actual.symbol.name), operation.spelling())) return false;
+                // A quoted occurrence pushes its symbol; it is never the operation.
+                if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
+                    !std.mem.eql(u8, intern.get(actual.symbol.name), operation.spelling())) return false;
                 const binding = operationBinding(operation);
                 const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
                 if (!guard.matches(actual.symbol, binding, primitive, .trusted)) return false;
@@ -579,7 +581,8 @@ fn matchAtoms(
                 capture.active_index = site;
             },
             .word => |expected| {
-                if (actual != .symbol or !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return false;
+                if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
+                    !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return false;
                 if (!guard.matches(actual.symbol, expected.binding, null, expected.origin)) return false;
                 if (expected.active) {
                     capture.active_word = actual.symbol.name;
@@ -737,6 +740,15 @@ comptime {
     }
 }
 
+comptime {
+    @setEvalBranchQuota(1_000_000);
+    for (registry) |entry| switch (entry.context) {
+        .fold, .scan, .fold1 => if (entry.operation == .binary and !numeric.reducesIntLanesTyped(entry.operation.binary))
+            @compileError("a recognized reduction has no typed plan over int lanes: " ++ entry.operation.binary.spelling()),
+        else => {},
+    };
+}
+
 /// Phrase words' interned names, interned on first use: each entry's head,
 /// then its following words. The intern table is one per process and never
 /// reset, so an id once learned stays valid.
@@ -789,7 +801,7 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         var last: ?LiveWord = null;
         const matched = for (entry.following, 0..) |expected, offset| {
             const form = forms.at(@intCast(offset));
-            if (form != .symbol or form.symbol.name != try phraseAtom(index, offset + 1)) break false;
+            if (form != .symbol or env.isQuoted(form.symbol.slot) or form.symbol.name != try phraseAtom(index, offset + 1)) break false;
             last = try followingWord(evaluator, form.symbol, expected.binding) orelse break false;
         } else true;
         if (!matched) continue;
@@ -1008,6 +1020,8 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
             continue;
         }
         const word = form.symbol;
+        // A quoted occurrence pushes a symbol, which no program register holds.
+        if (env.isQuoted(word.slot)) return null;
         const spelling = intern.get(word.name);
         if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
             const binding: BindingKind = if (stack_word == .over) .source else .builtin;

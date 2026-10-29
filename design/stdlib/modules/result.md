@@ -3,8 +3,6 @@
 Every entry validates its result envelope before invoking a caller quotation.
 A success payload is always a list representing a stack.
 
-### all
-
 ### and-then
 
 #### Examples
@@ -22,24 +20,6 @@ A success payload is always a list representing a stack.
 {kind io} result.err (first) (`kind at) result.either
 # => io
 ```
-
-### err
-
-### err?
-
-### map-err
-
-### ok
-
-### ok?
-
-### or-else
-
-### or-raise
-
-### partition
-
-### recover
 
 ### recover-kinds
 

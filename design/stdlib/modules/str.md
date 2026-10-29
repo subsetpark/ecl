@@ -12,8 +12,6 @@ non-ASCII scalar passes through unchanged.
 # => 1
 ```
 
-### ends?
-
 ### format
 
 #### Examples
@@ -22,16 +20,6 @@ non-ASCII scalar passes through unchanged.
 ["Ada" 2] "name={} n={}" str.format
 # => "name=Ada n=2"
 ```
-
-### index-of
-
-### lower
-
-### pad-left
-
-### pad-right
-
-### repeat
 
 ### replace
 
@@ -42,10 +30,6 @@ non-ASCII scalar passes through unchanged.
 # => "a+b+c"
 ```
 
-### starts?
-
-### str?
-
 ### trim
 
 #### Examples
@@ -54,10 +38,6 @@ non-ASCII scalar passes through unchanged.
 "  hello  " str.trim
 # => "hello"
 ```
-
-### trim-left
-
-### trim-right
 
 ### upper
 

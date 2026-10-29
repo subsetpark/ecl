@@ -39,10 +39,6 @@ bytes drain, while the input direction remains readable. Framing, TLS,
 encoding, and protocol limits belong to libraries. Deadlines compose tasks
 with `task.await-for`, cancellation, and joining.
 
-### accept
-
-### close
-
 ### listen
 
 #### Examples
@@ -66,11 +62,3 @@ dup "hello\n" bytes net.write
 net.close
 net.close
 ```
-
-### local-address
-
-### peer-address
-
-### read
-
-### write

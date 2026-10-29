@@ -57,7 +57,7 @@
 ### set answer
 (: "The answer.")
 42 `answer set
-42 literal `spelled def
+42 literal wrap `spelled def
 answer spelled match? io.pp
 `answer see
 `spelled see

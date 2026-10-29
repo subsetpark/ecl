@@ -862,9 +862,13 @@ pub const SpanArchive = enum(usize) {
             shared: switch (item) {
                 // The one rewrite: a symbol occurrence inside this body's text
                 // names the image the body is becoming. A lowered locals
-                // operation names no slot and keeps its operand.
+                // operation names no slot and keeps its operand; a quoted
+                // occurrence stays quoted under its new link.
                 .symbol => |reference| return if (env.localOperand(reference.slot) != null) item else .{
-                    .symbol = .{ .name = reference.name, .slot = try self.linker.link(reference.name) },
+                    .symbol = .{
+                        .name = reference.name,
+                        .slot = (try self.linker.link(reference.name)) | (reference.slot & if (env.isQuoted(reference.slot)) env.quote_flag else 0),
+                    },
                 },
                 .list => |nested| {
                     if (nested.kind() != .generic_spine) break :shared;
@@ -1779,19 +1783,21 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
     try std.testing.expectEqual(root.length(), copy.length());
 
     // Every word occurrence in the copy names the requested scope, and the
-    // source's do not.
+    // source's do not; the quoted name `go` stays quoted under its new link.
     var words: usize = 0;
+    var quoted: usize = 0;
     for (0..@as(usize, @intCast(copy.length()))) |index| {
         const item = list.atUnchecked(.{ .list = copy }, index);
         if (item != .symbol) continue;
         words += 1;
-        try std.testing.expectEqual(@as(u32, 7), item.symbol.slot);
-        try std.testing.expectEqual(
-            @as(u32, 0),
-            list.atUnchecked(.{ .list = root }, index).symbol.slot,
-        );
+        const source = list.atUnchecked(.{ .list = root }, index).symbol.slot;
+        try std.testing.expectEqual(env.isQuoted(source), env.isQuoted(item.symbol.slot));
+        if (env.isQuoted(item.symbol.slot)) quoted += 1;
+        try std.testing.expectEqual(@as(u32, 7), env.unquoted(item.symbol.slot));
+        try std.testing.expectEqual(@as(u32, 0), env.unquoted(source));
     }
     try std.testing.expect(words != 0);
+    try std.testing.expectEqual(@as(usize, 1), quoted);
 }
 
 test "spans: every re-scope step is one budget unit, publication included" {
@@ -1832,7 +1838,7 @@ test "spans: every re-scope step is one budget unit, publication included" {
 }
 
 test "spans: settled lineage storage tracks only live copies" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = @import("alloc_options").trace_frames }) = .init;
     {
         var fixture: ArchiveFixture = undefined;
         try fixture.init(counting.allocator());

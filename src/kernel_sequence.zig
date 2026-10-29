@@ -26,25 +26,22 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn definition(comptime operation: Op) ?env.BuiltinWord {
     return switch (operation) {
-        .at => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- value", .doc = "Select a list index or dictionary key, pervading over list indices." },
-        .where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- indices", .doc = "Expand integer counts into their replicated zero-based indices." },
+        .at => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- value", .doc = "Index a list or look up a dict key. Pervades over nested list selectors, preserving their shape, so an index vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is always one whole value, including when that value is a list. A missing dict key is an error." },
+        .where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- indices", .doc = "Expand a list of nonnegative ints into each index replicated its count times. A 0/1 mask is the common case, yielding the positions of 1s: `[0 1 1 0] where` is `[1 2]`." },
         .first_where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- index", .doc = "Return the first index with a positive count, or the count-list length when none exists; counts after the first hit are not inspected." },
-        .in_word => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- bool", .doc = "Test whole-value membership, pervading over the sought value and never into the list." },
-        .raze => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Flatten one level of a list." },
+        .in_word => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- bool", .doc = "Membership. Pervades over the sought value — the left operand, never the list — down to its atoms; each atom is then tested by whole-value `match?` against the list's top-level elements, so the result takes the sought value's shape: `[2 5] [1 2 3] in?` is `[1 0]`. The list is only ever read one level deep, and a list operand is decomposed before any comparison, so `in?` cannot ask whether a sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, the results of two atom searches. Use `([1 1] match?) any?` for that." },
+        .raze => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Flatten one level. Flat-map is `each raze`." },
         .cat => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- list", .doc = "Concatenate two lists." },
-        .take => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "Take a signed number of list elements, cycling when necessary." },
-        .drop => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "Drop a signed number of elements from a list." },
-        .range => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "bound -- list", .doc = "Return the integers from zero through one less than a nonnegative bound." },
-        .shape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- shape", .doc = "Return the dimensions of a rectangular list." },
-        .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Return a list's top-level element count." },
-        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Transpose a rectangular list." },
-        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle list data into the requested rectangular shape." },
-        .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into pieces that begin at each nondecreasing start index and end at the next; elements before the first start are dropped." },
-        .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty list is returned unchanged." },
-        // `first` is a builtin rather than a prelude word because the
-        // reader's quote expands to `(x) core.first`, so it must exist before
-        // the first quoted name in the prelude runs.
-        .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list." },
+        .take => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "The first `count` elements; a negative count takes from the end. When the magnitude exceeds the length, the data cycles." },
+        .drop => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- list", .doc = "Remove `count` elements from the front, or from the end when negative. (The stack word is `pop`.)" },
+        .range => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "bound -- list", .doc = "The ints `[0 1 … bound-1]`; the bound must be a nonnegative int." },
+        .shape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- shape", .doc = "The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything)." },
+        .len => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- count", .doc = "Top-level list element count. Lists may be ragged. Dictionary entry count is provided by `dict.size`." },
+        .flip => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Exchange the first two axes of a list of equally wide rows. Cells are preserved whole: strings, nested lists, dictionaries, and mixed values need not share a type or shape. Only the immediate row lengths must agree. Strings used as rows transpose their characters.\n\nAn empty list or a list containing no list items is unchanged. Mixing list rows with non-list items, unequal row lengths, or nonempty collections of zero-width rows raises `` `shape ``; the last case cannot retain the other axis after transposition. A non-list argument raises `` `type ``." },
+        .reshape => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list shape -- list", .doc = "Cycle the data into the exact nested-list shape; a zero axis must be final." },
+        .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings." },
+        .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int." },
+        .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list; an empty list is `` `domain ``." },
         .reverse, .rest => null,
     };
 }
@@ -199,6 +196,42 @@ const FlatGatherDriver = struct {
     }
 };
 
+/// One block's count total and the `or` of its counts.
+const BlockSum = struct { sum: usize, bits: i64 };
+
+const byte_lanes = std.simd.suggestVectorLength(u8) orelse 1;
+comptime {
+    // Each 16-bit lane of `byteBlockSum` holds at most a block of maximal
+    // byte counts.
+    if (kernel_flat.block_size * std.math.maxInt(u8) > std.math.maxInt(u16))
+        @compileError("a block of byte counts can overflow a 16-bit lane");
+}
+
+/// The total and `or` of at most one block of byte counts, which are never
+/// negative or too large, so every block sums. Whole byte vectors are `or`ed
+/// as bytes and summed with a widening add rather than widened to int lanes
+/// first: a comparison's mask is a byte leaf, so this is `where`'s and
+/// `compress`'s common case.
+fn byteBlockSum(counts: []const u8) BlockSum {
+    std.debug.assert(counts.len <= kernel_flat.block_size);
+    var bits: @Vector(byte_lanes, u8) = @splat(0);
+    var sum: @Vector(byte_lanes, u16) = @splat(0);
+    const vector_end = counts.len / byte_lanes * byte_lanes;
+    var index: usize = 0;
+    while (index != vector_end) : (index += byte_lanes) {
+        const items: @Vector(byte_lanes, u8) = counts[index..][0..byte_lanes].*;
+        bits |= items;
+        sum += @as(@Vector(byte_lanes, u16), items);
+    }
+    var tail_bits: i64 = @reduce(.Or, bits);
+    var tail_sum: usize = @reduce(.Add, @as(@Vector(byte_lanes, u32), sum));
+    for (counts[vector_end..]) |item| {
+        tail_bits |= item;
+        tail_sum += item;
+    }
+    return .{ .sum = tail_sum, .bits = tail_bits };
+}
+
 /// `mask where at` as one pass: the elements of the source at the positions
 /// `where` would list, each repeated its count, without the index list. The
 /// phrase admits a byte-leaf mask, or an empty one, over a typed leaf; a
@@ -273,17 +306,17 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                     // Positions the source has only need their sum; beyond
                     // it, a nonzero count is the gather's fault.
                     const inside = @min(block.len, length -| range.start);
-                    var total: usize = 0;
-                    var bits: u8 = 0;
-                    for (block[0..inside]) |count| {
-                        total += count;
-                        bits |= count;
+                    var offset: usize = 0;
+                    while (offset != inside) {
+                        const piece = @min(kernel_flat.block_size, inside - offset);
+                        const summed = byteBlockSum(block[offset..][0..piece]);
+                        output.total += summed.sum;
+                        output.mask = output.mask and summed.bits <= 1;
+                        offset += piece;
                     }
                     for (block[inside..]) |count| {
                         if (count != 0) return context.fail(.domain, "at index is out of bounds");
                     }
-                    output.total += total;
-                    output.mask = output.mask and bits <= 1;
                     output.index = range.end;
                 },
                 .fill => {
@@ -293,14 +326,21 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                     const out = output.writer.?.unpublishedRange(0, output.total);
                     if (output.mask) {
                         // Every position stores at the write cursor; only a
-                        // selected one advances it. The store is in bounds
-                        // while elements remain to select, so the loop ends
-                        // at the last selected position, not at the block.
-                        for (block, output.index..) |count, position| {
-                            if (output.written == output.total) break;
-                            out[output.written] = items[position];
-                            output.written += count;
+                        // selected one advances it. A stretch is no longer
+                        // than the room left, so each of its stores is in
+                        // bounds without a test, and filling ends at the last
+                        // selected position, not at the block.
+                        var position = output.index;
+                        var written = output.written;
+                        while (position != end and written != output.total) {
+                            const stretch = @min(end - position, output.total - written);
+                            for (all[position..][0..stretch], items[position..][0..stretch]) |count, item| {
+                                out[written] = item;
+                                written += count;
+                            }
+                            position += stretch;
                         }
+                        output.written = written;
                     } else for (block, output.index..) |count, position| {
                         if (output.written == output.total) break;
                         const element: Element = items[position];
@@ -615,9 +655,11 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
         /// The sum of one block of typed counts and the `or` of its counts, or
         /// null when the block holds a count that is negative or too large to
         /// sum without a checked add. Every count below 2^55 keeps a block's
-        /// sum below 2^63, so the `or` decides both.
-        fn blockSum(counts: []const Count) ?struct { sum: usize, bits: i64 } {
+        /// sum below 2^63, so the `or` decides both. Byte counts can be
+        /// neither, so they always sum.
+        fn blockSum(counts: []const Count) ?BlockSum {
             std.debug.assert(counts.len <= kernel_flat.block_size);
+            if (comptime @sizeOf(Count) == 1) return byteBlockSum(counts);
             // Independent accumulators, `unroll` vectors per iteration, so
             // loop control is paid once per group.
             var bits: [unroll]Lanes = @splat(@splat(0));
@@ -1743,19 +1785,14 @@ fn rangePrimitive(evaluator: *Machine) MachineError!void {
 const RangeKernel = struct {
     pub const arity = 0;
     pub const Params = void;
-    pub const Output = heap.LeafWriter(.leaf_i64);
-
-    pub fn prepare(evaluator: *Machine, _: [0]Value, _: void, length: usize) error{OutOfMemory}!Output {
-        return .init(evaluator.allocator(), length);
-    }
+    pub const Output = support.LeafResult(.leaf_i64);
+    pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
     pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
-        for (output.unpublishedRange(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
+        for (output.range(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
     }
 
-    pub fn finish(output: *Output) Value {
-        return output.finish();
-    }
+    pub const finish = Output.finish;
 };
 
 fn lenPrimitive(evaluator: *Machine) MachineError!void {
@@ -2670,7 +2707,9 @@ const CopyShape = union(enum) {
 /// representation, which `list.ListProfile` chose, is wider; a plain copy when
 /// they match. Every typed list move widens through this.
 fn copyWidened(comptime Out: type, out: []Out, items: anytype) void {
-    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return @memcpy(out, items);
+    // A result moving within its own source starts no later than it, so a
+    // forward copy is exact where `@memcpy` would forbid the overlap.
+    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return std.mem.copyForwards(Out, out, items);
     for (out, items) |*slot, item| slot.* = item;
 }
 
@@ -2712,54 +2751,52 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
     const Out = heap.LeafElement(out_kind);
     const Index = heap.LeafElement(index_kind);
     return struct {
-        fn prepareWriter(evaluator: *Machine, length: usize) error{OutOfMemory}!heap.LeafWriter(out_kind) {
-            return .init(evaluator.allocator(), length);
-        }
-
-        fn finishWriter(output: *heap.LeafWriter(out_kind)) Value {
-            return output.finish();
-        }
+        const Result = support.LeafResult(out_kind);
 
         const Single = struct {
             pub const arity = 1;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// A contiguous copy reads each source position at or past the
+            /// result position it lands on, so it may move within its source;
+            /// a reversed or cyclic one reads positions already stored over.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
+            pub fn mayOverwrite(shape: CopyShape, _: usize) bool {
+                return shape == .contiguous;
             }
             pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         const Concat = struct {
             pub const arity = 2;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// The left operand's elements keep their positions, so a left
+            /// list with room for the right becomes the result.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
-            }
             pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         const Gather = struct {
             pub const arity = 2;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// Each result position is stored after its own index is read,
+            /// so the index list may become the result.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{1} };
 
-            pub fn prepare(evaluator: *Machine, _: [2]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
-            }
             pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         /// An atom before a source's elements; an empty source is never read,
@@ -2767,16 +2804,16 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         const Cons = struct {
             pub const arity = 1;
             pub const Params = CopyShape;
-            pub const Output = heap.LeafWriter(out_kind);
+            pub const Output = Result;
+            /// The source shifts right past the head, so it never becomes
+            /// the result.
+            pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{} };
 
-            pub fn prepare(evaluator: *Machine, _: [1]Value, _: CopyShape, length: usize) error{OutOfMemory}!Output {
-                return prepareWriter(evaluator, length);
-            }
             pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
                 const source: []const Element = if (range.end > 1) heap.leafElements(kind, operands[0].list) else &.{};
-                return copyRange(context, shape, source, null, null, output.unpublishedRange(range.start, range.len()), range);
+                return copyRange(context, shape, source, null, null, output.range(range.start, range.len()), range);
             }
-            pub const finish = finishWriter;
+            pub const finish = Result.finish;
         };
 
         /// An atom as the result's element; `ListProfile` admitted its class.
@@ -2788,9 +2825,9 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             };
         }
 
-        /// Copies `range` of the result into `out`. Nothing reads the result
-        /// before it is published, so each shape writes its range in place,
-        /// with no staging block.
+        /// Copies `range` of the result into `out`, which may be the source's
+        /// own buffer for the shapes `Single` and `Concat` allow; each shape
+        /// writes its range in place, with no staging block.
         fn copyRange(
             context: support.Context,
             shape: CopyShape,

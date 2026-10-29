@@ -13,6 +13,7 @@
 //! and so exercises production semantics rather than a second kernel.
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
+const test_heap = @import("test_heap.zig");
 const kernels = @import("../kernels.zig");
 const flat = @import("../kernel_flat.zig");
 const session = @import("../session.zig");
@@ -1495,7 +1496,7 @@ test "typed kernels: temporary bytes are bounded by output plus one kernel chunk
     // kernel chunk plus slack. An intermediate proportional to the input — the
     // sixteen bytes per boxed cell the old route staged, or a second profiling
     // pass over them — exceeds that limit and turns into a failed allocation.
-    const Limited = std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = 0 });
+    const Limited = std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames });
     var limited: Limited = .init;
     defer if (limited.deinit() == .leak) std.debug.panic("memory-bound case leaked", .{});
     const limited_allocator = limited.allocator();

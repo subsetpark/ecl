@@ -23,32 +23,30 @@ const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "reduce-groups", .primitive = @import("kernel_numeric.zig").reduceGroups, .effect = "values groups reducer -- results", .doc = "Reduce top-level index lists using sum, count, min, or max without gathering slices." },
+        .{ .name = "reduce-groups", .primitive = @import("kernel_numeric.zig").reduceGroups, .effect = "values groups reducer -- results", .doc = "Reduce each top-level index list, preserving group and index order, including repeated indices. Reducer symbols are `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Sum uses checked numeric addition from zero, left to right; count accepts any selected value. Min/max use whole-value comparison and preserve the first value on ties. Empty groups yield zero for sum/count and raise `` `domain `` for min/max. Noninteger selectors raise `` `type ``; negative or out-of-range indices and unknown symbols raise `` `domain ``. Built-in reducer meanings do not depend on word bindings." },
         .{ .name = "dup", .primitive = dup, .effect = "x -- x x", .doc = "Duplicate the top stack value." },
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
-        .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
+        .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value. (`drop` is the sequence word.)" },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the visible operand stack into a bottom-to-top list while leaving every original value in place." },
-        .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Prepend a value or executable form to a list." },
-        .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Return whether two complete values are structurally equal." },
-        .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value kind as a symbol." },
-        .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Execute a word through ordinary name resolution and dispatch." },
-        .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "Parse source text into an unevaluated quotation." },
-        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, a symbol spelling, " ++
-            "a char as a one-element string, or a byte list decoded as UTF-8." },
-        .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list, or return a byte list unchanged." },
-        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol unchanged, or the already-interned symbol a string spells, linked to the root of the " ++
-            "activation that built it; a spelling that was never interned is `domain." },
-        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol unchanged, or create the symbol a string spells, linked to the root of the activation " ++
-            "that built it and growing the process-lifetime name table when it is new." },
-        .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of an integer-literal string." },
-        .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a numeric-literal string." },
-        .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char or string unchanged, the char with an int's codepoint, or the string whose chars have a list's codepoints." },
-        .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Run a body with an explicit initial stack in a fresh unit and return an ok or error result dictionary; observationally `@spawn task.await`." },
-        .{ .name = "@attempt!", .primitive = attemptSeedless, .effect = "quotation -- result", .doc = "Run a body on an empty stack in a fresh unit and return an ok or error result dictionary; `[] q @attempt`." },
-        .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dictionary." },
-        .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "Return the process arguments as a list of strings." },
-        .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Request root-session termination with the given exit status." },
-        .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "Return an environment variable's value from the session snapshot." },
+        .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Raw structural prepend. On data, `1 [2 3] cons` is `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not safe partial application — that is `partial`." },
+        .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Whole-value structural equality; **not** pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`." },
+        .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value's kind as a symbol: one of `int`, `float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`." },
+        .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Resolve and apply a symbol late through the ordinary word-dispatch path, exactly as if that symbol appeared in executable position. Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes, private resolution, annotations, tracing, builtins, native calls, and cancellation are preserved." },
+        .{ .name = "literal", .primitive = literal, .effect = "value -- form", .doc = "Return the form that pushes a value when a quotation runs it. A symbol becomes its quoted occurrence, so `` `x literal `` is `` `x `` and running it pushes `x` instead of executing it. Any other value already pushes itself and is returned unchanged. Wrap the form to get a quotation: `` v literal wrap `` pushes `v` when called." },
+        .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "The reader, reified: parse source text into an unevaluated quotation. Reading interns every symbol and word in the text, so this is a load-class word for trusted source, not a conversion: use `int`, `float`, and `symbol` on data." },
+        .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. Unlike `str`, the result is content rather than representation: `` (`foo) first chars `` is `\"foo\"`, while `` (`foo) first str `` is `\"`foo\"`. See [Conversions](SPEC.md#conversions)." },
+        .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a string as UTF-8 into a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged, so the word is idempotent. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions)." },
+        .{ .name = "symbol", .primitive = symbolWord, .effect = "value -- symbol", .doc = "Return a symbol unchanged, or the already-interned symbol whose spelling a string names. A spelling that is not yet interned is `` `domain ``, as is a string that is not a valid symbol spelling; any other value is `` `type ``. Every symbol written in loaded source is interned, so this succeeds for any key a program compares against and never grows the interned name space; use `intern` to create one. The symbol links to the root of the activation that built it, so `\"dup\" symbol wrap` executes the same `dup` as `(dup)` written there. See [Conversions](SPEC.md#conversions)." },
+        .{ .name = "intern", .primitive = internWord, .effect = "value -- symbol", .doc = "Return a symbol unchanged, or create the symbol for a string, interning the spelling when it is new. A string that is not a valid symbol spelling is `` `domain ``; any other value is `` `type ``. Interned names live for the whole process and are never reclaimed, so never apply this to unbounded external input; `symbol` is the lookup-only form. The symbol links to the root of the activation that built it. See [Conversions](SPEC.md#conversions)." },
+        .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of a string in the integer-literal grammar. A string outside that grammar is `` `parse ``. A float is `` `type ``: choose `floor`, `round`, or `ceil` instead. Any other value is also `` `type ``." },
+        .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a string in the numeric-literal grammar. A string outside that grammar is `` `parse ``; any other value is `` `type ``." },
+        .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``." },
+        .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "*Unit constructor.* Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. Use `[]` for no initial values. Always pushes exactly one result: `{ok (values)}` with the successful stack values as a list, or `{err <error dict>}`.\n\nObservationally `@spawn task.await` — same result shape, same error protocol, same self-contained-quotation contract — differing only in scheduling. That identity is what makes the isolation non-arbitrary rather than an implementation accident. The complete form is `values (q) @attempt`. See Errors." },
+        .{ .name = "@attempt!", .primitive = attemptSeedless, .effect = "quotation -- result", .doc = "*Unit constructor.* `@attempt` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @attempt`." },
+        .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dict." },
+        .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "The process arguments following the script or source, as a list of strings." },
+        .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status." },
+        .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`or-else` is the defaulting idiom. Absent host IO is `` `io ``." },
     };
     try core.installBuiltins(&definitions);
     try combinators.install(core);
@@ -194,11 +192,24 @@ fn typeWord(evaluator: *Machine) MachineError!void {
     };
     try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
 }
+/// Every value but a symbol pushes itself when a quotation runs it; a symbol
+/// would execute, so its form is its quoted occurrence, linked as written.
+fn literal(evaluator: *Machine) MachineError!void {
+    try evaluator.require(1);
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const form: Value = switch (item.borrow()) {
+        .symbol => |word| .{ .symbol = .{ .name = word.name, .slot = word.slot | value.quote_flag } },
+        else => item.take(),
+    };
+    return evaluator.pushOwned(form);
+}
 fn execute(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const word = switch (item.borrow()) {
-        .symbol => |word| word,
+        // `execute` runs the word a symbol names, quoted occurrence or not.
+        .symbol => |word| value.Symbol{ .name = word.name, .slot = env.unquoted(word.slot) },
         else => return evaluator.typeError("a symbol"),
     };
     try evaluator.executeWord(word);

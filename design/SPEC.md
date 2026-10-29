@@ -177,11 +177,13 @@ characters. An atom is classified whole-token, in this order:
    names `\space`, `\tab`, `\newline`, or `\u{...}` with one to six hex
    digits naming a Unicode scalar value (surrogate halves and values above
    U+10FFFF are parse errors).
-3. **Quote** — `` ` `` followed by a symbol. It is reader sugar for the two
-   forms `(symbol) core.first`, so `` `foo `` and `(foo) first` push the
-   same value. The expansion is literal wherever it appears, so `` [`a `b] ``
-   is the four-element list `((a) core.first (b) core.first)`; only `{ }`
-   rejects a quote, since the expansion would break its key/value pairing.
+3. **Quote** — `` ` `` followed by a symbol. It reads as one quoted occurrence
+   of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
+   push the same value. As data the occurrence is the symbol itself, so
+   `` [`a `b] `` is a two-element list equal to `[a b]`; the quote is
+   occurrence metadata, like a symbol's link, and travels with the occurrence
+   when lists are copied or spliced. `{ }` rejects a quote, since dict entries
+   are data and never run.
    `` ` `` is reserved token-initially and banned inside symbols.
 4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
@@ -492,11 +494,12 @@ A symbol is one kind of value whether it was written bare or built at
 runtime: `(dup) first` and `` `dup `` yield the same symbol, and `{dup 1}`
 stores it as a key. The position of a symbol in a list, not its value,
 decides what running the list does with it: `(dup) call` executes `dup`,
-while `` (`dup) call `` runs the quote's expansion `(dup) core.first` and
-pushes the symbol. Symbols print bare, delimited as `'...'` only when the
-bare spelling would not read back as the same symbol. Resolution and
-provenance metadata belong to stored symbol occurrences rather than their
-values and never distinguish two symbols.
+while `` (`dup) call `` runs a quoted occurrence and pushes the symbol. Symbols
+print bare, delimited as `'...'` only when the bare spelling would not read
+back as the same symbol, and a quoted occurrence prints with its quote, so
+`` (`dup) `` prints as `` (`dup) ``. Resolution, provenance, and quotation
+belong to stored symbol occurrences rather than their values and never
+distinguish two symbols.
 
 A quotation, vector, and matrix row are list roles. A homogeneous list of
 atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
@@ -524,8 +527,8 @@ Printing never exposes storage specialization. A non-string list uses `[...]`
 when its value has canonical array shape—a homogeneous flat vector of
 numbers or chars, or a rectangular nesting of such vectors—and `(...)`
 otherwise. A vector of symbols has a quotation's shape and prints with
-`(...)` however it was built, and a quotation prints its quote expansions,
-so `` (`x) `` prints as `((x) core.first)`. Both delimiters read as the same
+`(...)` however it was built, and a quoted occurrence prints as its quote,
+so `` (`x) `` prints as `` (`x) ``. Both delimiters read as the same
 list kind.
 Thus `(1 2 3)` prints as `[1 2 3]`, `[dup swap]` prints as `(dup swap)`, and
 the ragged result of `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings
@@ -1314,16 +1317,16 @@ representations but expose the same binding model.
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
 - ``annotation? value `name set`` binds a constant. It is sugar, defined in ecl
-  as `swap literal swap def`: the value is captured with `literal`, so the
-  published body is `(value)`, or `((value) first)` when the value is a word.
+  as `swap literal wrap swap def`: the value is captured with `literal`, so the
+  published body is `(value)`, or ``(`value)`` when the value is a word.
   Reference applies that body and pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. ``v `name set`` is therefore
-  observationally ``v literal `name def``: the sugar synthesizes no
+  observationally ``v literal wrap `name def``: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
   prints its literal-capture body, preceded by the annotation when one is
   present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `literal` plus `def` spelling. `set`
+  distinguishes it from the corresponding `literal wrap` plus `def` spelling. `set`
   assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
@@ -1332,7 +1335,11 @@ representations but expose the same binding model.
 - `see` prints the resolved binding's combined annotation, when present,
   followed by its body through the standard source formatter. It omits the
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
-  and effect metadata, and `doc` returns documentation.
+  and effect metadata, `doc` returns documentation, and `effect` returns the
+  declared effect as an annotation list, or `()` when none was declared.
+  `` `m exports `` returns module `m`'s public word names as sorted symbols
+  (`` `core exports `` lists core's), and `stdlib` returns the embedded
+  standard-library module names.
 - `` `name unset `` and `` `name undef `` are exact aliases. They remove a binding
   only from the current root and otherwise do nothing. Removing a shadow
   reveals core's binding for the name; it never mutates core. The name must be
@@ -1382,7 +1389,10 @@ four forms as top-level `def`: no annotation, effect only, documentation
 only, or both. A top-level effect is reflective metadata only; a module
 word's declared effect is a live contract, checked dynamically against the
 observed effect when application crosses a module boundary (violation:
-`` `contract ``). An omitted module effect means there is no such check.
+`` `contract ``). An omitted module effect means there is no such check, and
+so does a standard-library word's: the standard library's effects are
+reflective metadata, and a call with too few values fails inside the word,
+as the code it runs reports it.
 This source-language relaxation does not weaken the native ABI, whose
 `Call` effect and documentation remain mandatory; the shipped prelude
 keeps its stronger repository policy requiring meaningful documentation.
@@ -1980,6 +1990,11 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   publishes none of the request; malformed operand and name domains are
   `` `type `` and `` `domain ``, respectively. Each binding is a late-bound forwarding
   definition whose effect and documentation are copied from the original.
+  An attribute that a standard-library module binds to a host builtin is
+  bound directly instead: no other module can register a standard-library
+  name, so resolving the attribute once finds what every call would. A
+  failure inside the builtin names the attribute's qualified name, as a
+  forwarding call would; no forwarding frame appears in a trace.
   Naming a binding that already exists replaces only that binding; importing
   selected names never splices an entire module or emits shadow notices.
   `importp` is the private form: the same request publishes module-private

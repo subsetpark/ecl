@@ -188,11 +188,19 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
         /// the result's, or when it cannot hold `len_value` elements. A null
         /// claim retains nothing and leaves the caller's reference untouched.
         pub fn claim(handle: *ListHandle, len_value: usize) ?Self {
+            return claimHeld(handle, len_value, 1);
+        }
+
+        /// `claim` for a list the caller holds `references` owned references
+        /// to: one call's operands can be the same list, and when every
+        /// reference to it is the call's own, its buffer is still the call's
+        /// alone. The caller adopts one reference and releases the others.
+        pub fn claimHeld(handle: *ListHandle, len_value: usize, references: u32) ?Self {
             const source_kind = listKind(handle);
             if (leafElementSize(source_kind) != leafElementSize(result_kind)) return null;
             if (source_kind == .generic_spine or result_kind == .generic_spine) return null;
             if (capacity(handle) < len_value) return null;
-            const unique = claimUniqueList(handle) orelse return null;
+            const unique = claimHeldList(handle, references) orelse return null;
             return .{ .claimed = unique, .handle = handle, .length = len_value };
         }
 
@@ -223,7 +231,8 @@ pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
             std.debug.assert(offset + source.len <= self.length);
             if (source.len == 0) return;
             const items = payloadItems(Element, mutableHeader(self.handle));
-            @memcpy(items[offset..][0..source.len], source);
+            // `source` may be this buffer's own later positions.
+            std.mem.copyForwards(Element, items[offset..][0..source.len], source);
         }
 
         /// Consumes the authority and republishes the claimed list under the
@@ -892,8 +901,20 @@ fn setInitializingLength(header: *InitializingList, new_len: usize) void {
 }
 
 fn claimUniqueHeader(header: *Header) ?*UniqueHeader {
-    if (headerImpl(header).rc.load(.acquire) != 1) return null;
+    return claimHeldHeader(header, 1);
+}
+
+/// Unique for a caller that owns exactly `references` of the object's
+/// references and so knows no one else can observe it.
+fn claimHeldHeader(header: *Header, references: u32) ?*UniqueHeader {
+    std.debug.assert(references != 0);
+    if (headerImpl(header).rc.load(.acquire) != references) return null;
     return @ptrCast(@alignCast(header));
+}
+
+fn claimHeldList(handle: *ListHandle, references: u32) ?*UniqueList {
+    const unique = claimHeldHeader(mutableHeader(handle), references) orelse return null;
+    return @ptrCast(@alignCast(unique));
 }
 
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {

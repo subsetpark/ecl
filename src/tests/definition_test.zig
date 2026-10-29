@@ -126,7 +126,7 @@ test "every primitive exposes meaningful reflective documentation" {
     try expectOk(&runtime, "`over see `call see");
     try std.testing.expectEqualStrings(
         "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
-            "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive>\n",
+            "(quotation -- ... :\n \"*Inline.* Run a quotation on the current stack. A data list pushes its elements.\") <primitive>\n",
         output.written(),
     );
 }
@@ -140,6 +140,33 @@ test "which reports effect metadata without expanding documentation" {
     defer runtime.deinit();
     try expectOk(&runtime, "(x -- y : \"Not part of concise which output.\") (dup *) `square def `square which");
     try std.testing.expectEqualStrings("square -> square def public (x -- y)\n", output.written());
+}
+
+test "effect returns a binding's declared effect, or () when it declares none" {
+    // `bare` is defined first: a list left by an earlier `effect` would be
+    // taken as its optional annotation.
+    try support.expectStack(
+        "(1) `bare def " ++
+            "(x -- y : \"Square.\") (dup *) `square def " ++
+            "(--) (1 pop) `quiet def " ++
+            "`+ effect `dict.get effect `archive.sha256 effect " ++
+            "`square effect `quiet effect `bare effect `def effect",
+        "(x y -- z) (dict key default -- value) (bytes -- lowercase-hex) (x -- y) (--) () ()",
+    );
+}
+
+test "exports lists a module's public words and stdlib the embedded modules" {
+    try support.expectStack(
+        "`archive exports " ++
+            "`core exports (`effect match?) any? " ++
+            "[] ((1) `shown def (2) `hidden defp) `m @defm `m exports " ++
+            "stdlib (`dict match?) any?",
+        "(next-member open-tgz read-member sha256 unpack-tgz) 1 (shown) 1",
+    );
+    try support.expectErrors(&.{
+        .{ .name = "unknown module", .source = "`no-such-module exports", .kind = "undefined-word", .word = "exports" },
+        .{ .name = "invalid module name", .source = "`... exports", .kind = "domain", .word = "exports" },
+    });
 }
 
 test "invocation effects: which reports public task word contracts" {
@@ -171,7 +198,9 @@ test "invocation effects: task completion precedes caller continuation" {
         "42",
     );
     try support.expectErrors(&.{
-        .{ .name = "entry contract", .source = "task.await", .kind = "contract", .word = "task.await" },
+        // A standard-library word has no boundary effect check: too few
+        // values are the builtin's own underflow.
+        .{ .name = "entry underflow", .source = "task.await", .kind = "underflow", .word = "task.await" },
         .{ .name = "primitive failure", .source = "3 task.await", .kind = "type", .word = "task.await" },
         .{ .name = "driver failure", .source = "[3] task.await-any", .kind = "type", .word = "task.await-any" },
     });
@@ -438,10 +467,10 @@ test "long annotation traversal and reflection observe cancellation" {
 }
 
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
-// The merge makes `v 'name set` observationally `v literal 'name def`:
+// The merge makes `v 'name set` observationally `v literal wrap 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
 // a "value" is a word whose body is the literal capture: `(v)`, or
-// `((v) first)` for a word `v`. Since M11 made source annotations optional
+// `(`v)` for a word `v`. Since M11 made source annotations optional
 // everywhere, the sugar synthesizes no metadata at all and the equivalence is
 // exact.
 
@@ -614,5 +643,80 @@ test "seedless unit constructors start on an empty stack" {
         .{ .name = "@defm! name domain", .source = "() `core @defm!", .kind = "domain", .word = "@defm!" },
         .{ .name = "@spawn! in construction", .source = "((1) @spawn! pop) `m @defm!", .kind = "domain", .word = "@spawn!" },
         .{ .name = "@attempt! isolation", .source = "1 (pop) @attempt! `err at raise", .kind = "underflow", .word = "pop" },
+    });
+}
+
+test "quotes: one quoted occurrence that pushes its symbol" {
+    try support.expectStacks(&.{
+        // As data a quote is its symbol: one element, equal to the bare one.
+        .{ .name = "shape", .source = "(`a) len [`a `b] len", .expected = "1 2" },
+        .{ .name = "equality", .source = "[`a `b] [a b] match? (`a) first (a) first match?", .expected = "1 1" },
+        .{ .name = "push", .source = "`a type (`a) call (a) first match?", .expected = "symbol 1" },
+        // The quote prints as itself and reads back as the same occurrence.
+        .{ .name = "printing", .source = "(`a b `'c d') str", .expected = "\"(`a b `'c d')\"" },
+        .{ .name = "round trip", .source = "(`a b) str parse first first wrap call", .expected = "a" },
+        // The mark travels with the occurrence; `execute` runs the word.
+        .{ .name = "extracted occurrence", .source = "(`a) first wrap call 1 2 (`swap) first execute", .expected = "a 2 1" },
+        // A quote in a locals body is the symbol, not the local.
+        .{ .name = "locals", .source = "5 (|x| `x x) call", .expected = "x 5" },
+        .{ .name = "module body", .source = "[] ((|a| `a) `w def) `quoting @defm 5 quoting.w", .expected = "a" },
+        // A quoted operation pushes its symbol; no idiom takes it as the word.
+        .{ .name = "no idiom", .source = "[1 2] (pop `+) each", .expected = "(+ +)" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "dict entry", .source = "{`a 1}", .kind = "parse" },
+    });
+}
+
+test "strings: plain text and escapes read the same however long the run" {
+    // 148 plain characters, past the tokenizer's 64-byte run and the reader's
+    // 16-byte scan lanes.
+    const long = "abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 abcdefghijklmnopqrstuvwxyz0123456789 ";
+    try support.expectStacks(&.{
+        .{ .name = "empty", .source = "\"\" len", .expected = "0" },
+        .{ .name = "long plain", .source = "\"" ++ long ++ "\" len", .expected = "148" },
+        // An escape or a non-ASCII character late in a long run takes the
+        // codepoint route from the start.
+        .{ .name = "late escape", .source = "\"" ++ long ++ "\\n\" len", .expected = "149" },
+        .{ .name = "late quote escape", .source = "\"" ++ long ++ "\\\"\" last", .expected = "\\u{22}" },
+        .{ .name = "late non-ASCII", .source = "\"" ++ long ++ "\u{e9}\" last", .expected = "\\\u{e9}" },
+        .{ .name = "multiple lines", .source = "\"one\ntwo\" len", .expected = "7" },
+        .{ .name = "same value", .source = "\"plain\" \"pl\\u{61}in\" match?", .expected = "1" },
+    });
+    // Positions after a long string are counted per character.
+    try support.expectErrors(&.{.{
+        .name = "position after a long string",
+        .source = "\"" ++ long ++ "\" nope",
+        .kind = "undefined-word",
+        .word = "nope",
+        .data = &.{.{ .name = "col", .expected = .{ .int = 152 } }},
+    }});
+}
+
+test "reuse: a result never overwrites a value still observed" {
+    // Results take over an operand's buffer only when the call holds every
+    // reference to it and the kernel's loop permits it at every position the
+    // list occupies. Each case keeps or shares the operand; expected values
+    // are master's, before reuse was generalized.
+    try support.expectStacks(&.{
+        .{ .name = "same list twice, also bound", .source = "[1 2 3] `x set x x + x", .expected = "[2 4 6] [1 2 3]" },
+        .{ .name = "same list twice, also on the stack", .source = "5 range dup dup + +", .expected = "[0 3 6 9 12]" },
+        .{ .name = "right operand kept", .source = "5 range dup 3 + swap", .expected = "[3 4 5 6 7] [0 1 2 3 4]" },
+        // A gather over its own indices would read sources it already
+        // stored over; the reversed list makes every read cross a store.
+        .{ .name = "gather from its own indices", .source = "3 range reverse dup at", .expected = "[0 1 2]" },
+        .{ .name = "put into kept list", .source = "5 range dup 2 99 put swap", .expected = "[0 1 99 3 4] [0 1 2 3 4]" },
+        // One list as collection, indices, and replacement: a scatter over
+        // itself would read replacements it already stored over.
+        .{ .name = "vector put from itself", .source = "5 range reverse dup dup put", .expected = "[0 1 2 3 4]" },
+        .{ .name = "drop of kept list", .source = "10 range dup 3 drop swap", .expected = "[3 4 5 6 7 8 9] [0 1 2 3 4 5 6 7 8 9]" },
+        .{ .name = "cat with itself", .source = "5 range dup cat", .expected = "[0 1 2 3 4 0 1 2 3 4]" },
+        .{ .name = "scan of kept list", .source = "10 range dup 0 (+) scan swap", .expected = "[0 1 3 6 10 15 21 28 36 45] [0 1 2 3 4 5 6 7 8 9]" },
+        .{ .name = "row fold of kept list", .source = "12 range dup [3 4] reshape sum swap len", .expected = "[12 15 18 21] 12" },
+        .{ .name = "del of kept list", .source = "5 range dup 2 del swap", .expected = "[0 1 3 4] [0 1 2 3 4]" },
+        // Owned outright, the same operations still compute correctly.
+        .{ .name = "owned drop", .source = "1000 range 500 drop sum", .expected = "374750" },
+        .{ .name = "owned cat", .source = "1000 range dup 500 drop cat len", .expected = "1500" },
+        .{ .name = "owned put", .source = "5 range 2 99 put", .expected = "[0 1 99 3 4]" },
     });
 }

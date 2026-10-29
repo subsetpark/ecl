@@ -17,8 +17,8 @@ const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "tests", .primitive = discover, .effect = "-- descriptors", .doc = "Return deterministic pure descriptors for canonical registered module tests; available only in a test Session." },
-        .{ .name = "@test", .primitive = invoke, .effect = "descriptor -- result", .doc = "Invoke a discovered test in a fresh isolated unit with its registered module's private home and durable state; available only in a test Session." },
+        .{ .name = "tests", .primitive = discover, .effect = "-- descriptors", .doc = "Test-Session-only discovery of current canonical registrations, including root sources' private registrations, sorted by module then test name and source identifier. Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``. File-private registrations also include an integer `` `source `` identifier local to the test Session, distinguishing equal names in different files. Descriptors never contain executable bodies or authority handles. Aliases do not duplicate entries. Ordinary Sessions receive `` `domain ``." },
+        .{ .name = "@test", .primitive = invoke, .effect = "descriptor -- result", .doc = "Test-Session-only protected invocation. Validate a pure descriptor returned by `tests`, late-bind its module/name and optional source identifier to the current catalog, and run the body as a fresh isolated Unit under that registration's private home and durable state. Return exactly `{ok (values)}` or `{err error}`; a missing current test is a reified error. Ordinary Sessions receive `` `domain ``." },
     };
     try core.installBuiltins(&definitions);
 }

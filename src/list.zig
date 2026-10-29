@@ -562,7 +562,9 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
     };
 }
 
-fn initialCapacity(used: usize) usize {
+/// The capacity a list built for `used` elements starts with; the reader's
+/// string fast path builds with it so both routes yield the same list.
+pub fn initialCapacity(used: usize) usize {
     return growCapacity(@max(used, 1));
 }
 

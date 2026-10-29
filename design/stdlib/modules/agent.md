@@ -30,11 +30,3 @@ call with `call-for`.
 [] ((1 0 div) g agent.call) @attempt `err at `kind at (dup) g agent.call pair
 # => (domain [7 0])
 ```
-
-### call-for
-
-### send
-
-### serve
-
-### start

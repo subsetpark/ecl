@@ -31,26 +31,26 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
     return switch (operation) {
-        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add numeric values or conforming numeric arrays pervasively." },
-        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract numeric or character values or conforming arrays pervasively." },
-        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply numeric values or conforming numeric arrays pervasively." },
-        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Divide numeric values or conforming numeric arrays pervasively, returning floats." },
-        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute checked integer division pervasively." },
-        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "Compute the two-argument arctangent of numeric values pervasively." },
-        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Raise numbers to powers pervasively, returning floats." },
-        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Return the lesser of two comparable values pervasively." },
-        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Return the greater of two comparable values pervasively." },
-        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for pervasive equality, producing boolean masks." },
-        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values pervasively for ascending order." },
-        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values pervasively for descending order." },
-        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise and over integer bit patterns pervasively." },
-        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise or over integer bit patterns pervasively." },
-        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or over integer bit patterns pervasively." },
-        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern left, truncating bits off the top." },
-        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift an integer pattern right, filling zeros from the top." },
-        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
-        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
-        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers pervasively, wrapping modulo 2^64 instead of raising overflow." },
+        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``." },
+        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``." },
+        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Multiply. Integer overflow is `` `overflow ``." },
+        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN)." },
+        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Checked integer division. Division by zero is `` `domain ``." },
+        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "**Pervasive.** Two-argument arctangent; returns float." },
+        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Exponentiation; returns float." },
+        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** The lesser of two comparable atoms." },
+        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** The greater of two comparable atoms." },
+        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "**Pervasive.** Equality; numbers compare numerically across int and float. Whole-value equality is `match?`." },
+        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "**Pervasive.** Ascending comparison, producing 0/1 masks." },
+        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "**Pervasive.** Descending comparison, producing 0/1 masks." },
+        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``." },
+        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Bitwise or. See `band`." },
+        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns." },
+        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "**Pervasive.** Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``." },
+        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "**Pervasive.** Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``." },
+        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
+        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
+        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two." },
         .mod, .ne, .le, .ge, .and_word, .or_word => null,
     };
 }
@@ -71,16 +71,16 @@ pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
 
 fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
     return switch (operation) {
-        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return square roots of numeric values pervasively." },
-        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round numeric values downward pervasively to integers." },
-        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round numeric values upward pervasively to integers." },
-        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round numeric values to nearest integers pervasively." },
-        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return natural exponentials of numeric values pervasively." },
-        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return natural logarithms of numeric values pervasively." },
-        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return sines of numeric values pervasively." },
-        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return cosines of numeric values pervasively." },
-        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "Invert boolean 0 and 1 values pervasively." },
-        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Invert every bit of an integer pattern pervasively." },
+        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Square root. `` `domain `` on negative inputs (the result would be NaN)." },
+        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round down; the result is int64, `` `overflow `` outside its range." },
+        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round up; the result is int64, `` `overflow `` outside its range." },
+        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round to nearest; the result is int64, `` `overflow `` outside its range." },
+        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Natural exponential; float transcendental." },
+        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN)." },
+        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Sine; float transcendental." },
+        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Cosine; float transcendental." },
+        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "**Pervasive.** Invert 0/1 values." },
+        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`." },
         .neg, .abs => null,
     };
 }
@@ -646,7 +646,7 @@ pub const PervadeCursor = struct {
             shape,
         ) orelse return null;
         const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-        return try self.runTyped(try data.startNested(evaluator, .{ node.left, node.right }, null, .{ .reuse = false }, length));
+        return try self.runTyped(try data.startNested(evaluator, .{ node.left, node.right }, null, .{}, length));
     }
 
     fn acceptListChild(self: *PervadeCursor, frame: *ListFrame) void {
@@ -1341,83 +1341,6 @@ fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPo
     return .scalar_checked;
 }
 
-/// The typed result buffer: freshly allocated, or a solely-owned input buffer
-/// taken over in place under the mask-before-store protocol.
-const TypedOutput = union(enum) {
-    fresh_bytes: heap.LeafWriter(.leaf_u8),
-    fresh_ints: heap.LeafWriter(.leaf_i64),
-    fresh_reals: heap.LeafWriter(.leaf_f64),
-    reuse_bytes: heap.UniqueLeafAdoption(.leaf_u8),
-    reuse_ints: heap.UniqueLeafAdoption(.leaf_i64),
-    reuse_reals: heap.UniqueLeafAdoption(.leaf_f64),
-
-    fn store(self: *TypedOutput, comptime class: Number, offset: usize, block: []const class.Element()) void {
-        switch (class) {
-            .byte => switch (self.*) {
-                .fresh_bytes => |*writer| writer.writeRange(offset, block),
-                .reuse_bytes => |*adoption| adoption.writeRange(offset, block),
-                .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
-            },
-            .char1, .char2, .char4 => unreachable,
-            .integer => switch (self.*) {
-                .fresh_ints => |*writer| writer.writeRange(offset, block),
-                .reuse_ints => |*adoption| adoption.writeRange(offset, block),
-                .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
-            },
-            .real => switch (self.*) {
-                .fresh_reals => |*writer| writer.writeRange(offset, block),
-                .reuse_reals => |*adoption| adoption.writeRange(offset, block),
-                .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
-            },
-        }
-    }
-
-    /// The output's own range, which a vector loop writes directly. Nothing
-    /// reads a fresh buffer before it is published, so a block may land there
-    /// before its faults are known. A reused input's positions are its
-    /// operands until stored, so its loop stores a vector only after reading
-    /// it and, when checked, knowing it clean.
-    fn vectorRange(self: *TypedOutput, comptime class: Number, piece: flat.Chunk) []class.Element() {
-        return switch (class) {
-            .byte => switch (self.*) {
-                .fresh_bytes => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_bytes => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
-                .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
-            },
-            .char1, .char2, .char4 => unreachable,
-            .integer => switch (self.*) {
-                .fresh_ints => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_ints => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
-                .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
-            },
-            .real => switch (self.*) {
-                .fresh_reals => |*writer| writer.unpublishedRange(piece.start, piece.len()),
-                .reuse_reals => |*adoption| adoption.inPlaceRange(piece.start, piece.len()),
-                .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
-            },
-        };
-    }
-
-    fn finish(self: *TypedOutput) Value {
-        return switch (self.*) {
-            inline else => |*capability| capability.finish(),
-        };
-    }
-
-    fn retire(self: *TypedOutput, releases: *heap.ReleaseDomain) void {
-        switch (self.*) {
-            .fresh_bytes => |*writer| writer.retirePartial(releases),
-            .fresh_ints => |*writer| writer.retirePartial(releases),
-            .fresh_reals => |*writer| writer.retirePartial(releases),
-            // An abandoned reuse may hold stored results; the caller's
-            // reference to it is the one `root` holds, and only releases it.
-            .reuse_bytes => |*adoption| adoption.abandon(),
-            .reuse_ints => |*adoption| adoption.abandon(),
-            .reuse_reals => |*adoption| adoption.abandon(),
-        }
-    }
-};
-
 /// Whether a fault carries a logical index.
 ///
 /// Direct pervasion over a list reports the failing element's index, exactly as
@@ -1427,13 +1350,11 @@ const TypedOutput = union(enum) {
 /// one.
 const FaultReport = struct { index: bool = true };
 
-/// What a numeric or character kernel needs besides its operands: how a
-/// fault is reported, and whether its first operand is the operation's own
-/// and so may be taken over as the output. An element of a structure being
-/// descended is held by that structure, however few references it has.
+/// What a numeric kernel needs besides its operands: how a fault is reported.
+/// Whether an operand's buffer may become the output is the executor's to
+/// decide, from which operands the call owns.
 const NumericParams = struct {
     report: FaultReport = .{},
-    reuse: bool = true,
 };
 
 fn failTypedScalar(
@@ -1457,14 +1378,17 @@ fn failTypedScalar(
 /// its target at compile time, so each keeps its own inlined body.
 fn OutputTarget(comptime class: Number) type {
     return struct {
-        output: *TypedOutput,
+        output: *support.LeafResult(class.kind()),
 
+        /// The output's own range, which a vector loop writes directly. A
+        /// result written over its operands is stored only after its
+        /// positions are read; see `flat.Placement`.
         fn vector(self: @This(), piece: flat.Chunk) []class.Element() {
-            return self.output.vectorRange(class, piece);
+            return self.output.range(piece.start, piece.len());
         }
 
         fn store(self: @This(), offset: usize, items: []const class.Element()) void {
-            self.output.store(class, offset, items);
+            self.output.store(offset, items);
         }
     };
 }
@@ -1525,7 +1449,15 @@ fn binaryKernelInto(
     const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
     const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
     const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
-    const lanes = std.simd.suggestVectorLength(left_class.Element()) orelse 1;
+    // An int operation with a byte result, such as a comparison's mask, runs
+    // as many lanes as one output vector holds: the narrowed lanes then fill
+    // a whole store, and the narrowing is one shuffle tree per output vector
+    // rather than a narrowing chain per operand vector. Only that pairing
+    // widens, since every widened loop is code in every binary.
+    const lanes = if (left_class == .integer and out == .byte)
+        std.simd.suggestVectorLength(u8) orelse 1
+    else
+        std.simd.suggestVectorLength(left_class.Element()) orelse 1;
     const Vectors = flat.VectorFamily(left_class.Element(), right_class.Element(), out.Element(), lanes);
     const infallible_body = struct {
         fn run(a: left_class.Element(), b: right_class.Element()) out.Element() {
@@ -1712,7 +1644,7 @@ fn binaryKernelInto(
         /// Computes `range` into `output`. Returns the range a scalar replay
         /// must rescan when a checked piece faulted: it begins at the first
         /// position whose operands are still the input's.
-        fn runPieces(left: Left, right: Right, output: *TypedOutput, placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
+        fn runPieces(left: Left, right: Right, output: *support.LeafResult(out.kind()), placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
             return runRange(left, right, OutputTarget(out){ .output = output }, placement, range);
         }
 
@@ -1788,7 +1720,7 @@ fn binaryKernelInto(
 
         /// The operation's range loop over these classes, as
         /// `BinaryKernel` calls it.
-        fn chunk(params: NumericParams, operands: [2]Value, output: *KernelOutput, range: flat.Chunk, context: support.Context) MachineError!void {
+        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, context: support.Context) MachineError!void {
             const left: Left = if (shape == .scalar_leaf)
                 left_class.unboxed(operands[0])
             else
@@ -1797,8 +1729,8 @@ fn binaryKernelInto(
                 right_class.unboxed(operands[1])
             else
                 heap.leafElements(right_class.kind(), operands[1].list);
-            const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
-            if (runPieces(left, right, &output.typed, placement, range)) |faulted|
+            const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
+            if (runPieces(left, right, output, placement, range)) |faulted|
                 return replayDirect(context, params.report, left, right, faulted);
         }
 
@@ -1872,7 +1804,7 @@ fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, 
     return struct {
         /// Computes `range` into `output`. Returns the range a scalar replay
         /// must rescan; see `binaryKernel`'s.
-        fn runPieces(operand: []const operand_class.Element(), output: *TypedOutput, placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
+        fn runPieces(operand: []const operand_class.Element(), output: *support.LeafResult(out.kind()), placement: flat.Placement, range: flat.Chunk) ?flat.Chunk {
             return runRange(operand, OutputTarget(out){ .output = output }, placement, range);
         }
 
@@ -1906,10 +1838,10 @@ fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, 
 
         /// The operation's range loop over this class, as `UnaryKernel`
         /// calls it.
-        fn chunk(params: NumericParams, operands: [1]Value, output: *KernelOutput, range: flat.Chunk, context: support.Context) MachineError!void {
+        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, context: support.Context) MachineError!void {
             const elements = heap.leafElements(operand_class.kind(), operands[0].list);
-            const placement: flat.Placement = if (output.adopted) .over_operands else .fresh;
-            if (runPieces(elements, &output.typed, placement, range)) |faulted|
+            const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
+            if (runPieces(elements, output, placement, range)) |faulted|
                 return replayDirect(context, params.report, elements, faulted);
         }
 
@@ -1925,34 +1857,61 @@ fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, 
 
 /// A numeric kernel's result: a typed output, which may be its first
 /// operand's buffer taken over in place.
-const KernelOutput = struct {
-    typed: TypedOutput,
-    adopted: bool,
+/// A numeric kernel's result: the executor's leaf for the operation's result
+/// class, erased to one type so every plan's range loop has one signature.
+const KernelOutput = union(enum) {
+    bytes: support.LeafResult(.leaf_u8),
+    ints: support.LeafResult(.leaf_i64),
+    reals: support.LeafResult(.leaf_f64),
+
+    fn wrap(comptime class: Number, result: support.LeafResult(class.kind())) KernelOutput {
+        return switch (class) {
+            .byte => .{ .bytes = result },
+            .integer => .{ .ints = result },
+            .real => .{ .reals = result },
+            .char1, .char2, .char4 => unreachable,
+        };
+    }
+
+    fn leaf(self: *KernelOutput, comptime class: Number) *support.LeafResult(class.kind()) {
+        return switch (class) {
+            .byte => &self.bytes,
+            .integer => &self.ints,
+            .real => &self.reals,
+            .char1, .char2, .char4 => unreachable,
+        };
+    }
+
+    fn aliased(self: *const KernelOutput) bool {
+        return switch (self.*) {
+            inline else => |*result| result.aliased(),
+        };
+    }
 
     pub fn retire(self: *KernelOutput, releases: *heap.ReleaseDomain) void {
-        self.typed.retire(releases);
+        switch (self.*) {
+            inline else => |*result| result.retire(releases),
+        }
     }
 
     fn finish(self: *KernelOutput) Value {
-        return self.typed.finish();
-    }
-
-    fn adoptedOperand(self: *const KernelOutput) ?usize {
-        return if (self.adopted) 0 else null;
+        return switch (self.*) {
+            inline else => |*result| result.finish(),
+        };
     }
 };
 
-fn freshOutput(comptime out: Number, evaluator: *Machine, length: usize) error{OutOfMemory}!TypedOutput {
-    return switch (out) {
-        .byte => .{ .fresh_bytes = try .init(evaluator.allocator(), length) },
-        .integer => .{ .fresh_ints = try .init(evaluator.allocator(), length) },
-        .real => .{ .fresh_reals = try .init(evaluator.allocator(), length) },
-        .char1, .char2, .char4 => unreachable,
-    };
-}
-
 /// One operation's range loop over one pair of classes; see `BinaryKernel`.
-const BinaryChunk = *const fn (NumericParams, [2]Value, *KernelOutput, flat.Chunk, support.Context) MachineError!void;
+///
+/// Stored untyped, since plans of every result class share one table: a plan
+/// pairs a result class's executor with that class's loop when it is built,
+/// and the executor casts it back to `BinaryLoop(out)`, so the two cannot
+/// disagree.
+const BinaryChunk = *const anyopaque;
+
+fn BinaryLoop(comptime out: Number) type {
+    return *const fn (NumericParams, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, support.Context) MachineError!void;
+}
 
 /// What a binary kernel runs with: the caller's parameters and the plan's
 /// range loop.
@@ -1961,30 +1920,28 @@ const BinaryParams = struct {
     chunk: BinaryChunk,
 };
 
-/// The `support.Kernel` of every binary operation with this result class and
-/// shape. Its inline, nested, and driver paths depend only on how the output
-/// is prepared, so they are compiled once per output representation, and each
+/// The `support.Kernel` of every binary operation with this result class. Its
+/// inline, nested, and driver paths depend only on the result, which the
+/// executor prepares, so they are compiled once per result class, and each
 /// operation and class pair contributes only its range loop, which the plan
 /// hands over in its parameters.
-fn BinaryKernel(comptime out: Number, comptime shape: Shape) type {
+fn BinaryKernel(comptime out: Number) type {
     return struct {
-        /// A broadcast scalar has no buffer, so only a left leaf may become
-        /// the output; see `prepareOutput`.
         const Spec = struct {
             pub const arity = 2;
             pub const Params = BinaryParams;
-            pub const Output = KernelOutput;
+            pub const Output = support.LeafResult(out.kind());
 
-            pub fn prepare(evaluator: *Machine, operands: [2]Value, params: BinaryParams, length: usize) error{OutOfMemory}!Output {
-                return prepareOutput(out, evaluator, operands[0], shape != .scalar_leaf and params.numeric.reuse, length);
-            }
+            /// Either leaf may become the output; a broadcast scalar is no
+            /// list and is passed over.
+            pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{ 0, 1 } };
 
             pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                return params.chunk(params.numeric, operands, output, range, context);
+                const loop: BinaryLoop(out) = @ptrCast(@alignCast(params.chunk));
+                return loop(params.numeric, operands, output, range, context);
             }
 
-            pub const finish = KernelOutput.finish;
-            pub const adopted = KernelOutput.adoptedOperand;
+            pub const finish = Output.finish;
         };
 
         const run = support.Kernel(Spec).run;
@@ -1993,7 +1950,12 @@ fn BinaryKernel(comptime out: Number, comptime shape: Shape) type {
 }
 
 /// One operation's range loop over one operand class; see `UnaryKernel`.
-const UnaryChunk = *const fn (NumericParams, [1]Value, *KernelOutput, flat.Chunk, support.Context) MachineError!void;
+/// Untyped for the same reason as `BinaryChunk`.
+const UnaryChunk = *const anyopaque;
+
+fn UnaryLoop(comptime out: Number) type {
+    return *const fn (NumericParams, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, support.Context) MachineError!void;
+}
 
 const UnaryParams = struct {
     numeric: NumericParams,
@@ -2007,38 +1969,21 @@ fn UnaryKernel(comptime out: Number) type {
         const Spec = struct {
             pub const arity = 1;
             pub const Params = UnaryParams;
-            pub const Output = KernelOutput;
+            pub const Output = support.LeafResult(out.kind());
 
-            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: UnaryParams, length: usize) error{OutOfMemory}!Output {
-                return prepareOutput(out, evaluator, operands[0], params.numeric.reuse, length);
-            }
+            pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{0} };
 
             pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                return params.chunk(params.numeric, operands, output, range, context);
+                const loop: UnaryLoop(out) = @ptrCast(@alignCast(params.chunk));
+                return loop(params.numeric, operands, output, range, context);
             }
 
-            pub const finish = KernelOutput.finish;
-            pub const adopted = KernelOutput.adoptedOperand;
+            pub const finish = Output.finish;
         };
 
         const run = support.Kernel(Spec).run;
         const nested = support.Kernel(Spec).nested;
     };
-}
-
-/// A kernel's output: the first operand's buffer when `reuse` allows it and
-/// that buffer is solely owned and of the result's width, or a fresh one.
-fn prepareOutput(comptime out: Number, evaluator: *Machine, first: Value, reuse: bool, length: usize) error{OutOfMemory}!KernelOutput {
-    if (reuse) if (heap.UniqueLeafAdoption(out.kind()).claim(first.list, length)) |claimed| return .{
-        .typed = switch (out) {
-            .byte => .{ .reuse_bytes = claimed },
-            .integer => .{ .reuse_ints = claimed },
-            .real => .{ .reuse_reals = claimed },
-            .char1, .char2, .char4 => unreachable,
-        },
-        .adopted = true,
-    };
-    return .{ .typed = try freshOutput(out, evaluator, length), .adopted = false };
 }
 
 /// Runs a plan's operation through `support.Kernel`, inline or as a driver.
@@ -2102,7 +2047,7 @@ const NumericBinaryPlan = opaque {
                     if (candidate_shape == .scalar_leaf and !candidate_left.scalar()) continue;
                     if (candidate_shape == .leaf_scalar and !candidate_right.scalar()) continue;
                     const out = binaryResult(operation, candidate_left, candidate_right) orelse continue;
-                    const Shared = BinaryKernel(out, candidate_shape);
+                    const Shared = BinaryKernel(out);
                     const data = Data{
                         .left = candidate_left,
                         .right = candidate_right,
@@ -2110,7 +2055,7 @@ const NumericBinaryPlan = opaque {
                         .out = out,
                         .run = Shared.run,
                         .nested = Shared.nested,
-                        .chunk = binaryKernel(operation, candidate_left, candidate_right, candidate_shape).chunk,
+                        .chunk = @ptrCast(&binaryKernel(operation, candidate_left, candidate_right, candidate_shape).chunk),
                     };
                     table[@backingInt(candidate_left)][@backingInt(candidate_right)][@backingInt(candidate_shape)] =
                         @ptrCast(&data);
@@ -2201,7 +2146,7 @@ fn startNestedNumericBinary(
     const right_class = right_leaf orelse right_scalar.?;
     const plan = NumericBinaryPlan.select(operation, left_class, right_class, shape) orelse return null;
     const data: *const NumericBinaryPlan.Data = @ptrCast(@alignCast(plan));
-    return try data.startNested(evaluator, .{ left_item, right_item }, root, .{ .report = report, .reuse = root != null }, length);
+    return try data.startNested(evaluator, .{ left_item, right_item }, root, .{ .report = report }, length);
 }
 
 /// A typed leaf inside pervasion. `root`, when present, owns `left` and is
@@ -2255,7 +2200,7 @@ const NumericUnaryPlan = opaque {
                             .out = out,
                             .run = UnaryKernel(out).run,
                             .nested = UnaryKernel(out).nested,
-                            .chunk = unaryKernel(selected, candidate).chunk,
+                            .chunk = @ptrCast(&unaryKernel(selected, candidate).chunk),
                         };
                         break :blk @ptrCast(&data);
                     }
@@ -2279,7 +2224,7 @@ fn startNestedUnary(
     const length: usize = @intCast(operand.list.length());
     if (length == 0) return null;
     const data: *const NumericUnaryPlan.Data = @ptrCast(@alignCast(NumericUnaryPlan.select(operation, class)));
-    return try data.startNested(evaluator, .{operand}, null, .{ .report = report, .reuse = false }, length);
+    return try data.startNested(evaluator, .{operand}, null, .{ .report = report }, length);
 }
 
 /// A numeric operation runs through its plan's kernel, inline or as a
@@ -3135,7 +3080,7 @@ const ReduceParams = struct {
 const ReduceOutput = struct {
     accumulator: TypedAccumulator,
     /// Present for `scan`, whose result is the sequence of accumulators.
-    scan: ?TypedOutput,
+    scan: ?KernelOutput,
     base: usize,
 
     pub fn retire(self: *ReduceOutput, releases: *heap.ReleaseDomain) void {
@@ -3207,7 +3152,7 @@ fn reduceKernel(
                 const piece = flat.blockRange(range, offset);
                 block.reset();
                 if (unchecked and uncheckedBlock(output, elements, piece, &block)) {
-                    if (scan) output.scan.?.store(accumulator_class, piece.start, block.written());
+                    if (scan) output.scan.?.leaf(accumulator_class).store(piece.start, block.written());
                     offset += piece.len();
                     continue;
                 }
@@ -3241,7 +3186,7 @@ fn reduceKernel(
                 store(output, accumulator);
                 if (scan) {
                     block.len = piece.len();
-                    output.scan.?.store(accumulator_class, piece.start, block.written());
+                    output.scan.?.leaf(accumulator_class).store(piece.start, block.written());
                 }
                 offset += piece.len();
             }
@@ -3283,7 +3228,31 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
             pub const Params = ReduceKernelParams;
             pub const Output = ReduceOutput;
 
-            pub fn prepare(evaluator: *Machine, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
+            /// A scan's result is the input's length, and each position is
+            /// stored only after the element at it is read.
+            pub const result: ?support.ResultShape = if (scan) .{ .kind = accumulator_class.kind(), .overwritable = &.{0} } else null;
+
+            pub fn resultLength(_: ReduceKernelParams, operands: [1]Value, _: usize) usize {
+                return @intCast(operands[0].list.length());
+            }
+
+            pub fn leafResult(output: *Output) *support.LeafResult(accumulator_class.kind()) {
+                return output.scan.?.leaf(accumulator_class);
+            }
+
+            pub const prepare = if (scan) prepareScan else prepareFold;
+
+            fn prepareScan(evaluator: *Machine, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(accumulator_class.kind())) MachineError!Output {
+                var output = try prepareFold(evaluator, operands, params, length);
+                output.scan = .wrap(accumulator_class, prepared);
+                if (seeded) output.scan.?.leaf(accumulator_class).store(params.reduce.cursor_start, &.{switch (output.accumulator) {
+                    .integer => |number| if (accumulator_class == .integer) number else unreachable,
+                    .real => |number| if (accumulator_class == .real) number else unreachable,
+                }});
+                return output;
+            }
+
+            fn prepareFold(evaluator: *Machine, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
                 const input = operands[0];
                 const start = params.reduce.cursor_start;
                 const seed = if (seeded) first: {
@@ -3297,7 +3266,7 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
                         return evaluator.fail(diagnostic.kind, diagnostic.message);
                     };
                 } else ordinal(params.reduce.initial);
-                var output: Output = .{
+                const output: Output = .{
                     .accumulator = switch (accumulator_class) {
                         .byte, .char1, .char2, .char4 => unreachable,
                         .integer => .{ .integer = seed.int },
@@ -3306,10 +3275,6 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
                     .scan = null,
                     .base = start + @intFromBool(seeded),
                 };
-                if (scan) {
-                    output.scan = try freshOutput(accumulator_class, evaluator, @intCast(input.list.length()));
-                    if (seeded) output.scan.?.store(accumulator_class, start, &.{accumulator_class.unboxed(seed)});
-                }
                 return output;
             }
 
@@ -3339,6 +3304,19 @@ pub fn typedReduceCandidate(operation: BinaryOp, input: Value, initial: Value) b
     return NumericReducePlan.select(operation, accumulator_class, element_class, false) != null;
 }
 
+/// Whether a recognized `fold` or `scan` of `operation` with an int seed is
+/// one typed pass over int and byte lanes. The idiom registry requires this
+/// of every reduction it recognizes: one that matches but has no plan still
+/// runs, one scheduler turn per element, so only the cost would show it.
+pub fn reducesIntLanesTyped(comptime operation: BinaryOp) bool {
+    inline for ([_]Number{ .integer, .byte }) |element| {
+        inline for ([_]bool{ false, true }) |scan| {
+            if (NumericReducePlan.select(operation, .integer, element, scan) == null) return false;
+        }
+    }
+    return true;
+}
+
 /// The opaque plan binds a possible seed transition to its stable loop and
 /// output representation. Guard and entry use the same classification.
 const NumericReducePlan = opaque {
@@ -3353,17 +3331,26 @@ const NumericReducePlan = opaque {
     };
 
     fn select(operation: BinaryOp, accumulator: Number, element: Number, scan: bool) ?*const NumericReducePlan {
-        @setEvalBranchQuota(4000);
+        @setEvalBranchQuota(8000);
         return switch (operation) {
             inline else => |selected| blk: {
-                // Scalar accumulators have no byte storage class.
+                // Scalar accumulators have no byte storage class: a 0/1 result
+                // that is a byte in a leaf is an int scalar, as `scalarBinary`
+                // returns it, so the accumulator and a scan's output widen.
                 inline for ([_]Number{ .integer, .real }) |candidate_accumulator| {
                     inline for (number_classes) |candidate_element| {
-                        const out = comptime binaryResult(selected, candidate_accumulator, candidate_element);
-                        if (comptime out == null or out.? == .byte) continue;
+                        const raw = comptime binaryResult(selected, candidate_accumulator, candidate_element);
+                        if (comptime raw == null) continue;
+                        // A widened 0/1 result is planned only where it is
+                        // used, an int seed over int or byte lanes; any other
+                        // pairing keeps the generic route and its code size.
+                        if (comptime raw.? == .byte and (candidate_accumulator != .integer or
+                            (candidate_element != .integer and candidate_element != .byte))) continue;
+                        const out: ?Number = comptime widened(raw.?);
                         // A known first result is insufficient: every later
                         // result must have that same representation as well.
-                        if (comptime binaryResult(selected, out.?, candidate_element) != out) continue;
+                        const next = comptime binaryResult(selected, out.?, candidate_element);
+                        if (comptime next == null or widened(next.?) != out.?) continue;
                         inline for ([_]bool{ false, true }) |candidate_scan| {
                             if (accumulator == candidate_accumulator and element == candidate_element and scan == candidate_scan) {
                                 const seeded = comptime out.? != candidate_accumulator;
@@ -3536,19 +3523,21 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
         const CopySpec = struct {
             pub const arity = 1;
             pub const Params = ColumnShape;
-            pub const Output = heap.LeafWriter(element.kind());
+            pub const Output = support.LeafResult(element.kind());
+            /// An input that becomes the result already holds its first row
+            /// where the result's positions are.
+            pub const result: ?support.ResultShape = .{ .kind = element.kind(), .overwritable = &.{0} };
 
-            pub fn prepare(evaluator: *Machine, _: [1]Value, shape: ColumnShape, _: usize) error{OutOfMemory}!Output {
-                return .init(evaluator.allocator(), shape.width);
+            pub fn resultLength(shape: ColumnShape, _: [1]Value, _: usize) usize {
+                return shape.width;
             }
 
             pub fn chunk(_: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
-                output.writeRange(range.start, heap.leafElements(element.kind(), operands[0].list)[range.start..range.end]);
+                if (output.aliased()) return;
+                output.store(range.start, heap.leafElements(element.kind(), operands[0].list)[range.start..range.end]);
             }
 
-            pub fn finish(output: *Output) Value {
-                return output.finish();
-            }
+            pub const finish = Output.finish;
         };
 
         /// Positions are the input's, row by row: row 0 seeds each column's
@@ -3559,16 +3548,21 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
         const FoldSpec = struct {
             pub const arity = 1;
             pub const Params = ColumnShape;
-            pub const Output = heap.LeafWriter(accumulator.kind());
+            pub const Output = support.LeafResult(accumulator.kind());
+            /// The accumulator is the result's `width` positions, over the
+            /// input's first row when it takes the input's buffer: seeding
+            /// writes row 0 over itself, and every later row is read from
+            /// positions the accumulator never covers.
+            pub const result: ?support.ResultShape = .{ .kind = accumulator.kind(), .overwritable = &.{0} };
 
-            pub fn prepare(evaluator: *Machine, _: [1]Value, shape: ColumnShape, _: usize) error{OutOfMemory}!Output {
-                return .init(evaluator.allocator(), shape.width);
+            pub fn resultLength(shape: ColumnShape, _: [1]Value, _: usize) usize {
+                return shape.width;
             }
 
             pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
                 const width = shape.width;
                 const elements = heap.leafElements(element.kind(), operands[0].list);
-                const columns = output.unpublishedRange(0, width);
+                const columns = output.range(0, width);
                 var position = range.start;
                 // Rows 0 and 1 in one step, as `foldLeafRow` folds a first
                 // pair, whenever the range holds both whole.
@@ -3595,9 +3589,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 }
             }
 
-            pub fn finish(output: *Output) Value {
-                return output.finish();
-            }
+            pub const finish = Output.finish;
         };
 
         /// `left op right` into `out`, which may alias `left`: each block is
@@ -3671,11 +3663,14 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
             try evaluator.advanceKernel(length);
             var right = heap.LeafReader(row_class.kind()).acquire(row.list);
             defer right.release(evaluator.releaseDomain());
-            if (out == accumulator_class and accumulator_owned) if (heap.UniqueLeafAdoption(out.kind()).claim(accumulator.list, length)) |claimed| {
-                var adoption = claimed;
-                errdefer adoption.abandon();
-                try apply(evaluator, adoption.sourceSlice(out.kind()), right.slice(), adoption.inPlaceRange(0, length));
-                return .{ .in_place = adoption.finish() };
+            // The accumulator may become the next one through the one
+            // adoption every result producer uses; the step reads each
+            // position of it before storing that position.
+            if (out == accumulator_class and accumulator_owned) if (support.adopt(out.kind(), accumulator, 1, length)) |adopted| {
+                var result = adopted;
+                errdefer result.retire(evaluator.releaseDomain());
+                try apply(evaluator, heap.leafElements(out.kind(), accumulator.list)[0..length], right.slice(), result.range(0, length));
+                return .{ .in_place = result.finish() };
             };
             var left = heap.LeafReader(accumulator_class.kind()).acquire(accumulator.list);
             defer left.release(evaluator.releaseDomain());

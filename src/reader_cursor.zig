@@ -287,6 +287,8 @@ const Tokenizer = struct {
                 return .pending;
             },
             .string => {
+                // A run of plain text moves in one step, a bounded block of it.
+                if (!self.string_escaped and self.cursor.skipStringRun(64) != 0) return .pending;
                 const next = self.cursor.peek() orelse return .{ .incomplete = .{
                     .message = if (self.string_escaped)
                         "unclosed string escape"
@@ -474,6 +476,14 @@ const AtomBuilder = struct {
     /// `<module>` is one exact spelling; `<task:N>` needs its digits scanned,
     /// which is why recognition is a cursor step rather than a comparison.
     marker: enum { none, task_digits, port_digits, address_digits },
+    /// The atom is a quote's symbol: its occurrence pushes the symbol when run.
+    quoted: bool = false,
+
+    fn initQuoted(token: Token, allocator: std.mem.Allocator, word_linker: value.WordLinker) AtomBuilder {
+        var builder = init(token, allocator, word_linker);
+        builder.quoted = true;
+        return builder;
+    }
 
     fn init(token: Token, allocator: std.mem.Allocator, word_linker: value.WordLinker) AtomBuilder {
         const delimited = std.mem.indexOfScalar(u8, token.bytes, '\'') != null;
@@ -560,7 +570,13 @@ const AtomBuilder = struct {
             .pending => .pending,
             // The unit that read this text is the scope the symbol was
             // written in, whichever position it ends up occupying.
-            .complete => |id| .{ .complete = .{ .symbol = .{ .name = id, .slot = try self.word_linker.link(id) } } },
+            .complete => |id| result: {
+                const link = try self.word_linker.link(id);
+                break :result .{ .complete = .{ .symbol = .{
+                    .name = id,
+                    .slot = if (self.quoted) link | value.quote_flag else link,
+                } } };
+            },
         };
     }
 
@@ -630,6 +646,10 @@ const StringBuilder = struct {
         }
     };
     const State = union(enum) {
+        /// Checking whether the body is plain ASCII with no escapes, the
+        /// common case, which copies straight into a one-byte string.
+        ascii_scan: struct { index: usize = 0 },
+        ascii_fill: struct { index: usize = 0, builder: heap.AnyListBuilder },
         parsing: Parsing,
         gather: struct {
             parsing: Parsing,
@@ -649,6 +669,8 @@ const StringBuilder = struct {
             allocator: std.mem.Allocator,
         ) void {
             switch (self.*) {
+                .ascii_scan => {},
+                .ascii_fill => |*fill| fill.builder.retirePartial(releases),
                 .parsing => |*parsing| parsing.retire(releases),
                 .gather => |*gather| {
                     allocator.free(gather.codepoints);
@@ -672,11 +694,29 @@ const StringBuilder = struct {
             .allocator = allocator,
             .token = token,
             .provenance_namespace = provenance_namespace,
-            .state = .{ .parsing = .{
-                .cursor = .{ .source = token.bytes, .line = token.span.line, .col = token.span.col + 1 },
-                .codepoints = .init(allocator),
-            } },
+            .state = .{ .ascii_scan = .{} },
         };
+    }
+    fn beginParsing(self: *StringBuilder) void {
+        self.state = .{ .parsing = .{
+            .cursor = .{ .source = self.token.bytes, .line = self.token.span.line, .col = self.token.span.col + 1 },
+            .codepoints = .init(self.allocator),
+        } };
+    }
+    /// The length of the run at the front of `bytes` that a string literal
+    /// stores as written: ASCII other than the escape character.
+    fn plainPrefix(bytes: []const u8) usize {
+        const lanes = 16;
+        const Lane = @Vector(lanes, u8);
+        const high: Lane = @splat(0x80);
+        const escape: Lane = @splat('\\');
+        var index: usize = 0;
+        while (bytes.len - index >= lanes) : (index += lanes) {
+            const lane: Lane = bytes[index..][0..lanes].*;
+            if (@reduce(.Or, lane >= high) or @reduce(.Or, lane == escape)) break;
+        }
+        while (index != bytes.len and bytes[index] < 0x80 and bytes[index] != '\\') index += 1;
+        return index;
     }
     fn deinit(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
         self.retire(releases);
@@ -765,6 +805,41 @@ const StringBuilder = struct {
         work: *poll.WorkBudget,
     ) (error{ OutOfMemory, Parse })!ScalarProgress {
         return switch (self.state) {
+            // Both the scan and the copy take one budget unit a byte, a block
+            // at a time, as the codepoint route takes one a codepoint. Each
+            // call has paid for one unit already, so it always moves.
+            .ascii_scan => |*scan| result: {
+                const body = self.token.bytes;
+                const end = scan.index + work.chunk(body.len - scan.index);
+                const plain = scan.index + plainPrefix(body[scan.index..end]);
+                if (plain != end) {
+                    self.beginParsing();
+                    break :result .pending;
+                }
+                scan.index = end;
+                if (end != body.len) break :result .pending;
+                // Built before the state changes, so a failed allocation leaves
+                // the scan state rather than a fill state with no builder.
+                const builder = try heap.AnyListBuilder.initCode(
+                    self.allocator,
+                    .leaf_char1,
+                    body.len,
+                    list.initialCapacity(body.len),
+                    self.provenance_namespace,
+                );
+                self.state = .{ .ascii_fill = .{ .builder = builder } };
+                break :result .pending;
+            },
+            .ascii_fill => |*fill| result: {
+                const body = self.token.bytes;
+                const end = fill.index + work.chunk(body.len - fill.index);
+                fill.builder.writeAscii(fill.index, body[fill.index..end]);
+                fill.index = end;
+                if (end != body.len) break :result .pending;
+                const header = fill.builder.finish();
+                self.state = .complete;
+                break :result .{ .complete = .{ .list = header } };
+            },
             .parsing => |*parsing| switch (try self.parseOne(parsing, diag)) {
                 .pending => .pending,
                 .complete => result: {
@@ -1331,10 +1406,6 @@ const ParserCursor = struct {
     provenance_namespace: heap.CodeProvenanceNamespace,
     word_linker: value.WordLinker,
     state: State = .reading,
-    /// The forms a quote expands to, consumed before the next source token,
-    /// last first.
-    pending: [3]Token = @splat(.{ .kind = .atom, .span = .{} }),
-    pending_len: u8 = 0,
     retirement_phase: enum { state, contexts, storage, complete } = .state,
 
     fn init(
@@ -1424,7 +1495,7 @@ const ParserCursor = struct {
         self.state = .{
             .scalar = switch (token.kind) {
                 .atom => .{ .atom = .init(token, self.allocator, self.word_linker) },
-                .quoted => unreachable, // expanded by processToken
+                .quoted => .{ .atom = .initQuoted(token, self.allocator, self.word_linker) },
                 .character => .{ .character = .init(token) },
                 .string => .{ .string = .init(self.allocator, token, self.provenance_namespace) },
                 .semicolon => {
@@ -1557,13 +1628,14 @@ const ParserCursor = struct {
             return;
         }
         if (closeKind(token.kind) != null) return self.closeContext(token);
-        if (token.kind == .quoted) return self.expandQuote(token);
+        if (token.kind == .quoted) return self.beginQuote(token);
         try self.beginScalar(token);
     }
-    /// `` `x `` is reader sugar for the two forms `(x) core.first`; see
-    /// Lexical syntax. Expanding it into tokens reuses the nesting, locals,
-    /// and linking rules of the forms it stands for.
-    fn expandQuote(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!void {
+    /// `` `x `` reads as one occurrence of the symbol `x` marked quoted: run,
+    /// it pushes the symbol, the value `(x) core.first` pushes; see Lexical
+    /// syntax. It links as a bare `x` would, so the symbol it pushes resolves
+    /// where it was written.
+    fn beginQuote(self: *ParserCursor, token: Token) error{Parse}!void {
         if (token.bytes.len == 0) {
             self.diag.set(token.span, "quote is missing its symbol");
             return error.Parse;
@@ -1576,16 +1648,8 @@ const ParserCursor = struct {
             self.diag.set(token.span, "a quote cannot be a dict entry; write the symbol bare");
             return error.Parse;
         };
-        const at = Token{ .kind = .open_paren, .span = token.span, .source_start = token.source_start, .source_end = token.source_end };
-        self.pending = .{
-            .{ .kind = .atom, .bytes = quote_word, .span = at.span, .source_start = at.source_start, .source_end = at.source_end },
-            .{ .kind = .close_paren, .span = at.span, .source_start = at.source_start, .source_end = at.source_end },
-            .{ .kind = .atom, .bytes = token.bytes, .span = at.span, .source_start = at.source_start, .source_end = at.source_end },
-        };
-        self.pending_len = 3;
-        try self.processToken(at);
+        try self.beginScalar(token);
     }
-    const quote_word = "core.first";
     fn eof(self: *ParserCursor) ParseProgress {
         if (self.contexts.topPtr()) |context| {
             if (context.locals == .names) return .{ .incomplete = .{
@@ -1634,10 +1698,7 @@ const ParserCursor = struct {
                 },
             },
             .reading => result: {
-                const token = if (self.pending_len != 0) pending: {
-                    self.pending_len -= 1;
-                    break :pending self.pending[self.pending_len];
-                } else (self.tokens.next() orelse break :result self.eof()).*;
+                const token = (self.tokens.next() orelse break :result self.eof()).*;
                 try self.processToken(token);
                 break :result .pending;
             },

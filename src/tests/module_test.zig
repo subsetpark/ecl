@@ -712,7 +712,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
 }
 
 test "environment and registry retirement stays bounded after a delayed reader drains" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var host = heap.HostOwner.init(allocator);
@@ -811,7 +811,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
 }
 
 test "session: public definition mutation settles retirement every turn" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -831,7 +831,7 @@ test "session: public definition mutation settles retirement every turn" {
 }
 
 test "acceptance: definition and module re-registration soak keeps live memory bounded" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -871,7 +871,7 @@ test "acceptance: definition and module re-registration soak keeps live memory b
 }
 
 test "session: mutation settlement is independent of a busy sole worker" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -893,7 +893,7 @@ test "session: mutation settlement is independent of a busy sole worker" {
 }
 
 test "session: a pinned task keeps only the snapshot it observes" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -918,7 +918,7 @@ test "session: a pinned task keeps only the snapshot it observes" {
 }
 
 test "session: a module body's redefinitions are not kept for the image's life" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();

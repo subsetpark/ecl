@@ -112,6 +112,20 @@ pub const Symbol = struct {
     slot: u32 = 0,
 };
 
+/// A quoted occurrence, which the reader writes for `` `x ``, carries this
+/// flag in its slot field beside its ordinary link: run, it pushes its symbol
+/// with the link and without the flag, the value `(x) first` pushes. The flag
+/// is occurrence metadata like the link, so the occurrence is still the
+/// symbol `x` as data. Kept here rather than in `env` so the reader can set
+/// it without depending on the environment.
+pub const quote_flag: u32 = 1 << 29;
+
+/// Whether an occurrence's slot field marks it quoted. No other encoding sets
+/// the flag: links and locals operands stay below it.
+pub fn isQuotedSlot(slot: u32) bool {
+    return slot & quote_flag != 0;
+}
+
 /// How a producer of symbol occurrences links each one to its name's slot in
 /// the root it writes into. Carried by value through the reader so that
 /// neither the reader nor `value.zig` depends on the environment. The

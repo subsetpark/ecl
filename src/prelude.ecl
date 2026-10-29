@@ -83,6 +83,13 @@
 (first second -- list : "Collect two stack values into a two-element list in stack order.")
 (() cons cons) `pair def
 
+### def partial
+(value quotation -- quotation :
+ "Safe partial application: return a quotation that pushes an inert captured value before running
+  another quotation. Even a captured word remains data. `3 (+) partial` is `(3 +)`, and a captured
+  word `w` is prefixed as `` `w ``.")
+(swap literal swap cons) `partial def
+
 ### def rest
 (list -- list : "Return all but the first element of a nonempty list.")
 (dup first pop 1 drop) `rest def
@@ -149,20 +156,32 @@
 (left right -- quotation : "Concatenate two quotations in execution order.")
 (cat dup len 0 = (pop ()) when) `compose def
 
-### def literal
-(value -- quotation :
- "Return a plain quotation that pushes the exact captured value as inert data when called, without
-  executing or resolving it.
-
-  Every value but a symbol already pushes itself when run, so the result is `(x)`. A symbol would
-  execute, so it is quoted as `((x) core.first)`, the quote's own expansion.")
-(dup type `symbol match? (wrap (core.first) cons) (wrap) if) `literal def
+### def find
+(sequence needle -- index :
+ "Return the index of the first element that returns 1 from `match?` against the needle, or the
+  sequence length when no element matches. Defined in ecl.")
+((match?) partial each first-where) `find def
 
 ### def scan1
 (list quotation -- list :
  "*Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the
   successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.")
 (|xs quotation| xs first wrap xs rest xs first quotation scan cat) `scan1 def
+
+### def set
+(: "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a
+    constant word in the current scope. Reference applies the constant's body and pushes the exact
+    captured value, quotations included. Defined in ecl as `swap literal wrap swap def`, so `v `name
+    set` is observationally `v literal wrap `name def`: the stored body is `(v)`, or `` (`v) `` for
+    a symbol. An optional annotation beneath `v` is published as the constant's metadata; marker
+    words inside `v` are nested in the body and remain captured data.")
+(swap literal wrap swap def) `set def
+
+### def setp
+(: "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a
+    private module constant word; an optional annotation may precede the value. Defined in ecl as
+    `swap literal wrap swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.")
+(swap literal wrap swap defp) `setp def
 
 ### def uncons
 (list -- first rest : "Split a nonempty list into its first element and remaining elements.")
@@ -176,7 +195,7 @@
 (x q -- ... :
  "*Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x`
   returns on top of its results.")
-(swap literal compose call) `dip def
+(swap literal append call) `dip def
 
 ### def fail
 (msg -- :
@@ -206,28 +225,6 @@
 (|value count quotation|
  value wrap count range value (pop) quotation compose scan cat) `iterations def
 
-### def partial
-(value quotation -- quotation :
- "Safe partial application: return a quotation that pushes an inert captured value before running
-  another quotation. Even a captured word remains data. `3 (+) partial` is `(3 +)`, and a captured
-  word `w` is prefixed as `((w) first)`.")
-(swap literal swap compose) `partial def
-
-### def set
-(: "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a
-    constant word in the current scope. Reference applies the constant's body and pushes the exact
-    captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v `name set`
-    is observationally `v literal `name def`: the stored body is `((v) first)`. An optional
-    annotation beneath `v` is published as the constant's metadata; marker words inside `v` are
-    nested by `literal` and remain captured data.")
-(swap literal swap def) `set def
-
-### def setp
-(: "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a
-    private module constant word; an optional annotation may precede the value. Defined in ecl as
-    `swap literal swap defp`. A top-level `setp` is an error, raised by the `defp` it calls.")
-(swap literal swap defp) `setp def
-
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")
 (reverse uncons reverse swap) `unappend def
@@ -252,12 +249,6 @@
   upper.")
 ((max) dip min) `clamp def
 
-### def find
-(sequence needle -- index :
- "Return the index of the first element that returns 1 from `match?` against the needle, or the
-  sequence length when no element matches. Defined in ecl.")
-((match?) partial each first-where) `find def
-
 ### def or
 (x y -- bool :
  "**Pervasive.** Compute boolean disjunction over 0 and 1 values. Both operands are already
@@ -280,13 +271,13 @@
 (values quotation -- quotation :
  "Return a quotation that pushes every value from a list, in order and inertly, before running
   another quotation. Calling the result starts with the list's elements as separate stack values.
-  Defined in ecl as `((literal) each) dip append raze`.
+  Defined in ecl as `((literal) each) dip cat`.
 
   This is ordinary quotation composition and constructs nothing. It is not a unit's seed operand:
   the flattened quotation it returns is a runtime-built body, so `@defm` gives it no reader
   attribution. Unit constructors instead take their initial values and body as two separate
   operands, preserving the exact body for attribution.")
-(((literal) each) dip append raze) `with def
+(((literal) each) dip cat) `with def
 
 ### def @each
 (sequence values quotation -- results :

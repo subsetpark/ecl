@@ -25,46 +25,26 @@ const MachineError = machine.MachineError;
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "get",
-        .doc = "( request -- response ) Fetch a partial or complete http.request with GET defaults, following " ++
-            "redirects for bodyless requests, and return " ++
-            "{status int headers dict body string}.\n\n" ++
-            "request is a dictionary under the http.request contract and must carry a string `target URL. Its " ++
-            "optional `method overrides GET; optional `headers maps lowercased string names to lists of string " ++
-            "values, each sent in order; and optional `body is an exact byte list for POST, PUT, or PATCH. A " ++
-            "nonempty body with another method is `domain. Other request fields are " ++
-            "validated but do not affect the outbound exchange. A malformed request is `type, and an unsupported " ++
-            "method is `domain. In the response, `headers maps each header name the server " ++
-            "sent to its value, keeping the last value of a repeated header, and `body is the decoded text. A " ++
-            "non-2xx status is an ordinary response, not an error.\n\n" ++
-            "A transport or protocol failure, and a Session without network access, is `io carrying the url in " ++
-            "`path. Requests yield to other tasks and have a total 30-second deadline (`timeout). " ++
-            "Finite Session transfer and admission limits fail with `overflow; no partial response is returned.",
+        .effect = "request -- response",
+        .doc = "Fetch a partial or complete `http.request` value, using GET and redirect following as defaults. The request must carry a string `` `target `` URL. An optional `` `method `` overrides GET, optional `` `headers `` are sent once per value in list order, and an optional byte-list `` `body `` is sent exactly for POST, PUT, or PATCH. A nonempty body with another method is `` `domain ``. Return `{status int, headers dict, body string}`. A transport or protocol failure is `` `io `` carrying the URL in `` `path ``; a non-2xx status is an ordinary response.",
         .primitive = get,
     },
     .{
         .name = "get-bytes",
-        .doc = "( request -- response ) Fetch a request exactly as get does, but return `body as the exact response " ++
-            "octets in a byte list of ints in 0...255 instead of decoded text.\n\n" ++
-            "Arguments, redirects, response headers, and failures are those of get. Use this for archives and other " ++
-            "binary content, and chars to decode a body known to be UTF-8.",
+        .effect = "request -- response",
+        .doc = "Perform the same request as `get`, including redirects and content decoding, but return `` `body `` as the exact ordered octets in an ordinary integer byte list. Status and headers retain the same types. This is the binary ingress used for archives; no byte is decoded to or encoded from a Unicode character before hashing.",
         .primitive = getBytes,
     },
     .{
         .name = "post",
-        .doc = "( request -- response ) Fetch a partial or complete http.request with POST defaults and " ++
-            "return {status int headers dict body string}.\n\n" ++
-            "request has the same contract as for get. Its optional `method overrides POST, and POST supplies an " ++
-            "empty request body when `body is absent. Redirects are not followed: a 3xx status is returned as an " ++
-            "ordinary response. Response headers, body decoding, validation, and `io failures are those of get.",
+        .effect = "request -- response",
+        .doc = "Fetch the same request value as `get`, using POST, an empty body, and no redirect following as defaults. An optional `` `method `` or `` `body `` overrides those request defaults. Return the same response shape and errors as `get`.",
         .primitive = post,
     },
     .{
         .name = "send",
-        .doc = "( request -- response ) Send a complete http.request and return " ++
-            "{status int headers dict body string}.\n\n" ++
-            "Unlike get and post, send supplies no method default: request must carry string `method and `target " ++
-            "fields. Headers, body bytes, response decoding, validation, and `io failures are those of get. " ++
-            "Redirects are not followed, so send preserves the request method across exactly one exchange.",
+        .effect = "request -- response",
+        .doc = "Send a complete `http.request` value. Unlike `get` and `post`, this word supplies no method default: both string `` `method `` and `` `target `` fields are required. Redirects are not followed. Return the same response shape and errors as `get`.",
         .primitive = send,
     },
 };

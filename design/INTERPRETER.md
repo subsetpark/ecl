@@ -338,10 +338,11 @@ name plus a resolution slot. The slot is metadata: the reader links it for
 the root the text was written in, `symbol`, `intern`, and `qualify` link it
 for the root of the activation that builds the symbol, and a symbol the
 implementation builds for itself (an error-dict key, a trace entry) leaves
-zero and means core. Equality, hashing, and printing ignore it.
-Nothing else distinguishes "code" from "data": the reader's quote is the two
-forms `(x) core.first`, which is why `first` is a kernel builtin rather than a
-prelude word, and a locals declaration rewrites only its body's own top-level
+zero and means core. Equality and hashing ignore it. A quoted occurrence, the
+reader's `` `x ``, carries a quote flag above every id beside its ordinary
+link: dispatch pushes the symbol with the link and without the flag, and the
+printer writes the flag as the quote. Nothing else distinguishes "code" from
+"data": a locals declaration rewrites only its body's own unquoted top-level
 occurrences, since a symbol inside a nested list or dict is the symbol it
 spells. A symbol list is always a generic spine, since no leaf holds a slot.
 A `core.`-qualified
@@ -349,6 +350,15 @@ occurrence links to core's slot for its unqualified name in every root, so it
 dispatches, caches, and fuses exactly as the plain core word does and only its
 spelling stays qualified; the registry path serves module-qualified names
 alone.
+
+An `import` of a standard-library builtin binds that builtin in the importing
+root rather than a forwarding body. The binding records the attribute's
+qualified name as the name its failures report, so a call reaches the host
+operation in one dispatch while its diagnostics stay those of the forwarding
+call. A standard-library binding carries no boundary effect check, so the
+call is the builtin and nothing else. This is sound
+only because a standard-library module name has exactly one registration for
+the life of the process.
 
 Program construction produces ordinary values and never triggers compilation.
 Concatenating quotations produces another ordinary list that can execute
@@ -514,12 +524,21 @@ contains, so ordinary push and pop transfer ownership without changing a
 count. Operations such as `dup` that create another owner increment the count;
 containers and environments retain values they store.
 
-This discipline preserves meaningful uniqueness. When a list has exactly one
-owner, a kernel or collection operation may claim a nominal `Unique*`
-capability and reuse compatible storage. Publishing the result consumes that
-capability. A shared input or an incompatible element width takes the allocate-
-and-copy path. No caller performs an unchecked count test followed by a raw
-mutable cast.
+This discipline preserves meaningful uniqueness. When a list's every reference
+belongs to one call, that call's result may take over the list's storage
+instead of allocating. The decision is made in one place, the typed kernel
+executor, for every kernel at once: a kernel declares only its structure (its
+result's representation and length, and which operands its loop never reads
+after storing over the same position) and receives a result that is fresh or
+an operand's buffer, writing through it the same way. The executor adopts an
+operand the call owns, counting each operand position the same list occupies
+and requiring the kernel's promise at all of them, so `x x +` reuses `x` while
+`x x at` does not. A producer outside the executor asks the same function.
+Publishing the result consumes the nominal `Unique*` capability that decision
+issues; the source audit confines that capability to the heap and the
+executor, so no operation claims a buffer for itself, and no caller performs an
+unchecked count test followed by a raw mutable cast. A shared input, an
+incompatible element width, or too little capacity takes the allocate path.
 
 The broad idea resembles precise-reference-counting reuse systems such as
 Perceus, but ecl applies it directly to an interpreter value stack. The

@@ -1,5 +1,6 @@
 const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
+const test_heap = @import("test_heap.zig");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
 
@@ -58,7 +59,7 @@ test "concurrency: cooperative sessions preserve public task behavior without wo
 }
 
 test "concurrency: native shutdown releases delayed continuations and image pins" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var output_buffer: [64]u8 = undefined;
@@ -80,7 +81,7 @@ test "concurrency: native shutdown releases delayed continuations and image pins
 }
 
 test "concurrency: cooperative ready work cannot starve bounded retirement" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
         var runtime_inputs = try runtime_fixture.Fixture.init();

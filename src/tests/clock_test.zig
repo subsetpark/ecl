@@ -381,7 +381,7 @@ test "clock: a root unit sleeps through the same timer path" {
 }
 
 test "clock: session shutdown retires pending sleeps and their timers without leaking" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     {
         var fixture: Fixture = .{};
         const runtime = try fixture.openWith(counting.allocator(), .{ .config = .{ .worker_pool = 1 } });
@@ -390,7 +390,7 @@ test "clock: session shutdown retires pending sleeps and their timers without le
         fixture.closeSession();
     }
     try std.testing.expectEqual(.ok, counting.deinit());
-    var cooperative: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    var cooperative: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     {
         var fixture: Fixture = .{};
         const runtime = try fixture.openWith(cooperative.allocator(), .{});

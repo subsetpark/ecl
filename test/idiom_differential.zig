@@ -11,7 +11,7 @@ const allocator = std.testing.allocator;
 /// an allocation site — which the failing case's logged source already gives.
 /// Source strings stay on `std.testing.allocator`, where the volume is small
 /// and the attribution is worth having.
-const SessionHeap = std.heap.DebugAllocator(.{ .stack_trace_frames = 0 });
+const SessionHeap = std.heap.DebugAllocator(.{ .stack_trace_frames = @import("alloc_options").trace_frames });
 
 fn retireHeap(heap: *SessionHeap) void {
     if (heap.deinit() == .leak) std.debug.panic("idiom differential leaked session memory", .{});
@@ -713,6 +713,9 @@ test "idioms: where at fuses only the trusted at and keeps at's results" {
         "\"abc\" bytes 1000000 take dup 97 > where at len",
         "\"abc\" 1000000 take dup \\b = where at len",
         "\"\u{2713}x\" 1000 take dup \\x > where at",
+        // Masks spanning several count blocks; the stacks compare by value.
+        "\"abcdefg\" bytes 1000 take dup 97 = where at",
+        "\"abcdefgh\" bytes 600 take [0 2 1] bytes 600 take where at",
     }) |source| {
         compareExecutions(source) catch |err| {
             std.log.err("where at differs for `{s}`", .{source});
@@ -978,6 +981,11 @@ test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
         "[1 2] (pop pop) fold1",                  "[1 2] (pair) fold1",
         "(pop pop 9) `and def [1 0] (and) fold1", "(pop pop 9) `or def [0 0] 0 (or) fold",
         "(pop 1) `not def [1 0] 1 (and) fold",    "(pop pop 7) `fold1 def [1 0] (and) fold1",
+        // Comparison masks are byte leaves; the int seed widens their 0/1.
+        "5 range 0 >= 1 (and) fold",              "5 range 3 >= 0 (or) fold",
+        "5 range 2 >= 1 (and) scan",              "5 range 3 >= 0 (or) scan",
+        "5 range 2 >= (and) fold1",               "5 range 3 >= (or) fold1",
+        "5 range 2 >= 2 (and) fold",              "5 range 2 >= 1.0 (or) scan",
     }) |source| compareReductionModes(source) catch |err| {
         std.log.err("reduction comparison failed for {s}", .{source});
         return err;

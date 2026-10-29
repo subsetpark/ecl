@@ -92,6 +92,38 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
     try support.expectStack("`result (ok) import [1 2] ok", "{ok [1 2]}");
 }
 
+test "stdlib: an imported standard-library builtin is that builtin under its import's contract" {
+    // `dict` imports its kernels from `dict.core`, as a session may. The
+    // binding is the builtin itself, so a failure inside it names the
+    // attribute's qualified name with no forwarding frame. A standard-library
+    // word's effect is not checked at the boundary, so too few values are the
+    // builtin's own underflow; a user module's effect is still a contract.
+    try support.expectStacks(&.{
+        .{
+            .name = "a kernel failure names the kernel",
+            .source = "[] ([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
+            .expected = "dict.core.get (dict.core.get)",
+        },
+        .{
+            .name = "a session import binds the same way",
+            .source = "`dict.core [get] import [] ([1 2] 0 9 get) @attempt `err at dup `word at swap `trace at " ++
+                "{a 5} `a 0 get",
+            .expected = "dict.core.get (dict.core.get) 5",
+        },
+        .{
+            .name = "too few values are the kernel's underflow",
+            .source = "[] ({a 1} dict.get) @attempt `err at dup `kind at swap `word at",
+            .expected = "underflow dict.core.get",
+        },
+        .{
+            .name = "a user module's effect is still a contract",
+            .source = "[] ((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
+                "[] (checked.w) @attempt `err at dup `kind at swap `word at",
+            .expected = "contract checked.w",
+        },
+    });
+}
+
 test "stdlib: qualified reference auto-loads an unregistered module" {
     // No import, no registration, no path: the first mention of the dotted
     // name is what loads the module.

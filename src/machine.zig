@@ -5779,7 +5779,7 @@ pub const Machine = struct {
     /// so this never records a failure: an unlinked word, or one whose root
     /// has retired, is simply not a match, and generic execution reports it.
     pub fn peekSlotWord(self: *Machine, word: value.Symbol, out: *Resolution) bool {
-        if (word.slot == 0 or env.localOperand(word.slot) != null) return false;
+        if (word.slot == 0 or env.localOperand(word.slot) != null or env.isQuoted(word.slot)) return false;
         var borrow_pin: ?modules.GenerationPin = null;
         defer if (borrow_pin) |*owned| owned.deinit();
         const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
@@ -5852,7 +5852,10 @@ pub const Machine = struct {
         return entry;
     }
 
+    /// Runs an unquoted occurrence: `dispatch` pushes a quoted one instead,
+    /// and `execute` strips the quote before calling here.
     pub fn executeWord(self: *Machine, word: value.Symbol) MachineError!void {
+        std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         // A session or core word resolved before in this unit's view.
         const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
@@ -5861,7 +5864,7 @@ pub const Machine = struct {
             // A cached binding has no home, pin, or generation, so a builtin
             // runs exactly as `executeResolved` would run it.
             switch (cached.route) {
-                .builtin => return invokeBuiltin(self, cached.trace_word, cached.spec.binding.builtin),
+                .builtin => return invokeBuiltin(self, cached.spec.reports_as orelse cached.trace_word, cached.spec.binding.builtin),
                 .source => return enterCachedWord(self, cached),
                 .resolved => {},
             }
@@ -6621,6 +6624,10 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .symbol => |reference| reference,
         .int, .float, .char, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
     };
+    // A quoted occurrence pushes its symbol, linked as written and unmarked:
+    // the value `(x) first` pushes.
+    if (env.isQuoted(word.slot))
+        return self.pushBorrowed(.{ .symbol = .{ .name = word.name, .slot = env.unquoted(word.slot) } });
     try self.executeWord(word);
 }
 
@@ -6907,7 +6914,13 @@ const QualifiedRegistrationDriver = struct {
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home();
-    const cross_home_effect = if (cross_home) resolved.lease.spec().effect else null;
+    // A module word's declared effect is a contract checked where a call
+    // crosses into its module, except a standard-library word's: the
+    // implementation is the standard library's author, so its effects are
+    // reflective metadata, and its arity failures are those of the code it
+    // runs.
+    const checked = cross_home and resolved.origin != .standard_library;
+    const cross_home_effect = if (checked) resolved.lease.spec().effect else null;
     switch (resolved.lease.spec().binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
@@ -6941,11 +6954,14 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             );
         },
         .builtin => |primitive| {
+            // A declared effect is the called word's contract, so its check
+            // names that word; a failure inside the builtin names the
+            // builtin, which an import reports by its qualified name.
             if (cross_home_effect) |effect| try self.beginInvocation(effect, resolved.trace_word);
-            try invokeBuiltin(self, resolved.trace_word, primitive);
+            try invokeBuiltin(self, resolved.lease.spec().reports_as orelse resolved.trace_word, primitive);
         },
         .native => |callable| {
-            if (cross_home) {
+            if (checked) {
                 const effect = cross_home_effect orelse
                     return self.fail(.domain, "module word has no effect declaration");
                 try self.beginInvocation(effect, resolved.trace_word);

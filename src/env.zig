@@ -159,6 +159,19 @@ pub const TopPublication = union(enum) {
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     },
+    builtin: ImportedBuiltin,
+};
+
+/// A standard-library builtin that `import` binds directly instead of through
+/// a forwarding body. A standard-library module name can never be registered
+/// again, so its attribute is the same binding however late it is resolved.
+pub const ImportedBuiltin = struct {
+    primitive: PrimitiveImpl,
+    visibility: Visibility = .public,
+    effect: ?ValidatedEffect = null,
+    doc: ?*DocumentationString = null,
+    /// The attribute's qualified name, which a failure inside it reports.
+    reports_as: intern.TraceWord,
 };
 /// One word of a builtin-backed module: a host primitive published under a
 /// module name. The metadata is authored as plain text because these modules
@@ -221,6 +234,8 @@ pub const ModulePublication = union(enum) {
         effect: ?ValidatedEffect = null,
         doc: *DocumentationString,
     },
+    /// An import of a standard-library builtin, public as every import is.
+    imported: ImportedBuiltin,
 };
 
 /// What a trusted definition's body was recognized as, decided once when its
@@ -307,6 +322,10 @@ pub const BindingSpec = struct {
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
     direct_idiom: ?DirectIdiom = null,
+    /// The name a failure inside this builtin reports, when it is not the
+    /// name the call reached it by: an imported builtin reports its
+    /// attribute's qualified name, as a forwarding body would.
+    reports_as: ?intern.TraceWord = null,
     fn fromTop(publication: TopPublication) BindingSpec {
         return switch (publication) {
             .word => |word| .{
@@ -314,6 +333,13 @@ pub const BindingSpec = struct {
                 .source = word.source,
                 .effect = word.effect,
                 .doc = word.doc,
+            },
+            .builtin => |imported| .{
+                .binding = .{ .builtin = imported.primitive },
+                .visibility = imported.visibility,
+                .effect = imported.effect,
+                .doc = imported.doc,
+                .reports_as = imported.reports_as,
             },
         };
     }
@@ -344,6 +370,13 @@ pub const BindingSpec = struct {
                 .origin = origin,
                 .effect = primitive.effect,
                 .doc = primitive.doc,
+            },
+            .imported => |imported| .{
+                .binding = .{ .builtin = imported.primitive },
+                .origin = origin,
+                .effect = imported.effect,
+                .doc = imported.doc,
+                .reports_as = imported.reports_as,
             },
         };
     }
@@ -1305,6 +1338,19 @@ pub const Scope = struct {
         };
     }
 
+    /// Publishes an imported standard-library builtin, in whichever
+    /// publication this scope accepts.
+    pub fn publishImportedCursor(
+        self: *Scope,
+        name: intern.NamespaceName,
+        imported: ImportedBuiltin,
+    ) error{OutOfMemory}!Environment.BindCursor {
+        return switch (self.publisher()) {
+            .module => |module| module.cursor(name, .{ .imported = imported }),
+            .top => |top| top.cursor(name, .{ .builtin = imported }),
+        };
+    }
+
     /// The one publication this scope accepts. Every scope has exactly one,
     /// so a definition sink is chosen by switching on a capability rather
     /// than by asking a kind enum and trusting the answer; neither arm can be
@@ -1674,9 +1720,21 @@ pub const image_root_flag: u32 = 1 << 31;
 /// drop. It names no slot. Directory and scope ids stay below it.
 pub const local_operand_flag: u32 = 1 << 30;
 
+/// See `value.quote_flag`. Directory and scope ids stay below it, and a locals
+/// operation never carries it.
+pub const quote_flag: u32 = value.quote_flag;
+
+/// Whether an occurrence is quoted.
+pub const isQuoted = value.isQuotedSlot;
+
+/// The link of an occurrence, without any quote flag.
+pub fn unquoted(raw: u32) u32 {
+    return if (isQuoted(raw)) raw & ~quote_flag else raw;
+}
+
 /// The slot field of a locals operation with `operand`.
 pub fn localOperandSlot(operand: u32) u32 {
-    std.debug.assert(operand < local_operand_flag);
+    std.debug.assert(operand < quote_flag);
     return local_operand_flag | operand;
 }
 
@@ -1697,7 +1755,10 @@ pub const WordTarget = union(enum) {
     /// live.
     image: ScopeId,
 };
-pub fn wordTarget(raw: u32) WordTarget {
+/// A quoted occurrence's target is its link's: the flag says how it runs, not
+/// where its name resolves.
+pub fn wordTarget(raw_occurrence: u32) WordTarget {
+    const raw = unquoted(raw_occurrence);
     if (raw == 0) return .unlinked;
     if (raw & image_root_flag != 0) return .{ .image = @fromBackingInt(raw & ~image_root_flag) };
     if (localOperand(raw)) |operand| return .{ .local = operand };
@@ -2003,8 +2064,15 @@ pub const Env = enum(usize) {
         name: u32,
     ) error{OutOfMemory}!SlotId {
         const backing = self.privateState();
-        // `core.x` is core's `x` in every root: link it to core's own slot
-        // rather than to a slot the root would never bind.
+        // `core.x` is core's `x` in every root, core included: link it to
+        // core's own slot rather than to a slot no root ever binds. In core
+        // itself that is the prelude's reading of every quote, `(x)
+        // core.first`, which otherwise resolved through the registry on
+        // every call.
+        if (try intern.coreQualifiedName(name)) |unqualified| {
+            if (root.core or environment == &backing.core)
+                return self.linkSlot(root, environment, unqualified);
+        }
         if (!root.core and environment != &backing.core) {
             if (try intern.coreQualifiedName(name)) |unqualified|
                 return self.linkSlot(&backing.core_cell, &backing.core, unqualified);

@@ -96,6 +96,22 @@ pub const Cursor = struct {
         return decodeValidated(self.source[self.index..])[0];
     }
 
+    /// Advances over at most `limit` bytes of plain string text: ASCII other
+    /// than the quote, the escape, and the newline, so the column moves with
+    /// the index and the line does not. Returns how many bytes it passed.
+    pub fn skipStringRun(self: *Cursor, limit: usize) usize {
+        const end = @min(self.source.len, self.index + limit);
+        var index = self.index;
+        while (index != end) : (index += 1) {
+            const byte = self.source[index];
+            if (byte >= 0x80 or byte == '"' or byte == '\\' or byte == '\n') break;
+        }
+        const passed = index - self.index;
+        self.index = index;
+        self.col += @intCast(passed);
+        return passed;
+    }
+
     pub fn bump(self: *Cursor) ?u21 {
         if (self.atEnd()) return null;
         const codepoint, const length = decodeValidated(self.source[self.index..]);

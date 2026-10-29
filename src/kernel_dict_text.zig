@@ -32,11 +32,11 @@ pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
 
 fn definition(comptime operation: Op) ?env.BuiltinWord {
     return switch (operation) {
-        .put => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector value -- collection", .doc = "Functionally replace list positions through a pervasive selector, or one whole-value dictionary key." },
-        .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector -- collection", .doc = "Functionally remove list positions through a pervasive selector, or one whole-value dictionary key; a missing dictionary key is unchanged." },
-        .split => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "string separator -- parts", .doc = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
+        .put => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector value -- collection", .doc = "Functional replacement. For a list collection, a nested list selector is pervasive and replacement lists conform recursively to its shape; an atomic replacement extends across every selected position. Selector leaves are integer indices. Repeated indices are processed left to right, so the last replacement wins. For a dictionary, the selector is always one whole-value key, including a list key." },
+        .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector -- collection", .doc = "Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys." },
+        .split => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "string separator -- parts", .doc = "Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list." },
         .join => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "strings separator -- string", .doc = "Join a list of strings with a separator string." },
-        .str => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value -- string", .doc = "Return the canonical printed representation of a value as a string." },
+        .str => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value -- string", .doc = "The canonical printed representation; carries the round-trip guarantee (see [Readable representations and display](SPEC.md#readable-representations-and-display)): reading it back yields a structurally matching value for every recursively readable value." },
         .format => null,
     };
 }
@@ -437,27 +437,30 @@ fn ListPutKernel(comptime kind: value.HeapKind) type {
     return struct {
         pub const arity = 1;
         pub const Params = struct { replacement: Element, index: usize };
-        pub const Output = heap.LeafWriter(kind);
+        pub const Output = support.LeafResult(kind);
+        /// Every position but the replaced one keeps its element, so the
+        /// collection may become the result, which then needs one store.
+        pub const result: ?support.ResultShape = .{ .kind = kind, .overwritable = &.{0} };
 
-        pub fn prepare(evaluator: *Machine, _: [1]Value, _: Params, length: usize) error{OutOfMemory}!Output {
-            return .init(evaluator.allocator(), length);
+        pub fn positions(_: Params, aliased: bool, length: usize) usize {
+            return if (aliased) 1 else length;
         }
 
         pub fn chunk(put: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
-            const out = output.unpublishedRange(range.start, range.len());
+            if (output.aliased()) return output.store(put.index, &.{put.replacement});
+            const out = output.range(range.start, range.len());
             @memcpy(out, heap.leafElements(kind, operands[0].list)[range.start..range.end]);
             if (put.index >= range.start and put.index < range.end) out[put.index - range.start] = put.replacement;
         }
 
-        pub fn finish(output: *Output) Value {
-            return output.finish();
-        }
+        pub const finish = Output.finish;
     };
 }
 
-/// Same-kind leaf replacement is either one store under a heap-issued unique
-/// authority or one exact-size typed copy. A value that changes the leaf class
-/// deliberately returns false so the profiling path can widen its result.
+/// Same-kind leaf replacement through `ListPutKernel`: one store when the
+/// kernel takes the collection over, else one exact-size typed copy. A value
+/// that changes the leaf class deliberately returns false so the profiling
+/// path can widen its result.
 fn startTypedListPut(
     evaluator: *Machine,
     collection: *heap.OwnedValue,
@@ -470,15 +473,6 @@ fn startTypedListPut(
     inline for (put_leaf_kinds) |candidate| {
         if (kind == candidate) {
             const replacement = typedReplacement(candidate, new_value) orelse return false;
-            if (heap.UniqueLeafAdoption(candidate).claim(collection.borrow().list, count)) |claim| {
-                var adoption = claim;
-                adoption.writeRange(replace_index, &.{replacement});
-                _ = collection.take();
-                var result = heap.OwnedValue.init(evaluator.releaseDomain(), adoption.finish());
-                defer result.deinit();
-                try evaluator.pushOwned(result.take());
-                return true;
-            }
             try support.Kernel(ListPutKernel(candidate)).run(
                 evaluator,
                 .{collection},
@@ -496,26 +490,6 @@ fn startTypedListPut(
 /// losslessly into an integer collection, since literal and profiled integer
 /// lists are bytes whenever they can be.
 const VectorReplacement = enum { atom, same, bytes };
-
-/// The result buffer: a fresh copy, or the collection itself when this put
-/// holds its only reference. Indices are validated before the first store, so
-/// a reused collection is never left half-replaced by a failing put.
-fn VectorPutOutput(comptime kind: value.HeapKind) type {
-    return union(enum) {
-        const Self = @This();
-        fresh: heap.LeafWriter(kind),
-        /// Publishing republishes the collection's own list, so the
-        /// collection's reference becomes the result's.
-        reuse: heap.UniqueLeafAdoption(kind),
-
-        fn items(self: *Self, count: usize) []heap.LeafElement(kind) {
-            return switch (self.*) {
-                .fresh => |*writer| writer.unpublishedRange(0, count),
-                .reuse => |*adoption| adoption.inPlaceRange(0, count),
-            };
-        }
-    };
-}
 
 /// `put` with a flat typed index vector into a typed leaf, in three phases:
 /// validate every index, copy the collection unless it is reused, then
@@ -535,27 +509,32 @@ fn VectorPutKernel(
         pub const Params = if (replacement == .atom) Element else void;
         pub const Output = struct {
             phase: enum { validate, copy, scatter } = .validate,
-            result: VectorPutOutput(kind),
+            result: support.LeafResult(kind),
             count: usize,
             selected: usize,
 
             pub fn retire(self: *Output, releases: *heap.ReleaseDomain) void {
-                switch (self.result) {
-                    .fresh => |*writer| writer.retirePartial(releases),
-                    .reuse => |*adoption| adoption.abandon(),
-                }
+                self.result.retire(releases);
             }
         };
 
-        pub fn prepare(evaluator: *Machine, operands: [arity]Value, _: Params, _: usize) error{OutOfMemory}!Output {
-            const collection = operands[0].list;
-            const count: usize = @intCast(collection.length());
+        /// The collection may become the result: indices are validated before
+        /// the first store, so it is never left half-replaced, and a taken-over
+        /// collection skips the copy.
+        pub const result: ?support.ResultShape = .{ .kind = kind, .overwritable = &.{0} };
+
+        pub fn resultLength(_: Params, operands: [arity]Value, _: usize) usize {
+            return @intCast(operands[0].list.length());
+        }
+
+        pub fn leafResult(output: *Output) *support.LeafResult(kind) {
+            return &output.result;
+        }
+
+        pub fn prepare(_: *Machine, operands: [arity]Value, _: Params, _: usize, prepared: support.LeafResult(kind)) error{OutOfMemory}!Output {
             return .{
-                .result = if (heap.UniqueLeafAdoption(kind).claim(collection, count)) |claim|
-                    .{ .reuse = claim }
-                else
-                    .{ .fresh = try heap.LeafWriter(kind).init(evaluator.allocator(), count) },
-                .count = count,
+                .result = prepared,
+                .count = @intCast(operands[0].list.length()),
                 .selected = @intCast(operands[1].list.length()),
             };
         }
@@ -567,9 +546,9 @@ fn VectorPutKernel(
                     .negative => context.fail(.domain, "put index is negative"),
                     .out_of_bounds => context.fail(.domain, "put index is out of bounds"),
                 },
-                .copy => output.result.fresh.writeRange(range.start, heap.leafElements(kind, operands[0].list)[range.start..range.end]),
+                .copy => output.result.store(range.start, heap.leafElements(kind, operands[0].list)[range.start..range.end]),
                 .scatter => {
-                    const out = output.result.items(output.count);
+                    const out = output.result.range(0, output.count);
                     switch (replacement) {
                         .atom => for (indices[range.start..range.end]) |index| {
                             out[@intCast(index)] = atom;
@@ -587,7 +566,7 @@ fn VectorPutKernel(
 
         pub fn next(_: support.Context, output: *Output) MachineError!?usize {
             switch (output.phase) {
-                .validate => if (output.result == .fresh) {
+                .validate => if (!output.result.aliased()) {
                     output.phase = .copy;
                     return output.count;
                 },
@@ -598,15 +577,8 @@ fn VectorPutKernel(
             return output.selected;
         }
 
-        pub fn adopted(output: *const Output) ?usize {
-            return if (output.result == .reuse) 0 else null;
-        }
-
         pub fn finish(output: *Output) Value {
-            return switch (output.result) {
-                .fresh => |*writer| writer.finish(),
-                .reuse => |*adoption| adoption.finish(),
-            };
+            return output.result.finish();
         }
     };
 }
@@ -990,23 +962,25 @@ fn DelOneKernel(comptime kind: value.HeapKind) type {
         pub const arity = 1;
         /// The removed position.
         pub const Params = usize;
-        pub const Output = heap.LeafWriter(kind);
+        pub const Output = support.LeafResult(kind);
+        /// Positions before the removed one stay; later ones move down by
+        /// one, so the source may become the result.
+        pub const result: ?support.ResultShape = .{ .kind = kind, .overwritable = &.{0} };
 
-        pub fn prepare(evaluator: *Machine, _: [1]Value, _: usize, length: usize) error{OutOfMemory}!Output {
-            return .init(evaluator.allocator(), length - 1);
+        pub fn resultLength(_: usize, _: [1]Value, length: usize) usize {
+            return length - 1;
         }
 
         pub fn chunk(removed: usize, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
             const source = heap.leafElements(kind, operands[0].list);
             const left_end = @min(range.end, removed);
-            if (range.start < left_end) output.writeRange(range.start, source[range.start..left_end]);
+            // Over its source the left part is already in place.
+            if (range.start < left_end and !output.aliased()) output.store(range.start, source[range.start..left_end]);
             const right_start = @max(range.start, removed + 1);
-            if (right_start < range.end) output.writeRange(right_start - 1, source[right_start..range.end]);
+            if (right_start < range.end) output.store(right_start - 1, source[right_start..range.end]);
         }
 
-        pub fn finish(output: *Output) Value {
-            return output.finish();
-        }
+        pub const finish = Output.finish;
     };
 }
 

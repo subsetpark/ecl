@@ -26,11 +26,11 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
-        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Return -1, 0, or 1 for the whole-value order of two comparable values; lists order lexicographically." },
-        .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "Return the stable ascending sort permutation of a comparable list." },
-        .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return the first occurrence of each distinct list value in input order." },
-        .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group equal-length columns by composite row keys in first-occurrence order." },
-        .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Group equal list values into a dictionary of zero-based index lists." },
+        .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Three-way whole-value ordering, −1/0/1; **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain: numbers (exact across int/float), chars by codepoint, and lists, which compare lexicographically: corresponding elements by `cmp` until the first nonzero result, then by length. Strings are char lists, so they order by codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements after the first difference are never compared. Equivalent on two lists to `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe for ordering: `-` errors on int64 overflow where an ordering must be total." },
+        .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "The stable ascending sort permutation. Orders by `cmp`, so every element pair must be mutually comparable; the error's index names the later element of a pair that is not." },
+        .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`." },
+        .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group rows from a nonempty list of equal-length columns. Keys are whole composite lists, in first-occurrence order; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``." },
+        .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Dict from each distinct value to the list of its 0-based indices, keyed in first-occurrence order." },
     };
 }
 

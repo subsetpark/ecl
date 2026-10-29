@@ -751,7 +751,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 185 col 51}}
+        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 204 col 51}}
         \\=== result.ok? ===
         \\source: [] (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -843,8 +843,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\(:
-        \\ "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal swap def`, so `v `name set` is observationally `v literal `name def`: the stored body is `((v) first)`. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested by `literal` and remain captured data.")
-        \\(swap literal swap def)
+        \\ "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal wrap swap def`, so `v `name set` is observationally `v literal wrap `name def`: the stored body is `(v)`, or `` (`v) `` for a symbol. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested in the body and remain captured data.")
+        \\(swap literal wrap swap def)
         \\stderr:
         \\<empty>
         \\=== setp ===
@@ -853,7 +853,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 229 col 20}}
+        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 184 col 25}}
         \\=== qualify execute ===
         \\source: [] ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0
@@ -872,7 +872,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `qualify doc
         \\exit: 0
         \\stdout:
-        \\"Construct an executable qualified word without reparsing source text."
+        \\"<411-characters-elided>"
         \\stderr:
         \\<empty>
         \\=== undefm unknown ===
@@ -893,7 +893,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `undefm doc
         \\exit: 0
         \\stdout:
-        \\"Remove the module registered under a canonical name or alias."
+        \\"<359-characters-elided>"
         \\stderr:
         \\<empty>
         \\=== result ok ===

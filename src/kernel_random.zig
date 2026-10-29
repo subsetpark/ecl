@@ -176,20 +176,15 @@ fn randInts(evaluator: *Machine) MachineError!void {
 const DrawKernel = struct {
     pub const arity = 0;
     pub const Params = struct { state: State, bound: u64 };
-    pub const Output = heap.LeafWriter(.leaf_i64);
-
-    pub fn prepare(evaluator: *Machine, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
-        return .init(evaluator.allocator(), length);
-    }
+    pub const Output = support.LeafResult(.leaf_i64);
+    pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
     pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
-        for (output.unpublishedRange(range.start, range.len()), range.start..) |*slot, index|
+        for (output.range(range.start, range.len()), range.start..) |*slot, index|
             slot.* = @bitCast(boundedDraw(params.state, index, params.bound));
     }
 
-    pub fn finish(output: *Output) Value {
-        return output.finish();
-    }
+    pub const finish = Output.finish;
 };
 
 /// The displaced indices of a partial Fisher-Yates over a virtual range: an
