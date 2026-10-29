@@ -389,7 +389,35 @@ test "formatting preserves parsed structure across the ordinary grammar" {
     );
 }
 
-fn formatterAllocationProbe(failing: std.mem.Allocator) !void {
+/// Forwards allocation and free but never resizes in place. The formatter's
+/// arena grows its first node through the backing allocator, and whether the
+/// host can extend a large mapping in place varies from run to run on Linux,
+/// which changes the allocation count the injection sweep depends on.
+const FixedBlocks = struct {
+    parent: std.mem.Allocator,
+
+    fn allocator(self: *FixedBlocks) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *FixedBlocks = @ptrCast(@alignCast(raw));
+        return self.parent.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *FixedBlocks = @ptrCast(@alignCast(raw));
+        self.parent.rawFree(memory, alignment, ra);
+    }
+};
+
+fn formatterAllocationProbe(failing_backing: std.mem.Allocator) !void {
+    var fixed: FixedBlocks = .{ .parent = failing_backing };
+    const failing = fixed.allocator();
     const output = try formatter.format(
         failing,
         "[] ((value -- value : \"Documentation that exercises normalized prose.\") " ++
