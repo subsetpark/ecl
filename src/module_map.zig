@@ -55,13 +55,19 @@ pub const Validated = opaque {
     pub fn artifacts(self: *const Validated) []const Artifact {
         return self.backing().artifacts.items;
     }
+    pub fn scope(self: *const Validated, id: ScopeId) *const Scope {
+        return &self.backing().scopes.items[@backingInt(id)];
+    }
+    pub fn artifact(self: *const Validated, id: ArtifactId) *const Artifact {
+        return &self.backing().artifacts.items[@backingInt(id)];
+    }
     pub fn local(self: *const Validated) ScopeId {
         return self.backing().local;
     }
     pub fn deinit(self: *Validated) void {
         const owned = self.backing();
-        for (owned.scopes.items) |scope| scope.deinit(owned.allocator);
-        for (owned.artifacts.items) |artifact| artifact.deinit(owned.allocator);
+        for (owned.scopes.items) |item| item.deinit(owned.allocator);
+        for (owned.artifacts.items) |item| item.deinit(owned.allocator);
         owned.scopes.deinit(owned.allocator);
         owned.artifacts.deinit(owned.allocator);
         owned.allocator.destroy(owned);
