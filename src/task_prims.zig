@@ -85,11 +85,10 @@ fn spawnSeedless(evaluator: *Unit) MachineError!void {
 fn spawnInput(evaluator: *Unit, popped: machine.OwnedUnitInput) MachineError!void {
     var input = popped;
     defer input.deinit(evaluator.releases);
-    const borrowed = input.borrow();
     const task = try spawnTask(
         evaluator,
-        borrowed.quotation(),
-        borrowed.initialStack(null),
+        input.quotation(),
+        input.initialStack(null),
         .spawn,
     );
     try evaluator.pushOwned(task);

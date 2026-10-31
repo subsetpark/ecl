@@ -6081,27 +6081,6 @@ pub const Unit = struct {
 /// cleanup, or backpressure), so its executor should let other work run.
 pub const RunStatus = enum { completed, exhausted, yielded, parked };
 
-/// A non-owning child-launch projection. The decoded owner remains alive until
-/// the scheduler has retained the quotation and initial operands into the new
-/// Unit, so a child launch never invents a second teardown protocol.
-pub const BorrowedUnitInput = struct {
-    body: *Header,
-    seeds: ?*Header,
-
-    pub fn quotation(self: BorrowedUnitInput) *Header {
-        return self.body;
-    }
-
-    pub fn initialStack(self: BorrowedUnitInput, element: ?Value) InitialStack {
-        if (element) |item| {
-            const seeds = self.seeds orelse return .{ .borrowed_element = item };
-            return .{ .borrowed_element_and_seeds = .{ .element = item, .seeds = seeds } };
-        }
-        const seeds = self.seeds orelse return .empty;
-        return .{ .borrowed_seeds = seeds };
-    }
-};
-
 /// The decoded input every unit constructor takes. It remains the one nominal
 /// owner through validation, child borrowing, fan-out transfer, and boundary
 /// handoff. Empty seeds use the null representation; otherwise it owns both
@@ -6136,9 +6115,22 @@ pub const OwnedUnitInput = enum(u128) {
         return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
     }
 
-    pub fn borrow(self: *const OwnedUnitInput) BorrowedUnitInput {
+    /// The body, borrowed: the input stays alive until the scheduler has
+    /// retained it and the initial operands into the new Unit, so a child
+    /// launch never invents a second teardown protocol.
+    pub fn quotation(self: *const OwnedUnitInput) *Header {
         std.debug.assert(self.* != .consumed);
-        return .{ .body = self.bodyHeader().?, .seeds = self.seedHeader() };
+        return self.bodyHeader().?;
+    }
+
+    pub fn initialStack(self: *const OwnedUnitInput, element: ?Value) InitialStack {
+        std.debug.assert(self.* != .consumed);
+        if (element) |item| {
+            const seeds = self.seedHeader() orelse return .{ .borrowed_element = item };
+            return .{ .borrowed_element_and_seeds = .{ .element = item, .seeds = seeds } };
+        }
+        const seeds = self.seedHeader() orelse return .empty;
+        return .{ .borrowed_seeds = seeds };
     }
 
     pub fn move(self: *OwnedUnitInput) OwnedUnitInput {
@@ -6164,7 +6156,7 @@ pub const OwnedUnitInput = enum(u128) {
 
     pub fn deinit(self: *OwnedUnitInput, releases: *heap.ReleaseDomain) void {
         if (self.seedHeader()) |items| releases.releaseHeader(items);
-        if (self.bodyHeader()) |quotation| releases.releaseHeader(quotation);
+        if (self.bodyHeader()) |body| releases.releaseHeader(body);
         self.* = .consumed;
     }
 };
