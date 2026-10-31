@@ -11,14 +11,14 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Query = enum { cwd, executable };
-fn cwd(evaluator: *machine.Machine) machine.MachineError!void {
+fn cwd(evaluator: *machine.Unit) machine.MachineError!void {
     return begin(evaluator, .cwd);
 }
-fn executable(evaluator: *machine.Machine) machine.MachineError!void {
+fn executable(evaluator: *machine.Unit) machine.MachineError!void {
     return begin(evaluator, .executable);
 }
-fn begin(evaluator: *machine.Machine, query: Query) machine.MachineError!void {
-    const owned = try evaluator.allocator().create(Metadata);
+fn begin(evaluator: *machine.Unit, query: Query) machine.MachineError!void {
+    const owned = try evaluator.allocator.create(Metadata);
     // SAFETY: executablePath fills the buffer before its returned prefix is read.
     owned.* = .{ .query = query, .buffer = undefined };
     evaluator.adoptDriver(owned);
@@ -33,10 +33,10 @@ const Metadata = struct {
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         if (self.state == .text) self.state.text.retire(releases);
     }
-    pub fn advance(evaluator: *machine.Machine, self: *@This()) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *@This()) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .query) {
-            const runtime = evaluator.unit.inherited.runtime();
+            const runtime = evaluator.inherited.runtime();
             const bytes = switch (self.query) {
                 .cwd => runtime.startup_cwd,
                 .executable => path: {
@@ -45,7 +45,7 @@ const Metadata = struct {
                     break :path self.buffer[0..length];
                 },
             };
-            self.state = .{ .text = .init(evaluator.allocator(), bytes) };
+            self.state = .{ .text = .init(evaluator.allocator, bytes) };
         }
         return switch (self.state.text.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

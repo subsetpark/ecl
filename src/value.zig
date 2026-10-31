@@ -130,14 +130,14 @@ pub fn isQuotedSlot(slot: u32) bool {
 /// the root it writes into. Carried by value through the reader so that
 /// neither the reader nor `value.zig` depends on the environment. The
 /// context is two opaque words the link function alone interprets.
-pub const WordLinker = struct {
+pub const SymbolLinker = struct {
     context: [2]usize = .{ 0, 0 },
     link_fn: ?*const fn (context: [2]usize, name: u32) error{OutOfMemory}!u32 = null,
 
-    /// Links nothing: every word it produces carries slot zero.
-    pub const unlinked: WordLinker = .{};
+    /// Links nothing: every symbol it produces carries slot zero.
+    pub const unlinked: SymbolLinker = .{};
 
-    pub fn link(self: WordLinker, name: u32) error{OutOfMemory}!u32 {
+    pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
         const function = self.link_fn orelse return 0;
         return function(self.context, name);
     }

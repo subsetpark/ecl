@@ -12,7 +12,7 @@ const poll = @import("poll.zig");
 const kernel_flat = @import("kernel_flat.zig");
 
 const Value = value.Value;
-const Machine = support.Machine;
+const Unit = support.Unit;
 const MachineError = support.MachineError;
 
 /// The operation family lives in `kernel_support`, beside the others.
@@ -36,7 +36,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Machine) MachineError!void {
+        fn run(evaluator: *Unit) MachineError!void {
             return switch (operation) {
                 .cmp => cmpPrimitive(evaluator),
                 .grade => gradePrimitive(evaluator),
@@ -48,7 +48,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
     }.run);
 }
 
-fn cmpPrimitive(evaluator: *Machine) MachineError!void {
+fn cmpPrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -75,7 +75,7 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(CompareDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
-        .cursor = .init(.init(evaluator.allocator(), left_item, right_item)),
+        .cursor = .init(.init(evaluator.allocator, left_item, right_item)),
     });
 }
 
@@ -135,7 +135,7 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             pub fn retire(_: *Output, _: *heap.ReleaseDomain) void {}
         };
 
-        pub fn prepare(_: *Machine, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Unit, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
             return .{ .ordering = std.math.order(operands[0].list.length(), operands[1].list.length()) };
         }
 
@@ -197,7 +197,7 @@ fn lexKind(kind: value.HeapKind) bool {
 
 /// `( left right -- ordering )`: `cmp`, which is `(cmp) lex-cmp-with`, over
 /// two lists that `lexCompareCandidate` admits.
-pub fn lexCompare(evaluator: *Machine) MachineError!void {
+pub fn lexCompare(evaluator: *Unit) MachineError!void {
     var right = try evaluator.popValue();
     defer right.deinit();
     var left = try evaluator.popValue();
@@ -205,7 +205,7 @@ pub fn lexCompare(evaluator: *Machine) MachineError!void {
     return startLexCompare(evaluator, &left, &right);
 }
 
-fn startLexCompare(evaluator: *Machine, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
+fn startLexCompare(evaluator: *Unit, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
     const left_list = left.borrow().list;
     const right_list = right.borrow().list;
     const shared: usize = @intCast(@min(left_list.length(), right_list.length()));
@@ -223,17 +223,17 @@ fn startLexCompare(evaluator: *Machine, left: *heap.OwnedValue, right: *heap.Own
     unreachable;
 }
 
-fn gradePrimitive(evaluator: *Machine) MachineError!void {
+fn gradePrimitive(evaluator: *Unit) MachineError!void {
     return startGrade(evaluator, false);
 }
 
-fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
+fn startGrade(evaluator: *Unit, sorted_values: bool) MachineError!void {
     var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list) return evaluator.typeError("a comparable list");
     if (try startTypedGrade(evaluator, &collection, sorted_values)) return;
     const count: usize = @intCast(collection.borrow().list.length());
-    const indices = try evaluator.allocator().alloc(usize, count);
+    const indices = try evaluator.allocator.alloc(usize, count);
     try evaluator.startDriver(GradeDriver{
         .collection = .init(collection.take()),
         .sorted_values = sorted_values,
@@ -289,14 +289,14 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Machine, _: [1]Value, sorted_values: bool, length: usize) error{OutOfMemory}!Output {
-            const pairs = try evaluator.allocator().alloc(Pair, length);
-            errdefer evaluator.allocator().free(pairs);
+        pub fn prepare(evaluator: *Unit, _: [1]Value, sorted_values: bool, length: usize) error{OutOfMemory}!Output {
+            const pairs = try evaluator.allocator.alloc(Pair, length);
+            errdefer evaluator.allocator.free(pairs);
             return .{
-                .allocator = evaluator.allocator(),
+                .allocator = evaluator.allocator,
                 .sorted_values = sorted_values,
                 .pairs = pairs,
-                .scratch = try evaluator.allocator().alloc(Pair, length),
+                .scratch = try evaluator.allocator.alloc(Pair, length),
             };
         }
 
@@ -428,7 +428,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
     };
 }
 
-fn startTypedGrade(evaluator: *Machine, collection: *heap.OwnedValue, sorted_values: bool) MachineError!bool {
+fn startTypedGrade(evaluator: *Unit, collection: *heap.OwnedValue, sorted_values: bool) MachineError!bool {
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0 or collection.borrow().list.kind() == .generic_spine) return false;
     const kind = collection.borrow().list.kind();
@@ -441,7 +441,7 @@ fn startTypedGrade(evaluator: *Machine, collection: *heap.OwnedValue, sorted_val
     unreachable;
 }
 
-pub fn sortForIdiom(evaluator: *Machine) MachineError!void {
+pub fn sortForIdiom(evaluator: *Unit) MachineError!void {
     try startGrade(evaluator, true);
 }
 
@@ -566,7 +566,7 @@ const CompareDriver = struct {
     left: heap.Owned(Value),
     right: heap.Owned(Value),
     cursor: heap.Owned(CompareCursor),
-    pub fn advance(evaluator: *Machine, self: *CompareDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -626,7 +626,7 @@ const GradeDriver = struct {
         }
     };
 
-    pub fn advance(evaluator: *Machine, self: *GradeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *GradeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
@@ -649,9 +649,9 @@ const GradeDriver = struct {
                 while (index.* != end) : (index.* += 1) indices[index.*] = index.*;
                 if (index.* == indices.len) {
                     const sort = try GradeSortCursor.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         indices,
-                        .{ .collection = self.collection.borrow(), .allocator = evaluator.allocator() },
+                        .{ .collection = self.collection.borrow(), .allocator = evaluator.allocator },
                     );
                     self.state.borrowMut().* = .{ .sort = .init(sort) };
                 }
@@ -666,14 +666,14 @@ const GradeDriver = struct {
             }) {
                 .pending => return .stepped,
                 .complete => {
-                    sort.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    sort.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .prepare;
                     continue;
                 },
             },
             .prepare => {
                 if (self.sorted_values) {
-                    const values = try evaluator.allocator().alloc(
+                    const values = try evaluator.allocator.alloc(
                         Value,
                         self.indices.borrow().len,
                     );
@@ -683,7 +683,7 @@ const GradeDriver = struct {
                     } };
                 } else {
                     const writer = try heap.LeafWriter(.leaf_i64).init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.indices.borrow().len,
                     );
                     self.state.borrowMut().* = .{ .prepare_indices = .{
@@ -700,7 +700,7 @@ const GradeDriver = struct {
                     values[prepare.index] = list.atUnchecked(self.collection.borrow(), indices[prepare.index]);
                 if (prepare.index == indices.len) {
                     const materializer = list.ValueMaterializer.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         values,
                     );
                     self.state.borrowMut().* = .{ .materialize_values = .{
@@ -733,8 +733,8 @@ const GradeDriver = struct {
                     .pending => .stepped,
                     .complete => |result| completed: {
                         materialize.materializer.deinit(
-                            evaluator.releaseDomain(),
-                            evaluator.allocator(),
+                            evaluator.releases,
+                            evaluator.allocator,
                         );
                         self.state.borrowMut().* = .{ .complete_values = .init(
                             materialize.values.take(),
@@ -749,7 +749,7 @@ const GradeDriver = struct {
     }
 };
 
-fn distinctPrimitive(evaluator: *Machine) MachineError!void {
+fn distinctPrimitive(evaluator: *Unit) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
@@ -759,7 +759,7 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
             if (kind == candidate) return support.Kernel(DistinctKernel(candidate)).run(evaluator, .{&collection}, {}, count);
         }
     }
-    const results = try evaluator.allocator().alloc(Value, count);
+    const results = try evaluator.allocator.alloc(Value, count);
     try evaluator.startDriver(DistinctDriver{
         .collection = .init(collection.take()),
         .results = .init(results),
@@ -802,8 +802,8 @@ fn DistinctKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Machine, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
-            const allocator = evaluator.allocator();
+        pub fn prepare(evaluator: *Unit, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
+            const allocator = evaluator.allocator;
             const capacity = std.math.ceilPowerOfTwo(usize, @max(8, length * 2)) catch return error.OutOfMemory;
             const slots = try allocator.alloc(usize, capacity);
             errdefer allocator.free(slots);
@@ -850,7 +850,7 @@ const DistinctDriver = struct {
     matcher: ?heap.Owned(equal.MatchCursor) = null,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *DistinctDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DistinctDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) {
@@ -858,7 +858,7 @@ const DistinctDriver = struct {
                 return switch (try materializer.borrowMut().advance(work)) {
                     .pending => .stepped,
                     .complete => |result| completed: {
-                        materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        materializer.deinit(evaluator.releases, evaluator.allocator);
                         self.materializer = null;
                         break :completed .{ .output = result };
                     },
@@ -866,7 +866,7 @@ const DistinctDriver = struct {
             }
             if (self.item_index == self.results.borrow().len) {
                 self.materializer = .init(list.ValueMaterializer.init(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     self.results.borrow()[0..self.result_count],
                 ));
                 continue;
@@ -883,14 +883,14 @@ const DistinctDriver = struct {
                 continue;
             }
             if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(
-                evaluator.allocator(),
+                evaluator.allocator,
                 self.results.borrow()[self.candidate],
                 list.atUnchecked(self.collection.borrow(), self.item_index),
             ));
             switch (try self.matcher.?.borrowMut().advance(work)) {
                 .pending => _ = work.spend(),
                 .complete => |matches| {
-                    self.matcher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.matcher.?.deinit(evaluator.releases, evaluator.allocator);
                     self.matcher = null;
                     if (matches) {
                         self.item_index += 1;
@@ -904,13 +904,13 @@ const DistinctDriver = struct {
     }
 };
 
-fn groupPrimitive(evaluator: *Machine) MachineError!void {
+fn groupPrimitive(evaluator: *Unit) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()) });
 }
 
-fn groupColumnsPrimitive(evaluator: *Machine) MachineError!void {
+fn groupColumnsPrimitive(evaluator: *Unit) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()), .columns = true });
@@ -949,21 +949,21 @@ const GroupDriver = struct {
     dict_materializer: ?heap.Owned(dict.Materializer) = null,
     group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
-    fn allocate(self: *GroupDriver, evaluator: *Machine) error{OutOfMemory}!void {
-        const allocator = evaluator.allocator();
+    fn allocate(self: *GroupDriver, evaluator: *Unit) error{OutOfMemory}!void {
+        const allocator = evaluator.allocator;
         const count = self.row_count;
         self.key_rows = .init(try allocator.alloc(usize, count));
         const capacity = std.math.ceilPowerOfTwo(usize, std.math.add(usize, std.math.mul(usize, count, 2) catch return error.OutOfMemory, 1) catch return error.OutOfMemory) catch return error.OutOfMemory;
         self.slots = .init(try allocator.alloc(usize, capacity));
         self.hashes = .init(try allocator.alloc(u64, count));
-        if (self.columns) self.key_values = .init(try .init(evaluator.releaseDomain(), count));
+        if (self.columns) self.key_values = .init(try .init(evaluator.releases, count));
         self.keys = .init(try allocator.alloc(Value, count));
         self.assignments = .init(try allocator.alloc(usize, count));
         self.frequencies = .init(try allocator.alloc(usize, count));
         self.offsets = .init(try allocator.alloc(usize, count + 1));
         self.cursors = .init(try allocator.alloc(usize, count));
         self.indices = .init(try allocator.alloc(i64, count));
-        self.group_values = .init(try .init(evaluator.releaseDomain(), count));
+        self.group_values = .init(try .init(evaluator.releases, count));
         self.offsets.?.borrow()[0] = 0;
         self.phase = .initialize;
     }
@@ -1026,7 +1026,7 @@ const GroupDriver = struct {
         self.phase = .hash;
     }
 
-    pub fn advance(evaluator: *Machine, self: *GroupDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *GroupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -1071,7 +1071,7 @@ const GroupDriver = struct {
                 }
                 const rows = work.take(self.row_count - self.item_index);
                 switch (self.collection.borrow().list.kind()) {
-                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| self.assignTyped(kind, rows, evaluator.releaseDomain()),
+                    inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| self.assignTyped(kind, rows, evaluator.releases),
                     .generic_spine, .dict, .task, .port, .address, .reserved_mask => unreachable,
                 }
             },
@@ -1092,12 +1092,12 @@ const GroupDriver = struct {
                     _ = work.spend();
                     break :scalar h;
                 } else blk: {
-                    if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(evaluator.allocator(), item));
+                    if (self.hasher == null) self.hasher = .init(try equal.HashCursor.init(evaluator.allocator, item));
                     const progress = try self.hasher.?.borrowMut().advance(work);
                     switch (progress) {
                         .pending => continue,
                         .complete => |h| {
-                            self.hasher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                            self.hasher.?.deinit(evaluator.releases, evaluator.allocator);
                             self.hasher = null;
                             break :blk h;
                         },
@@ -1134,12 +1134,12 @@ const GroupDriver = struct {
                     _ = work.spend();
                     continue;
                 }
-                if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(evaluator.allocator(), left, right));
+                if (self.matcher == null) self.matcher = .init(try equal.MatchCursor.init(evaluator.allocator, left, right));
                 const progress = try self.matcher.?.borrowMut().advance(work);
                 switch (progress) {
                     .pending => {},
                     .complete => |matches| {
-                        self.matcher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.matcher.?.deinit(evaluator.releases, evaluator.allocator);
                         self.matcher = null;
                         if (matches) self.cell += 1 else {
                             self.cell = 0;
@@ -1150,7 +1150,7 @@ const GroupDriver = struct {
             },
             .key => {
                 if (self.columns) {
-                    if (self.key_builder == null) self.key_builder = .init(try .init(evaluator.releaseDomain(), self.cellCount()));
+                    if (self.key_builder == null) self.key_builder = .init(try .init(evaluator.releases, self.cellCount()));
                     if (self.cell != self.cellCount()) {
                         self.key_builder.?.borrowMut().appendBorrowed(self.cellValue(self.item_index, self.cell));
                         self.cell += 1;
@@ -1214,7 +1214,7 @@ const GroupDriver = struct {
             .groups => {
                 if (self.index == self.key_count) {
                     self.dict_materializer = .init(try dict.Materializer.initBorrowedSlices(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.keys.?.borrow()[0..self.key_count],
                         self.group_values.?.borrow().values(),
                         false,
@@ -1225,7 +1225,7 @@ const GroupDriver = struct {
                 const start = self.offsets.?.borrow()[self.index];
                 const end = self.offsets.?.borrow()[self.index + 1];
                 if (self.group_writer == null) self.group_writer = .init(try heap.LeafWriter(.leaf_i64).init(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     end - start,
                 ));
                 const copied = work.take(end - start - self.group_fill);
@@ -1246,9 +1246,9 @@ const GroupDriver = struct {
                 .pending => return .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| {
-                    self.dict_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.dict_materializer.?.deinit(evaluator.releases, evaluator.allocator);
                     self.dict_materializer = null;
-                    self.group_values.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.group_values.?.deinit(evaluator.releases, evaluator.allocator);
                     self.group_values = null;
                     return .{ .output = result };
                 },

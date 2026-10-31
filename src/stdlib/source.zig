@@ -13,7 +13,7 @@ pub const words = [_]env.BuiltinWord{.{
     .primitive = declarations,
 }};
 
-fn declarations(evaluator: *machine.Machine) machine.MachineError!void {
+fn declarations(evaluator: *machine.Unit) machine.MachineError!void {
     var forms = try evaluator.popQuotation();
     defer forms.deinit();
     try evaluator.startDriver(DeclarationsDriver{ .forms = .init(forms.take()) });
@@ -28,7 +28,7 @@ const DeclarationsDriver = struct {
     // The counting pass fixes the allocation size before materialization.
     output: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
-    pub fn advance(evaluator: *machine.Machine, self: *DeclarationsDriver) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *DeclarationsDriver) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const forms = self.forms.borrow();
         const end = self.index + evaluator.workBudget().take(forms.list.length() - self.index);
@@ -45,7 +45,7 @@ const DeclarationsDriver = struct {
             self.output = null;
             return .{ .output = result };
         }
-        self.output = .init(try .init(evaluator.releaseDomain(), self.count));
+        self.output = .init(try .init(evaluator.releases, self.count));
         self.index = 0;
         self.scan = .{};
         return .stepped;

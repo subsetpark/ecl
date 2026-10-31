@@ -80,7 +80,7 @@ pub fn readCode(
     source: []const u8,
     diag: *Diag,
     provenance_namespace: @import("heap.zig").CodeProvenanceNamespace,
-    word_linker: value.WordLinker,
+    symbol_linker: value.SymbolLinker,
 ) Error!ReadResult {
-    return implementation.readCode(host, source_name, source, diag, provenance_namespace, word_linker);
+    return implementation.readCode(host, source_name, source, diag, provenance_namespace, symbol_linker);
 }

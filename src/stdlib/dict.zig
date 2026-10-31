@@ -15,7 +15,7 @@ const dict_kernels = @import("../kernel_dict_text.zig");
 const dict_storage = @import("../dict.zig");
 
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -117,7 +117,7 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn get(evaluator: *Machine) MachineError!void {
+fn get(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     var fallback = try evaluator.popValue();
     defer fallback.deinit();
@@ -125,7 +125,7 @@ fn get(evaluator: *Machine) MachineError!void {
     defer key.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const cursor = dict_storage.FindCursor.initHeader(evaluator.allocator(), dictionary.borrow().dict, key.borrow());
+    const cursor = dict_storage.FindCursor.initHeader(evaluator.allocator, dictionary.borrow().dict, key.borrow());
     try evaluator.startDriver(GetDriver{
         .dictionary = .init(dictionary.take()),
         .key = .init(key.take()),
@@ -144,7 +144,7 @@ const GetDriver = struct {
     fallback: heap.Owned(Value),
     cursor: heap.Owned(dict_storage.FindCursor),
 
-    pub fn advance(evaluator: *Machine, self: *GetDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *GetDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -156,15 +156,15 @@ const GetDriver = struct {
     }
 };
 
-fn valuesAtOr(evaluator: *Machine) MachineError!void {
+fn valuesAtOr(evaluator: *Unit) MachineError!void {
     return lookupKeys(evaluator, true);
 }
 
-fn valuesAt(evaluator: *Machine) MachineError!void {
+fn valuesAt(evaluator: *Unit) MachineError!void {
     return lookupKeys(evaluator, false);
 }
 
-fn lookupKeys(evaluator: *Machine, comptime with_default: bool) MachineError!void {
+fn lookupKeys(evaluator: *Unit, comptime with_default: bool) MachineError!void {
     try evaluator.require(if (with_default) 3 else 2);
     var fallback: ?heap.OwnedValue = if (with_default) try evaluator.popValue() else null;
     defer if (fallback) |*owned| owned.deinit();
@@ -189,14 +189,14 @@ const DictLookupDriver = struct {
     cursor: ?heap.Owned(dict_storage.FindCursor) = null,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *DictLookupDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DictLookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.keys.borrow().list.length());
-        if (self.output == null) self.output = .init(try .init(evaluator.releaseDomain(), count));
+        if (self.output == null) self.output = .init(try .init(evaluator.releases, count));
         const work = evaluator.workBudget();
         while (self.index < count and work.spend()) {
             if (self.cursor == null) self.cursor = .init(dict_storage.FindCursor.initHeader(
-                evaluator.allocator(),
+                evaluator.allocator,
                 self.dictionary.borrow().dict,
                 list.atUnchecked(self.keys.borrow(), self.index),
             ));
@@ -204,7 +204,7 @@ const DictLookupDriver = struct {
                 .pending => {},
                 .complete => |found| {
                     self.output.?.borrowMut().appendBorrowed(found orelse if (self.fallback) |*fallback| fallback.borrow() else return evaluator.fail(.domain, "dict.at could not find the dict key"));
-                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
                     self.cursor = null;
                     self.index += 1;
                 },
@@ -217,7 +217,7 @@ const DictLookupDriver = struct {
     }
 };
 
-fn associate(evaluator: *Machine) MachineError!void {
+fn associate(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
@@ -225,7 +225,7 @@ fn associate(evaluator: *Machine) MachineError!void {
     defer associated_value.deinit();
     const pair = [1]dict_storage.Pair{.{ key.borrow(), associated_value.borrow() }};
     const materializer = try dict_storage.Materializer.init(
-        evaluator.allocator(),
+        evaluator.allocator,
         &pair,
         false,
     );
@@ -242,7 +242,7 @@ const AssociateDriver = struct {
     associated_value: heap.Owned(Value),
     materializer: heap.Owned(dict_storage.Materializer),
 
-    pub fn advance(evaluator: *Machine, self: *AssociateDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *AssociateDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -252,7 +252,7 @@ const AssociateDriver = struct {
     }
 };
 
-fn fromFlat(evaluator: *Machine) MachineError!void {
+fn fromFlat(evaluator: *Unit) MachineError!void {
     var entries = try evaluator.popValue();
     defer entries.deinit();
     if (entries.borrow() != .list) return evaluator.typeError("a flat key/value list");
@@ -260,7 +260,7 @@ fn fromFlat(evaluator: *Machine) MachineError!void {
     if (count % 2 != 0) {
         return evaluator.fail(.contract, "dict.from-flat requires an even-length key/value list");
     }
-    const flat_pairs = try evaluator.allocator().alloc(dict_storage.Pair, count / 2);
+    const flat_pairs = try evaluator.allocator.alloc(dict_storage.Pair, count / 2);
     try evaluator.startDriver(FromFlatDriver{
         .entries = .init(entries.take()),
         .pairs = .init(flat_pairs),
@@ -274,7 +274,7 @@ const FromFlatDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict_storage.Materializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *FromFlatDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *FromFlatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.materializer == null) {
             const flat_pairs = self.pairs.borrow();
@@ -284,7 +284,7 @@ const FromFlatDriver = struct {
                 list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),
             };
             if (self.index != flat_pairs.len) return .stepped;
-            self.materializer = .init(try .init(evaluator.allocator(), flat_pairs, true));
+            self.materializer = .init(try .init(evaluator.allocator, flat_pairs, true));
             return .stepped;
         }
         return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
@@ -295,22 +295,22 @@ const FromFlatDriver = struct {
     }
 };
 
-fn take(evaluator: *Machine) MachineError!void {
+fn take(evaluator: *Unit) MachineError!void {
     return selectKeys(evaluator, true);
 }
 
-fn del(evaluator: *Machine) MachineError!void {
+fn del(evaluator: *Unit) MachineError!void {
     return selectKeys(evaluator, false);
 }
 
-fn selectKeys(evaluator: *Machine, keep: bool) MachineError!void {
+fn selectKeys(evaluator: *Unit, keep: bool) MachineError!void {
     try evaluator.require(2);
     var selector = try evaluator.popList();
     defer selector.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     const count: usize = @intCast(dictionary.borrow().dict.length());
-    const selected = try evaluator.allocator().alloc(bool, count);
+    const selected = try evaluator.allocator.alloc(bool, count);
     try evaluator.startDriver(DictSelectDriver{
         .dictionary = .init(dictionary.take()),
         .selector = .init(selector.take()),
@@ -337,7 +337,7 @@ const DictSelectDriver = struct {
     selected_count: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *DictSelectDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DictSelectDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -355,12 +355,12 @@ const DictSelectDriver = struct {
                 if (self.finder == null) {
                     if (self.key_index == self.selector.borrow().list.length()) {
                         const count = if (self.keep) self.selected_count else self.selected.borrow().len - self.selected_count;
-                        self.pairs = .init(try evaluator.allocator().alloc(dict_storage.Pair, count));
+                        self.pairs = .init(try evaluator.allocator.alloc(dict_storage.Pair, count));
                         self.phase = .copy;
                         continue;
                     }
                     self.finder = .init(dict_storage.FindCursor.initHeader(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.dictionary.borrow().dict,
                         list.atUnchecked(self.selector.borrow(), self.key_index),
                     ));
@@ -378,7 +378,7 @@ const DictSelectDriver = struct {
                                 self.selected_count += 1;
                             }
                         }
-                        self.finder.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.finder.?.deinit(evaluator.releases, evaluator.allocator);
                         self.finder = null;
                     },
                 }
@@ -386,7 +386,7 @@ const DictSelectDriver = struct {
             .copy => {
                 if (self.index == self.selected.borrow().len) {
                     self.materializer = .init(try dict_storage.Materializer.initBorrowedPairs(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.pairs.?.borrow(),
                         false,
                     ));
@@ -417,7 +417,7 @@ const DictSelectDriver = struct {
     }
 };
 
-fn mergeWith(evaluator: *Machine) MachineError!void {
+fn mergeWith(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     var conflict = try evaluator.popQuotation();
     defer conflict.deinit();
@@ -427,12 +427,12 @@ fn mergeWith(evaluator: *Machine) MachineError!void {
     defer left.deinit();
     const left_count: usize = @intCast(left.borrow().dict.length());
     const right_count: usize = @intCast(right.borrow().dict.length());
-    const pairs_buffer = try evaluator.allocator().alloc(dict_storage.Pair, left_count + right_count);
+    const pairs_buffer = try evaluator.allocator.alloc(dict_storage.Pair, left_count + right_count);
     var pairs_locally_owned = true;
-    errdefer if (pairs_locally_owned) evaluator.allocator().free(pairs_buffer);
-    var collision_values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), right_count);
+    errdefer if (pairs_locally_owned) evaluator.allocator.free(pairs_buffer);
+    var collision_values = try heap.OwnedValueBuffer.init(evaluator.releases, right_count);
     defer collision_values.deinit();
-    const state = try evaluator.allocator().create(MergeWithState);
+    const state = try evaluator.allocator.create(MergeWithState);
     state.* = .{
         .left = .init(left.take()),
         .right = .init(right.take()),
@@ -491,14 +491,14 @@ const MergeWithApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *MergeWithApplication,
         window: machine.StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?machine.ApplicationStep {
         evaluator.setActiveWord(self.state.borrow().word);
         evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse 0;
+        const observed = window.observed(evaluator.stack.items.len) orelse 0;
         if (observed != 1)
             return evaluator.fail(.contract, "dict.merge-with quotation must return one value");
         var result = try evaluator.popValue();
@@ -517,7 +517,7 @@ const MergeWithWorkDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: heap.Owned(*MergeWithState),
 
-    pub fn advance(evaluator: *Machine, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.state.borrow().word);
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
@@ -540,7 +540,7 @@ const MergeWithWorkDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(state.right.borrow().dict.length());
                 if (state.index == count) {
-                    const materializer: dict_storage.Materializer = try .init(evaluator.allocator(), state.pairs.borrow()[0..state.pair_count], false);
+                    const materializer: dict_storage.Materializer = try .init(evaluator.allocator, state.pairs.borrow()[0..state.pair_count], false);
                     state.work.borrowMut().* = .{ .materializing = materializer };
                     state.phase = .materialize;
                     continue;
@@ -548,7 +548,7 @@ const MergeWithWorkDriver = struct {
                 const key = dict_storage.keyAt(state.right.borrow().dict, state.index);
                 if (state.work.borrowMut().* != .finding) state.work.borrowMut().* = .{
                     .finding = dict_storage.FindCursor.initHeader(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         state.left.borrow().dict,
                         key,
                     ),
@@ -557,7 +557,7 @@ const MergeWithWorkDriver = struct {
                     .pending => _ = work.spend(),
                     .complete => {
                         const found = state.work.borrowMut().finding.foundIndex();
-                        state.work.borrowMut().retire(evaluator.releaseDomain());
+                        state.work.borrowMut().retire(evaluator.releases);
                         const right_value = dict_storage.valueAt(state.right.borrow().dict, state.index);
                         if (found) |destination| {
                             state.collision_index = destination;
@@ -565,7 +565,7 @@ const MergeWithWorkDriver = struct {
                             stack.pushBorrowed(key);
                             stack.pushBorrowed(state.pairs.borrow()[destination][1]);
                             stack.pushBorrowed(right_value);
-                            const application_state = try evaluator.allocator().create(MergeWithApplication);
+                            const application_state = try evaluator.allocator.create(MergeWithApplication);
                             application_state.* = .{ .state = .init(self.state.take()) };
                             try evaluator.beginIsolatedApplication(application_state.application());
                             return .completed;
@@ -580,7 +580,7 @@ const MergeWithWorkDriver = struct {
                 .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
-                    state.work.borrowMut().retire(evaluator.releaseDomain());
+                    state.work.borrowMut().retire(evaluator.releases);
                     break :completed .{ .output = result };
                 },
             },

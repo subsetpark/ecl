@@ -14,7 +14,7 @@ const dict_text = @import("kernel_dict_text.zig");
 const combinators = @import("combinators.zig");
 
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 
 pub const Context = enum {
@@ -468,7 +468,7 @@ fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quota
 /// when a quotation is offered.
 const WordGuard = union(enum) {
     frozen: env.FrozenLookup,
-    live: *Machine,
+    live: *Unit,
 
     fn matches(
         self: WordGuard,
@@ -500,7 +500,7 @@ const LiveWord = struct {
 /// one cache probe rather than a slot resolution. A word the cache does not
 /// hold is resolved in full. Either way it must be the trusted binding
 /// expected, from a slot on core or the running root.
-fn followingWord(evaluator: *Machine, word: value.Symbol, binding: BindingKind) error{OutOfMemory}!?LiveWord {
+fn followingWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind) error{OutOfMemory}!?LiveWord {
     if (!plainWord(word.slot)) return null;
     const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
     if (cached.origin != .core and cached.origin != .standard_library) return null;
@@ -521,12 +521,12 @@ fn followingWord(evaluator: *Machine, word: value.Symbol, binding: BindingKind) 
 /// run, or whose root has retired, is simply not that binding; generic
 /// execution reports any error. A frozen binding outlives the call that
 /// matched it, so what it returns stays valid for the call.
-fn liveWord(evaluator: *Machine, word: value.Symbol, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
+fn liveWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
     if (!plainWord(word.slot)) return null;
     // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
     var resolved: machine.Resolution = undefined;
     if (!evaluator.peekSlotWord(word, &resolved)) return null;
-    defer resolved.deinit(evaluator.allocator());
+    defer resolved.deinit(evaluator.allocator);
     if (resolved.origin != .core and resolved.origin != .standard_library) return null;
     const spec = resolved.lease.spec();
     switch (binding) {
@@ -619,12 +619,12 @@ fn frozenBindingMatches(
 }
 
 pub fn tryApply(
-    evaluator: *Machine,
+    evaluator: *Unit,
     request: machine.IdiomRequest,
     source: machine.FallbackSource,
 ) MachineError!void {
     const decline: Decline = .{ .deferred = source };
-    if (evaluator.unit.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
+    if (evaluator.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
     const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
     // A quotation of any length may be a scalar program.
@@ -649,25 +649,25 @@ const Decline = union(enum) {
     deferred: machine.FallbackSource,
     made: machine.IdiomFallback,
 
-    fn take(self: Decline, evaluator: *Machine) machine.IdiomFallback {
+    fn take(self: Decline, evaluator: *Unit) machine.IdiomFallback {
         return switch (self) {
             .deferred => |source| source.make(evaluator),
             .made => |fallback| fallback,
         };
     }
 
-    fn run(self: Decline, evaluator: *Machine) MachineError!void {
+    fn run(self: Decline, evaluator: *Unit) MachineError!void {
         var owned = self.take(evaluator);
-        defer owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        defer owned.deinit(evaluator.releases, evaluator.allocator);
         return owned.run(evaluator);
     }
 
-    fn discard(self: Decline, evaluator: *Machine) void {
+    fn discard(self: Decline, evaluator: *Unit) void {
         switch (self) {
             .deferred => {},
             .made => |fallback| {
                 var owned = fallback;
-                owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                owned.deinit(evaluator.releases, evaluator.allocator);
             },
         }
     }
@@ -686,7 +686,7 @@ const Capture = struct {
     active_index: ?u32 = null,
 };
 
-fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candidate {
+fn requestCandidate(evaluator: *Unit, request: machine.IdiomRequest) ?Candidate {
     const context: Context, const depth: usize = switch (request) {
         .each => .{ .each, 2 },
         .fold1 => .{ .fold1, 2 },
@@ -696,7 +696,7 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
         .scan => .{ .scan, 3 },
     };
     if (evaluator.available() < depth) return null;
-    const phrase = evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
+    const phrase = evaluator.stack.items[evaluator.stack.items.len - 1];
     if (phrase != .list) return null;
     return .{ .context = context, .phrase = phrase };
 }
@@ -705,8 +705,8 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
 /// it. A declined call runs the word's body, so nothing is prepared for it.
 /// `fold1` is the combinator itself: it offers the caller's quotation, and the
 /// body is the fallback should that be declined.
-pub fn applyTrusted(evaluator: *Machine, call: machine.TrustedCall) MachineError!machine.TrustedOutcome {
-    if (evaluator.unit.inherited.idiom_mode == .generic_only) return .declined;
+pub fn applyTrusted(evaluator: *Unit, call: machine.TrustedCall) MachineError!machine.TrustedOutcome {
+    if (evaluator.inherited.idiom_mode == .generic_only) return .declined;
     const entry = registry[call.idiom.entry];
     if (entry.offers) |request| return .{ .offered = request };
     if (!canApplyEntry(evaluator, entry)) return .declined;
@@ -778,9 +778,9 @@ fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
 /// its phrases (see `kernel_support.headed`). Only the word being dispatched
 /// can head one: a primitive reached any other way declines, as does a unit
 /// that runs generic code only.
-pub fn applyHeaded(evaluator: *Machine, first: u16) MachineError!bool {
-    if (evaluator.unit.inherited.idiom_mode == .generic_only) return false;
-    if (evaluator.unit.active_word.atom() != try phraseAtom(first, 0)) return false;
+pub fn applyHeaded(evaluator: *Unit, first: u16) MachineError!bool {
+    if (evaluator.inherited.idiom_mode == .generic_only) return false;
+    if (evaluator.active_word.atom() != try phraseAtom(first, 0)) return false;
     return try applyPhrase(evaluator, first) == .applied;
 }
 
@@ -790,7 +790,7 @@ pub fn applyHeaded(evaluator: *Machine, first: u16) MachineError!bool {
 /// and consumes those words. A fault is reported as the last following word
 /// would report it when it runs alone: its own recognition names the active
 /// word and the site in its body, and the word is the trace parent.
-fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutcome {
+fn applyPhrase(evaluator: *Unit, first: u16) MachineError!machine.TrustedOutcome {
     const name = registry[first].source_word.?;
     var index = first;
     while (index < registry.len) : (index += 1) {
@@ -808,8 +808,8 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         const owner = last.?;
         if (entry.operation.direct == .where_at) {
             if (!compressShape(evaluator)) continue;
-            evaluator.unit.idiom_hits += 1;
-            evaluator.unit.phrase_hits += 1;
+            evaluator.idiom_hits += 1;
+            evaluator.phrase_hits += 1;
             evaluator.skipFollowingForms(count);
             _ = evaluator.commitDirectIdiomTrace();
             // The fused pass reports as `at` would: it is the only word that
@@ -824,8 +824,8 @@ fn applyPhrase(evaluator: *Machine, first: u16) MachineError!machine.TrustedOutc
         }
         const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
         const idiom = owner.idiom orelse continue;
-        evaluator.unit.idiom_hits += 1;
-        evaluator.unit.phrase_hits += 1;
+        evaluator.idiom_hits += 1;
+        evaluator.phrase_hits += 1;
         evaluator.skipFollowingForms(count);
         _ = evaluator.commitDirectIdiomTrace();
         if (idiom.active_word) |word| evaluator.setActiveWord(.plain(word));
@@ -859,9 +859,9 @@ fn columnOperation(operation: DirectOp) numeric.BinaryOp {
 
 /// Whether `list mask where at` can run as one pass over the list: see
 /// `kernel_sequence.compress`. Anything else runs the words as written.
-fn compressShape(evaluator: *Machine) bool {
+fn compressShape(evaluator: *Unit) bool {
     if (evaluator.available() < 2) return false;
-    const stack = evaluator.unit.stack.items;
+    const stack = evaluator.stack.items;
     return sequence.compressCandidate(stack[stack.len - 2], stack[stack.len - 1]);
 }
 
@@ -869,9 +869,9 @@ fn compressShape(evaluator: *Machine) bool {
 /// rows can run on the list itself: a two-axis shape of positive ints whose
 /// volume is the list's length, and a numeric leaf the operation keeps typed.
 /// Anything else runs the words as written.
-fn columnFoldShape(evaluator: *Machine, operation: DirectOp) ?struct { rows: usize, columns: usize } {
+fn columnFoldShape(evaluator: *Unit, operation: DirectOp) ?struct { rows: usize, columns: usize } {
     if (evaluator.available() < 2) return null;
-    const stack = evaluator.unit.stack.items;
+    const stack = evaluator.stack.items;
     const shape = stack[stack.len - 1];
     const input = stack[stack.len - 2];
     if (shape != .list or shape.list.length() != 2 or input != .list) return null;
@@ -902,8 +902,8 @@ const Recognized = union(enum) {
 /// Every recognized application starts here: it counts the hit and reports
 /// a fault or a continuing driver at the phrase's active word, through the
 /// trusted definition it stands for.
-inline fn applyRecognized(evaluator: *Machine, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
-    evaluator.unit.idiom_hits += 1;
+inline fn applyRecognized(evaluator: *Unit, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
+    evaluator.idiom_hits += 1;
     const attribution: Attribution = .{
         .site = if (capture.active_index) |index| .{ .code = phrase.list, .index = index } else null,
         .parent = if (recognized.context().tracesDefinition()) evaluator.commitDirectIdiomTrace() else null,
@@ -922,7 +922,7 @@ const Attribution = struct {
     site: ?struct { code: *value.ListHandle, index: u32 } = null,
     parent: ?intern.TraceWord = null,
 
-    fn started(self: Attribution, evaluator: *Machine, result: MachineError!void) MachineError!void {
+    fn started(self: Attribution, evaluator: *Unit, result: MachineError!void) MachineError!void {
         result catch |err| {
             if (err == error.Ecl) {
                 if (self.site) |site| evaluator.setFailureSite(site.code, site.index);
@@ -941,7 +941,7 @@ const Attribution = struct {
 /// by the registry's shape and each pattern word is one slot read, so the
 /// whole match runs where the combinator applies.
 fn matchOffered(
-    evaluator: *Machine,
+    evaluator: *Unit,
     candidate: Candidate,
     entries: []const u16,
     decline: Decline,
@@ -1103,8 +1103,8 @@ const OfferedProgram = struct {
 /// quotation as a scalar program over the operands it will see. It is
 /// compiled afresh on every call rather than planned: the plan holds a
 /// registry entry, and a program is not one.
-fn recognizeProgram(evaluator: *Machine, candidate: Candidate) ?OfferedProgram {
-    const stack = evaluator.unit.stack.items;
+fn recognizeProgram(evaluator: *Unit, candidate: Candidate) ?OfferedProgram {
+    const stack = evaluator.stack.items;
     const inputs: u8 = switch (candidate.context) {
         .each => 1,
         .zip_with, .fold, .fold1, .scan => 2,
@@ -1122,7 +1122,7 @@ fn recognizeProgram(evaluator: *Machine, candidate: Candidate) ?OfferedProgram {
     return .{ .context = candidate.context, .compiled = compiled };
 }
 
-fn startProgram(evaluator: *Machine, program: *const OfferedProgram) MachineError!void {
+fn startProgram(evaluator: *Unit, program: *const OfferedProgram) MachineError!void {
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
     switch (program.context) {
@@ -1152,7 +1152,7 @@ fn startProgram(evaluator: *Machine, program: *const OfferedProgram) MachineErro
 
 /// Applies a matched entry when this application's operands admit it, and
 /// declines otherwise.
-fn applyMatched(evaluator: *Machine, phrase: Value, matched: ?u16, capture: Capture, decline: Decline) MachineError!void {
+fn applyMatched(evaluator: *Unit, phrase: Value, matched: ?u16, capture: Capture, decline: Decline) MachineError!void {
     const index = matched orelse return decline.run(evaluator);
     const selected = registry[index];
     if (!canApplyEntry(evaluator, selected)) return decline.run(evaluator);
@@ -1160,8 +1160,8 @@ fn applyMatched(evaluator: *Machine, phrase: Value, matched: ?u16, capture: Capt
     return applyRecognized(evaluator, phrase, .{ .entry = selected }, capture);
 }
 
-fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
-    const stack = evaluator.unit.stack.items;
+fn canApplyEntry(evaluator: *Unit, entry: RegistryEntry) bool {
+    const stack = evaluator.stack.items;
     return switch (entry.operation) {
         .unary => switch (entry.context) {
             .direct => evaluator.available() >= 1,
@@ -1200,7 +1200,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
     };
 }
 
-fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) MachineError!void {
+fn applyEntry(evaluator: *Unit, entry: RegistryEntry, capture: Capture) MachineError!void {
     if (capture.active_word) |word| evaluator.setActiveWord(.plain(word));
     try switch (entry.operation) {
         .unary => |operation| switch (entry.context) {
@@ -1227,7 +1227,7 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
     };
 }
 
-fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
+fn applyDirect(evaluator: *Unit, operation: DirectOp) MachineError!void {
     try switch (operation) {
         .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
         .sort => order.sortForIdiom(evaluator),
@@ -1244,8 +1244,8 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
 
 /// `sum`/`product` over a list: the empty seed, or `(op) fold1` without the
 /// definition's dispatch. The list is the reduction's only consumed value.
-fn applyTotal(evaluator: *Machine, operation: numeric.BinaryOp, empty: i64) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+fn applyTotal(evaluator: *Unit, operation: numeric.BinaryOp, empty: i64) MachineError!void {
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - 1];
     if (input.list.length() == 0) {
         popRelease(evaluator, 1);
@@ -1255,13 +1255,13 @@ fn applyTotal(evaluator: *Machine, operation: numeric.BinaryOp, empty: i64) Mach
 }
 
 /// `(cmp) lex-cmp-with`: the comparator is consumed with the lists.
-fn applyLexCompare(evaluator: *Machine) MachineError!void {
+fn applyLexCompare(evaluator: *Unit) MachineError!void {
     popRelease(evaluator, 1);
     return order.lexCompare(evaluator);
 }
 
-fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+fn applyUnaryEach(evaluator: *Unit, operation: numeric.UnaryOp) MachineError!void {
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     // Over a numeric leaf, applying the operation to each element and pervading
@@ -1279,12 +1279,12 @@ fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!
 }
 
 fn applyConstantEach(
-    evaluator: *Machine,
+    evaluator: *Unit,
     operation: numeric.BinaryOp,
     constant: Value,
     constant_left: bool,
 ) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     if (numeric.typedConstantCandidate(operation, input, constant, constant_left)) {
@@ -1294,7 +1294,7 @@ fn applyConstantEach(
         defer operand.deinit();
         // The captured constant is an atom, so it needs no reference of its own:
         // the typed loop reads it with stride zero.
-        var scalar = heap.OwnedValue.init(evaluator.releaseDomain(), constant);
+        var scalar = heap.OwnedValue.init(evaluator.releases, constant);
         heap.retainValue(constant);
         defer scalar.deinit();
         return if (constant_left)
@@ -1313,8 +1313,8 @@ fn applyConstantEach(
     );
 }
 
-fn applyZipWith(evaluator: *Machine, operation: numeric.BinaryOp) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+fn applyZipWith(evaluator: *Unit, operation: numeric.BinaryOp) MachineError!void {
+    const stack = evaluator.stack.items;
     const right = stack[stack.len - 2];
     const left = stack[stack.len - 3];
     const left_list = left == .list;
@@ -1358,14 +1358,14 @@ const PervadeEachDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     fn install(
-        evaluator: *Machine,
+        evaluator: *Unit,
         mode: Mode,
         left: Value,
         right: ?Value,
         count: usize,
         consumed: usize,
     ) error{OutOfMemory}!void {
-        const results = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+        const results = try heap.OwnedValueBuffer.init(evaluator.releases, count);
         try evaluator.startDriver(PervadeEachDriver{
             .mode = mode,
             .left = left,
@@ -1377,13 +1377,13 @@ const PervadeEachDriver = struct {
 
     /// Elements run one after another within a step until the budget is spent,
     /// through one cursor armed in place for each.
-    pub fn advance(evaluator: *Machine, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const count = self.results.borrow().capacity();
         while (self.index != count) {
             if (self.cursor == null) {
-                self.cursor = .init(numeric.PervadeCursor.initIdle(evaluator.releaseDomain(), evaluator.allocator()));
+                self.cursor = .init(numeric.PervadeCursor.initIdle(evaluator.releases, evaluator.allocator));
                 self.arm(self.cursor.?.borrowMut());
             }
             switch (try self.cursor.?.borrowMut().advance(evaluator, work)) {
@@ -1396,11 +1396,11 @@ const PervadeEachDriver = struct {
             }
         }
         if (self.cursor) |*cursor| {
-            cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            cursor.deinit(evaluator.releases, evaluator.allocator);
             self.cursor = null;
         }
         if (self.materializer == null)
-            self.materializer = .init(.init(evaluator.allocator(), self.results.borrow().values()));
+            self.materializer = .init(.init(evaluator.allocator, self.results.borrow().values()));
         if (work.exhausted()) return .stepped;
         return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
@@ -1434,12 +1434,12 @@ const PervadeEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn applyLengthEach(evaluator: *Machine) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+fn applyLengthEach(evaluator: *Unit) MachineError!void {
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - 2];
     const count: usize = @intCast(input.list.length());
     if (count == 0) return finishCollected(evaluator, &.{}, 2);
-    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count);
+    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, count);
     try evaluator.startDriver(LengthEachDriver{ .input = input, .writer = .init(writer) });
 }
 
@@ -1450,7 +1450,7 @@ const LengthEachDriver = struct {
     writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
     index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *LengthEachDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *LengthEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.input.list.length());
         const end = self.index + evaluator.workBudget().take(count - self.index);
@@ -1465,13 +1465,13 @@ const LengthEachDriver = struct {
     }
 };
 
-fn applyMatchEach(evaluator: *Machine, constant: Value) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+fn applyMatchEach(evaluator: *Unit, constant: Value) MachineError!void {
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     const count: usize = @intCast(input.list.length());
     if (count == 0) return finishCollected(evaluator, &.{}, 2);
-    const writer = try heap.LeafWriter(.leaf_u8).init(evaluator.allocator(), count);
+    const writer = try heap.LeafWriter(.leaf_u8).init(evaluator.allocator, count);
     try evaluator.startDriver(MatchEachDriver{
         .input = input,
         .constant = constant,
@@ -1489,7 +1489,7 @@ const MatchEachDriver = struct {
     index: usize = 0,
     cursor: ?heap.Owned(equal.MatchCursor) = null,
 
-    pub fn advance(evaluator: *Machine, self: *MatchEachDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *MatchEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.input.list.length());
         const work = evaluator.workBudget();
@@ -1501,12 +1501,12 @@ const MatchEachDriver = struct {
                     self.index += 1;
                     continue;
                 }
-                self.cursor = .init(try .init(evaluator.allocator(), item, self.constant));
+                self.cursor = .init(try .init(evaluator.allocator, item, self.constant));
             }
             switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => return .stepped,
                 .complete => |matches| {
-                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
                     self.cursor = null;
                     self.writer.borrowMut().fillRange(self.index, 1, @intFromBool(matches));
                     self.index += 1;
@@ -1524,8 +1524,8 @@ const MatchEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn applyMatchFind(evaluator: *Machine) MachineError!void {
-    const stack = evaluator.unit.stack.items;
+fn applyMatchFind(evaluator: *Unit) MachineError!void {
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
     try evaluator.startDriver(MatchFindDriver{
@@ -1545,14 +1545,14 @@ const MatchFindDriver = struct {
     index: usize = 0,
     cursor: ?heap.Owned(equal.MatchCursor) = null,
 
-    fn finish(self: *MatchFindDriver, evaluator: *Machine, index: usize) machine.WorkProgress {
-        if (self.cursor) |*cursor| cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+    fn finish(self: *MatchFindDriver, evaluator: *Unit, index: usize) machine.WorkProgress {
+        if (self.cursor) |*cursor| cursor.deinit(evaluator.releases, evaluator.allocator);
         self.cursor = null;
         popRelease(evaluator, 2);
         return .{ .output = .{ .int = @intCast(index) } };
     }
 
-    pub fn advance(evaluator: *Machine, self: *MatchFindDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *MatchFindDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.input.list.length());
         const work = evaluator.workBudget();
@@ -1564,12 +1564,12 @@ const MatchFindDriver = struct {
                     self.index += 1;
                     continue;
                 }
-                self.cursor = .init(try .init(evaluator.allocator(), item, self.needle));
+                self.cursor = .init(try .init(evaluator.allocator, item, self.needle));
             }
             switch (try self.cursor.?.borrowMut().advance(work)) {
                 .pending => return .stepped,
                 .complete => |matches| {
-                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
                     self.cursor = null;
                     if (matches) return self.finish(evaluator, self.index);
                     self.index += 1;
@@ -1587,7 +1587,7 @@ const MatchFindDriver = struct {
 };
 
 fn applyReduction(
-    evaluator: *Machine,
+    evaluator: *Unit,
     operation: numeric.BinaryOp,
     context: Context,
 ) MachineError!void {
@@ -1595,7 +1595,7 @@ fn applyReduction(
     const from_first = context == .fold1;
     const consumed: usize = if (from_first) 2 else 3;
     const start: usize = if (from_first) 1 else 0;
-    const stack = evaluator.unit.stack.items;
+    const stack = evaluator.stack.items;
     const input = stack[stack.len - consumed];
     const initial = if (from_first) list.atUnchecked(input, 0) else stack[stack.len - 2];
     return startReduction(evaluator, operation, scan, input, initial, start, consumed);
@@ -1604,7 +1604,7 @@ fn applyReduction(
 /// `consumed` stack values lie under the result: the list is the deepest,
 /// and `start` is 1 when `initial` is its first element.
 fn startReduction(
-    evaluator: *Machine,
+    evaluator: *Unit,
     operation: numeric.BinaryOp,
     scan: bool,
     input: Value,
@@ -1639,7 +1639,7 @@ fn startReduction(
         return numeric.idiomReduceStart(operation)(evaluator, input, initial, scan, start, consumed);
     }
     const results: ?heap.OwnedValueBuffer = if (scan)
-        try .init(evaluator.releaseDomain(), count)
+        try .init(evaluator.releases, count)
     else
         null;
     try evaluator.startDriver(ReductionDriver{
@@ -1675,7 +1675,7 @@ const ReductionDriver = struct {
     cursor: heap.Owned(numeric.PervadeCursor) = .none,
 
     pub fn advance(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *ReductionDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1695,7 +1695,7 @@ const ReductionDriver = struct {
             )) {
                 .declined => break,
                 .in_place => |next| accumulator.* = .{ .owned = next },
-                .fresh => |next| accumulator.replaceOwned(evaluator.releaseDomain(), next),
+                .fresh => |next| accumulator.replaceOwned(evaluator.releases, next),
             }
             self.initialized += 1;
             if (evaluator.remainingKernelFuel() == 0) return .stepped;
@@ -1709,16 +1709,16 @@ const ReductionDriver = struct {
                 // output; both are only lent.
                 self.cursor = .init(if (!self.scan and self.accumulator.borrow() == .owned)
                     try .initBinaryOwningLeft(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                         self.operation,
-                        .init(evaluator.releaseDomain(), self.accumulator.borrowMut().takeOwned()),
+                        .init(evaluator.releases, self.accumulator.borrowMut().takeOwned()),
                         row,
                     )
                 else
                     try .initBinary(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                         self.operation,
                         self.accumulator.borrow().value(),
                         row,
@@ -1728,12 +1728,12 @@ const ReductionDriver = struct {
                 .pending => return .stepped,
                 .complete => |result| result,
             };
-            self.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.cursor.deinit(evaluator.releases, evaluator.allocator);
             if (self.scan) {
                 self.results.?.borrowMut().appendOwned(next);
                 self.accumulator.borrowMut().* = .{ .borrowed = next };
             } else {
-                self.accumulator.borrowMut().replaceOwned(evaluator.releaseDomain(), next);
+                self.accumulator.borrowMut().replaceOwned(evaluator.releases, next);
             }
             self.initialized += 1;
             return .stepped;
@@ -1744,7 +1744,7 @@ const ReductionDriver = struct {
         }
         if (!self.materializing) {
             self.materializer = .init(.init(
-                evaluator.allocator(),
+                evaluator.allocator,
                 self.results.?.borrow().values(),
             ));
             self.materializing = true;
@@ -1803,14 +1803,14 @@ const Accumulator = union(enum) {
     }
 };
 
-fn finishCollected(evaluator: *Machine, values: []const Value, consumed: usize) MachineError!void {
+fn finishCollected(evaluator: *Unit, values: []const Value, consumed: usize) MachineError!void {
     std.debug.assert(values.len == 0);
-    const result = try list.fromValuesGeneric(evaluator.allocator(), values);
+    const result = try list.fromValuesGeneric(evaluator.allocator, values);
     popRelease(evaluator, consumed);
     try evaluator.pushOwned(result);
 }
 
-fn popRelease(evaluator: *Machine, count: usize) void {
+fn popRelease(evaluator: *Unit, count: usize) void {
     evaluator.discard(count);
 }
 

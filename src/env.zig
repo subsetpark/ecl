@@ -11,9 +11,9 @@ const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
 const snapshot_api = @import("snapshot.zig");
 const reader_types = @import("reader_types.zig");
-/// In-tree primitives use Machine's ergonomic error helpers. This binding
+/// In-tree primitives use Unit's ergonomic error helpers. This binding
 /// kind is not part of the native-extension ABI.
-pub const PrimitiveImpl = *const fn (*machine.Machine) machine.MachineError!void;
+pub const PrimitiveImpl = *const fn (*machine.Unit) machine.MachineError!void;
 
 /// A native definition together with the nominal image pin that owns its
 /// callback. Only the loader can construct the opaque `ModuleInstance`.
@@ -2028,7 +2028,7 @@ pub const Env = enum(usize) {
     /// Links words to their names' slots in the root `root` names. The root
     /// must outlive every use of the linker: the reader or construction that
     /// holds it runs inside that root.
-    pub fn linker(self: *Env, root: *ScopeCell) value.WordLinker {
+    pub fn linker(self: *Env, root: *ScopeCell) value.SymbolLinker {
         return .{
             .context = .{ @backingInt(self.*), @intFromPtr(root) },
             .link_fn = linkFromContext,

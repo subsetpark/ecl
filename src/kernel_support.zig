@@ -13,7 +13,7 @@ const WorkBudget = poll.WorkBudget;
 
 pub const Value = value.Value;
 pub const HeapKind = value.HeapKind;
-pub const Machine = machine.Machine;
+pub const Unit = machine.Unit;
 pub const MachineError = machine.MachineError;
 
 /// A kernel word's primitive, wrapped when the idiom registry has phrases it
@@ -27,7 +27,7 @@ pub fn headed(comptime spelling: []const u8, comptime primitive: env.PrimitiveIm
     if (found == null) return primitive;
     const first = found.?;
     return struct {
-        fn run(evaluator: *Machine) MachineError!void {
+        fn run(evaluator: *Unit) MachineError!void {
             if (try evaluator.continuesPhrase(first)) return;
             return @call(.always_inline, primitive, .{evaluator});
         }
@@ -378,13 +378,13 @@ pub fn Kernel(comptime Spec: type) type {
 
         /// The output, with the result leaf prepared here when the kernel
         /// declares one.
-        inline fn prepareOutput(evaluator: *Machine, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) MachineError!Spec.Output {
+        inline fn prepareOutput(evaluator: *Unit, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) MachineError!Spec.Output {
             if (comptime shape == null) return Spec.prepare(evaluator, operands, params, length);
             const result_length = if (comptime @hasDecl(Spec, "resultLength")) Spec.resultLength(params, operands, length) else length;
             var result = try prepareResult(evaluator, operands, ownership, params, result_length);
             if (comptime Spec.Output == Result) return result;
             return Spec.prepare(evaluator, operands, params, length, result) catch |err| {
-                result.retire(evaluator.releaseDomain());
+                result.retire(evaluator.releases);
                 return err;
             };
         }
@@ -393,7 +393,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// overwritable operand the call owns, held only through the call's
         /// own references (one operand may appear more than once), wide
         /// enough and of the result's element width. Otherwise a fresh leaf.
-        inline fn prepareResult(evaluator: *Machine, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) error{OutOfMemory}!Result {
+        inline fn prepareResult(evaluator: *Unit, operands: Operands, ownership: Ownership, params: Spec.Params, length: usize) error{OutOfMemory}!Result {
             const declared = shape.?;
             inline for (declared.overwritable) |position| reuse: {
                 switch (ownership) {
@@ -450,7 +450,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// under the caller's references, which the caller releases after
         /// the result is pushed. Otherwise the references move into a driver
         /// that computes one budgeted range per step.
-        pub fn run(evaluator: *Machine, owners: Owners, params: Spec.Params, length: usize) MachineError!void {
+        pub fn run(evaluator: *Unit, owners: Owners, params: Spec.Params, length: usize) MachineError!void {
             // SAFETY: the loop below writes every element before any is read.
             var operands: Operands = undefined;
             inline for (&operands, owners) |*operand, owner| operand.* = owner.borrow();
@@ -460,7 +460,7 @@ pub fn Kernel(comptime Spec: type) type {
             if (work > evaluator.remainingKernelFuel()) return startDriver(evaluator, owners, params, output, .init(work));
             // An unfinished result is abandoned exactly as its `heap.Owned`
             // disposal would abandon it in a driver.
-            errdefer output.retire(evaluator.releaseDomain());
+            errdefer output.retire(evaluator.releases);
             const context = Context{ .evaluator = evaluator };
             try context.advance(work);
             try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, context);
@@ -493,7 +493,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// A turn that runs out first continues as the driver from the same
         /// position.
         fn runStepwise(
-            evaluator: *Machine,
+            evaluator: *Unit,
             owners: Owners,
             operands: Operands,
             params: Spec.Params,
@@ -504,16 +504,16 @@ pub fn Kernel(comptime Spec: type) type {
             var cursor = flat.FlatCursor.init(length);
             const context = Context{ .evaluator = evaluator };
             while (pending(context, &output, &cursor) catch |err| {
-                output.retire(evaluator.releaseDomain());
+                output.retire(evaluator.releases);
                 return err;
             }) {
                 if (evaluator.remainingKernelFuel() == 0) return startDriver(evaluator, owners, params, output, cursor);
                 const range = (cursor.nextRange(context) catch |err| {
-                    output.retire(evaluator.releaseDomain());
+                    output.retire(evaluator.releases);
                     return err;
                 }).?;
                 Spec.chunk(params, operands, &output, range, context) catch |err| {
-                    output.retire(evaluator.releaseDomain());
+                    output.retire(evaluator.releases);
                     return err;
                 };
             }
@@ -523,7 +523,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// Publishes a finished kernel's result. When the result republished
         /// an operand's buffer, that operand's reference is the result's now,
         /// not the caller's to release.
-        fn publish(evaluator: *Machine, owners: Owners, output: *Spec.Output) MachineError!void {
+        fn publish(evaluator: *Unit, owners: Owners, output: *Spec.Output) MachineError!void {
             const consumed = adoptedOperand(output);
             const result = Spec.finish(output);
             if (comptime Spec.arity != 0) if (consumed) |position| {
@@ -535,7 +535,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// Kept out of line, so the common inline path carries none of the
         /// driver's construction.
         noinline fn startDriver(
-            evaluator: *Machine,
+            evaluator: *Unit,
             owners: Owners,
             params: Spec.Params,
             output: Spec.Output,
@@ -560,7 +560,7 @@ pub fn Kernel(comptime Spec: type) type {
         /// retains its own references to them. The result is returned rather
         /// than pushed.
         pub fn nested(
-            evaluator: *Machine,
+            evaluator: *Unit,
             operands: Operands,
             root: ?*heap.OwnedValue,
             params: Spec.Params,
@@ -570,7 +570,7 @@ pub fn Kernel(comptime Spec: type) type {
             var output = try prepareOutput(evaluator, operands, if (root != null) .first else .none, params, length);
             const work = workLength(params, &output, length);
             if (work > evaluator.remainingKernelFuel()) return .{ .frame = try boxDriver(evaluator, operands, root, params, output, work) };
-            errdefer output.retire(evaluator.releaseDomain());
+            errdefer output.retire(evaluator.releases);
             const context = Context{ .evaluator = evaluator };
             try context.advance(work);
             try Spec.chunk(params, operands, &output, .{ .start = 0, .end = work }, context);
@@ -584,7 +584,7 @@ pub fn Kernel(comptime Spec: type) type {
         }
 
         noinline fn boxDriver(
-            evaluator: *Machine,
+            evaluator: *Unit,
             operands: Operands,
             root: ?*heap.OwnedValue,
             params: Spec.Params,
@@ -592,9 +592,9 @@ pub fn Kernel(comptime Spec: type) type {
             length: usize,
         ) error{OutOfMemory}!ErasedDriver {
             const held: Held = .{ .values = operands };
-            const driver = evaluator.allocator().create(Driver) catch |err| {
+            const driver = evaluator.allocator.create(Driver) catch |err| {
                 var abandoned = output;
-                abandoned.retire(evaluator.releaseDomain());
+                abandoned.retire(evaluator.releases);
                 return err;
             };
             // Only now can nothing fail: the driver takes its references.
@@ -638,7 +638,7 @@ pub fn Kernel(comptime Spec: type) type {
             output: heap.Owned(Spec.Output),
             cursor: flat.FlatCursor,
 
-            pub fn advance(evaluator: *Machine, self: *Driver) MachineError!machine.WorkProgress {
+            pub fn advance(evaluator: *Unit, self: *Driver) MachineError!machine.WorkProgress {
                 const context = Context{ .evaluator = evaluator };
                 if (try self.cursor.nextRange(context)) |range|
                     try Spec.chunk(self.params, self.operands.borrow().values, self.output.borrowMut(), range, context);
@@ -664,14 +664,14 @@ pub const NestedOutcome = union(enum) {
 /// kernels and must stay small: pervasion moves its frames by value.
 pub const ErasedDriver = struct {
     context: *anyopaque,
-    advance_fn: *const fn (*anyopaque, *Machine) MachineError!machine.WorkProgress,
+    advance_fn: *const fn (*anyopaque, *Unit) MachineError!machine.WorkProgress,
     destroy_fn: *const fn (*anyopaque, *heap.ReleaseDomain, std.mem.Allocator) void,
 
     fn of(comptime Driver: type, driver: *Driver) ErasedDriver {
         return .{
             .context = driver,
             .advance_fn = struct {
-                fn advance(context: *anyopaque, evaluator: *Machine) MachineError!machine.WorkProgress {
+                fn advance(context: *anyopaque, evaluator: *Unit) MachineError!machine.WorkProgress {
                     return Driver.advance(evaluator, @ptrCast(@alignCast(context)));
                 }
             }.advance,
@@ -687,12 +687,12 @@ pub const ErasedDriver = struct {
 
     /// One budgeted range. Returns the result when the kernel completes, and
     /// then the driver is already destroyed.
-    pub fn advance(self: *ErasedDriver, evaluator: *Machine) MachineError!?Value {
+    pub fn advance(self: *ErasedDriver, evaluator: *Unit) MachineError!?Value {
         const progress = try self.advance_fn(self.context, evaluator);
         return switch (progress) {
             .stepped => null,
             .output => |result| result: {
-                self.destroy_fn(self.context, evaluator.releaseDomain(), evaluator.allocator());
+                self.destroy_fn(self.context, evaluator.releases, evaluator.allocator);
                 break :result result;
             },
             else => unreachable, // A kernel driver only steps or publishes.
@@ -706,16 +706,16 @@ pub const ErasedDriver = struct {
 };
 
 pub const Context = struct {
-    evaluator: *Machine,
+    evaluator: *Unit,
 
     pub fn allocator(self: Context) std.mem.Allocator {
-        return self.evaluator.allocator();
+        return self.evaluator.allocator;
     }
 
     /// Typed capabilities retire through the domain, never through the
     /// allocator directly, so reclamation stays bounded and off the hot path.
     pub fn releaseDomain(self: Context) *@import("heap.zig").ReleaseDomain {
-        return self.evaluator.releaseDomain();
+        return self.evaluator.releases;
     }
 
     /// The remaining charge this turn may spend before the machine wants the
@@ -839,6 +839,6 @@ pub fn adopt(comptime kind: value.HeapKind, operand: Value, references: u32, len
 }
 
 /// A fresh result of `length` elements.
-pub fn allocate(comptime kind: value.HeapKind, evaluator: *Machine, length: usize) error{OutOfMemory}!LeafResult(kind) {
-    return .{ .storage = .{ .fresh = try .init(evaluator.allocator(), length) } };
+pub fn allocate(comptime kind: value.HeapKind, evaluator: *Unit, length: usize) error{OutOfMemory}!LeafResult(kind) {
+    return .{ .storage = .{ .fresh = try .init(evaluator.allocator, length) } };
 }
