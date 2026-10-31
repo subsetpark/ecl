@@ -74,7 +74,7 @@ fn whileWord(evaluator: *Unit) MachineError!void {
         .body = .init(body.take().list),
         .checkpoint = .init(.{}),
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
         .provenance_target = provenance_target,
         .phase = .condition,
     };
@@ -218,7 +218,7 @@ const WhileState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
+        evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         switch (self.phase) {
             .condition => {
@@ -245,7 +245,7 @@ const WhileStartDriver = struct {
 
     pub fn advance(evaluator: *Unit, self: *WhileStartDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
-        evaluator.setActiveWord(state.word);
+        evaluator.active_word = state.word;
         try evaluator.pollKernel();
         if (!try state.checkpoint.borrowMut().advance(evaluator)) return .stepped;
         _ = self.state.take();
@@ -262,7 +262,7 @@ const WhileWorkDriver = struct {
     state: *WhileState,
 
     pub fn advance(evaluator: *Unit, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.state.word);
+        evaluator.active_word = self.state.word;
         try evaluator.pollKernel();
         return if (try self.state.checkpoint.borrowMut().advance(evaluator)) .completed else .stepped;
     }
@@ -288,7 +288,7 @@ const TimesState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
+        evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         self.remaining -= 1;
         return if (self.remaining == 0) null else self.step();
@@ -313,7 +313,7 @@ fn times(evaluator: *Unit) MachineError!void {
         .quotation = .init(quotation.take().list),
         .site = evaluator.applicationSite(),
         .remaining = @intCast(count_value.borrow().int),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
     try evaluator.beginInlineApplication(state.application());
 }
@@ -333,7 +333,7 @@ pub fn dipForIdiom(evaluator: *Unit) MachineError!void {
         .quotation = .init(quotation.take().list),
         .protected = .init(protected.take()),
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
     const word = state.word;
     try evaluator.beginInlineApplication(state.application());
@@ -359,7 +359,7 @@ const DipState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
+        evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         try evaluator.pushOwned(self.protected.take());
         return null;
@@ -502,7 +502,7 @@ const GuardSnapshotDriver = struct {
     target: GuardTarget,
 
     pub fn advance(evaluator: *Unit, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.control.borrow().word);
+        evaluator.active_word = self.control.borrow().word;
         try evaluator.pollKernel();
         if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
@@ -520,7 +520,7 @@ const GuardRestoreDriver = struct {
     target: GuardTarget,
 
     pub fn advance(evaluator: *Unit, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.control.borrow().word);
+        evaluator.active_word = self.control.borrow().word;
         try evaluator.pollKernel();
         if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
@@ -546,7 +546,7 @@ const GuardPredicateState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.control.borrow().word);
+        evaluator.active_word = self.control.borrow().word;
         var predicate = try evaluator.popValue();
         defer predicate.deinit();
         const target = self.control.borrowMut().selectedTarget(try boolValue(evaluator, &predicate));
@@ -579,7 +579,7 @@ const GuardActionState = struct {
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         // A `cond` action is the clause's whole result.
-        evaluator.setActiveWord(self.control.borrow().word);
+        evaluator.active_word = self.control.borrow().word;
         return null;
     }
     pub const ownership: heap.DriverOwnership = .fields;
@@ -675,7 +675,7 @@ const LinrecSnapshotDriver = struct {
     level: heap.Owned(LinrecLevel),
 
     pub fn advance(evaluator: *Unit, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.level.borrow().word);
+        evaluator.active_word = self.level.borrow().word;
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
         if (!checkpoint.advanceCapture(evaluator)) return .stepped;
@@ -696,7 +696,7 @@ const LinrecRestoreDriver = struct {
     branch: LinrecBranch,
 
     pub fn advance(evaluator: *Unit, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.level.borrow().word);
+        evaluator.active_word = self.level.borrow().word;
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
         if (!try checkpoint.advanceRestore(evaluator)) return .stepped;
@@ -736,7 +736,7 @@ const LinrecPredicateState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.level.borrow().word);
+        evaluator.active_word = self.level.borrow().word;
         var predicate = try evaluator.popValue();
         defer predicate.deinit();
         const branch: LinrecBranch = if (try boolValue(evaluator, &predicate)) .base else .recurse;
@@ -777,7 +777,7 @@ const LinrecApplicationState = struct {
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.level.borrow().word);
+        evaluator.active_word = self.level.borrow().word;
         evaluator.chargeContinuationStep();
         switch (self.phase) {
             .base, .post => return null,
@@ -831,7 +831,7 @@ fn linrec(evaluator: *Unit) MachineError!void {
         }),
         .checkpoint = .init(checkpoint.take()),
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
         .provenance_target = provenance_target,
     }) });
 }
@@ -849,7 +849,7 @@ fn cond(evaluator: *Unit) MachineError!void {
     try evaluator.startDriver(CondDriver{
         .clauses = .init(clauses.take()),
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
         .provenance_target = try evaluator.applicationProvenanceTarget(),
     });
 }
@@ -924,7 +924,7 @@ const IterationState = struct {
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
+        evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         const base: usize = window.base();
         const observed = window.observed(evaluator.stack.items.len) orelse
@@ -1126,7 +1126,7 @@ const UpdateApplication = struct {
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         const state = self.state.borrow();
-        evaluator.setActiveWord(state.word);
+        evaluator.active_word = state.word;
         evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
@@ -1195,7 +1195,7 @@ const UpdateWorkDriver = struct {
 
     pub fn advance(evaluator: *Unit, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
-        evaluator.setActiveWord(state.word);
+        evaluator.active_word = state.word;
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (state.phase) {
@@ -1421,7 +1421,7 @@ fn startUpdateOwned(
         .values = .init(values.take()),
         .phase = initial_phase,
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
 
     if (mode == .list_selector) {
@@ -1549,7 +1549,7 @@ const StencilBootstrapDriver = struct {
         evaluator: *Unit,
         self: *StencilBootstrapDriver,
     ) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.control.borrow().word);
+        evaluator.active_word = self.control.borrow().word;
         try evaluator.pollKernel();
         const control = self.control.borrow();
         if (self.materializer == null) if (try self.fillTyped(evaluator)) |complete| {
@@ -1621,7 +1621,7 @@ const StencilApplication = struct {
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         const control = self.control.borrowMut();
-        evaluator.setActiveWord(control.word);
+        evaluator.active_word = control.word;
         evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
@@ -1706,7 +1706,7 @@ fn stencil(evaluator: *Unit) MachineError!void {
         .site = evaluator.applicationSite(),
         .count = count,
         .width = width,
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
     try evaluator.startDriver(StencilBootstrapDriver{
         .control = .init(control),
@@ -1754,7 +1754,7 @@ const UnfoldState = struct {
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
+        evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
@@ -1910,7 +1910,7 @@ fn unfold(evaluator: *Unit) MachineError!void {
         .values = .init(values.take()),
         .items = .init(.init(evaluator.allocator)),
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
     try evaluator.pushBorrowed(state.current.borrow());
     state_owner = null;
@@ -2207,7 +2207,7 @@ fn createIteration(
         .expected = if (expected) |item| .init(item.take()) else null,
         .site = evaluator.applicationSite(),
         .count = count,
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
     state.plan = .init(.init(state.quotation.borrow()));
     return state;

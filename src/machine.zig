@@ -2891,9 +2891,6 @@ pub const Unit = struct {
         );
         return scope;
     }
-    pub fn sourceCursor(self: *const Unit, header: *Header) spans.SpanArchive.SourceCursor {
-        return self.archive.sourceCursor(header);
-    }
     /// The source name attached to the occurrence being dispatched. The
     /// archive owns the returned bytes for at least as long as the current
     /// code header, which the activation retains across any driver this call
@@ -3066,10 +3063,6 @@ pub const Unit = struct {
             self.locals.appendAssumeCapacity(self.stack.items[base + remaining]);
         }
         self.stack.shrinkRetainingCapacity(base);
-    }
-
-    pub fn localDepth(self: *const Unit) usize {
-        return self.locals.items.len;
     }
 
     pub fn readLocal(self: *Unit, index: usize) error{OutOfMemory}!void {
@@ -4972,12 +4965,6 @@ pub const Unit = struct {
         heap.retainValue(item);
         return self.pushOwned(item);
     }
-    pub fn activeWordId(self: *const Unit) intern.TraceWord {
-        return self.active_word;
-    }
-    pub fn setActiveWord(self: *Unit, word: intern.TraceWord) void {
-        self.active_word = word;
-    }
     /// Places the pending failure at `code[index]`, the position the failing
     /// path ran in place of, unless an inner position already holds it.
     pub fn setFailureSite(self: *Unit, code: *Header, index: u32) void {
@@ -5782,7 +5769,7 @@ pub const Unit = struct {
         const locals = self.environment.localsWords();
         self.active_word = .plain(name);
         if (name == locals.get) {
-            if (operand >= self.localDepth()) return self.fail(.domain, "_gl index is out of bounds");
+            if (operand >= self.locals.items.len) return self.fail(.domain, "_gl index is out of bounds");
             return self.readLocal(operand);
         }
         if (name == locals.load) {
@@ -5790,7 +5777,7 @@ pub const Unit = struct {
             return self.bindLocals(operand);
         }
         if (name == locals.drop) {
-            if (operand > self.localDepth()) return self.fail(.domain, "_dl count exceeds the live locals");
+            if (operand > self.locals.items.len) return self.fail(.domain, "_dl count exceeds the live locals");
             return self.unbindLocals(operand);
         }
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
@@ -6771,7 +6758,7 @@ fn continueQualifiedRequest(
         .replay, .load_only => .completed,
         .dispatch => |dispatch_request| continuation: {
             evaluator.retireDriver(driver);
-            evaluator.setActiveWord(.plain(dispatch_request.word));
+            evaluator.active_word = .plain(dispatch_request.word);
             var resolution = ResolutionCursor.initAtCurrent(evaluator, dispatch_request.word);
             resolution.context = request.context;
             try evaluator.startDriver(DispatchDriver{

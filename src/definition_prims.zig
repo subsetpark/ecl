@@ -401,7 +401,7 @@ const DefineDriver = struct {
                             );
                         self.state.borrowMut().* = .{ .source = .{
                             .binding_name = binding_name,
-                            .cursor = evaluator.sourceCursor(self.item.borrow().list),
+                            .cursor = evaluator.archive.sourceCursor(self.item.borrow().list),
                         } };
                     },
                 }

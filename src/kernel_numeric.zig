@@ -2962,7 +2962,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
 /// its position in the quotation, with the shared scalar diagnostic.
 fn failProgram(evaluator: *Unit, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
     @setEvalBranchQuota(10_000);
-    evaluator.setActiveWord(.plain(instruction.word));
+    evaluator.active_word = .plain(instruction.word);
     const failure = scalarFailure(evaluator, fault, null);
     evaluator.setFailureSite(phrase.list, instruction.index);
     if (instruction.defined) evaluator.setFailureTraceParent(.plain(instruction.word));

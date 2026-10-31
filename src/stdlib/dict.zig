@@ -441,7 +441,7 @@ fn mergeWith(evaluator: *Unit) MachineError!void {
         .collision_values = .init(collision_values.take()),
         .pair_count = left_count,
         .site = evaluator.applicationSite(),
-        .word = evaluator.activeWordId(),
+        .word = evaluator.active_word,
     };
     pairs_locally_owned = false;
     try evaluator.startDriver(MergeWithWorkDriver{ .state = .init(state) });
@@ -496,7 +496,7 @@ const MergeWithApplication = struct {
         window: machine.StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?machine.ApplicationStep {
-        evaluator.setActiveWord(self.state.borrow().word);
+        evaluator.active_word = self.state.borrow().word;
         evaluator.chargeContinuationStep();
         const observed = window.observed(evaluator.stack.items.len) orelse 0;
         if (observed != 1)
@@ -518,7 +518,7 @@ const MergeWithWorkDriver = struct {
     state: heap.Owned(*MergeWithState),
 
     pub fn advance(evaluator: *Unit, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
-        evaluator.setActiveWord(self.state.borrow().word);
+        evaluator.active_word = self.state.borrow().word;
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const state = self.state.borrow();
