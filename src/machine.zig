@@ -23,6 +23,7 @@ const resolution_core = @import("resolution_core.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
 const scheduler_api = @import("scheduler.zig");
+const idioms = @import("idioms.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -1725,9 +1726,6 @@ pub const InheritedContext = struct {
     ecl_path: ?[]const u8 = null,
     module_snapshot: ?*const map_state.Snapshot = null,
     idiom_mode: IdiomMode = .automatic,
-    phrase_recognizer: ?PhraseRecognizer = null,
-    /// Decides trusted definitions' idioms when a module image freezes.
-    freeze_recognizer: ?env.FreezeRecognizer = null,
     phase: union(enum) { bootstrap, runtime: RuntimeContext },
 
     pub fn console(self: *const InheritedContext) ?*console_api.Console {
@@ -1841,13 +1839,6 @@ pub const FallbackSource = struct {
     pub fn make(self: FallbackSource, evaluator: *Unit) IdiomFallback {
         return self.make_fn(self.context, evaluator);
     }
-};
-pub const PhraseRecognizer = struct {
-    offered: *const fn (*Unit, IdiomRequest, FallbackSource) MachineError!void,
-    trusted: *const fn (*Unit, TrustedCall) MachineError!TrustedOutcome,
-    /// Given the first registry entry a kernel word heads: true when one of
-    /// its phrases applied and consumed its following words.
-    headed: *const fn (*Unit, u16) MachineError!bool,
 };
 
 pub const ParkRequest = union(enum) {
@@ -5003,8 +4994,7 @@ pub const Unit = struct {
     /// Whether the words after a phrase head continue a recognized phrase,
     /// which then ran in its place.
     pub fn continuesPhrase(self: *Unit, first_entry: u16) MachineError!bool {
-        const recognizer = self.inherited.phrase_recognizer orelse return false;
-        return recognizer.headed(self, first_entry);
+        return idioms.applyHeaded(self, first_entry);
     }
     /// The forms after the dispatching word in its own code, when it was
     /// dispatched from a source position and `count` of them follow. A word
@@ -5058,15 +5048,12 @@ pub const Unit = struct {
         return error.Ecl;
     }
     /// What a module image built by this unit recognizes against when it
-    /// seals: the session's recognizer and core. Null when the unit has none.
-    /// Recognition for an image about to seal. Only a standard-library image's
-    /// definitions are trusted at dispatch, so any other image skips the work
-    /// rather than recording idioms nothing will read.
+    /// seals: the session's core. Only a standard-library image's definitions
+    /// are trusted at dispatch, so any other image skips the work rather than
+    /// recording idioms nothing will read.
     pub fn moduleRecognition(self: *Unit, provenance: modules.RegistrationProvenance) ?env.ModuleRecognition {
         if (provenance != .standard_library) return null;
-        const recognizer = self.inherited.freeze_recognizer orelse return null;
         return .{
-            .recognizer = recognizer,
             .core = self.environment.coreView(),
             .core_scope = self.environment.coreScopeId(),
             .slots = self.environment.slotDirectory(),
@@ -5074,10 +5061,7 @@ pub const Unit = struct {
     }
 
     pub fn continueWithIdiom(self: *Unit, request: IdiomRequest, source: FallbackSource) MachineError!void {
-        if (self.inherited.phrase_recognizer) |recognizer| return recognizer.offered(self, request, source);
-        var owned = source.make(self);
-        defer owned.deinit(self.releases, self.allocator);
-        return owned.run(self);
+        return idioms.tryApply(self, request, source);
     }
     /// The active word as a diagnostic spells it. A module-local word has no
     /// single interned spelling, so the rendering borrows the unit's scratch;
@@ -6876,8 +6860,8 @@ fn executeResolved(self: *Unit, resolved: *Resolution) MachineError!void {
             // environment froze; one that recognized nothing runs as any
             // source word does.
             const trusted = resolved.origin == .core or resolved.origin == .standard_library;
-            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| if (self.inherited.phrase_recognizer) |recognizer| {
-                switch (try recognizer.trusted(self, .{ .body = body_header, .idiom = idiom })) {
+            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| {
+                switch (try idioms.applyTrusted(self, .{ .body = body_header, .idiom = idiom })) {
                     .applied => return,
                     .declined => {},
                     .offered => |request| {
@@ -6887,7 +6871,7 @@ fn executeResolved(self: *Unit, resolved: *Resolution) MachineError!void {
                             .home = resolved.home,
                             .effect = cross_home_effect,
                         };
-                        return recognizer.offered(self, request, body_fallback.source());
+                        return idioms.tryApply(self, request, body_fallback.source());
                     },
                 }
             };

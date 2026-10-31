@@ -14,7 +14,6 @@ const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
 const prelude = @import("prelude.zig");
-const idioms = @import("idioms.zig");
 const printer = @import("print.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
@@ -391,7 +390,7 @@ pub const Session = enum(usize) {
         errdefer archive_owner.deinit();
         const archive = archive_owner.view();
         var bootstrap_cancelled: std.atomic.Value(bool) = .init(false);
-        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled, idioms.freeze_recognizer) catch |err| switch (err) {
+        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
@@ -602,8 +601,6 @@ pub const Session = enum(usize) {
                 .ecl_path = core.ecl_path,
                 .module_snapshot = core.module_snapshot,
                 .idiom_mode = core.idiom_mode,
-                .phrase_recognizer = .{ .offered = idioms.tryApply, .trusted = idioms.applyTrusted, .headed = idioms.applyHeaded },
-                .freeze_recognizer = idioms.freeze_recognizer,
                 .phase = .{ .runtime = .{
                     .native_loader = core.native_owner.loader(),
                     .console = &core.console,

@@ -422,7 +422,7 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 }
 
 /// Every trusted definition a direct entry can recognize, by name.
-const direct_names = blk: {
+pub const direct_names = blk: {
     var names: [registry.len][]const u8 = undefined;
     var count: usize = 0;
     for (registry) |entry| {
@@ -440,14 +440,9 @@ const direct_names = blk: {
     break :blk final;
 };
 
-/// Decides each trusted definition's direct entry when its environment
+/// Decides one trusted definition's direct entry when its environment
 /// freezes, against bindings that can no longer change.
-pub const freeze_recognizer: env.FreezeRecognizer = .{
-    .names = &direct_names,
-    .recognize = recognizeTrusted,
-};
-
-fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quotation) ?env.DirectIdiom {
+pub fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quotation) ?env.DirectIdiom {
     const phrase: Value = .{ .list = env.quotationHeader(body) };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;

@@ -8,6 +8,7 @@ const lexer = @import("lexer.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
+const idioms = @import("idioms.zig");
 const native_module = @import("native_module.zig");
 const snapshot_api = @import("snapshot.zig");
 const reader_types = @import("reader_types.zig");
@@ -249,14 +250,6 @@ pub const DirectIdiom = struct {
     constant: ?value.Value = null,
     active_word: ?u32 = null,
     active_index: ?u32 = null,
-};
-
-/// Recognition performed at a freeze edge. `names` are the only definitions
-/// it can recognize, so the edge looks those up rather than walking the
-/// environment, and its work does not grow with the environment's size.
-pub const FreezeRecognizer = struct {
-    names: []const []const u8,
-    recognize: *const fn (lookup: FrozenLookup, name: []const u8, body: *Quotation) ?DirectIdiom,
 };
 
 /// Name resolution in an environment that is about to freeze, as a word in
@@ -1027,8 +1020,11 @@ pub const Environment = struct {
     /// Records each recognizable definition's outcome before the environment
     /// freezes. It republishes only cells that change and never walks the
     /// environment, so a failure leaves every definition as it was.
-    fn recognizeDirect(self: *Environment, lookup: FrozenLookup, recognizer: FreezeRecognizer) error{OutOfMemory}!void {
-        for (recognizer.names) |spelling| {
+    /// Only the idiom table's direct names can be recognized, so the edge
+    /// looks those up rather than walking the environment, and its work does
+    /// not grow with the environment's size.
+    fn recognizeDirect(self: *Environment, lookup: FrozenLookup) error{OutOfMemory}!void {
+        for (idioms.direct_names) |spelling| {
             const id = try intern.intern(spelling);
             var lease = lookupFrozen(self, id) orelse continue;
             defer lease.deinit();
@@ -1036,7 +1032,7 @@ pub const Environment = struct {
                 .word => |body| body,
                 .builtin, .native => continue,
             };
-            const idiom = recognizer.recognize(lookup, spelling, body) orelse continue;
+            const idiom = idioms.recognizeTrusted(lookup, spelling, body) orelse continue;
             const name = intern.namespaceName(id) catch continue;
             var recognized = lease.spec().*;
             recognized.direct_idiom = idiom;
@@ -1441,7 +1437,7 @@ pub const ModulePublisher = enum(usize) {
             .own_scope = @backingInt(own_scope),
             .core_scope = @backingInt(selected.core_scope),
             .slots = selected.slots,
-        }, selected.recognizer);
+        });
         environment.freeze();
     }
 };
@@ -1449,7 +1445,6 @@ pub const ModulePublisher = enum(usize) {
 /// What a module image's freeze edge recognizes against besides the image
 /// itself: the core its definitions fall back to.
 pub const ModuleRecognition = struct {
-    recognizer: FreezeRecognizer,
     core: EnvironmentView,
     core_scope: ScopeId,
     slots: *const SlotIndex,
@@ -2407,17 +2402,17 @@ pub const BuildingEnv = enum(usize) {
     /// Recognizes the core's trusted definitions against their final bindings,
     /// then freezes the core. On failure the core is not frozen and the builder
     /// is not consumed, so the session that owns it does not start.
-    pub fn finish(self: *BuildingEnv, recognizer: ?FreezeRecognizer) error{OutOfMemory}!void {
+    pub fn finish(self: *BuildingEnv) error{OutOfMemory}!void {
         var environment = self.target();
         const core = &environment.privateState().core;
         const core_scope = @backingInt(environment.coreScopeId());
-        if (recognizer) |selected| try core.recognizeDirect(.{
+        try core.recognizeDirect(.{
             .own = core,
             .core = null,
             .own_scope = core_scope,
             .core_scope = core_scope,
             .slots = &environment.privateState().slot_index,
-        }, selected);
+        });
         core.freeze();
         self.* = .invalid;
     }

@@ -213,7 +213,6 @@ fn expectInvalidPrelude(source: []const u8) !void {
         &cancelled,
         "invalid-prelude.ecl",
         source,
-        null,
     ));
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
     defer heap.hostDomain(host.cleanup()).releaseValue(body);
