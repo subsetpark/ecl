@@ -6,7 +6,7 @@ import tarfile
 
 root = Path(__file__).parent
 manifest = b'''{format 2 name "sample" version "1.0.0" sources ["src/**/*.ecl"] exports ["sample.api"] requires {}}'''
-source = b'''"BAD" `cwd "package-source-executed" fs.create-text [] ((7) `value def) `sample.api @defm [] () `private.literal @defm ([] () `nested @defm)'''
+source = b'''`cwd "package-source-executed" "BAD" fs.create-text [] ((7) `value def) `sample.api @defm [] () `private.literal @defm ([] () `nested @defm)'''
 base = {"ecl.pkg": manifest, "src/api.ecl": source, "README.md": b"ordinary data\x00\xff"}
 fixtures = {
     "valid": base,

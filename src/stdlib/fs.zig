@@ -45,12 +45,12 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "child-dir", .effect = "root path -- directory", .doc = "Acquire an independent directory resource beneath an existing root. Resolution, including final symlinks, is confined to that root. The acquired directory becomes the new containment boundary; closing its ordinary parent resource does not close it. Children of a staging resource, including further descendants, close when staging is sealed or closed even after task ownership transfer. `.` acquires the root itself.", .primitive = childDirectory },
     .{ .name = "read-bytes", .effect = "root path -- bytes", .doc = "Read one regular file, following a final link within the root, and return its exact bytes as an integer list. The size observed at open is the size read; growth or shrink meanwhile fails with `` `io `` and reason `` `changed ``. A directory fails with `` `io `` and reason `` `is-directory ``; a non-regular object fails with `` `io `` and reason `` `not-regular ``; a file over the transfer limit is `` `overflow ``.", .primitive = readBytes },
     .{ .name = "read-text", .effect = "root path -- string", .doc = "Read one regular file as `read-bytes` does and decode it as UTF-8. Invalid UTF-8 is `` `io `` with reason `` `invalid-utf8 ``.", .primitive = readText },
-    .{ .name = "create-bytes", .effect = "bytes root path --", .doc = "Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry fails with `` `io `` and reason `` `already-exists ``; a missing parent fails with `` `io `` and reason `` `not-found ``.", .primitive = createBytes },
-    .{ .name = "create-text", .effect = "string root path --", .doc = "Atomically create an absent regular file holding the string as UTF-8, with the same collision contract as `create-bytes`.", .primitive = createText },
-    .{ .name = "replace-bytes", .effect = "bytes root path --", .doc = "Atomically replace an existing regular file with exact bytes. The final entry must be observed as a regular file without following: absence fails with `` `io `` and reason `` `not-found ``, and a symlink, directory, or other entry fails with `` `io `` and reason `` `not-regular ``. The replacement is a new inode published by an atomic exchange; the word never becomes create-or-replace.", .primitive = replaceBytes },
-    .{ .name = "replace-text", .effect = "string root path --", .doc = "Replace an existing regular file with UTF-8 text under the `replace-bytes` contract.", .primitive = replaceText },
-    .{ .name = "publish-bytes", .effect = "bytes root path --", .doc = "Atomically publish complete file contents, creating an absent destination or replacing one that exists. An entry observed before staging must be a regular file; a symlink, directory, or other entry is `` `not-regular ``. Use the observed file's permissions, or host defaults on first creation. Publication replaces the final directory entry without following it; concurrent publications each succeed and the last commit wins. An intervening directory causes failure. A failed operation preserves its destination, and cancellation before commit removes staging. Cancellation after commit does not roll back publication. Visibility is atomic; directory-entry durability across a crash is not promised.", .primitive = publishBytes },
-    .{ .name = "publish-text", .effect = "string root path --", .doc = "Publish UTF-8 text under the `publish-bytes` contract.", .primitive = publishText },
+    .{ .name = "create-bytes", .effect = "root path bytes --", .doc = "Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry fails with `` `io `` and reason `` `already-exists ``; a missing parent fails with `` `io `` and reason `` `not-found ``.", .primitive = createBytes },
+    .{ .name = "create-text", .effect = "root path string --", .doc = "Atomically create an absent regular file holding the string as UTF-8, with the same collision contract as `create-bytes`.", .primitive = createText },
+    .{ .name = "replace-bytes", .effect = "root path bytes --", .doc = "Atomically replace an existing regular file with exact bytes. The final entry must be observed as a regular file without following: absence fails with `` `io `` and reason `` `not-found ``, and a symlink, directory, or other entry fails with `` `io `` and reason `` `not-regular ``. The replacement is a new inode published by an atomic exchange; the word never becomes create-or-replace.", .primitive = replaceBytes },
+    .{ .name = "replace-text", .effect = "root path string --", .doc = "Replace an existing regular file with UTF-8 text under the `replace-bytes` contract.", .primitive = replaceText },
+    .{ .name = "publish-bytes", .effect = "root path bytes --", .doc = "Atomically publish complete file contents, creating an absent destination or replacing one that exists. An entry observed before staging must be a regular file; a symlink, directory, or other entry is `` `not-regular ``. Use the observed file's permissions, or host defaults on first creation. Publication replaces the final directory entry without following it; concurrent publications each succeed and the last commit wins. An intervening directory causes failure. A failed operation preserves its destination, and cancellation before commit removes staging. Cancellation after commit does not roll back publication. Visibility is atomic; directory-entry durability across a crash is not promised.", .primitive = publishBytes },
+    .{ .name = "publish-text", .effect = "root path string --", .doc = "Publish UTF-8 text under the `publish-bytes` contract.", .primitive = publishText },
     .{ .name = "stat", .effect = "root path -- metadata", .doc = "Follow the path, including a final link within the root, and describe the object reached with the same shapes as `lstat`. A dangling link fails with `` `io `` and reason `` `not-found ``.", .primitive = stat },
     .{ .name = "lstat", .effect = "root path -- metadata", .doc = "Describe the final entry without following it: `{kind file size n}` for a regular file, `{kind directory}`, `{kind symlink}`, or `{kind other}`. An absent entry fails with `` `io `` and reason `` `not-found ``.", .primitive = lstat },
     .{ .name = "exists?", .effect = "root path -- bool", .doc = "Return 1 when the final entry exists and 0 when it is definitely absent, without following a final link: a dangling link is 1. Malformed paths, unknown roots, denial, traversal failures such as a missing or escaping intermediate component, and host failures are errors rather than 0.", .primitive = exists },
@@ -518,17 +518,17 @@ fn begin(evaluator: *Fiber, operation: Operation) MachineError!void {
             inputs = .{ .root = root.take(), .path = path.take() };
         },
         .payload => {
+            var payload = try evaluator.popValue();
+            errdefer payload.deinit();
+            if (operation.textPayload()) {
+                if (!payload.borrow().isString()) return evaluator.typeError("a string to write");
+            } else if (payload.borrow() != .list) return evaluator.typeError("a byte list to write");
             var path = try evaluator.popValue();
             errdefer path.deinit();
             if (!path.borrow().isString()) return evaluator.typeError("a string path");
             var root = try evaluator.popValue();
             errdefer root.deinit();
             if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
-            var payload = try evaluator.popValue();
-            errdefer payload.deinit();
-            if (operation.textPayload()) {
-                if (!payload.borrow().isString()) return evaluator.typeError("a string to write");
-            } else if (payload.borrow() != .list) return evaluator.typeError("a byte list to write");
             inputs = .{ .root = root.take(), .path = path.take(), .payload = payload.take() };
         },
         .copy => {

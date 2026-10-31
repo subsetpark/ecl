@@ -69,7 +69,7 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "associate",
-        .effect = "value key -- dict",
+        .effect = "key value -- dict",
         .doc = "Build a one-entry dictionary associating `key` with `value`.",
         .primitive = associate,
     },
@@ -219,10 +219,10 @@ const DictLookupDriver = struct {
 
 fn associate(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
-    var key = try evaluator.popValue();
-    defer key.deinit();
     var associated_value = try evaluator.popValue();
     defer associated_value.deinit();
+    var key = try evaluator.popValue();
+    defer key.deinit();
     const pair = [1]dict_storage.Pair{.{ key.borrow(), associated_value.borrow() }};
     const materializer = try dict_storage.Materializer.init(
         evaluator.allocator,

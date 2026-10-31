@@ -58,7 +58,7 @@
  (directory hash bytes -- :
   "Publish only the bytes named by this cache key through an explicit directory.")
  (|directory hash bytes|
-  bytes hash pkg.fetch.checked directory hash filename fs.publish-bytes) `write-at def
+  directory hash filename bytes hash pkg.fetch.checked fs.publish-bytes) `write-at def
 
  ### def write
  (path hash bytes -- : "Populate the cache opportunistically; cancellation still propagates.")

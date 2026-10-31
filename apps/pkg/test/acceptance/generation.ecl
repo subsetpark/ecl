@@ -35,8 +35,8 @@
  ### defp exercise
  (project -- : "Pin privately, publish without activation, and retain exact portable snapshots.")
  (|project|
-  manifest str project `directory at "ecl.pkg" fs.create-text
-  "broken" project `directory at "ecl.modules" fs.create-text
+  project `directory at "ecl.pkg" manifest str fs.create-text
+  project `directory at "ecl.modules" "broken" fs.create-text
   project pkg.project.lock
   project started project pair (build) with call port.close) `exercise defp
 
@@ -79,7 +79,7 @@
  ### defp rejected-map
  (project -- : "Reject a conflicting local declaration before publishing a candidate generation.")
  (|project|
-  "[] () `sample.api @defm" project `directory at "collision.ecl" fs.publish-text
+  project `directory at "collision.ecl" "[] () `sample.api @defm" fs.publish-text
   project started project pair (reject-work) with call) `rejected-map defp
 
  ### defp reject-work
@@ -113,11 +113,11 @@
   "Replay the real generation validator across the two root writes.")
  (|previous-map next-lock work project|
   manifest `requires {} put pkg.manifest.write
-  dup project `directory at "ecl.pkg" fs.publish-text
+  dup project `directory at "ecl.pkg" rolldown fs.publish-text
   work swap next-lock pkg.generation.finish
   project `directory at work `location at next-lock
   project `path at (pkg.verify.publication) partial pkg.transaction.prepare
-  next-lock project `directory at "ecl.lock" fs.publish-text
+  project `directory at "ecl.lock" next-lock fs.publish-text
   project wrap (pkg.install.verify) @attempt result.err? 1 equal
   project `directory at "ecl.modules" fs.read-text previous-map equal
   project previous-map pkg.layout.from-reference pkg.verify.generation
@@ -133,7 +133,7 @@
  (project location -- :
   "Verification checks old generations independently and never repairs changed bytes.")
  (|project location|
-  "changed" project `directory at location "/packages/sample/README.md" cat fs.publish-text
+  project `directory at location "/packages/sample/README.md" cat "changed" fs.publish-text
   project location pair (pkg.verify.generation) @attempt result.err? 1 equal
   project `directory at location "/packages/sample/README.md" cat fs.read-text "changed" equal
   project pkg.install.verify) `check-damage defp

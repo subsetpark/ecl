@@ -10,7 +10,7 @@ a word, for example an ambient random generator:
 
 ```ecl
 [0 0] agent.start `rng set
-(5 rand.int) rng agent.call
+rng (5 rand.int) agent.call
 # => 0
 ```
 
@@ -24,9 +24,9 @@ call with `call-for`.
 
 ```ecl
 [0 0] agent.start `g set
-(100 rand.int) g agent.call (100 rand.int) g agent.call pair
+g (100 rand.int) agent.call g (100 rand.int) agent.call pair
 # => [35 0]
 [7 0] agent.start `g set
-[] ((1 0 div) g agent.call) @attempt `err at `kind at (dup) g agent.call pair
+[] (g (1 0 div) agent.call) @attempt `err at `kind at g (dup) agent.call pair
 # => (domain [7 0])
 ```

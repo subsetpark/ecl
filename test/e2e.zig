@@ -1505,7 +1505,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "\"alpha\\nbeta\\n\" `cwd \"round-trip.txt\" fs.create-text " ++
+            "`cwd \"round-trip.txt\" \"alpha\\nbeta\\n\" fs.create-text " ++
                 "`cwd \"round-trip.txt\" fs.read-text io.pp " ++
                 "`cwd \"round-trip.txt\" fs.read-text \"\\n\" split io.pp " ++
                 "`cwd \".\" fs.list (`name at \"round-trip.txt\" match?) filter io.pp",

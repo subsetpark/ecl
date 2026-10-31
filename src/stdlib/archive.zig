@@ -38,7 +38,7 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "unpack-tgz",
-        .effect = "bytes root destination -- regular-file-paths",
+        .effect = "root destination bytes -- regular-file-paths",
         .doc = "Validate and atomically unpack a gzip-compressed tar byte list beneath a previously absent `destination`, a canonical relative path under a named Session filesystem root or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its directory lease until publication or rollback completes. The destination must name a child entry, not `.`. Return normalized regular-file paths in archive order. Unsafe, linked, special, duplicate, malformed, or over-limit members are `` `domain ``; invalid byte items are `` `domain ``; wrong container kinds are `` `type ``; an unknown root or a non-canonical destination is `` `domain `` carrying the `fs` failure data; an exhausted operation quota is `` `overflow ``; filesystem and destination conflicts are `` `io ``. Failure never publishes a partial destination. See the environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives) for the complete format, limit, containment, and publication contract.",
         .primitive = unpackTgz,
     },
@@ -209,15 +209,15 @@ const Sha256Driver = struct {
 
 fn unpackTgz(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
+    var bytes_value = try evaluator.popValue();
+    errdefer bytes_value.deinit();
+    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
     var destination = try evaluator.popValue();
     errdefer destination.deinit();
     if (!destination.borrow().isString()) return evaluator.typeError("a string destination path");
     var root = try evaluator.popValue();
     errdefer root.deinit();
     if (!fsport.isRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
-    var bytes_value = try evaluator.popValue();
-    errdefer bytes_value.deinit();
-    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
     const access = evaluator.inherited.runtime().filesystem_access;
     const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes_value.borrow());
     const path_encoder = storage.StringEncoder.init(evaluator.allocator, destination.borrow());

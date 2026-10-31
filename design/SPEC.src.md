@@ -919,7 +919,7 @@ accumulates between submissions, tasks, or module loads.
 - `rand.shuffle` and `rand.deal` thread the same state through a permutation
   and a draw without replacement. Code that wants an ambient generator keeps
   the state in an agent: ``[0 0] agent.start `rng set`` then
-  `(5 rand.int) rng agent.call` (see The standard library).
+  `rng (5 rand.int) agent.call` (see The standard library).
 
 ## Chars and strings
 
@@ -1286,7 +1286,7 @@ views, and port messages exactly as task handles are.
 A handle reaches a task's result; an address does not. That is why a handle can
 never travel through a mailbox while an address can be sent, stored, and
 forwarded freely: a message holding a handle could close a reference cycle
-through the result it reaches. `task.send ( value address -- )` first checks
+through the result it reaches. `task.send ( address value -- )` first checks
 the value for handles, raising `` `type `` if it finds one, then queues it. A
 mailbox holds sixteen messages; a sender to a full mailbox parks until the
 receiver takes one. Sending to a closed mailbox raises `` `io `` with

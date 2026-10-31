@@ -6,7 +6,7 @@
 # whole result stack and never replies. The server ends only by cancellation.
 #
 # This is the stateful-module idiom as an ordinary task:
-# `[0 0] agent.start `rng set` then `(5 rand.int) rng agent.call`.
+# `[0 0] agent.start `rng set` then `rng (5 rand.int) agent.call`.
 []
 (
  ### defp settle-ok
@@ -24,7 +24,7 @@
 
  ### defp reply
  (reply address -- : "Send a reply, ignoring a caller whose helper has already gone.")
- (pair (task.send) @attempt pop) `reply defp
+ (swap pair (task.send) @attempt pop) `reply defp
 
  ### defp apply-message
  (state message -- state :
@@ -51,17 +51,17 @@
  (wrap (serve) @spawn task.address) `start def
 
  ### defp exchange
- (quotation address -- reply :
+ (address quotation -- reply :
   "Send a request carrying a fresh reply helper's address and return the helper's reply; a refused
    send cancels the helper and re-raises its error.")
- (|quotation address|
+ (|address quotation|
   [] (task.receive) @spawn dup task.address
   {} `quot quotation put `from rolldown put
-  address pair (task.send) @attempt
+  address swap pair (task.send) @attempt
   dup result.ok? (pop task.await `ok at first) (swap task.cancel `err at raise) if) `exchange defp
 
  ### def call
- (quotation address -- result :
+ (address quotation -- result :
   "Apply a quotation to the agent's stack and return the top of the result stack; the agent keeps
    the rest. The quotation's own error is re-raised here and leaves the agent unchanged. A result
    stack with nothing on it is `` `domain ``. Replies travel through a helper task. A call to an
@@ -80,22 +80,22 @@
  `check-deadline defp
 
  ### def call-for
- (quotation address milliseconds -- result :
+ (address quotation milliseconds -- result :
   "`agent.call` with a nonnegative int deadline in milliseconds, checked before anything is sent: a
    negative duration is `` `domain `` and a non-int is `` `type ``. When no reply arrives in time
    the call raises `` `timeout ``, whether the deadline passed while waiting for room in a full
    mailbox or for the reply; the quotation, if it was sent, still runs on the agent when its turn
    comes, and its reply is discarded.")
- (|quotation address milliseconds|
+ (|address quotation milliseconds|
   milliseconds check-deadline pop
-  quotation address pair (exchange) @spawn
+  address quotation pair (exchange) @spawn
   dup milliseconds task.await-for swap task.cancel
   dup result.ok? (`ok at first) (`err at raise) if
   dup result.ok? (`ok at first) (`err at raise) if) `call-for def
 
  ### def send
- (quotation address -- :
+ (address quotation -- :
   "Apply a quotation to the agent's stack without waiting for a reply. The whole result stack
    becomes the new state; a failing quotation changes nothing and reports nothing.")
- (|quotation address| {} `quot quotation put address task.send) `send def
+ (|address quotation| address {} `quot quotation put task.send) `send def
 ) `agent @defm

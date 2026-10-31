@@ -33,7 +33,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "`task.await` with a nonnegative int deadline; expiry returns `{err {kind timeout}}` without cancelling the task. A terminal task beats even a zero deadline. A deadline beyond any instant the scheduler clock can report is `` `overflow `` before the wait registers." },
     .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "The address of a task's mailbox. Two addresses of one task match. An address outlives its task; after the task ends it names a closed mailbox." },
     .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "The executing task's own address. `` `domain `` outside a task: the session root owns tasks but has no mailbox." },
-    .{ .name = "send", .primitive = send, .effect = "value address --", .doc = "Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified." },
+    .{ .name = "send", .primitive = send, .effect = "address value --", .doc = "Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified." },
     .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "Take the oldest message from the executing task's mailbox, parking until one arrives. `` `domain `` outside a task." },
     .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "`task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}` when nothing arrives in time. A deadline beyond any instant the scheduler clock can report is `` `overflow ``. `` `domain `` outside a task." },
 };
@@ -390,11 +390,11 @@ fn ownMailbox(evaluator: *Fiber, comptime word: []const u8) MachineError!*mailbo
 
 fn send(evaluator: *Fiber) MachineError!void {
     const pair = try evaluator.popPair();
-    var payload = pair[0];
-    defer payload.deinit();
-    var target = pair[1];
+    var target = pair[0];
     defer target.deinit();
-    if (target.borrow() != .address) return evaluator.typeError("a value followed by an address");
+    var payload = pair[1];
+    defer payload.deinit();
+    if (target.borrow() != .address) return evaluator.typeError("an address followed by a value");
     const check = try mailbox.HandleCheck.init(evaluator.allocator, payload.borrow());
     try evaluator.startDriver(SendDriver{
         .payload = .init(payload.take()),

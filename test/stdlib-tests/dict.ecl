@@ -77,8 +77,8 @@
 
  ### test construction
  (-- : "Construct dictionaries from one association, pairs, and repeated values.")
- (42 `answer dict.associate {answer 42} equal
-  [1 2] `args dict.associate {args [1 2]} equal
+ (`answer 42 dict.associate {answer 42} equal
+  `args [1 2] dict.associate {args [1 2]} equal
   [[a 1] [b 2]] dict.from-pairs dup dict.pairs dict.from-pairs match? 1 equal
   [a b c] 0 dict.from-keys {a 0 b 0 c 0} equal
   [] dict.from-pairs {} equal

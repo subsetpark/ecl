@@ -30,12 +30,13 @@
  (`cwd "apps/pkg/test/fixtures/publication-unused" fs.stage-dir
   (|project|
    project generation fs.mkdirs
+   project "ecl.pkg"
    "{format 2 name \"project\" version \"0.1.0\" sources [] exports [] requires {}}\n"
-   project "ecl.pkg" fs.create-text
-   old-lock project "ecl.lock" fs.create-text
-   old-map project "ecl.modules" fs.create-text
-   new-lock project generation "/ecl.lock" cat fs.create-text
-   "accepted" project generation "/validated" cat fs.create-text
+   fs.create-text
+   project "ecl.lock" old-lock fs.create-text
+   project "ecl.modules" old-map fs.create-text
+   project generation "/ecl.lock" cat new-lock fs.create-text
+   project generation "/validated" cat "accepted" fs.create-text
    project project ".ecl/mutation.lock" fs.lock)
   call) `fixture defp
 
@@ -58,8 +59,8 @@
  (fixture 3 pack
   (|state project lock|
    project prepare project old-lock old-map roots
-   state 1 >= new-lock project "ecl.lock" 3 pack (fs.publish-text) with when
-   state 2 >= generation pkg.layout.reference project "ecl.modules" 3 pack
+   state 1 >= project "ecl.lock" new-lock 3 pack (fs.publish-text) with when
+   state 2 >= project "ecl.modules" generation pkg.layout.reference 3 pack
    (fs.publish-text) with when
    project recover project recover
    project new-lock generation pkg.layout.reference roots
@@ -87,7 +88,7 @@
  (fixture 3 pack
   (|path project lock|
    project prepare
-   "unrelated edit" project path fs.publish-text
+   project path "unrelated edit" fs.publish-text
    project "ecl.lock" fs.read-text project "ecl.modules" fs.read-text pair
    project wrap (recover) @attempt result.err? 1 equal
    project "ecl.lock" fs.read-text project "ecl.modules" fs.read-text pair equal
