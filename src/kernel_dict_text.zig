@@ -13,7 +13,7 @@ const kernel_flat = @import("kernel_flat.zig");
 const poll = @import("poll.zig");
 
 const Value = value.Value;
-const Unit = support.Unit;
+const Fiber = support.Fiber;
 const MachineError = support.MachineError;
 
 /// The text family also includes the hosted `str.format` idiom;
@@ -26,7 +26,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     }
 }
 
-pub fn formatForIdiom(evaluator: *Unit) MachineError!void {
+pub fn formatForIdiom(evaluator: *Fiber) MachineError!void {
     return formatPrimitive(evaluator);
 }
 
@@ -43,7 +43,7 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             return switch (operation) {
                 .put => putPrimitive(evaluator),
                 .del => delPrimitive(evaluator),
@@ -56,7 +56,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
     }.run);
 }
 
-fn strPrimitive(evaluator: *Unit) MachineError!void {
+fn strPrimitive(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const renderer = try printer.OwnedStringCursor.init(evaluator.allocator, item.borrow());
@@ -97,7 +97,7 @@ const StrDriver = struct {
     item: heap.Owned(Value),
     work: heap.Owned(StrPhase),
 
-    pub fn advance(evaluator: *Unit, self: *StrDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *StrDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const phase = self.work.borrowMut();
         return switch (phase.*) {
@@ -132,39 +132,39 @@ const StrDriver = struct {
     }
 };
 
-fn keysPrimitive(evaluator: *Unit) MachineError!void {
+fn keysPrimitive(evaluator: *Fiber) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     const keys = dict.keysOf(dictionary.borrow().dict);
     try evaluator.pushBorrowed(keys);
 }
 
-pub fn keysForModule(evaluator: *Unit) MachineError!void {
+pub fn keysForModule(evaluator: *Fiber) MachineError!void {
     return keysPrimitive(evaluator);
 }
 
-fn sizePrimitive(evaluator: *Unit) MachineError!void {
+fn sizePrimitive(evaluator: *Fiber) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     try evaluator.pushOwned(.{ .int = @intCast(dictionary.borrow().dict.length()) });
 }
 
-pub fn sizeForModule(evaluator: *Unit) MachineError!void {
+pub fn sizeForModule(evaluator: *Fiber) MachineError!void {
     return sizePrimitive(evaluator);
 }
 
-fn valsPrimitive(evaluator: *Unit) MachineError!void {
+fn valsPrimitive(evaluator: *Fiber) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     const values = dict.valsOf(dictionary.borrow().dict);
     try evaluator.pushBorrowed(values);
 }
 
-pub fn valsForModule(evaluator: *Unit) MachineError!void {
+pub fn valsForModule(evaluator: *Fiber) MachineError!void {
     return valsPrimitive(evaluator);
 }
 
-fn hasPrimitive(evaluator: *Unit) MachineError!void {
+fn hasPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
@@ -182,7 +182,7 @@ fn hasPrimitive(evaluator: *Unit) MachineError!void {
     });
 }
 
-pub fn hasForModule(evaluator: *Unit) MachineError!void {
+pub fn hasForModule(evaluator: *Fiber) MachineError!void {
     return hasPrimitive(evaluator);
 }
 
@@ -197,7 +197,7 @@ const HasDriver = struct {
     key: heap.Owned(Value),
     cursor: heap.Owned(dict.FindCursor),
 
-    pub fn advance(evaluator: *Unit, self: *HasDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -206,15 +206,15 @@ const HasDriver = struct {
     }
 };
 
-pub fn putForModule(evaluator: *Unit) MachineError!void {
+pub fn putForModule(evaluator: *Fiber) MachineError!void {
     return putImpl(evaluator, true);
 }
 
-fn putPrimitive(evaluator: *Unit) MachineError!void {
+fn putPrimitive(evaluator: *Fiber) MachineError!void {
     return putImpl(evaluator, false);
 }
 
-fn putImpl(evaluator: *Unit, comptime dictionary_only: bool) MachineError!void {
+fn putImpl(evaluator: *Fiber, comptime dictionary_only: bool) MachineError!void {
     try evaluator.require(3);
     var new_value = try evaluator.popValue();
     defer new_value.deinit();
@@ -310,7 +310,7 @@ const PervasivePutDriver = struct {
     copy_index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *PervasivePutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *PervasivePutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const output = self.values.borrow();
@@ -446,7 +446,7 @@ fn ListPutKernel(comptime kind: value.HeapKind) type {
             return if (aliased) 1 else length;
         }
 
-        pub fn chunk(put: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(put: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
             if (output.aliased()) return output.store(put.index, &.{put.replacement});
             const out = output.range(range.start, range.len());
             @memcpy(out, heap.leafElements(kind, operands[0].list)[range.start..range.end]);
@@ -462,7 +462,7 @@ fn ListPutKernel(comptime kind: value.HeapKind) type {
 /// that changes the leaf class deliberately returns false so the profiling
 /// path can widen its result.
 fn startTypedListPut(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     collection: *heap.OwnedValue,
     new_value: Value,
     replace_index: usize,
@@ -531,7 +531,7 @@ fn VectorPutKernel(
             return &output.result;
         }
 
-        pub fn prepare(_: *Unit, operands: [arity]Value, _: Params, _: usize, prepared: support.LeafResult(kind)) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Fiber, operands: [arity]Value, _: Params, _: usize, prepared: support.LeafResult(kind)) error{OutOfMemory}!Output {
             return .{
                 .result = prepared,
                 .count = @intCast(operands[0].list.length()),
@@ -539,7 +539,7 @@ fn VectorPutKernel(
             };
         }
 
-        pub fn chunk(atom: Params, operands: [arity]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(atom: Params, operands: [arity]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             const indices = heap.leafElements(index_kind, operands[1].list);
             switch (output.phase) {
                 .validate => if (kernel_flat.firstIndexFault(Index, indices[range.start..range.end], output.count)) |fault| return switch (fault.kind) {
@@ -564,7 +564,7 @@ fn VectorPutKernel(
             }
         }
 
-        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(_: *Fiber, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .validate => if (!output.result.aliased()) {
                     output.phase = .copy;
@@ -589,7 +589,7 @@ fn VectorPutKernel(
 /// result. Anything else, including a mismatched replacement length, returns
 /// false and takes the pervasive path, which owns those errors.
 fn startTypedVectorPut(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     collection: *heap.OwnedValue,
     selector: *heap.OwnedValue,
     replacement: *heap.OwnedValue,
@@ -633,7 +633,7 @@ const ListPutDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *ListPutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ListPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.materializer == null) {
@@ -699,7 +699,7 @@ const DictPutDriver = struct {
     pairs: ?heap.Owned([]dict.Pair) = null,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *DictPutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DictPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(work)) {
@@ -748,7 +748,7 @@ const DictPutDriver = struct {
     }
 };
 
-pub fn fromListsForModule(evaluator: *Unit) MachineError!void {
+pub fn fromListsForModule(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var values = try evaluator.popValue();
     defer values.deinit();
@@ -777,7 +777,7 @@ const FromListsDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict.Materializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *FromListsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FromListsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.materializer == null) {
@@ -802,7 +802,7 @@ const FromListsDriver = struct {
     }
 };
 
-fn delPrimitive(evaluator: *Unit) MachineError!void {
+fn delPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
@@ -879,7 +879,7 @@ const PervasiveDelDriver = struct {
     removed_count: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *PervasiveDelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *PervasiveDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -971,7 +971,7 @@ fn DelOneKernel(comptime kind: value.HeapKind) type {
             return length - 1;
         }
 
-        pub fn chunk(removed: usize, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(removed: usize, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
             const source = heap.leafElements(kind, operands[0].list);
             const left_end = @min(range.end, removed);
             // Over its source the left part is already in place.
@@ -1008,7 +1008,7 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
             }
         };
 
-        pub fn prepare(evaluator: *Unit, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
             return .{
                 .allocator = evaluator.allocator,
                 .removed = try evaluator.allocator.alloc(bool, length),
@@ -1016,7 +1016,7 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
             };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             switch (output.phase) {
                 .initialize => @memset(output.removed[range.start..range.end], false),
                 .mark => {
@@ -1044,7 +1044,7 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
             }
         }
 
-        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .initialize => {
                     output.phase = .mark;
@@ -1068,7 +1068,7 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
 
 /// Starts the typed `del` for a typed leaf collection and a validated scalar
 /// position or a flat byte or integer index leaf; false for any other shape.
-fn startTypedDel(evaluator: *Unit, collection: *heap.OwnedValue, selection: *heap.OwnedValue) MachineError!bool {
+fn startTypedDel(evaluator: *Fiber, collection: *heap.OwnedValue, selection: *heap.OwnedValue) MachineError!bool {
     const kind = collection.borrow().list.kind();
     const count: usize = @intCast(collection.borrow().list.length());
     inline for (put_leaf_kinds) |candidate| {
@@ -1104,7 +1104,7 @@ const ListDelDriver = struct {
     destination_index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *ListDelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ListDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.materializer == null) {
@@ -1148,7 +1148,7 @@ const DictDelDriver = struct {
     source_index: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *DictDelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DictDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(work)) {
@@ -1192,7 +1192,7 @@ const DictDelDriver = struct {
     }
 };
 
-fn mergePrimitive(evaluator: *Unit) MachineError!void {
+fn mergePrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -1210,7 +1210,7 @@ fn mergePrimitive(evaluator: *Unit) MachineError!void {
     });
 }
 
-pub fn mergeForModule(evaluator: *Unit) MachineError!void {
+pub fn mergeForModule(evaluator: *Fiber) MachineError!void {
     return mergePrimitive(evaluator);
 }
 
@@ -1227,7 +1227,7 @@ const MergeDriver = struct {
     index: usize = 0,
     work: heap.Owned(RebuildPhase) = .init(.between),
 
-    pub fn advance(evaluator: *Unit, self: *MergeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *MergeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -1291,7 +1291,7 @@ const MergeDriver = struct {
     }
 };
 
-fn splitPrimitive(evaluator: *Unit) MachineError!void {
+fn splitPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var separator = try evaluator.popValue();
     defer separator.deinit();
@@ -1359,14 +1359,14 @@ const NarrowSplitKernel = struct {
         }
     };
 
-    pub fn prepare(_: *Unit, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+    pub fn prepare(_: *Fiber, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
         return .{
             .text_len = @intCast(operands[0].list.length()),
             .separator_len = @intCast(operands[1].list.length()),
         };
     }
 
-    pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+    pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
         const text = heap.leafElements(.leaf_char1, operands[0].list);
         const separator = heap.leafElements(.leaf_char1, operands[1].list);
         switch (output.phase) {
@@ -1375,7 +1375,7 @@ const NarrowSplitKernel = struct {
         }
     }
 
-    pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+    pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
         switch (output.phase) {
             .count => {
                 output.part_count += 1;
@@ -1416,7 +1416,7 @@ const NarrowSplitKernel = struct {
     /// Emits whole parts while `units` last: one unit to begin a part, one
     /// per codepoint copied. The part that exhausts the budget is still
     /// emitted whole, so a part is never left half built across steps.
-    fn fill(output: *Output, evaluator: *Unit, text: []const u8, separator: []const u8, units: usize) error{OutOfMemory}!void {
+    fn fill(output: *Output, evaluator: *Fiber, text: []const u8, separator: []const u8, units: usize) error{OutOfMemory}!void {
         var remaining = units;
         while (remaining != 0 and output.emitted != output.part_count) {
             const end = find(text, separator, output.cursor);
@@ -1471,7 +1471,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
             }
         };
 
-        pub fn prepare(evaluator: *Unit, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
             const text_len: usize = @intCast(operands[0].list.length());
             return .{
                 .allocator = evaluator.allocator,
@@ -1481,7 +1481,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
             };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             const text = heap.leafElements(text_kind, operands[0].list);
             switch (output.phase) {
                 .scan => scan(output, text, heap.leafElements(separator_kind, operands[1].list), range),
@@ -1490,7 +1490,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
             }
         }
 
-        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .scan => {
                     if (output.separator_len != 0) output.record(.{
@@ -1567,7 +1567,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
 
         /// Spends `units` on the fill: one to begin each part, then one per
         /// codepoint written; a part is appended to the spine once full.
-        fn fill(output: *Output, evaluator: *Unit, text: anytype, units: usize) error{OutOfMemory}!void {
+        fn fill(output: *Output, evaluator: *Fiber, text: anytype, units: usize) error{OutOfMemory}!void {
             var remaining = units;
             while (true) {
                 if (output.writer) |*writer| {
@@ -1637,7 +1637,7 @@ const AnyCharReader = union(enum) {
     }
 };
 
-fn joinPrimitive(evaluator: *Unit) MachineError!void {
+fn joinPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var separator = try evaluator.popValue();
     defer separator.deinit();
@@ -1669,7 +1669,7 @@ const JoinDriver = struct {
     separator_mode: bool = false,
     source: ?heap.Owned(AnyCharReader) = null,
 
-    pub fn advance(evaluator: *Unit, self: *JoinDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *JoinDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         var block: [kernel_flat.block_size]u32 = undefined;
@@ -1769,7 +1769,7 @@ const JoinDriver = struct {
     }
 };
 
-fn formatPrimitive(evaluator: *Unit) MachineError!void {
+fn formatPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var template = try evaluator.popValue();
     defer template.deinit();
@@ -1869,7 +1869,7 @@ const FormatDriver = struct {
         };
     }
 
-    pub fn advance(evaluator: *Unit, self: *FormatDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FormatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
@@ -2024,7 +2024,7 @@ const FormatDriver = struct {
 };
 
 fn addFormatCount(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     count: *usize,
     amount: usize,
 ) MachineError!void {

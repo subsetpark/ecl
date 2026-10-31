@@ -97,8 +97,8 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, needles: [
 }
 
 /// Run one source and assert the values it left, then drain them: the
-/// session stack persists across units, so every assertion here starts from
-/// an empty stack and leaves one behind.
+/// session stack persists across submissions, so every assertion here starts
+/// from an empty stack and leaves one behind.
 fn expectStack(runtime: *session.Session, source: []const u8, expected: []const u8) !void {
     try expectOk(runtime, source);
     {
@@ -360,8 +360,8 @@ test "concurrency: repeated construct reload cycles grow no faster than registra
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
         defer runtime.deinit();
-        // Both batches run as one unit each and differ by a single source
-        // character, so their fixed per-unit costs are the same and the only
+        // Both batches run as one fiber each and differ by a single source
+        // character, so their fixed per-fiber costs are the same and the only
         // variable is how many construct/reload cycles ran. A Session keeps
         // every published image, so ten times the cycles may cost ten times
         // the retained images, and no more.

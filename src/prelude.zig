@@ -64,7 +64,7 @@ pub fn installSource(
         host.drain();
     }
     // The embedded prelude is a fixed, bounded input read on the installing
-    // thread before any unit exists, so no unit's turn meters it.
+    // thread before any fiber exists, so no fiber's turn meters it.
     var work = poll.unbounded();
     const root_header = while (true) {
         switch (ingestion.advance(&work) catch |err| switch (err) {
@@ -81,7 +81,7 @@ pub fn installSource(
     };
     var arguments = heap.OwnedValue.init(release_domain, try list.fromValuesGeneric(allocator, &.{}));
     defer arguments.deinit();
-    var unit = machine.Unit.init(
+    var fiber = machine.Fiber.init(
         allocator,
         release_domain,
         executionAccess(),
@@ -89,26 +89,26 @@ pub fn installSource(
         &environment,
         &archive,
         // Phrases are recognized only once the core is frozen and the session
-        // runs; the bootstrap unit evaluates the prelude generically.
+        // runs; the bootstrap fiber evaluates the prelude generically.
         .{ .registry = registry, .idiom_mode = .generic_only, .phase = .bootstrap },
         arguments.borrow(),
         cancelled,
     );
-    defer unit.deinit();
-    unit.replaceRootScope(building.rootScope(allocator));
-    machine.run(&unit, root_header) catch |err| switch (err) {
+    defer fiber.deinit();
+    fiber.replaceRootScope(building.rootScope(allocator));
+    machine.run(&fiber, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Ecl => {
             // The prelude is fixed at build time, so a failure here is a
             // source defect; name it rather than leaving a bare panic.
-            if (unit.terminal == .failed) {
-                const rendered = try print.toOwnedString(allocator, unit.terminal.failed);
+            if (fiber.terminal == .failed) {
+                const rendered = try print.toOwnedString(allocator, fiber.terminal.failed);
                 defer allocator.free(rendered);
                 if (!@import("builtin").is_test) std.log.err("embedded prelude failed: {s}", .{rendered});
             }
             return error.InvalidPrelude;
         },
     };
-    if (unit.stack.items.len != 0) return error.InvalidPrelude;
+    if (fiber.stack.items.len != 0) return error.InvalidPrelude;
     try building.finish(machine.recognizeCore);
 }

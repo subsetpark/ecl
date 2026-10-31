@@ -477,7 +477,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     defer runtime.deinit();
 
     // Cold dotted completion reaches the embedded builtin manifest before
-    // any Unit has loaded or published that module.
+    // any Fiber has loaded or published that module.
     var cold_completion = try runtime.completionCandidates("json.pa");
     cold_completion.deinit();
 
@@ -1055,7 +1055,7 @@ fn stdlibSessionAllocationProbe(
                 "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
                 "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
         ),
-        // The pure words once each, then a serving unit with no peer that is
+        // The pure words once each, then a serving fiber with no peer that is
         // cancelled at once. Listener startup and cancellation can elide wait
         // allocations even without a live exchange.
         .http_server => try runOk(

@@ -221,7 +221,7 @@ fn expectInvalidPrelude(source: []const u8) !void {
     try scope.storage.core_build.publish(try intern.internNamespace("still-writable"), definition);
 }
 
-fn stillWritable(_: *@import("../machine.zig").Unit) @import("../machine.zig").MachineError!void {}
+fn stillWritable(_: *@import("../machine.zig").Fiber) @import("../machine.zig").MachineError!void {}
 
 test "bootstrap rejects malformed failing and unbalanced source" {
     try expectInvalidPrelude("(");

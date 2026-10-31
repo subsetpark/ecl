@@ -11,7 +11,7 @@
 //! on host time.
 //!
 //! `@serve` blocks until cancelled, and `requestCancellation` cannot wake a
-//! parked root unit, so each serving program runs on a `Runner` thread while
+//! parked root fiber, so each serving program runs on a `Runner` thread while
 //! the test thread drives peers and finally sends the request whose handler
 //! ends the server: `/stop` cancels the serving task, `/close-listener` closes
 //! the listener. The Session is touched by one thread at a time. Sessions run
@@ -105,7 +105,7 @@ const Runtime = struct {
 };
 
 /// Runs one program on its own thread so the test thread can drive peers
-/// while the serving unit is parked.
+/// while the serving fiber is parked.
 const Runner = struct {
     runtime: *Runtime,
     program: []const u8,
@@ -281,7 +281,7 @@ fn exchange(port: u16, request: []const u8) !Observed {
 }
 
 /// Wait until the scheduler holds exactly `count` timer entries. Progress
-/// depends only on the serving unit registering its deadline, never on host
+/// depends only on the serving fiber registering its deadline, never on host
 /// time; the bound turns a deadline that is never registered into a diagnosed
 /// failure instead of a hang.
 fn awaitTimerEntries(runtime: *Runtime, count: usize) void {
@@ -305,7 +305,7 @@ const ok_row = "\"/ok\" (pop {status 200 headers {} body \"ok\"}) ";
 const not_found_default = "(pop http.response.not-found)";
 const close_listener_request = "GET /close-listener HTTP/1.1\r\nHost: h\r\n\r\n";
 
-/// A serving unit under `srv`: `prelude` runs first (a gate task, say), the
+/// A serving fiber under `srv`: `prelude` runs first (a gate task, say), the
 /// handler is a `case` over the path whose rows end with two that stop the
 /// server, and the root parks in `srv await` leaving the failure kind and
 /// reason on the stack.
@@ -650,7 +650,7 @@ test "http server: configuration and listener arguments are validated before ser
     );
     try runtime.expectDisplay("type type domain domain domain type type type");
     // A connection is a port too, but not a listener: the acceptor's accept
-    // fails 'type and the serving unit fails with it.
+    // fails 'type and the serving fiber fails with it.
     const silent = try Peer.start(port, .connect_then_close);
     try expectSilentClose(silent.join());
     try runtime.run("pop pop pop pop pop pop pop pop l net.accept `c set [] (c {} (1) http.server.@serve) @attempt `err at `kind at");

@@ -357,9 +357,9 @@ test "reflection failures are total" {
 /// through an inline `if` so each definition lands at root level.
 const redefinition_churn = "(dup 0 = (pop) ((1) `churned def 1 - churn) if) `churn def";
 
-/// Every unit retains a fixed amount of source provenance, so the batches are
-/// one unit each and differ only in their count: a small batch fixes the
-/// per-unit cost, and a large one must not retain anything per redefinition.
+/// Every fiber retains a fixed amount of source provenance, so the batches are
+/// one fiber each and differ only in their count: a small batch fixes the
+/// per-fiber cost, and a large one must not retain anything per redefinition.
 fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize) !void {
     try expectOk(runtime, redefinition_churn);
     try expectOk(runtime, "64 churn");

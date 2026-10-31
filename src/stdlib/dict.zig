@@ -15,7 +15,7 @@ const dict_kernels = @import("../kernel_dict_text.zig");
 const dict_storage = @import("../dict.zig");
 
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -117,7 +117,7 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn get(evaluator: *Unit) MachineError!void {
+fn get(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var fallback = try evaluator.popValue();
     defer fallback.deinit();
@@ -144,7 +144,7 @@ const GetDriver = struct {
     fallback: heap.Owned(Value),
     cursor: heap.Owned(dict_storage.FindCursor),
 
-    pub fn advance(evaluator: *Unit, self: *GetDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GetDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -156,15 +156,15 @@ const GetDriver = struct {
     }
 };
 
-fn valuesAtOr(evaluator: *Unit) MachineError!void {
+fn valuesAtOr(evaluator: *Fiber) MachineError!void {
     return lookupKeys(evaluator, true);
 }
 
-fn valuesAt(evaluator: *Unit) MachineError!void {
+fn valuesAt(evaluator: *Fiber) MachineError!void {
     return lookupKeys(evaluator, false);
 }
 
-fn lookupKeys(evaluator: *Unit, comptime with_default: bool) MachineError!void {
+fn lookupKeys(evaluator: *Fiber, comptime with_default: bool) MachineError!void {
     try evaluator.require(if (with_default) 3 else 2);
     var fallback: ?heap.OwnedValue = if (with_default) try evaluator.popValue() else null;
     defer if (fallback) |*owned| owned.deinit();
@@ -189,7 +189,7 @@ const DictLookupDriver = struct {
     cursor: ?heap.Owned(dict_storage.FindCursor) = null,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *DictLookupDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DictLookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.keys.borrow().list.length());
         if (self.output == null) self.output = .init(try .init(evaluator.releases, count));
@@ -217,7 +217,7 @@ const DictLookupDriver = struct {
     }
 };
 
-fn associate(evaluator: *Unit) MachineError!void {
+fn associate(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
@@ -242,7 +242,7 @@ const AssociateDriver = struct {
     associated_value: heap.Owned(Value),
     materializer: heap.Owned(dict_storage.Materializer),
 
-    pub fn advance(evaluator: *Unit, self: *AssociateDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *AssociateDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -252,7 +252,7 @@ const AssociateDriver = struct {
     }
 };
 
-fn fromFlat(evaluator: *Unit) MachineError!void {
+fn fromFlat(evaluator: *Fiber) MachineError!void {
     var entries = try evaluator.popValue();
     defer entries.deinit();
     if (entries.borrow() != .list) return evaluator.typeError("a flat key/value list");
@@ -274,7 +274,7 @@ const FromFlatDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict_storage.Materializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *FromFlatDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FromFlatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.materializer == null) {
             const flat_pairs = self.pairs.borrow();
@@ -295,15 +295,15 @@ const FromFlatDriver = struct {
     }
 };
 
-fn take(evaluator: *Unit) MachineError!void {
+fn take(evaluator: *Fiber) MachineError!void {
     return selectKeys(evaluator, true);
 }
 
-fn del(evaluator: *Unit) MachineError!void {
+fn del(evaluator: *Fiber) MachineError!void {
     return selectKeys(evaluator, false);
 }
 
-fn selectKeys(evaluator: *Unit, keep: bool) MachineError!void {
+fn selectKeys(evaluator: *Fiber, keep: bool) MachineError!void {
     try evaluator.require(2);
     var selector = try evaluator.popList();
     defer selector.deinit();
@@ -337,7 +337,7 @@ const DictSelectDriver = struct {
     selected_count: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *DictSelectDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DictSelectDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -417,7 +417,7 @@ const DictSelectDriver = struct {
     }
 };
 
-fn mergeWith(evaluator: *Unit) MachineError!void {
+fn mergeWith(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var conflict = try evaluator.popQuotation();
     defer conflict.deinit();
@@ -491,7 +491,7 @@ const MergeWithApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *MergeWithApplication,
         window: machine.StackWindow,
         _: *machine.ApplicationContractSite,
@@ -517,7 +517,7 @@ const MergeWithWorkDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: heap.Owned(*MergeWithState),
 
-    pub fn advance(evaluator: *Unit, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *MergeWithWorkDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.state.borrow().word;
         try evaluator.pollKernel();
         const work = evaluator.workBudget();

@@ -260,7 +260,7 @@ test "see retains source locals while execution uses their lowered body" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
 
-    // Define and reflect in separate units: the binding, rather than the
+    // Define and reflect in separate submissions: the binding, rather than the
     // already-retired input turn, owns the shared source slice.
     try expectOk(&runtime, "(n -- n : \"Increment.\") (|x| x 1 +) `inc def");
     try expectOk(&runtime, "`inc see");

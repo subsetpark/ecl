@@ -63,7 +63,7 @@ pub const CommandMode = enum {
 pub const default_worker_count: usize = session_options.default_worker_count;
 
 /// Deterministic HTTPS verification inputs. `ca_file` is borrowed on input;
-/// the Session copies it and owns the copy for the lifetime of every Unit.
+/// the Session copies it and owns the copy for the lifetime of every Fiber.
 /// It is absolute or relative to the process working directory.
 pub const TlsTrustOverride = struct {
     ca_file: []const u8,
@@ -562,30 +562,30 @@ pub const Session = enum(usize) {
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
         defer checkpoint.deinit();
         for (core.stack.items) |item| checkpoint.appendBorrowed(item);
-        var unit = initRootUnit(core);
+        var fiber = initRootFiber(core);
         core.stack = .empty;
-        defer finishRootUnit(core, &unit);
-        machine.initializeSource(&unit, source_name, source) catch {
-            restoreCheckpoint(&unit, checkpoint.values());
+        defer finishRootFiber(core, &fiber);
+        machine.initializeSource(&fiber, source_name, source) catch {
+            restoreCheckpoint(&fiber, checkpoint.values());
             return error.OutOfMemory;
         };
-        core.scheduler.runInitializedRoot(&unit) catch |err| switch (err) {
+        core.scheduler.runInitializedRoot(&fiber) catch |err| switch (err) {
             error.OutOfMemory => {
-                restoreCheckpoint(&unit, checkpoint.values());
+                restoreCheckpoint(&fiber, checkpoint.values());
                 return error.OutOfMemory;
             },
             error.Ecl => {
-                restoreCheckpoint(&unit, checkpoint.values());
-                return .{ .err = unit.takeError().? };
+                restoreCheckpoint(&fiber, checkpoint.values());
+                return .{ .err = fiber.takeError().? };
             },
         };
-        if (unit.takeSourceIncomplete()) |incomplete|
+        if (fiber.takeSourceIncomplete()) |incomplete|
             return .{ .incomplete = incomplete };
         return .ok;
     }
 
-    fn initRootUnit(core: *SessionCore) machine.Unit {
-        var unit = machine.Unit.init(
+    fn initRootFiber(core: *SessionCore) machine.Fiber {
+        var fiber = machine.Fiber.init(
             core.allocator(),
             core.releaseDomain(),
             core.moduleAccess(),
@@ -616,23 +616,23 @@ pub const Session = enum(usize) {
             core.arguments,
             &core.cancelled,
         );
-        unit.scheduler = core.scheduler.worker();
-        unit.task_scope = &core.root_tasks;
-        unit.is_root_unit = true;
-        unit.execution_scope = core.root_scope.?;
-        return unit;
+        fiber.scheduler = core.scheduler.worker();
+        fiber.task_scope = &core.root_tasks;
+        fiber.is_root_fiber = true;
+        fiber.execution_scope = core.root_scope.?;
+        return fiber;
     }
 
-    fn finishRootUnit(core: *SessionCore, unit: *machine.Unit) void {
-        core.stack = unit.takeStack();
-        core.last_max_frames = unit.max_frames;
-        core.last_polls = unit.polls;
+    fn finishRootFiber(core: *SessionCore, fiber: *machine.Fiber) void {
+        core.stack = fiber.takeStack();
+        core.last_max_frames = fiber.max_frames;
+        core.last_polls = fiber.polls;
         if (comptime machine.root_execution_metrics_enabled)
-            core.last_root_execution_metrics = unit.root_execution_metrics;
-        core.requested_exit = unit.exitStatus();
-        core.last_idiom_hits = unit.idiom_hits;
-        core.last_phrase_hits = unit.phrase_hits;
-        unit.deinit();
+            core.last_root_execution_metrics = fiber.root_execution_metrics;
+        core.requested_exit = fiber.exitStatus();
+        core.last_idiom_hits = fiber.idiom_hits;
+        core.last_phrase_hits = fiber.phrase_hits;
+        fiber.deinit();
     }
 
     /// Resolve one already validated module name through the ordinary loader
@@ -667,35 +667,35 @@ pub const Session = enum(usize) {
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
         defer checkpoint.deinit();
         for (core.stack.items) |item| checkpoint.appendBorrowed(item);
-        var unit = initRootUnit(core);
+        var fiber = initRootFiber(core);
         core.stack = .empty;
-        defer finishRootUnit(core, &unit);
-        try machine.initialize(&unit, root.borrow().list, .empty);
+        defer finishRootFiber(core, &fiber);
+        try machine.initialize(&fiber, root.borrow().list, .empty);
         const started = switch (target) {
-            .module => |name| unit.loadModuleOnly(name),
-            .source => |source| unit.loadSourceOnly(source),
+            .module => |name| fiber.loadModuleOnly(name),
+            .source => |source| fiber.loadSourceOnly(source),
         };
         started catch |err| switch (err) {
             error.OutOfMemory => {
-                restoreCheckpoint(&unit, checkpoint.values());
+                restoreCheckpoint(&fiber, checkpoint.values());
                 return error.OutOfMemory;
             },
             error.Ecl => {
-                restoreCheckpoint(&unit, checkpoint.values());
-                return .{ .err = unit.takeError().? };
+                restoreCheckpoint(&fiber, checkpoint.values());
+                return .{ .err = fiber.takeError().? };
             },
         };
-        core.scheduler.runInitializedRoot(&unit) catch |err| switch (err) {
+        core.scheduler.runInitializedRoot(&fiber) catch |err| switch (err) {
             error.OutOfMemory => {
-                restoreCheckpoint(&unit, checkpoint.values());
+                restoreCheckpoint(&fiber, checkpoint.values());
                 return error.OutOfMemory;
             },
             error.Ecl => {
-                restoreCheckpoint(&unit, checkpoint.values());
-                return .{ .err = unit.takeError().? };
+                restoreCheckpoint(&fiber, checkpoint.values());
+                return .{ .err = fiber.takeError().? };
             },
         };
-        restoreCheckpoint(&unit, checkpoint.values());
+        restoreCheckpoint(&fiber, checkpoint.values());
         return .ok;
     }
 
@@ -1052,7 +1052,7 @@ fn sessionTypeExposesAuthority(
             T == heap.ReleaseDomain or
             T == env.Env or
             T == modules.Registry or
-            T == machine.Unit or
+            T == machine.Fiber or
             T == scheduler_api.Scheduler or
             T == console_api.Console))
         return true;
@@ -1154,8 +1154,8 @@ fn materializeCompletion(
     return .fromBacking(backing);
 }
 
-fn restoreCheckpoint(unit: *machine.Unit, checkpoint: []const Value) void {
-    unit.restoreStackBorrowedAssumeCapacity(checkpoint);
+fn restoreCheckpoint(fiber: *machine.Fiber, checkpoint: []const Value) void {
+    fiber.restoreStackBorrowedAssumeCapacity(checkpoint);
 }
 fn argumentsValue(
     allocator: std.mem.Allocator,
@@ -1192,10 +1192,10 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             terminal: completion.Completion = .{},
             first: bool = true,
 
-            pub fn advance(evaluator: *machine.Unit, self: *@This()) machine.MachineError!machine.WorkProgress {
+            pub fn advance(evaluator: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
                 return self.terminal.advance(evaluator, self);
             }
-            pub fn advanceOperation(self: *@This(), evaluator: *machine.Unit) machine.MachineError!completion.Progress {
+            pub fn advanceOperation(self: *@This(), evaluator: *machine.Fiber) machine.MachineError!completion.Progress {
                 if (self.first) {
                     self.first = false;
                     _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 8);
@@ -1232,7 +1232,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             mode: enum { output, empty, failure, chain, forever, exhausted_output, exhausted_empty, exhausted_chain },
             remaining: u8 = 2,
 
-            pub fn advance(evaluator: *machine.Unit, self: *@This()) machine.MachineError!machine.WorkProgress {
+            pub fn advance(evaluator: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
                 if (evaluator.workBudget().exhausted()) return evaluator.fail(.user, "driver ran on an exhausted turn");
                 try evaluator.pollKernel();
                 if (self.remaining != 0) {
@@ -1266,49 +1266,49 @@ test "invocation effects: completion owns immediate deferred nested and failing 
                 };
             }
         };
-        fn immediate(evaluator: *machine.Unit) machine.MachineError!void {
+        fn immediate(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.pushOwned(.{ .int = 11 });
         }
-        fn hostYield(evaluator: *machine.Unit) machine.MachineError!void {
+        fn hostYield(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(YieldingDriver{});
         }
-        fn empty(_: *machine.Unit) machine.MachineError!void {}
-        fn deferred(evaluator: *machine.Unit) machine.MachineError!void {
+        fn empty(_: *machine.Fiber) machine.MachineError!void {}
+        fn deferred(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .output });
         }
-        fn wrong(evaluator: *machine.Unit) machine.MachineError!void {
+        fn wrong(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .empty });
         }
-        fn failure(evaluator: *machine.Unit) machine.MachineError!void {
+        fn failure(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .failure });
         }
-        fn chain(evaluator: *machine.Unit) machine.MachineError!void {
+        fn chain(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .chain });
         }
-        fn forever(evaluator: *machine.Unit) machine.MachineError!void {
+        fn forever(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .forever });
         }
-        fn exhaustedOutput(evaluator: *machine.Unit) machine.MachineError!void {
+        fn exhaustedOutput(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .exhausted_output, .remaining = 0 });
         }
-        fn exhaustedEmpty(evaluator: *machine.Unit) machine.MachineError!void {
+        fn exhaustedEmpty(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .exhausted_empty, .remaining = 0 });
         }
-        fn exhaustedChain(evaluator: *machine.Unit) machine.MachineError!void {
+        fn exhaustedChain(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .exhausted_chain, .remaining = 0 });
         }
-        fn freshTurn(evaluator: *machine.Unit) machine.MachineError!void {
+        fn freshTurn(evaluator: *machine.Fiber) machine.MachineError!void {
             if (evaluator.remainingKernelFuel() < 128) return evaluator.fail(.user, "successor ran without a fresh allowance");
             try evaluator.pushOwned(.{ .int = 1 });
         }
-        fn shortTurn(evaluator: *machine.Unit) machine.MachineError!void {
+        fn shortTurn(evaluator: *machine.Fiber) machine.MachineError!void {
             _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 100);
         }
-        fn nested(evaluator: *machine.Unit) machine.MachineError!void {
+        fn nested(evaluator: *machine.Fiber) machine.MachineError!void {
             var body = try evaluator.popQuotation();
             try evaluator.callOwned(body.take().list);
         }
-        fn reflect(evaluator: *machine.Unit) machine.MachineError!void {
+        fn reflect(evaluator: *machine.Fiber) machine.MachineError!void {
             try evaluator.executeWord(.{ .name = try intern.intern("which") });
         }
     };
@@ -1416,7 +1416,7 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
                 unreachable;
             }
         };
-        pub fn write(self: *@This(), evaluator: *machine.Unit, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
+        pub fn write(self: *@This(), evaluator: *machine.Fiber, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
             if (bytes.len == 0 or bytes.len > evaluator.remainingKernelFuel())
                 return evaluator.fail(.user, "write exceeds remaining allowance");
             self.counts.calls += 1;
@@ -1429,8 +1429,8 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
     var runtime = try Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("write-budget.ecl", "")) == .ok);
-    var unit = Session.initRootUnit(runtime.coreState());
-    defer unit.deinit();
+    var fiber = Session.initRootFiber(runtime.coreState());
+    defer fiber.deinit();
     const Driver = @import("port_transfer.zig").WriteDriver(Probe);
     for ([_]usize{ 5, machine.kernel_poll_quantum }) |length| {
         const items = try std.testing.allocator.alloc(Value, length);
@@ -1439,16 +1439,16 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
         const bytes = try list.fromValuesGeneric(std.testing.allocator, items);
         var probe: Counts = .{};
         var driver = Driver.init(std.testing.allocator, .{ .int = 0 }, bytes, .{ .counts = &probe }, .{ .probe = &probe });
-        defer driver.deinit(unit.releases, std.testing.allocator);
+        defer driver.deinit(fiber.releases, std.testing.allocator);
         const grant = if (length == 5) 8 else length;
-        unit.kernel_budget = poll.testing.budget(grant);
-        try std.testing.expect((try Driver.advance(&unit, &driver)) == .stepped);
+        fiber.kernel_budget = poll.testing.budget(grant);
+        try std.testing.expect((try Driver.advance(&fiber, &driver)) == .stepped);
         try std.testing.expectEqual(grant - length, probe.written);
-        try std.testing.expectEqual(@as(usize, 0), unit.kernel_budget.remaining);
+        try std.testing.expectEqual(@as(usize, 0), fiber.kernel_budget.remaining);
         try std.testing.expectEqual(@as(usize, if (length == 5) 1 else 0), probe.calls);
         while (!probe.finished) {
-            unit.kernel_budget = poll.testing.budget(7);
-            _ = try Driver.advance(&unit, &driver);
+            fiber.kernel_budget = poll.testing.budget(7);
+            _ = try Driver.advance(&fiber, &driver);
         }
         try std.testing.expectEqual(length, probe.written);
     }

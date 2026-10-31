@@ -12,7 +12,7 @@ const kernel_flat = @import("kernel_flat.zig");
 const poll = @import("poll.zig");
 
 const Value = value.Value;
-const Unit = support.Unit;
+const Fiber = support.Fiber;
 const MachineError = support.MachineError;
 
 /// The operation family lives in `kernel_support`, beside the others.
@@ -48,13 +48,13 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             return primitive(evaluator, operation);
         }
     }.run);
 }
 
-fn primitive(evaluator: *Unit, comptime operation: Op) MachineError!void {
+fn primitive(evaluator: *Fiber, comptime operation: Op) MachineError!void {
     return switch (operation) {
         .at => atPrimitive(evaluator),
         .where => wherePrimitive(evaluator),
@@ -77,7 +77,7 @@ fn primitive(evaluator: *Unit, comptime operation: Op) MachineError!void {
     };
 }
 
-fn atPrimitive(evaluator: *Unit) MachineError!void {
+fn atPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var index = try evaluator.popValue();
     defer index.deinit();
@@ -153,7 +153,7 @@ const IndexDriver = struct {
     collection: heap.Owned(Value),
     index: heap.Owned(Value),
     cursor: heap.Owned(IndexCursor),
-    pub fn advance(evaluator: *Unit, self: *IndexDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *IndexDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
             .pending => .stepped,
@@ -172,7 +172,7 @@ const FlatGatherDriver = struct {
     cursor: kernel_flat.FlatCursor,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (try self.cursor.nextRange(evaluator)) |range| {
             const source = self.source.borrow();
@@ -240,7 +240,7 @@ fn byteBlockSum(counts: []const u8) BlockSum {
 /// fault, as the words would report it; nothing else can fault. Counting
 /// charges one unit per mask position, filling one per position and one per
 /// element written, as `where` charges its fill.
-pub fn compress(evaluator: *Unit, source: *heap.OwnedValue, mask: *heap.OwnedValue) MachineError!void {
+pub fn compress(evaluator: *Fiber, source: *heap.OwnedValue, mask: *heap.OwnedValue) MachineError!void {
     const source_kind = source.borrow().list.kind();
     const length: usize = if (mask.borrow().list.kind() == .leaf_u8) @intCast(mask.borrow().list.length()) else 0;
     inline for (leaf_kinds) |candidate| if (candidate == source_kind) {
@@ -287,7 +287,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(_: *Unit, _: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Fiber, _: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
             return .{ .positions = length };
         }
 
@@ -296,7 +296,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             return heap.leafElements(.leaf_u8, mask.list)[0..@intCast(mask.list.length())];
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             const source = operands[0];
             const length: usize = @intCast(source.list.length());
             const all = counts(operands[1]);
@@ -352,7 +352,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             }
         }
 
-        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
             if (output.phase == .fill) return null;
             output.phase = .fill;
             output.index = 0;
@@ -388,7 +388,7 @@ const DictAtDriver = struct {
     collection: heap.Owned(Value),
     key: heap.Owned(Value),
     cursor: heap.Owned(dict.FindCursor),
-    pub fn advance(evaluator: *Unit, self: *DictAtDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DictAtDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -455,7 +455,7 @@ const IndexCursor = struct {
             .node => false,
         };
     }
-    pub fn advance(self: *IndexCursor, evaluator: *Unit, work: *poll.WorkBudget) MachineError!IndexProgress {
+    pub fn advance(self: *IndexCursor, evaluator: *Fiber, work: *poll.WorkBudget) MachineError!IndexProgress {
         while (true) {
             // A frame handing work to a nested cursor is charged by that
             // cursor; spending first would starve it at a one-unit grain.
@@ -549,7 +549,7 @@ const IndexCursor = struct {
     }
 };
 
-fn wherePrimitive(evaluator: *Unit) MachineError!void {
+fn wherePrimitive(evaluator: *Fiber) MachineError!void {
     var counts = try evaluator.popValue();
     defer counts.deinit();
     if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
@@ -596,11 +596,11 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
             }
         };
 
-        pub fn prepare(_: *Unit, _: [1]Value, _: void, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Fiber, _: [1]Value, _: void, _: usize) error{OutOfMemory}!Output {
             return .{};
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             switch (output.phase) {
                 .count => if (typed)
                     try countTyped(output, evaluator, heap.leafElements(kind.?, operands[0].list)[range.start..range.end])
@@ -613,7 +613,7 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
             }
         }
 
-        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
             if (output.phase == .fill) return null;
             // Every index the fill stores is below the count of counts.
             if (output.index != 0 and std.math.cast(i64, output.index - 1) == null)
@@ -689,7 +689,7 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
 
         /// Validates and adds the count at `index`: the exact per-element
         /// check, which reports the first failing position.
-        fn countOne(output: *Output, evaluator: *Unit, item: Value) MachineError!void {
+        fn countOne(output: *Output, evaluator: *Fiber, item: Value) MachineError!void {
             if (item != .int) return evaluator.failAtIndex(.type, "where expected integer counts", output.index);
             if (item.int < 0) return evaluator.failAtIndex(.domain, "where counts must be non-negative", output.index);
             const repetitions = std.math.cast(usize, item.int) orelse
@@ -701,7 +701,7 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
         }
 
         /// Counts one range of a typed list, a block at a time.
-        fn countTyped(output: *Output, evaluator: *Unit, counts: []const Count) MachineError!void {
+        fn countTyped(output: *Output, evaluator: *Fiber, counts: []const Count) MachineError!void {
             var offset: usize = 0;
             while (offset != counts.len) {
                 const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
@@ -794,7 +794,7 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
     };
 }
 
-fn firstWherePrimitive(evaluator: *Unit) MachineError!void {
+fn firstWherePrimitive(evaluator: *Fiber) MachineError!void {
     var counts = try evaluator.popValue();
     defer counts.deinit();
     if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
@@ -827,11 +827,11 @@ fn FirstWhereKernel(comptime kind: ?value.HeapKind) type {
             pub fn retire(_: *Output, _: *heap.ReleaseDomain) void {}
         };
 
-        pub fn prepare(_: *Unit, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Fiber, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
             return .{ .index = length };
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             if (kind) |typed| {
                 for (heap.leafElements(typed, operands[0].list)[range.start..range.end], range.start..) |item, index| {
                     if (typed == .leaf_i64 and item < 0)
@@ -856,7 +856,7 @@ fn FirstWhereKernel(comptime kind: ?value.HeapKind) type {
     };
 }
 
-fn inPrimitive(evaluator: *Unit) MachineError!void {
+fn inPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var collection = try evaluator.popValue();
     defer collection.deinit();
@@ -936,11 +936,11 @@ fn ScalarMembershipKernel(comptime haystack_kind: value.HeapKind) type {
             pub fn retire(_: *Output, _: *heap.ReleaseDomain) void {}
         };
 
-        pub fn prepare(_: *Unit, _: [1]Value, _: Value, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Fiber, _: [1]Value, _: Value, _: usize) error{OutOfMemory}!Output {
             return .{};
         }
 
-        pub fn chunk(needle: Value, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(needle: Value, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
             for (heap.leafElements(haystack_kind, operands[0].list)[range.start..range.end]) |candidate| {
                 if (scalarMatchesElement(haystack_kind, needle, candidate)) {
                     output.found = true;
@@ -1031,7 +1031,7 @@ fn LeafMembershipKernel(
             }
         };
 
-        pub fn prepare(evaluator: *Unit, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
             var writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, length);
             errdefer writer.retirePartial(evaluator.releases);
             const candidates: usize = @intCast(operands[1].list.length());
@@ -1047,7 +1047,7 @@ fn LeafMembershipKernel(
             };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
             const needles = heap.leafElements(needle_kind, operands[0].list);
             switch (output.phase) {
                 .table => for (needles[range.start..range.end]) |needle| output.table.insert(equal.LeafMatchKey.of(needle_kind, needle)),
@@ -1069,7 +1069,7 @@ fn LeafMembershipKernel(
             return output.phase == .scan and output.table.unfound == 0;
         }
 
-        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(_: *Fiber, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .table => {
                     output.phase = .scan;
@@ -1094,7 +1094,7 @@ fn LeafMembershipKernel(
 /// is a stride-zero register value; a flat needle list writes its final i64
 /// mask directly. Generic-spine needles retain the recursive structural cursor
 /// because their result shape is itself recursive.
-fn startTypedMembership(evaluator: *Unit, needle: *heap.OwnedValue, haystack: *heap.OwnedValue) MachineError!bool {
+fn startTypedMembership(evaluator: *Fiber, needle: *heap.OwnedValue, haystack: *heap.OwnedValue) MachineError!bool {
     const haystack_kind = haystack.borrow().list.kind();
     if (haystack_kind == .generic_spine) return false;
     const candidates: usize = @intCast(haystack.borrow().list.length());
@@ -1137,7 +1137,7 @@ const MembershipDriver = struct {
     needle: heap.Owned(Value),
     collection: heap.Owned(Value),
     cursor: heap.Owned(MembershipCursor),
-    pub fn advance(evaluator: *Unit, self: *MembershipDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *MembershipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
             .pending => .stepped,
@@ -1208,7 +1208,7 @@ const MembershipCursor = struct {
             .node => false,
         };
     }
-    pub fn advance(self: *MembershipCursor, evaluator: *Unit, work: *poll.WorkBudget) MachineError!IndexProgress {
+    pub fn advance(self: *MembershipCursor, evaluator: *Fiber, work: *poll.WorkBudget) MachineError!IndexProgress {
         while (true) {
             // A frame handing work to a nested cursor is charged by that
             // cursor; spending first would starve it at a one-unit grain.
@@ -1333,7 +1333,7 @@ const MembershipCursor = struct {
     }
 };
 
-fn razePrimitive(evaluator: *Unit) MachineError!void {
+fn razePrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     try evaluator.runDriver(RazeDriver{ .collection = .init(collection.take()) });
@@ -1395,7 +1395,7 @@ const RazeDriver = struct {
         }
     }
 
-    pub fn advance(evaluator: *Unit, self: *RazeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *RazeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.collection.borrow().list.length());
         const work = evaluator.workBudget();
@@ -1489,7 +1489,7 @@ const RazeDriver = struct {
     }
 };
 
-fn catPrimitive(evaluator: *Unit) MachineError!void {
+fn catPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -1507,14 +1507,14 @@ fn catPrimitive(evaluator: *Unit) MachineError!void {
     try ListCopyDriver.installCat(evaluator, &left, &right, left_count, right_count);
 }
 
-fn firstPrimitive(evaluator: *Unit) MachineError!void {
+fn firstPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     if (collection.borrow().list.length() == 0) return evaluator.fail(.domain, "first requires a non-empty list");
     try evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), 0));
 }
 
-fn restPrimitive(evaluator: *Unit) MachineError!void {
+fn restPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
@@ -1523,11 +1523,11 @@ fn restPrimitive(evaluator: *Unit) MachineError!void {
     try ListCopyDriver.installOne(evaluator, &collection, 1, count, false);
 }
 
-pub fn restForIdiom(evaluator: *Unit) MachineError!void {
+pub fn restForIdiom(evaluator: *Fiber) MachineError!void {
     return restPrimitive(evaluator);
 }
 
-fn takePrimitive(evaluator: *Unit) MachineError!void {
+fn takePrimitive(evaluator: *Fiber) MachineError!void {
     var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
     defer collection.deinit();
@@ -1565,7 +1565,7 @@ fn takePrimitive(evaluator: *Unit) MachineError!void {
 
 /// A rotation is a cyclic copy of the whole list from the element the count
 /// lands on, so it shares `take`'s typed and boxed copy paths.
-fn rotatePrimitive(evaluator: *Unit) MachineError!void {
+fn rotatePrimitive(evaluator: *Fiber) MachineError!void {
     var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
     defer collection.deinit();
@@ -1602,7 +1602,7 @@ const TakeDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *TakeDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1625,7 +1625,7 @@ const TakeDriver = struct {
     }
 };
 
-fn dropPrimitive(evaluator: *Unit) MachineError!void {
+fn dropPrimitive(evaluator: *Fiber) MachineError!void {
     var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
     defer collection.deinit();
@@ -1643,7 +1643,7 @@ fn dropPrimitive(evaluator: *Unit) MachineError!void {
     try ListCopyDriver.installOne(evaluator, &collection, bounds.start, bounds.end, false);
 }
 
-fn reversePrimitive(evaluator: *Unit) MachineError!void {
+fn reversePrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
@@ -1651,7 +1651,7 @@ fn reversePrimitive(evaluator: *Unit) MachineError!void {
     try ListCopyDriver.installOne(evaluator, &collection, 0, count, true);
 }
 
-pub fn reverseForIdiom(evaluator: *Unit) MachineError!void {
+pub fn reverseForIdiom(evaluator: *Fiber) MachineError!void {
     return reversePrimitive(evaluator);
 }
 
@@ -1670,7 +1670,7 @@ const ListCopyDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
 
     fn installOne(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         collection: *heap.OwnedValue,
         start: usize,
         end: usize,
@@ -1693,7 +1693,7 @@ const ListCopyDriver = struct {
         });
     }
 
-    fn installCons(evaluator: *Unit, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+    fn installCons(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
         const count: usize = @intCast(collection.borrow().list.length());
         const values = try evaluator.allocator.alloc(Value, count + 1);
         try evaluator.runDriver(ListCopyDriver{
@@ -1707,7 +1707,7 @@ const ListCopyDriver = struct {
     }
 
     fn installCat(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         left: *heap.OwnedValue,
         right: *heap.OwnedValue,
         left_count: usize,
@@ -1732,7 +1732,7 @@ const ListCopyDriver = struct {
         });
     }
 
-    pub fn advance(evaluator: *Unit, self: *ListCopyDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ListCopyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const values = self.values.borrow();
@@ -1768,7 +1768,7 @@ fn emptyLike(allocator: std.mem.Allocator, collection: Value) MachineError!Value
     };
 }
 
-fn rangePrimitive(evaluator: *Unit) MachineError!void {
+fn rangePrimitive(evaluator: *Fiber) MachineError!void {
     var count_value = try evaluator.popValue();
     defer count_value.deinit();
     if (count_value.borrow() != .int) return evaluator.typeError("a non-negative integer");
@@ -1788,14 +1788,14 @@ const RangeKernel = struct {
     pub const Output = support.LeafResult(.leaf_i64);
     pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
-    pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+    pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
         for (output.range(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
     }
 
     pub const finish = Output.finish;
 };
 
-fn lenPrimitive(evaluator: *Unit) MachineError!void {
+fn lenPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     try evaluator.pushOwned(.{ .int = @intCast(collection.borrow().list.length()) });
@@ -1879,7 +1879,7 @@ const ShapeCursor = struct {
     }
 };
 
-fn shapePrimitive(evaluator: *Unit) MachineError!void {
+fn shapePrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const cursor = try ShapeCursor.init(evaluator.allocator, collection.borrow());
@@ -1895,7 +1895,7 @@ const ShapeDriver = struct {
     cursor: heap.Owned(ShapeCursor),
     dimensions: ?heap.Owned([]usize) = null,
 
-    pub fn advance(evaluator: *Unit, self: *ShapeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ShapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => return .stepped,
@@ -1913,7 +1913,7 @@ const ShapeDriver = struct {
     }
 };
 
-fn flipPrimitive(evaluator: *Unit) MachineError!void {
+fn flipPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list) return evaluator.typeError("a rectangular list");
@@ -1960,7 +1960,7 @@ const FlipDriver = struct {
     inner: ?heap.Owned(list.ValueMaterializer) = null,
     outer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *FlipDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FlipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const rows: usize = @intCast(self.collection.borrow().list.length());
         const columns = switch (self.validation) {
@@ -2040,7 +2040,7 @@ const FlipDriver = struct {
     /// split's current result row and position.
     fn advanceTyped(
         self: *FlipDriver,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         kind: value.HeapKind,
         rows: usize,
         columns: usize,
@@ -2154,7 +2154,7 @@ const FlipDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn reshapePrimitive(evaluator: *Unit) MachineError!void {
+fn reshapePrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var shape_value = try evaluator.popValue();
     defer shape_value.deinit();
@@ -2219,7 +2219,7 @@ fn reshapePrimitive(evaluator: *Unit) MachineError!void {
 /// anything when the column dimension is not a positive integer or the volume
 /// is zero, leaving validation and its errors to the generic driver.
 fn startTypedMatrix(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     source: *heap.OwnedValue,
     rows: usize,
     columns_value: Value,
@@ -2253,11 +2253,11 @@ fn MatrixKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Unit, _: [1]Value, shape: Params, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, _: [1]Value, shape: Params, _: usize) error{OutOfMemory}!Output {
             return .{ .spine = try heap.OwnedValueBuffer.init(evaluator.releases, shape.rows) };
         }
 
-        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             const source = heap.leafElements(kind, operands[0].list);
             var position = range.start;
             while (position != range.end) {
@@ -2473,7 +2473,7 @@ const ReshapeDriver = struct {
     ravel_filling: bool = false,
     builder: ?heap.Owned(ReshapeBuildCursor) = null,
 
-    pub fn advance(evaluator: *Unit, self: *ReshapeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ReshapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.dimension_index != self.dimensions.borrow().len) {
             while (self.dimension_index != self.dimensions.borrow().len and evaluator.workBudget().spend()) : (self.dimension_index += 1) {
@@ -2540,7 +2540,7 @@ const ReshapeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn cutPrimitive(evaluator: *Unit) MachineError!void {
+fn cutPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var starts = try evaluator.popValue();
     defer starts.deinit();
@@ -2584,7 +2584,7 @@ const CutDriver = struct {
             self.start(index + 1);
     }
 
-    pub fn advance(evaluator: *Unit, self: *CutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *CutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.starts.borrow().list.length());
         const length: usize = @intCast(self.collection.borrow().list.length());
@@ -2658,7 +2658,7 @@ const CutDriver = struct {
         return .stepped;
     }
 
-    fn finishPiece(self: *CutDriver, evaluator: *Unit, piece_value: Value) void {
+    fn finishPiece(self: *CutDriver, evaluator: *Fiber, piece_value: Value) void {
         self.pieces.?.borrowMut().appendOwned(piece_value);
         self.piece += 1;
         self.filled = 0;
@@ -2765,7 +2765,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             pub fn mayOverwrite(shape: CopyShape, _: usize) bool {
                 return shape == .contiguous;
             }
-            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
                 return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
@@ -2779,7 +2779,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// list with room for the right becomes the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
                 return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
@@ -2793,7 +2793,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// so the index list may become the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{1} };
 
-            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
                 return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
@@ -2809,7 +2809,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{} };
 
-            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
                 const source: []const Element = if (range.end > 1) heap.leafElements(kind, operands[0].list) else &.{};
                 return copyRange(evaluator, shape, source, null, null, output.range(range.start, range.len()), range);
             }
@@ -2829,7 +2829,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         /// own buffer for the shapes `Single` and `Concat` allow; each shape
         /// writes its range in place, with no staging block.
         fn copyRange(
-            evaluator: *Unit,
+            evaluator: *Fiber,
             shape: CopyShape,
             source: []const Element,
             other: ?[]const Other,
@@ -2888,7 +2888,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
 /// mixed-representation move to the generic path. The caller knows
 /// its copy's shape, so each shape has its own start and names exactly its
 /// operands.
-fn startTypedSlice(evaluator: *Unit, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {
+fn startTypedSlice(evaluator: *Fiber, source_owner: *heap.OwnedValue, shape: CopyShape, length: usize) MachineError!bool {
     if (length == 0) return false;
     const source = source_owner.borrow();
     if (source != .list) return false;
@@ -2903,7 +2903,7 @@ fn startTypedSlice(evaluator: *Unit, source_owner: *heap.OwnedValue, shape: Copy
 }
 
 fn startTypedConcat(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     left_owner: *heap.OwnedValue,
     right_owner: *heap.OwnedValue,
     left_count: usize,
@@ -2933,7 +2933,7 @@ fn startTypedConcat(
 /// list's elements join into one leaf representation (see `CopyKernels`); onto
 /// an empty list, the leaf the atom alone makes. False otherwise, for the
 /// generic path.
-fn startTypedCons(evaluator: *Unit, item: Value, collection: *heap.OwnedValue) MachineError!bool {
+fn startTypedCons(evaluator: *Fiber, item: Value, collection: *heap.OwnedValue) MachineError!bool {
     const atom_kind = list.ListProfile.of(item).heapKind();
     const count: usize = @intCast(collection.borrow().list.length());
     const list_kind = if (count == 0) atom_kind else collection.borrow().list.kind();
@@ -2953,7 +2953,7 @@ fn startTypedCons(evaluator: *Unit, item: Value, collection: *heap.OwnedValue) M
 
 /// `cons`: a typed copy when the atom and the list join into one leaf, and
 /// otherwise the boxed copy every mixed move takes, profiled into its result.
-pub fn consForPrims(evaluator: *Unit) MachineError!void {
+pub fn consForPrims(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var collection = try evaluator.popList();
     defer collection.deinit();
@@ -2964,7 +2964,7 @@ pub fn consForPrims(evaluator: *Unit) MachineError!void {
 }
 
 fn startTypedGather(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     source_owner: *heap.OwnedValue,
     indices_owner: *heap.OwnedValue,
     length: usize,

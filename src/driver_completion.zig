@@ -12,7 +12,7 @@ pub const Progress = union(enum) { stepped, yielded, completed, output: Value };
 pub const Completion = struct {
     phase: union(enum) { running, success: ?Value, failure: machine.MachineError, abandoned, settled } = .running,
 
-    pub fn advance(self: *Completion, evaluator: *machine.Unit, driver: anytype) machine.MachineError!machine.WorkProgress {
+    pub fn advance(self: *Completion, evaluator: *machine.Fiber, driver: anytype) machine.MachineError!machine.WorkProgress {
         if (self.phase == .running) {
             const progress: Progress = driver.advanceOperation(evaluator) catch |err| {
                 self.phase = .{ .failure = err };
@@ -27,8 +27,9 @@ pub const Completion = struct {
                 .output => |value| self.phase = .{ .success = value },
             }
         }
-        // Cleanup draws on the unit's budget but yields rather than stepping
-        // when it is spent: it must finish whether or not the unit is cancelled.
+        // Cleanup draws on the fiber's budget but yields rather than stepping
+        // when it is spent: it must finish whether or not the fiber is
+        // cancelled.
         const work = evaluator.workBudget();
         while (work.spend()) {
             if (!driver.advanceCleanup(evaluator.releases, evaluator.allocator)) continue;

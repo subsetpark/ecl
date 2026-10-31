@@ -13,7 +13,7 @@ const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
 const value = @import("../value.zig");
 
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 const Value = value.Value;
 
@@ -29,7 +29,7 @@ pub const words = [_]env.BuiltinWord{
 const Domain = enum { unix, monotonic };
 
 /// Build `{'<domain> milliseconds}`.
-fn tagged(evaluator: *Unit, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
+fn tagged(evaluator: *Fiber, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
     const key = try intern.intern(@tagName(domain));
     return dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
         .{ .{ .symbol = .{ .name = key } }, .{ .int = milliseconds } },
@@ -49,12 +49,12 @@ fn untag(domain: Domain, item: Value) error{OutOfMemory}!?i64 {
     return payload.int;
 }
 
-fn now(evaluator: *Unit) MachineError!void {
+fn now(evaluator: *Fiber) MachineError!void {
     const instant = evaluator.scheduler.?.monotonicMilliseconds();
     try evaluator.pushOwned(try tagged(evaluator, .monotonic, instant));
 }
 
-fn elapsed(evaluator: *Unit) MachineError!void {
+fn elapsed(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const start = (try untag(.monotonic, item.borrow())) orelse
@@ -65,7 +65,7 @@ fn elapsed(evaluator: *Unit) MachineError!void {
     try evaluator.pushOwned(.{ .int = delta });
 }
 
-fn unix(evaluator: *Unit) MachineError!void {
+fn unix(evaluator: *Fiber) MachineError!void {
     const milliseconds: i64 = switch (evaluator.inherited.runtime().wall_clock) {
         .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
             return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
@@ -76,7 +76,7 @@ fn unix(evaluator: *Unit) MachineError!void {
     try evaluator.pushOwned(try tagged(evaluator, .unix, milliseconds));
 }
 
-fn sleep(evaluator: *Unit) MachineError!void {
+fn sleep(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (item.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
@@ -88,6 +88,6 @@ fn sleep(evaluator: *Unit) MachineError!void {
         return evaluator.fail(.overflow, "clock.sleep deadline lies beyond the clock's range");
     // The deadline itself is captured by the scheduler at registration, after
     // this primitive returns, and a zero duration is already expired there:
-    // the unit parks and is woken on the next scheduler turn without a timer.
+    // the fiber parks and is woken on the next scheduler turn without a timer.
     try evaluator.park(.{ .sleep = duration });
 }

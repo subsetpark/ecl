@@ -1,6 +1,6 @@
-//! Allocation-free turn policy for a unit's kernel budget.
+//! Allocation-free turn policy for a fiber's kernel budget.
 //!
-//! A unit has one budget per turn. This module knows nothing about drivers,
+//! A fiber has one budget per turn. This module knows nothing about drivers,
 //! frames, or cancellation flags: it accepts the budget, one charge or one
 //! driver outcome, and returns what the evaluator must do next. The machine
 //! loop carries the decision out; the tests below enumerate every case.
@@ -10,9 +10,9 @@ const poll = @import("poll.zig");
 
 /// Why a driver ends its turn without finishing.
 pub const Yield = enum {
-    /// The driver installed a park request; the unit parks until it is woken.
+    /// The driver installed a park request; the fiber parks until it is woken.
     park,
-    /// The driver waits on something outside its own work: another unit, a
+    /// The driver waits on something outside its own work: another fiber, a
     /// slot's turn, a contended load, or the host.
     wait,
     /// Work that must finish regardless of cancellation, such as a failure

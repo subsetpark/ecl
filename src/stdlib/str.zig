@@ -6,7 +6,7 @@ const env = @import("../env.zig");
 const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
 
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -18,7 +18,7 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn kind(evaluator: *Unit) MachineError!void {
+fn kind(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const spelling: []const u8 = switch (item.borrow()) {

@@ -11,7 +11,7 @@ const poll = @import("poll.zig");
 const module_snapshot = @import("module_snapshot.zig");
 
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
@@ -163,7 +163,7 @@ const DiscoveryDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *DiscoveryDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -224,7 +224,7 @@ const DiscoveryDriver = struct {
     }
 };
 
-fn discover(evaluator: *Unit) MachineError!void {
+fn discover(evaluator: *Fiber) MachineError!void {
     const access = evaluator.inherited.test_observation orelse
         return evaluator.fail(.domain, "tests is available only in a test Session");
     const keys = try DescriptorKeys.init();
@@ -261,14 +261,14 @@ const InvocationDriver = struct {
         self.descriptor.deinit(releases, allocator);
     }
 
-    fn invalid(evaluator: *Unit) MachineError {
+    fn invalid(evaluator: *Fiber) MachineError {
         return evaluator.fail(
             .domain,
             "@test requires a descriptor produced by tests",
         );
     }
 
-    fn missingOutcome(evaluator: *Unit) error{OutOfMemory}!Value {
+    fn missingOutcome(evaluator: *Fiber) error{OutOfMemory}!Value {
         var failure = machine.EclErr.init(.domain, "test descriptor names no current test");
         defer failure.retire(evaluator.releases);
         const payload = try machine.errorValue(
@@ -287,7 +287,7 @@ const InvocationDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *InvocationDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -307,7 +307,7 @@ const InvocationDriver = struct {
                     defer target.deinit();
                     const home = target.home(evaluator.module_access);
                     const task = evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
-                        .parent_unit = evaluator,
+                        .parent_fiber = evaluator,
                         .site = .{ .module = home },
                         .quotation = target.quotation(),
                         .constructor = .@"test",
@@ -389,7 +389,7 @@ const InvocationDriver = struct {
     }
 };
 
-fn invoke(evaluator: *Unit) MachineError!void {
+fn invoke(evaluator: *Fiber) MachineError!void {
     if (evaluator.inherited.test_execution == null)
         return evaluator.fail(.domain, "@test is available only in a test Session");
     var descriptor = try evaluator.popValue();

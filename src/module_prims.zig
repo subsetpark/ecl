@@ -13,7 +13,7 @@ const reflection = @import("reflection.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 /// Removal is one directory edit; the retired generation's images release
 /// through the superseded directory's own bounded retirement.
@@ -38,19 +38,19 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// The one module constructor. The name is validated before the body runs, so
 /// a name that could never be published costs no evaluation and no effect.
 /// Only a registry change during construction can still refuse publication.
-fn defmWord(evaluator: *Unit) MachineError!void {
+fn defmWord(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     const name = try evaluator.popSymbol();
     try startDefm(evaluator, name, try evaluator.popUnitInput());
 }
 
-fn defmSeedless(evaluator: *Unit) MachineError!void {
+fn defmSeedless(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     const name = try evaluator.popSymbol();
     try startDefm(evaluator, name, try evaluator.popSeedlessUnitInput());
 }
 
-fn startDefm(evaluator: *Unit, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
+fn startDefm(evaluator: *Fiber, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
     var input = popped;
     errdefer input.deinit(evaluator.releases);
     try evaluator.startDriver(DefmDriver{
@@ -64,7 +64,7 @@ const DefmDriver = struct {
     input: heap.Owned(machine.OwnedUnitInput),
     validation: intern.ModuleNameCursor,
 
-    pub fn advance(evaluator: *Unit, self: *DefmDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.validation.advance()) {
@@ -91,7 +91,7 @@ const DefmDriver = struct {
 /// registered more than once, and an alias still reaches its target's
 /// canonical registration. A construction body reports the name it is being
 /// built under.
-fn moduleNameWord(evaluator: *Unit) MachineError!void {
+fn moduleNameWord(evaluator: *Fiber) MachineError!void {
     const home = evaluator.currentHome() orelse return evaluator.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
@@ -102,7 +102,7 @@ fn moduleNameWord(evaluator: *Unit) MachineError!void {
 /// Returns the reader source that authored the active occurrence. Source names
 /// are user-sized host input, so materialization remains scheduled and
 /// cancellable rather than hiding a traversal in the primitive callback.
-fn fileWord(evaluator: *Unit) MachineError!void {
+fn fileWord(evaluator: *Fiber) MachineError!void {
     const source_name = evaluator.activeSourceName() orelse return evaluator.fail(
         .domain,
         "*file* is unavailable for code without source provenance",
@@ -116,7 +116,7 @@ const FileDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     text: heap.Owned(kernel_storage.TextMaterializer),
 
-    pub fn advance(evaluator: *Unit, self: *FileDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FileDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.text.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -127,13 +127,13 @@ const FileDriver = struct {
 
 fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             return importWord(evaluator, visibility);
         }
     }.run;
 }
 
-fn importWord(evaluator: *Unit, visibility: env.Visibility) MachineError!void {
+fn importWord(evaluator: *Fiber, visibility: env.Visibility) MachineError!void {
     try evaluator.require(2);
     const scope = try evaluator.definitionScope();
     if (visibility == .private and (!scope.isModuleRoot() or evaluator.stagingImage(scope) == null))
@@ -151,7 +151,7 @@ fn importWord(evaluator: *Unit, visibility: env.Visibility) MachineError!void {
         visibility,
     ));
 }
-fn aliasModule(evaluator: *Unit) MachineError!void {
+fn aliasModule(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     const target = try evaluator.popSymbol();
     const short = try evaluator.popSymbol();
@@ -193,7 +193,7 @@ const ImportDriver = struct {
     publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
 
     fn init(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         module_id: u32,
         requested: Value,
         prepared: []ImportName,
@@ -209,7 +209,7 @@ const ImportDriver = struct {
         };
     }
 
-    pub fn advance(evaluator: *Unit, self: *ImportDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ImportDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -360,7 +360,7 @@ const AliasDriver = struct {
     short: ?intern.BindingName = null,
     target: ?intern.ModuleName = null,
     cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
-    pub fn advance(evaluator: *Unit, self: *AliasDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *AliasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -408,7 +408,7 @@ const AliasDriver = struct {
     }
 };
 
-fn qualify(evaluator: *Unit) MachineError!void {
+fn qualify(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     const binding = try evaluator.popSymbol();
     const module_name = try evaluator.popSymbol();
@@ -426,7 +426,7 @@ const QualifyDriver = struct {
     binding_name: ?intern.BindingName = null,
     cursor: ?heap.Owned(intern.QualifiedCursor) = null,
 
-    pub fn advance(evaluator: *Unit, self: *QualifyDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *QualifyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -462,11 +462,11 @@ const QualifyDriver = struct {
         return .stepped;
     }
 };
-fn words(evaluator: *Unit) MachineError!void {
+fn words(evaluator: *Fiber) MachineError!void {
     try evaluator.startDriver(WordsDriver.init(evaluator));
 }
 
-fn exportsWord(evaluator: *Unit) MachineError!void {
+fn exportsWord(evaluator: *Fiber) MachineError!void {
     const requested = try evaluator.popSymbol();
     try evaluator.startDriver(ExportsDriver.init(evaluator, requested));
 }
@@ -522,7 +522,7 @@ const ExportsDriver = struct {
         }
     };
 
-    fn init(evaluator: *Unit, requested: u32) ExportsDriver {
+    fn init(evaluator: *Fiber, requested: u32) ExportsDriver {
         const core_requested = intern.isReservedRegistryBytes(intern.get(requested));
         return .{
             .allocator = evaluator.allocator,
@@ -535,17 +535,17 @@ const ExportsDriver = struct {
         };
     }
 
-    fn replace(self: *ExportsDriver, evaluator: *Unit, next: State) void {
+    fn replace(self: *ExportsDriver, evaluator: *Fiber, next: State) void {
         self.state.borrowMut().deinit(evaluator.releases, evaluator.allocator);
         self.state.borrowMut().* = next;
     }
 
-    fn startSort(self: *ExportsDriver, evaluator: *Unit) MachineError!void {
+    fn startSort(self: *ExportsDriver, evaluator: *Fiber) MachineError!void {
         const cursor = try reflection.SortedUniqueNameCursor.init(self.allocator, self.found.borrowMut());
         self.replace(evaluator, .{ .sort = .init(cursor) });
     }
 
-    pub fn advance(evaluator: *Unit, self: *ExportsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ExportsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -622,7 +622,7 @@ const ExportsDriver = struct {
     }
 };
 
-fn stdlibWord(evaluator: *Unit) MachineError!void {
+fn stdlibWord(evaluator: *Fiber) MachineError!void {
     const names = comptime stdlib.sortedNames();
     var values: [names.len]Value = undefined;
     for (names, &values) |name, *slot| slot.* = .{ .symbol = .{ .name = try intern.intern(name) } };
@@ -667,7 +667,7 @@ const WordsDriver = struct {
         }
     };
 
-    fn init(evaluator: *Unit) WordsDriver {
+    fn init(evaluator: *Fiber) WordsDriver {
         return .{
             .allocator = evaluator.allocator,
             .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
@@ -681,7 +681,7 @@ const WordsDriver = struct {
     fn append(self: *WordsDriver, name: u32) error{OutOfMemory}!void {
         try self.found.borrowMut().append(name);
     }
-    pub fn advance(evaluator: *Unit, self: *WordsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -739,10 +739,10 @@ const WordsDriver = struct {
         return .stepped;
     }
 };
-fn writeFailure(evaluator: *Unit) MachineError {
+fn writeFailure(evaluator: *Fiber) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }
-fn load(evaluator: *Unit) MachineError!void {
+fn load(evaluator: *Fiber) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
@@ -752,4 +752,4 @@ fn load(evaluator: *Unit) MachineError!void {
         .encoder = .init(encoder),
     });
 }
-const LoadPathDriver = machine.PathActionDriver(Unit.loadFileOwned);
+const LoadPathDriver = machine.PathActionDriver(Fiber.loadFileOwned);

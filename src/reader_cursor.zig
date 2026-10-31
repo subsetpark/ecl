@@ -464,7 +464,7 @@ const AtomBuilder = struct {
     /// delimiters.
     delimited: bool,
     /// The scope the symbols this atom yields were written in — the reading
-    /// unit's.
+    /// fiber's.
     symbol_linker: ?env.SymbolLinker,
     classifier: ?lexer.ClassifyCursor = null,
     classification: ?lexer.Classification = null,
@@ -569,7 +569,7 @@ const AtomBuilder = struct {
         };
         return switch (try self.inserter.?.advance()) {
             .pending => .pending,
-            // The unit that read this text is the scope the symbol was
+            // The fiber that read this text is the scope the symbol was
             // written in, whichever position it ends up occupying.
             .complete => |id| result: {
                 const link = if (self.symbol_linker) |linker| try linker.link(id) else 0;

@@ -24,7 +24,7 @@ pub const Device = enum { input, output, diagnostics };
 
 /// The three devices and their published endpoint values. Values are made on
 /// first use under the mutex and released once, by the Session, after every
-/// unit has stopped.
+/// fiber has stopped.
 pub const Devices = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,

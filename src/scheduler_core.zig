@@ -38,7 +38,7 @@ const Active = struct {
     cancellation_requested: bool = false,
 };
 
-pub const Unit = union(enum) {
+pub const Fiber = union(enum) {
     constructing,
     ready: Active,
     running: Active,
@@ -46,14 +46,14 @@ pub const Unit = union(enum) {
     closing: Completion,
     done: Completion,
 
-    pub fn phase(self: Unit) UnitPhase {
+    pub fn phase(self: Fiber) FiberPhase {
         return std.meta.activeTag(self);
     }
 };
 
-pub const UnitPhase = std.meta.Tag(Unit);
+pub const FiberPhase = std.meta.Tag(Fiber);
 
-pub const UnitEvent = union(enum) {
+pub const FiberEvent = union(enum) {
     publish,
     dispatch,
     yield,
@@ -64,7 +64,7 @@ pub const UnitEvent = union(enum) {
     scope_quiescent,
 };
 
-pub const UnitCommand = union(enum) {
+pub const FiberCommand = union(enum) {
     none,
     enqueue,
     cancel_before_dispatch,
@@ -74,14 +74,14 @@ pub const UnitCommand = union(enum) {
     publish: Completion,
 };
 
-pub const UnitDecision = struct {
-    next: Unit,
-    command: UnitCommand,
+pub const FiberDecision = struct {
+    next: Fiber,
+    command: FiberCommand,
 };
 
 pub const TransitionError = error{InvalidTransition};
 
-pub fn decideUnit(before: Unit, event: UnitEvent) TransitionError!UnitDecision {
+pub fn decideFiber(before: Fiber, event: FiberEvent) TransitionError!FiberDecision {
     return switch (before) {
         .constructing => switch (event) {
             .publish => .{ .next = .{ .ready = .{} }, .command = .enqueue },

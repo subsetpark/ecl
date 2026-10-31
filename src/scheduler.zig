@@ -27,8 +27,8 @@ fn blockingIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-fn unitDecision(before: core.Unit, event: core.UnitEvent) core.UnitDecision {
-    return core.decideUnit(before, event) catch @panic("invalid scheduler unit transition");
+fn fiberDecision(before: core.Fiber, event: core.FiberEvent) core.FiberDecision {
+    return core.decideFiber(before, event) catch @panic("invalid scheduler fiber transition");
 }
 
 fn waitDecision(before: core.Wait, event: core.WaitEvent) core.WaitDecision {
@@ -203,7 +203,7 @@ const ExecutionPhase = union(enum) {
 };
 
 const TaskExecution = struct {
-    unit: machine.Unit,
+    fiber: machine.Fiber,
     phase: ExecutionPhase = .evaluating,
 };
 
@@ -231,7 +231,7 @@ const ParentMembership = union(enum) {
 };
 
 const RootWaiter = struct {
-    unit: *machine.Unit,
+    fiber: *machine.Fiber,
     mutex: std.Io.Mutex = .init,
     changed: std.Io.Condition = .init,
     ready: bool = false,
@@ -242,7 +242,7 @@ const RootWaiter = struct {
     fn publish(self: *RootWaiter, result: machine.ParkResume) void {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.unit.installParkResume(result);
+        self.fiber.installParkResume(result);
         self.ready = true;
         self.changed.signal(blockingIo());
     }
@@ -1095,12 +1095,12 @@ const WaitSet = struct {
         switch (self.owner) {
             .task => |cell| {
                 std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-                const unit = cell.evaluatingUnit();
+                const fiber = cell.evaluatingFiber();
                 std.debug.assert(cell.waitset == self);
-                const decision = unitDecision(cell.policy, .{ .wake = reason });
+                const decision = fiberDecision(cell.policy, .{ .wake = reason });
                 cell.policy = decision.next;
                 cell.waitset = null;
-                unit.installParkResume(park_result);
+                fiber.installParkResume(park_result);
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 std.debug.assert(decision.command == .enqueue);
                 self.scheduler.enqueueTask(cell);
@@ -1374,7 +1374,7 @@ const TaskCell = struct {
     scheduler: *const WorkerScheduler,
     header_state: TaskHeaderState = .unpublished,
     mutex: std.Io.Mutex = .init,
-    policy: core.Unit = .constructing,
+    policy: core.Fiber = .constructing,
     cancelled: std.atomic.Value(bool) = .init(false),
     publication: TaskPublication = .constructing,
     scope: TaskScope,
@@ -1386,7 +1386,7 @@ const TaskCell = struct {
     waiter_last: ?*WaitRegistration = null,
     waitset: ?*WaitSet = null,
     cancellation: CancellationWork = .none,
-    /// Created with the cell and closed when the unit becomes terminal. The
+    /// Created with the cell and closed when the fiber becomes terminal. The
     /// cell's reference is one of several: every address value holds its
     /// own, which is why an address can outlive the task it names.
     mailbox: *mailbox.Mailbox,
@@ -1421,13 +1421,13 @@ const TaskCell = struct {
         };
     }
 
-    fn evaluatingUnit(self: *TaskCell) *machine.Unit {
+    fn evaluatingFiber(self: *TaskCell) *machine.Fiber {
         const execution = switch (self.publication) {
             .active => |execution| execution,
             .constructing, .published => unreachable,
         };
         std.debug.assert(execution.phase == .evaluating);
-        return &execution.unit;
+        return &execution.fiber;
     }
 
     fn handle(self: *const TaskCell) *TaskHandle {
@@ -1531,13 +1531,13 @@ pub const SpawnSite = union(enum) {
 pub const ScopeTransferError = error{ OutOfMemory, Transfer };
 
 pub const SpawnRequest = struct {
-    parent_unit: *machine.Unit,
+    parent_fiber: *machine.Fiber,
     site: SpawnSite,
     quotation: *ListHandle,
     initial_stack: machine.InitialStack = .empty,
     /// Which constructor made this child, so an underflow against its floor
     /// can name the word the caller actually wrote.
-    constructor: machine.UnitConstructor = .spawn,
+    constructor: machine.FiberConstructor = .spawn,
     /// Moves external resources from the spawning scope into the child's
     /// scope as part of constructing the child, so a resource is never
     /// unowned and never visible to the child before the child's scope owns
@@ -1956,40 +1956,40 @@ pub const WorkerScheduler = enum(usize) {
 
         const execution = try self.allocator().create(TaskExecution);
         errdefer self.allocator().destroy(execution);
-        execution.* = .{ .unit = machine.Unit.init(
+        execution.* = .{ .fiber = machine.Fiber.init(
             self.allocator(),
             self.releaseDomain(),
-            request.parent_unit.module_access,
+            request.parent_fiber.module_access,
             .empty,
-            request.parent_unit.environment,
-            request.parent_unit.archive,
-            request.parent_unit.inherited,
-            request.parent_unit.arguments,
+            request.parent_fiber.environment,
+            request.parent_fiber.archive,
+            request.parent_fiber.inherited,
+            request.parent_fiber.arguments,
             &cell.cancelled,
         ) };
-        const unit = &execution.unit;
-        errdefer unit.deinit();
+        const fiber = &execution.fiber;
+        errdefer fiber.deinit();
         const parent_scope = switch (request.site) {
             .inherited => |site| site.scope,
-            .module => |home| home.scope(request.parent_unit.module_access),
+            .module => |home| home.scope(request.parent_fiber.module_access),
         };
         // A task runs in its spawner's scope, which is always a root: the
         // session, which outlives every task in it, or a module image, which
         // the generation pin below keeps alive. It may not define there.
-        unit.execution_scope = parent_scope;
-        unit.root_defining = false;
-        unit.scheduler = self;
-        unit.task_scope = &cell.scope;
-        unit.is_root_unit = false;
-        unit.constructor = request.constructor;
+        fiber.execution_scope = parent_scope;
+        fiber.root_defining = false;
+        fiber.scheduler = self;
+        fiber.task_scope = &cell.scope;
+        fiber.is_root_fiber = false;
+        fiber.constructor = request.constructor;
         switch (request.site) {
-            .inherited => |site| if (site.home) |generation| try unit.pinGeneration(generation),
+            .inherited => |site| if (site.home) |generation| try fiber.pinGeneration(generation),
             .module => |generation| {
-                try unit.pinGeneration(generation);
-                unit.executeRootAtModule(generation);
+                try fiber.pinGeneration(generation);
+                fiber.executeRootAtModule(generation);
             },
         }
-        try machine.initialize(unit, request.quotation, request.initial_stack);
+        try machine.initialize(fiber, request.quotation, request.initial_stack);
         // Attach the moved resources to the child's scope while the scope is
         // still private: nothing can reach it, so a failure here unwinds by
         // dropping the new memberships and the originals never moved.
@@ -2006,7 +2006,7 @@ pub const WorkerScheduler = enum(usize) {
         std.Io.Threaded.mutexLockUncancelable(&state_.tree_mutex);
         std.Io.Threaded.mutexLockUncancelable(&parent.mutex);
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-        const publish = unitDecision(cell.policy, .publish);
+        const publish = fiberDecision(cell.policy, .publish);
         cell.policy = publish.next;
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         std.debug.assert(publish.command == .enqueue);
@@ -2137,28 +2137,28 @@ pub const WorkerScheduler = enum(usize) {
     /// public word call or importing that module into the session scope.
     pub fn runInitializedRoot(
         self: *const WorkerScheduler,
-        unit: *machine.Unit,
+        fiber: *machine.Fiber,
     ) machine.MachineError!void {
         const state_ = self.privateState();
         var admission = Admission{ .owner = .root };
         while (true) {
-            if (!self.acquireAdmission(&admission, unit.cancelled.load(.acquire))) {
+            if (!self.acquireAdmission(&admission, fiber.cancelled.load(.acquire))) {
                 if (state_.config.isCooperative()) _ = self.runNextCooperative();
                 _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
                 std.Thread.yield() catch @panic("root reclamation pressure yield failed");
                 continue;
             }
-            const result = machine.runSlice(unit);
+            const result = machine.runSlice(fiber);
             self.releaseAdmission(&admission);
             const status = result catch |err| {
-                if (err == error.OutOfMemory) self.drainAbandonedRootWork(unit);
+                if (err == error.OutOfMemory) self.drainAbandonedRootWork(fiber);
                 return err;
             };
             _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
             switch (status) {
                 .completed => {
-                    if (unit.hasRequestedExit())
-                        while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
+                    if (fiber.hasRequestedExit())
+                        while (!fiber.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
                             _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
                         };
                     return;
@@ -2173,29 +2173,29 @@ pub const WorkerScheduler = enum(usize) {
                 },
                 .yielded => if (!state_.config.isCooperative() or !self.runNextCooperative())
                     std.Thread.yield() catch @panic("scheduler root yield failed"),
-                .parked => self.handleRootPark(unit) catch |err| {
-                    self.drainAbandonedRootWork(unit);
+                .parked => self.handleRootPark(fiber) catch |err| {
+                    self.drainAbandonedRootWork(fiber);
                     return err;
                 },
             }
         }
     }
 
-    fn drainAbandonedRootWork(self: *const WorkerScheduler, unit: *machine.Unit) void {
-        while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
+    fn drainAbandonedRootWork(self: *const WorkerScheduler, fiber: *machine.Fiber) void {
+        while (!fiber.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
             _ = self.releaseDomain().tryAdvance(ExecutorArbitration.retirement_quantum);
             std.Thread.yield() catch @panic("root teardown yield failed");
         }
     }
 
-    fn handleRootPark(self: *const WorkerScheduler, unit: *machine.Unit) error{OutOfMemory}!void {
+    fn handleRootPark(self: *const WorkerScheduler, fiber: *machine.Fiber) error{OutOfMemory}!void {
         const state_ = self.privateState();
-        const request = unit.parkRequest().?;
+        const request = fiber.parkRequest().?;
         if (request == .close_scope) {
             const status = request.close_scope;
-            _ = unit.takeParkRequest();
-            self.closeRootScope(unit.task_scope.?);
-            unit.installParkResume(.{ .scope_closed = status });
+            _ = fiber.takeParkRequest();
+            self.closeRootScope(fiber.task_scope.?);
+            fiber.installParkResume(.{ .scope_closed = status });
             return;
         }
         // External readiness can be the first operation that needs a queue
@@ -2206,19 +2206,19 @@ pub const WorkerScheduler = enum(usize) {
         self.ensureStarted() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Io => {
-                _ = unit.takeParkRequest();
-                unit.installParkResume(machine.ParkResume.serviceUnavailable(request));
+                _ = fiber.takeParkRequest();
+                fiber.installParkResume(machine.ParkResume.serviceUnavailable(request));
                 request.deinit(self.releaseDomain());
                 return;
             },
         };
-        var root = RootWaiter{ .unit = unit };
+        var root = RootWaiter{ .fiber = fiber };
         const wait = try WaitSet.create(
             self,
             .{ .root = &root },
             request,
         );
-        _ = unit.takeParkRequest();
+        _ = fiber.takeParkRequest();
         while (true) {
             var work = poll.WorkBudget.init(machine.kernel_poll_quantum);
             if (wait.advanceSetup(&work)) break;
@@ -2269,7 +2269,7 @@ pub const WorkerScheduler = enum(usize) {
 
     pub fn installTasksDriver(
         self: *const WorkerScheduler,
-        evaluator: *machine.Unit,
+        evaluator: *machine.Fiber,
         scope: *TaskScope,
     ) error{OutOfMemory}!void {
         try evaluator.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
@@ -2508,13 +2508,13 @@ pub const WorkerScheduler = enum(usize) {
     }
 
     fn execute(self: *const WorkerScheduler, cell: *TaskCell) void {
-        const unit = cell.evaluatingUnit();
-        const result = machine.runSlice(unit);
+        const fiber = cell.evaluatingFiber();
+        const result = machine.runSlice(fiber);
         self.releaseAdmission(&cell.admission);
         if (result) |status| switch (status) {
             .exhausted, .yielded => {
                 std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-                const decision = unitDecision(cell.policy, .yield);
+                const decision = fiberDecision(cell.policy, .yield);
                 cell.policy = decision.next;
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 std.debug.assert(decision.command == .enqueue);
@@ -2530,23 +2530,23 @@ pub const WorkerScheduler = enum(usize) {
     }
 
     fn parkTask(self: *const WorkerScheduler, cell: *TaskCell) void {
-        const unit = cell.evaluatingUnit();
-        const request = unit.parkRequest().?;
+        const fiber = cell.evaluatingFiber();
+        const request = fiber.parkRequest().?;
         const wait = WaitSet.create(
             self,
             .{ .task = cell },
             request,
         ) catch return self.finish(cell, .oom);
-        _ = unit.takeParkRequest();
+        _ = fiber.takeParkRequest();
 
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-        const parking = unitDecision(cell.policy, .park);
+        const parking = fiberDecision(cell.policy, .park);
         cell.policy = parking.next;
         if (parking.command == .register_wait) cell.waitset = wait;
         std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         if (parking.command == .enqueue) {
-            unit.installParkResume(machine.ParkResume.cancelledFor(request));
+            fiber.installParkResume(machine.ParkResume.cancelledFor(request));
             wait.discard();
             self.enqueueTask(cell);
             return;
@@ -2569,7 +2569,7 @@ pub const WorkerScheduler = enum(usize) {
             .oom => .out_of_memory,
         };
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-        const finishing = unitDecision(cell.policy, .{ .body_finished = completion });
+        const finishing = fiberDecision(cell.policy, .{ .body_finished = completion });
         cell.policy = finishing.next;
         const execution = switch (cell.publication) {
             .active => |execution| execution,
@@ -2652,7 +2652,7 @@ pub const WorkerScheduler = enum(usize) {
             self.enqueueTask(cell);
             return;
         }
-        if (!self.advanceFinishedUnitCleanup(&execution.unit)) {
+        if (!self.advanceFinishedFiberCleanup(&execution.fiber)) {
             self.enqueueTask(cell);
             return;
         }
@@ -2660,12 +2660,12 @@ pub const WorkerScheduler = enum(usize) {
             .ready => |ready| ready,
             else => unreachable,
         };
-        // The mailbox closes with the unit: a sender then sees `'closed`
+        // The mailbox closes with the fiber: a sender then sees `'closed`
         // and a parked receiver wakes, before the result is published.
         cell.mailbox.close(self.releaseDomain());
-        execution.unit.deinit();
+        execution.fiber.deinit();
         std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-        const completed = unitDecision(cell.policy, .scope_quiescent);
+        const completed = fiberDecision(cell.policy, .scope_quiescent);
         cell.policy = completed.next;
         std.debug.assert(completed.command == .publish);
         cell.publication = .{ .published = terminal };
@@ -2674,8 +2674,8 @@ pub const WorkerScheduler = enum(usize) {
         self.advancePublication(cell);
     }
 
-    fn advanceFinishedUnitCleanup(_: *const WorkerScheduler, unit: *machine.Unit) bool {
-        return unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete;
+    fn advanceFinishedFiberCleanup(_: *const WorkerScheduler, fiber: *machine.Fiber) bool {
+        return fiber.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete;
     }
 
     fn advanceTerminalMaterialization(
@@ -2692,7 +2692,7 @@ pub const WorkerScheduler = enum(usize) {
                 return true;
             },
             .language_error => {
-                const failure = execution.unit.takeError().?;
+                const failure = execution.fiber.takeError().?;
                 const wrapped = machine.outcomeDict(self.allocator(), self.releaseDomain(), "err", failure) catch {
                     work.* = .{ .ready = .oom };
                     return true;
@@ -2704,7 +2704,7 @@ pub const WorkerScheduler = enum(usize) {
                 work.* = .{
                     .success_materializing = list.ValueMaterializer.init(
                         self.allocator(),
-                        execution.unit.stack.items,
+                        execution.fiber.stack.items,
                     ),
                 };
             },
@@ -2783,7 +2783,7 @@ pub const WorkerScheduler = enum(usize) {
                 if (!self.acquireAdmission(&cell.admission, cell.cancelled.load(.acquire))) return;
                 const command = dispatch(cell);
                 if (command == .cancel_before_dispatch)
-                    machine.armCancellationBeforeDispatch(cell.evaluatingUnit());
+                    machine.armCancellationBeforeDispatch(cell.evaluatingFiber());
                 self.execute(cell);
             },
             .closing => switch (cell.cancellation) {
@@ -2836,7 +2836,7 @@ const SchedulerState = struct {
     worker: WorkerState,
 };
 
-/// Host-side scheduler lifecycle authority. Executing units receive only the
+/// Host-side scheduler lifecycle authority. Executing fibers receive only the
 /// `WorkerScheduler` facade, which cannot drain or destroy the host domain.
 pub const Scheduler = enum(usize) {
     consumed = 0,
@@ -2900,9 +2900,9 @@ pub const Scheduler = enum(usize) {
 
     pub fn runInitializedRoot(
         self: *Scheduler,
-        unit: *machine.Unit,
+        fiber: *machine.Fiber,
     ) machine.MachineError!void {
-        return self.worker().runInitializedRoot(unit);
+        return self.worker().runInitializedRoot(fiber);
     }
 
     /// A blocking mutation turn is a settlement barrier with stronger semantics
@@ -2919,7 +2919,7 @@ pub const Scheduler = enum(usize) {
 
     /// Move the manual clock forward by whole milliseconds and let the timer
     /// thread reconsider its heap. Only the host root may call this: an
-    /// executing unit cannot reach it, so evaluated code never decides what
+    /// executing fiber cannot reach it, so evaluated code never decides what
     /// time it is. Refused when the scheduler reads the host clock, and with
     /// `Overflow` — the reading unchanged — when the sum would leave the
     /// clock's range.
@@ -2981,8 +2981,8 @@ fn taskCell(task: Value) ?*TaskCell {
 }
 
 /// Descendants visited per hold of the tree mutex. This bounds a critical
-/// section every worker contends for, not the unit's turn: the visits are
-/// charged to the unit's budget and the pass resumes after releasing the lock.
+/// section every worker contends for, not the fiber's turn: the visits are
+/// charged to the fiber's budget and the pass resumes after releasing the lock.
 const task_snapshot_quantum = 256;
 
 const TaskSnapshotPass = struct {
@@ -3017,7 +3017,7 @@ const TasksDriver = struct {
     filled: usize = 0,
 
     pub fn advance(
-        evaluator: *machine.Unit,
+        evaluator: *machine.Fiber,
         self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -3196,7 +3196,7 @@ fn cancelOne(cell: *TaskCell) core.ScopeCommand {
     _ = cell.cancelled.swap(true, .release);
     cell.scheduler.cancelAdmission(cell);
     std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-    const decision = unitDecision(cell.policy, .cancel);
+    const decision = fiberDecision(cell.policy, .cancel);
     cell.policy = decision.next;
     const wait = if (decision.command == .race_cancellation) cell.waitset.? else null;
     if (wait) |pending| pending.retain();
@@ -3272,9 +3272,9 @@ fn workerMain(scheduler: *const WorkerScheduler) void {
     }
 }
 
-fn dispatch(cell: *TaskCell) core.UnitCommand {
+fn dispatch(cell: *TaskCell) core.FiberCommand {
     std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
-    const decision = unitDecision(cell.policy, .dispatch);
+    const decision = fiberDecision(cell.policy, .dispatch);
     cell.policy = decision.next;
     std.Io.Threaded.mutexUnlock(&cell.mutex);
     std.debug.assert(decision.command == .none or decision.command == .cancel_before_dispatch);

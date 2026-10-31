@@ -11,13 +11,13 @@ pub const words = [_]env.BuiltinWord{
 };
 
 const Query = enum { cwd, executable };
-fn cwd(evaluator: *machine.Unit) machine.MachineError!void {
+fn cwd(evaluator: *machine.Fiber) machine.MachineError!void {
     return begin(evaluator, .cwd);
 }
-fn executable(evaluator: *machine.Unit) machine.MachineError!void {
+fn executable(evaluator: *machine.Fiber) machine.MachineError!void {
     return begin(evaluator, .executable);
 }
-fn begin(evaluator: *machine.Unit, query: Query) machine.MachineError!void {
+fn begin(evaluator: *machine.Fiber, query: Query) machine.MachineError!void {
     const owned = try evaluator.allocator.create(Metadata);
     // SAFETY: executablePath fills the buffer before its returned prefix is read.
     owned.* = .{ .query = query, .buffer = undefined };
@@ -33,7 +33,7 @@ const Metadata = struct {
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         if (self.state == .text) self.state.text.retire(releases);
     }
-    pub fn advance(evaluator: *machine.Unit, self: *@This()) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Fiber, self: *@This()) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .query) {
             const runtime = evaluator.inherited.runtime();
