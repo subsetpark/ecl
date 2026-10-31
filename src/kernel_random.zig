@@ -29,34 +29,34 @@ const poll_api = @import("poll.zig");
 const support = @import("kernel_support.zig");
 const flat = @import("kernel_flat.zig");
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 
 /// The golden-ratio odd constant SplitMix64 advances by; reused here as the
 /// per-counter stride so consecutive counters land in unrelated sub-streams.
 const gamma: u64 = 0x9E3779B97F4A7C15;
 
-pub fn intForModule(evaluator: *Machine) MachineError!void {
+pub fn intForModule(evaluator: *Unit) MachineError!void {
     return randInt(evaluator);
 }
 
-pub fn intsForModule(evaluator: *Machine) MachineError!void {
+pub fn intsForModule(evaluator: *Unit) MachineError!void {
     return randInts(evaluator);
 }
 
-pub fn floatForModule(evaluator: *Machine) MachineError!void {
+pub fn floatForModule(evaluator: *Unit) MachineError!void {
     return randFloat(evaluator);
 }
 
-pub fn entropyForModule(evaluator: *Machine) MachineError!void {
+pub fn entropyForModule(evaluator: *Unit) MachineError!void {
     return entropy(evaluator);
 }
 
-pub fn dealForModule(evaluator: *Machine) MachineError!void {
+pub fn dealForModule(evaluator: *Unit) MachineError!void {
     return randDeal(evaluator);
 }
 
-pub fn shuffleForModule(evaluator: *Machine) MachineError!void {
+pub fn shuffleForModule(evaluator: *Unit) MachineError!void {
     return randShuffle(evaluator);
 }
 
@@ -101,18 +101,18 @@ fn floatDraw(state: State, index: u64) f64 {
     return @as(f64, @floatFromInt(stream.next() >> 11)) * 0x1.0p-53;
 }
 
-fn stateValue(evaluator: *Machine, state: State) error{OutOfMemory}!Value {
+fn stateValue(evaluator: *Unit, state: State) error{OutOfMemory}!Value {
     const items = [2]Value{
         .{ .int = @bitCast(state.key) },
         .{ .int = @bitCast(state.counter) },
     };
-    var materializer = list.ValueMaterializer.init(evaluator.allocator(), &items);
-    defer materializer.retire(evaluator.releaseDomain());
+    var materializer = list.ValueMaterializer.init(evaluator.allocator, &items);
+    defer materializer.retire(evaluator.releases);
     var work = poll_api.unbounded();
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 
-fn popState(evaluator: *Machine) MachineError!State {
+fn popState(evaluator: *Unit) MachineError!State {
     var item = try evaluator.popValue();
     defer item.deinit();
     return State.decode(item.borrow()) orelse
@@ -121,7 +121,7 @@ fn popState(evaluator: *Machine) MachineError!State {
 
 /// The two rejections read differently: a non-integer never could have been a
 /// count, while an integer below the minimum is a count that is out of range.
-fn popCount(evaluator: *Machine, minimum: i64, what: []const u8) MachineError!u64 {
+fn popCount(evaluator: *Unit, minimum: i64, what: []const u8) MachineError!u64 {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (item.borrow() != .int) return evaluator.typeError(what);
@@ -133,7 +133,7 @@ fn popCount(evaluator: *Machine, minimum: i64, what: []const u8) MachineError!u6
     return @intCast(item.borrow().int);
 }
 
-fn randInt(evaluator: *Machine) MachineError!void {
+fn randInt(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     const bound = try popCount(evaluator, 1, "a positive bound");
     const state = try popState(evaluator);
@@ -141,14 +141,14 @@ fn randInt(evaluator: *Machine) MachineError!void {
     try evaluator.pushOwned(.{ .int = @bitCast(boundedDraw(state, 0, bound)) });
 }
 
-fn randFloat(evaluator: *Machine) MachineError!void {
+fn randFloat(evaluator: *Unit) MachineError!void {
     try evaluator.require(1);
     const state = try popState(evaluator);
     try evaluator.pushOwned(try stateValue(evaluator, state.advanced(1)));
     try evaluator.pushOwned(.{ .float = floatDraw(state, 0) });
 }
 
-fn randInts(evaluator: *Machine) MachineError!void {
+fn randInts(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     const bound = try popCount(evaluator, 1, "a positive bound");
     const count = try popCount(evaluator, 0, "a nonnegative draw count");
@@ -160,7 +160,7 @@ fn randInts(evaluator: *Machine) MachineError!void {
     // empty result is the value layer's existing choice: it stays the generic
     // empty list this word has always produced.
     if (count == 0) {
-        return evaluator.pushOwned(try list.fromValues(evaluator.allocator(), &.{}));
+        return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &.{}));
     }
     // Every element of a draw vector is an int: the output representation is
     // known before the first draw, so the fill writes the typed buffer directly
@@ -277,7 +277,7 @@ const DealOutput = struct {
 };
 
 /// `( state count pool -- state results )`: `count` distinct ints below `pool`.
-fn randDeal(evaluator: *Machine) MachineError!void {
+fn randDeal(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     const pool = try popCount(evaluator, 0, "a nonnegative pool size");
     const count = try popCount(evaluator, 0, "a nonnegative draw count");
@@ -285,7 +285,7 @@ fn randDeal(evaluator: *Machine) MachineError!void {
     const state = try popState(evaluator);
     try evaluator.pushOwned(try stateValue(evaluator, state.advanced(count)));
     if (count == 0) {
-        return evaluator.pushOwned(try list.fromValues(evaluator.allocator(), &.{}));
+        return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &.{}));
     }
     try support.Kernel(DealKernel).run(evaluator, .{}, .{ .state = state, .pool = pool }, @intCast(count));
 }
@@ -297,10 +297,10 @@ const DealKernel = struct {
     pub const Params = struct { state: State, pool: u64 };
     pub const Output = DealOutput;
 
-    pub fn prepare(evaluator: *Machine, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
-        var dealer = try Dealer.init(evaluator.allocator(), length);
+    pub fn prepare(evaluator: *Unit, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
+        var dealer = try Dealer.init(evaluator.allocator, length);
         errdefer dealer.deinit();
-        return .{ .dealer = dealer, .writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), length) };
+        return .{ .dealer = dealer, .writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, length) };
     }
 
     pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
@@ -318,7 +318,7 @@ const DealKernel = struct {
 /// a gather of the elements through that permutation, so every element kind
 /// is permuted and a typed leaf keeps its representation. The state advances
 /// by the length.
-fn randShuffle(evaluator: *Machine) MachineError!void {
+fn randShuffle(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var values = try evaluator.popValue();
     defer values.deinit();
@@ -364,20 +364,20 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Machine, _: [1]Value, _: State, length: usize) error{OutOfMemory}!Output {
-            var dealer = try Dealer.init(evaluator.allocator(), length);
+        pub fn prepare(evaluator: *Unit, _: [1]Value, _: State, length: usize) error{OutOfMemory}!Output {
+            var dealer = try Dealer.init(evaluator.allocator, length);
             errdefer dealer.deinit();
-            const permutation = try evaluator.allocator().alloc(i64, length);
-            errdefer evaluator.allocator().free(permutation);
+            const permutation = try evaluator.allocator.alloc(i64, length);
+            errdefer evaluator.allocator.free(permutation);
             return .{
-                .allocator = evaluator.allocator(),
+                .allocator = evaluator.allocator,
                 .dealer = dealer,
                 .permutation = permutation,
                 .phase = .deal,
                 .result = if (kind) |leaf|
-                    try heap.LeafWriter(leaf).init(evaluator.allocator(), length)
+                    try heap.LeafWriter(leaf).init(evaluator.allocator, length)
                 else
-                    try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), length),
+                    try heap.OwnedValueBuffer.init(evaluator.releases, length),
             };
         }
 
@@ -420,8 +420,8 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
 }
 
 /// The one impure word reads the process CSPRNG through runtime I/O.
-fn entropy(evaluator: *Machine) MachineError!void {
-    const io = evaluator.unit.inherited.runtime().host_io;
+fn entropy(evaluator: *Unit) MachineError!void {
+    const io = evaluator.inherited.runtime().host_io;
     var bytes: [8]u8 = undefined;
     std.Io.randomSecure(io, &bytes) catch
         return evaluator.fail(.io, "entropy is unavailable");

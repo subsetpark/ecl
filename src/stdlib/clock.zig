@@ -14,7 +14,7 @@ const machine = @import("../machine.zig");
 const scheduler_api = @import("../scheduler.zig");
 const value = @import("../value.zig");
 
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 const Value = value.Value;
 
@@ -30,9 +30,9 @@ pub const words = [_]env.BuiltinWord{
 const Domain = enum { unix, monotonic };
 
 /// Build `{'<domain> milliseconds}`.
-fn tagged(evaluator: *Machine, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
+fn tagged(evaluator: *Unit, domain: Domain, milliseconds: i64) error{OutOfMemory}!Value {
     const key = try intern.intern(@tagName(domain));
-    return dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+    return dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
         .{ .{ .symbol = .{ .name = key } }, .{ .int = milliseconds } },
     });
 }
@@ -50,16 +50,16 @@ fn untag(domain: Domain, item: Value) error{OutOfMemory}!?i64 {
     return payload.int;
 }
 
-fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
-    return @ptrCast(@alignCast(evaluator.unit.scheduler.?));
+fn scheduler(evaluator: *Unit) *const scheduler_api.WorkerScheduler {
+    return @ptrCast(@alignCast(evaluator.scheduler.?));
 }
 
-fn now(evaluator: *Machine) MachineError!void {
+fn now(evaluator: *Unit) MachineError!void {
     const instant = scheduler(evaluator).monotonicMilliseconds();
     try evaluator.pushOwned(try tagged(evaluator, .monotonic, instant));
 }
 
-fn elapsed(evaluator: *Machine) MachineError!void {
+fn elapsed(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const start = (try untag(.monotonic, item.borrow())) orelse
@@ -70,8 +70,8 @@ fn elapsed(evaluator: *Machine) MachineError!void {
     try evaluator.pushOwned(.{ .int = delta });
 }
 
-fn unix(evaluator: *Machine) MachineError!void {
-    const milliseconds: i64 = switch (evaluator.unit.inherited.runtime().wall_clock) {
+fn unix(evaluator: *Unit) MachineError!void {
+    const milliseconds: i64 = switch (evaluator.inherited.runtime().wall_clock) {
         .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
             return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
         .fixed => |timestamp| timestamp,
@@ -81,7 +81,7 @@ fn unix(evaluator: *Machine) MachineError!void {
     try evaluator.pushOwned(try tagged(evaluator, .unix, milliseconds));
 }
 
-fn sleep(evaluator: *Machine) MachineError!void {
+fn sleep(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (item.borrow() != .int) return evaluator.typeError("an integer millisecond duration");

@@ -13,7 +13,7 @@ const kernel_flat = @import("kernel_flat.zig");
 const poll = @import("poll.zig");
 
 const Value = value.Value;
-const Machine = support.Machine;
+const Unit = support.Unit;
 const MachineError = support.MachineError;
 
 /// The text family also includes the hosted `str.format` idiom;
@@ -26,7 +26,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     }
 }
 
-pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
+pub fn formatForIdiom(evaluator: *Unit) MachineError!void {
     return formatPrimitive(evaluator);
 }
 
@@ -43,7 +43,7 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Machine) MachineError!void {
+        fn run(evaluator: *Unit) MachineError!void {
             return switch (operation) {
                 .put => putPrimitive(evaluator),
                 .del => delPrimitive(evaluator),
@@ -56,10 +56,10 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
     }.run);
 }
 
-fn strPrimitive(evaluator: *Machine) MachineError!void {
+fn strPrimitive(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    const renderer = try printer.OwnedStringCursor.init(evaluator.allocator(), item.borrow());
+    const renderer = try printer.OwnedStringCursor.init(evaluator.allocator, item.borrow());
     try evaluator.startDriver(StrDriver{
         .item = .init(item.take()),
         .work = .init(.{ .rendering = renderer }),
@@ -97,7 +97,7 @@ const StrDriver = struct {
     item: heap.Owned(Value),
     work: heap.Owned(StrPhase),
 
-    pub fn advance(evaluator: *Machine, self: *StrDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *StrDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const phase = self.work.borrowMut();
         return switch (phase.*) {
@@ -107,7 +107,7 @@ const StrDriver = struct {
                     renderer.deinit();
                     phase.* = .{ .materializing = .{
                         .bytes = bytes,
-                        .cursor = .init(evaluator.allocator(), bytes),
+                        .cursor = .init(evaluator.allocator, bytes),
                     } };
                     break :transitioned .stepped;
                 },
@@ -122,7 +122,7 @@ const StrDriver = struct {
                 .pending => .stepped,
                 .complete => |result| completed: {
                     materializing.cursor.deinit();
-                    evaluator.allocator().free(materializing.bytes);
+                    evaluator.allocator.free(materializing.bytes);
                     phase.* = .complete;
                     break :completed .{ .output = result };
                 },
@@ -132,46 +132,46 @@ const StrDriver = struct {
     }
 };
 
-fn keysPrimitive(evaluator: *Machine) MachineError!void {
+fn keysPrimitive(evaluator: *Unit) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     const keys = dict.keysOf(dictionary.borrow().dict);
     try evaluator.pushBorrowed(keys);
 }
 
-pub fn keysForModule(evaluator: *Machine) MachineError!void {
+pub fn keysForModule(evaluator: *Unit) MachineError!void {
     return keysPrimitive(evaluator);
 }
 
-fn sizePrimitive(evaluator: *Machine) MachineError!void {
+fn sizePrimitive(evaluator: *Unit) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     try evaluator.pushOwned(.{ .int = @intCast(dictionary.borrow().dict.length()) });
 }
 
-pub fn sizeForModule(evaluator: *Machine) MachineError!void {
+pub fn sizeForModule(evaluator: *Unit) MachineError!void {
     return sizePrimitive(evaluator);
 }
 
-fn valsPrimitive(evaluator: *Machine) MachineError!void {
+fn valsPrimitive(evaluator: *Unit) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     const values = dict.valsOf(dictionary.borrow().dict);
     try evaluator.pushBorrowed(values);
 }
 
-pub fn valsForModule(evaluator: *Machine) MachineError!void {
+pub fn valsForModule(evaluator: *Unit) MachineError!void {
     return valsPrimitive(evaluator);
 }
 
-fn hasPrimitive(evaluator: *Machine) MachineError!void {
+fn hasPrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
     const cursor = dict.FindCursor.initHeader(
-        evaluator.allocator(),
+        evaluator.allocator,
         dictionary.borrow().dict,
         key.borrow(),
     );
@@ -182,7 +182,7 @@ fn hasPrimitive(evaluator: *Machine) MachineError!void {
     });
 }
 
-pub fn hasForModule(evaluator: *Machine) MachineError!void {
+pub fn hasForModule(evaluator: *Unit) MachineError!void {
     return hasPrimitive(evaluator);
 }
 
@@ -197,7 +197,7 @@ const HasDriver = struct {
     key: heap.Owned(Value),
     cursor: heap.Owned(dict.FindCursor),
 
-    pub fn advance(evaluator: *Machine, self: *HasDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -206,15 +206,15 @@ const HasDriver = struct {
     }
 };
 
-pub fn putForModule(evaluator: *Machine) MachineError!void {
+pub fn putForModule(evaluator: *Unit) MachineError!void {
     return putImpl(evaluator, true);
 }
 
-fn putPrimitive(evaluator: *Machine) MachineError!void {
+fn putPrimitive(evaluator: *Unit) MachineError!void {
     return putImpl(evaluator, false);
 }
 
-fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!void {
+fn putImpl(evaluator: *Unit, comptime dictionary_only: bool) MachineError!void {
     try evaluator.require(3);
     var new_value = try evaluator.popValue();
     defer new_value.deinit();
@@ -226,7 +226,7 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
     switch (collection.borrow()) {
         .dict => {
             const finder = dict.FindCursor.initHeader(
-                evaluator.allocator(),
+                evaluator.allocator,
                 collection.borrow().dict,
                 key.borrow(),
             );
@@ -241,8 +241,8 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
             if (key.borrow() == .list) {
                 if (try startTypedVectorPut(evaluator, &collection, &key, &new_value)) return;
                 const count: usize = @intCast(collection.borrow().list.length());
-                const values = try evaluator.allocator().alloc(Value, count);
-                var actions = poll.ChunkStack(PutAction).init(evaluator.allocator());
+                const values = try evaluator.allocator.alloc(Value, count);
+                var actions = poll.ChunkStack(PutAction).init(evaluator.allocator);
                 errdefer actions.deinit();
                 try actions.push(.{ .node = .{
                     .selector = key.borrow(),
@@ -271,7 +271,7 @@ fn putImpl(evaluator: *Machine, comptime dictionary_only: bool) MachineError!voi
                 index,
                 count,
             )) return;
-            const values = try evaluator.allocator().alloc(Value, count);
+            const values = try evaluator.allocator.alloc(Value, count);
             try evaluator.startDriver(ListPutDriver{
                 .collection = .init(collection.take()),
                 .key = .init(key.take()),
@@ -310,7 +310,7 @@ const PervasivePutDriver = struct {
     copy_index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *PervasivePutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *PervasivePutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const output = self.values.borrow();
@@ -379,12 +379,12 @@ const PervasivePutDriver = struct {
         if (!self.actions.borrow().isEmpty()) return .stepped;
 
         if (self.materializer == null)
-            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), output));
+            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator, output));
         if (work.exhausted()) return .stepped;
         return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
             .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer.?.deinit(evaluator.releases, evaluator.allocator);
                 self.materializer = null;
                 break :completed .{ .output = result };
             },
@@ -462,7 +462,7 @@ fn ListPutKernel(comptime kind: value.HeapKind) type {
 /// that changes the leaf class deliberately returns false so the profiling
 /// path can widen its result.
 fn startTypedListPut(
-    evaluator: *Machine,
+    evaluator: *Unit,
     collection: *heap.OwnedValue,
     new_value: Value,
     replace_index: usize,
@@ -531,7 +531,7 @@ fn VectorPutKernel(
             return &output.result;
         }
 
-        pub fn prepare(_: *Machine, operands: [arity]Value, _: Params, _: usize, prepared: support.LeafResult(kind)) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Unit, operands: [arity]Value, _: Params, _: usize, prepared: support.LeafResult(kind)) error{OutOfMemory}!Output {
             return .{
                 .result = prepared,
                 .count = @intCast(operands[0].list.length()),
@@ -589,7 +589,7 @@ fn VectorPutKernel(
 /// result. Anything else, including a mismatched replacement length, returns
 /// false and takes the pervasive path, which owns those errors.
 fn startTypedVectorPut(
-    evaluator: *Machine,
+    evaluator: *Unit,
     collection: *heap.OwnedValue,
     selector: *heap.OwnedValue,
     replacement: *heap.OwnedValue,
@@ -633,7 +633,7 @@ const ListPutDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *ListPutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ListPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.materializer == null) {
@@ -645,13 +645,13 @@ const ListPutDriver = struct {
                 else
                     list.atUnchecked(self.collection.borrow(), self.index);
             if (self.index != values.len) return .stepped;
-            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values));
+            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator, values));
         }
         if (work.exhausted()) return .stepped;
         return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
             .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer.?.deinit(evaluator.releases, evaluator.allocator);
                 self.materializer = null;
                 break :completed .{ .output = result };
             },
@@ -699,16 +699,16 @@ const DictPutDriver = struct {
     pairs: ?heap.Owned([]dict.Pair) = null,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *DictPutDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DictPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(work)) {
             .pending => return .stepped,
             .complete => {
                 self.found_index = self.work.borrowMut().finding.foundIndex();
-                self.work.borrowMut().finish(evaluator.releaseDomain());
+                self.work.borrowMut().finish(evaluator.releases);
                 const old_count: usize = @intCast(self.dictionary.borrow().dict.length());
-                self.pairs = .init(try evaluator.allocator().alloc(
+                self.pairs = .init(try evaluator.allocator.alloc(
                     dict.Pair,
                     old_count + @intFromBool(self.found_index == null),
                 ));
@@ -733,7 +733,7 @@ const DictPutDriver = struct {
                 }
             }
             if (self.index != pairs.len) return .stepped;
-            const materializer: dict.Materializer = try .initBorrowedPairs(evaluator.allocator(), pairs, false);
+            const materializer: dict.Materializer = try .initBorrowedPairs(evaluator.allocator, pairs, false);
             self.work.borrowMut().* = .{ .materializing = materializer };
         }
         if (work.exhausted()) return .stepped;
@@ -741,14 +741,14 @@ const DictPutDriver = struct {
             .pending => .stepped,
             .duplicate_key => unreachable,
             .complete => |result| completed: {
-                self.work.borrowMut().finish(evaluator.releaseDomain());
+                self.work.borrowMut().finish(evaluator.releases);
                 break :completed .{ .output = result };
             },
         };
     }
 };
 
-pub fn fromListsForModule(evaluator: *Machine) MachineError!void {
+pub fn fromListsForModule(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var values = try evaluator.popValue();
     defer values.deinit();
@@ -759,7 +759,7 @@ pub fn fromListsForModule(evaluator: *Machine) MachineError!void {
     if (values.borrow().list.length() != keys.borrow().list.length()) {
         return evaluator.fail(.shape, "dict.from-lists requires equal key and value lengths");
     }
-    const pairs = try evaluator.allocator().alloc(dict.Pair, count);
+    const pairs = try evaluator.allocator.alloc(dict.Pair, count);
     try evaluator.startDriver(FromListsDriver{
         .keys = .init(keys.take()),
         .values = .init(values.take()),
@@ -777,7 +777,7 @@ const FromListsDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict.Materializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *FromListsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *FromListsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.materializer == null) {
@@ -788,13 +788,13 @@ const FromListsDriver = struct {
                 list.atUnchecked(self.values.borrow(), self.index),
             };
             if (self.index != pairs.len or work.exhausted()) return .stepped;
-            self.materializer = .init(try .init(evaluator.allocator(), pairs, true));
+            self.materializer = .init(try .init(evaluator.allocator, pairs, true));
         }
         return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
             .duplicate_key => evaluator.fail(.domain, "dict.from-lists keys must be distinct"),
             .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer.?.deinit(evaluator.releases, evaluator.allocator);
                 self.materializer = null;
                 break :completed .{ .output = result };
             },
@@ -802,7 +802,7 @@ const FromListsDriver = struct {
     }
 };
 
-fn delPrimitive(evaluator: *Machine) MachineError!void {
+fn delPrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
@@ -811,7 +811,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
     switch (collection.borrow()) {
         .dict => {
             const finder = dict.FindCursor.initHeader(
-                evaluator.allocator(),
+                evaluator.allocator,
                 collection.borrow().dict,
                 key.borrow(),
             );
@@ -825,15 +825,15 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
             if (key.borrow() == .list) {
                 if (try startTypedDel(evaluator, &collection, &key)) return;
                 const count: usize = @intCast(collection.borrow().list.length());
-                const removed = try evaluator.allocator().alloc(bool, count);
+                const removed = try evaluator.allocator.alloc(bool, count);
                 var removed_owned_locally = true;
-                errdefer if (removed_owned_locally) evaluator.allocator().free(removed);
+                errdefer if (removed_owned_locally) evaluator.allocator.free(removed);
                 var selector_cursor = try support.PervasiveSelectorCursor.init(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     key.borrow(),
                 );
                 var cursor_owned_locally = true;
-                errdefer if (cursor_owned_locally) selector_cursor.retire(evaluator.releaseDomain());
+                errdefer if (cursor_owned_locally) selector_cursor.retire(evaluator.releases);
                 removed_owned_locally = false;
                 cursor_owned_locally = false;
                 try evaluator.startDriver(PervasiveDelDriver{
@@ -851,7 +851,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
             const count: usize = @intCast(collection.borrow().list.length());
             if (index >= count) return evaluator.fail(.domain, "del index is out of bounds");
             if (try startTypedDel(evaluator, &collection, &key)) return;
-            const values = try evaluator.allocator().alloc(Value, count - 1);
+            const values = try evaluator.allocator.alloc(Value, count - 1);
             try evaluator.startDriver(ListDelDriver{
                 .collection = .init(collection.take()),
                 .key = .init(key.take()),
@@ -879,7 +879,7 @@ const PervasiveDelDriver = struct {
     removed_count: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *PervasiveDelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *PervasiveDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -913,9 +913,9 @@ const PervasiveDelDriver = struct {
                         }
                     },
                     .complete => {
-                        self.selector_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.selector_cursor.?.deinit(evaluator.releases, evaluator.allocator);
                         self.selector_cursor = null;
-                        self.values = .init(try evaluator.allocator().alloc(
+                        self.values = .init(try evaluator.allocator.alloc(
                             Value,
                             self.removed.borrow().len - self.removed_count,
                         ));
@@ -926,7 +926,7 @@ const PervasiveDelDriver = struct {
             .copy => {
                 if (self.index == self.removed.borrow().len) {
                     self.materializer = .init(list.ValueMaterializer.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.values.?.borrow(),
                     ));
                     self.phase = .materialize;
@@ -943,7 +943,7 @@ const PervasiveDelDriver = struct {
             .materialize => return switch (try self.materializer.?.borrowMut().advance(work)) {
                 .pending => .stepped,
                 .complete => |result| completed: {
-                    self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.materializer.?.deinit(evaluator.releases, evaluator.allocator);
                     self.materializer = null;
                     break :completed .{ .output = result };
                 },
@@ -1008,10 +1008,10 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
             }
         };
 
-        pub fn prepare(evaluator: *Machine, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Unit, operands: [2]Value, _: void, length: usize) error{OutOfMemory}!Output {
             return .{
-                .allocator = evaluator.allocator(),
-                .removed = try evaluator.allocator().alloc(bool, length),
+                .allocator = evaluator.allocator,
+                .removed = try evaluator.allocator.alloc(bool, length),
                 .selected = @intCast(operands[1].list.length()),
             };
         }
@@ -1068,7 +1068,7 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
 
 /// Starts the typed `del` for a typed leaf collection and a validated scalar
 /// position or a flat byte or integer index leaf; false for any other shape.
-fn startTypedDel(evaluator: *Machine, collection: *heap.OwnedValue, selection: *heap.OwnedValue) MachineError!bool {
+fn startTypedDel(evaluator: *Unit, collection: *heap.OwnedValue, selection: *heap.OwnedValue) MachineError!bool {
     const kind = collection.borrow().list.kind();
     const count: usize = @intCast(collection.borrow().list.length());
     inline for (put_leaf_kinds) |candidate| {
@@ -1104,7 +1104,7 @@ const ListDelDriver = struct {
     destination_index: usize = 0,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *ListDelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ListDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.materializer == null) {
@@ -1119,7 +1119,7 @@ const ListDelDriver = struct {
             }
             if (self.source_index != count) return .stepped;
             self.materializer = .init(list.ValueMaterializer.init(
-                evaluator.allocator(),
+                evaluator.allocator,
                 self.values.borrow(),
             ));
         }
@@ -1127,7 +1127,7 @@ const ListDelDriver = struct {
         return switch (try self.materializer.?.borrowMut().advance(work)) {
             .pending => .stepped,
             .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer.?.deinit(evaluator.releases, evaluator.allocator);
                 self.materializer = null;
                 break :completed .{ .output = result };
             },
@@ -1148,20 +1148,20 @@ const DictDelDriver = struct {
     source_index: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *DictDelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DictDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(work)) {
             .pending => return .stepped,
             .complete => {
                 self.removed_index = self.work.borrowMut().finding.foundIndex();
-                self.work.borrowMut().finish(evaluator.releaseDomain());
+                self.work.borrowMut().finish(evaluator.releases);
                 if (self.removed_index == null) {
                     heap.retainValue(self.dictionary.borrow());
                     return .{ .output = self.dictionary.borrow() };
                 }
                 const count: usize = @intCast(self.dictionary.borrow().dict.length());
-                self.pairs = .init(try evaluator.allocator().alloc(dict.Pair, count - 1));
+                self.pairs = .init(try evaluator.allocator.alloc(dict.Pair, count - 1));
                 return .stepped;
             },
         };
@@ -1178,21 +1178,21 @@ const DictDelDriver = struct {
                 _ = work.spend();
             }
             if (self.source_index != count or work.exhausted()) return .stepped;
-            const materializer: dict.Materializer = try .init(evaluator.allocator(), self.pairs.?.borrow(), false);
+            const materializer: dict.Materializer = try .init(evaluator.allocator, self.pairs.?.borrow(), false);
             self.work.borrowMut().* = .{ .materializing = materializer };
         }
         return switch (try self.work.borrowMut().materializing.advance(work)) {
             .pending => .stepped,
             .duplicate_key => unreachable,
             .complete => |result| completed: {
-                self.work.borrowMut().finish(evaluator.releaseDomain());
+                self.work.borrowMut().finish(evaluator.releases);
                 break :completed .{ .output = result };
             },
         };
     }
 };
 
-fn mergePrimitive(evaluator: *Machine) MachineError!void {
+fn mergePrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -1201,7 +1201,7 @@ fn mergePrimitive(evaluator: *Machine) MachineError!void {
     if (left.borrow() != .dict or right.borrow() != .dict) return evaluator.typeError("two dicts");
     const left_count: usize = @intCast(left.borrow().dict.length());
     const right_count: usize = @intCast(right.borrow().dict.length());
-    const pairs = try evaluator.allocator().alloc(dict.Pair, left_count + right_count);
+    const pairs = try evaluator.allocator.alloc(dict.Pair, left_count + right_count);
     try evaluator.startDriver(MergeDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
@@ -1210,7 +1210,7 @@ fn mergePrimitive(evaluator: *Machine) MachineError!void {
     });
 }
 
-pub fn mergeForModule(evaluator: *Machine) MachineError!void {
+pub fn mergeForModule(evaluator: *Unit) MachineError!void {
     return mergePrimitive(evaluator);
 }
 
@@ -1227,7 +1227,7 @@ const MergeDriver = struct {
     index: usize = 0,
     work: heap.Owned(RebuildPhase) = .init(.between),
 
-    pub fn advance(evaluator: *Machine, self: *MergeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *MergeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -1248,7 +1248,7 @@ const MergeDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(self.right.borrow().dict.length());
                 if (self.index == count) {
-                    const materializer: dict.Materializer = try .init(evaluator.allocator(), self.pairs.borrow()[0..self.pair_count], false);
+                    const materializer: dict.Materializer = try .init(evaluator.allocator, self.pairs.borrow()[0..self.pair_count], false);
                     self.work.borrowMut().* = .{ .materializing = materializer };
                     self.phase = .materialize;
                     continue;
@@ -1256,7 +1256,7 @@ const MergeDriver = struct {
                 const key = dict.keyAt(self.right.borrow().dict, self.index);
                 if (self.work.borrowMut().* != .finding) self.work.borrowMut().* = .{
                     .finding = dict.FindCursor.initHeader(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.left.borrow().dict,
                         key,
                     ),
@@ -1265,7 +1265,7 @@ const MergeDriver = struct {
                     .pending => _ = work.spend(),
                     .complete => {
                         const found = self.work.borrowMut().finding.foundIndex();
-                        self.work.borrowMut().finish(evaluator.releaseDomain());
+                        self.work.borrowMut().finish(evaluator.releases);
                         const pair = dict.Pair{ key, dict.valueAt(self.right.borrow().dict, self.index) };
                         if (found) |destination| {
                             self.pairs.borrow()[destination][1] = pair[1];
@@ -1282,7 +1282,7 @@ const MergeDriver = struct {
                 .pending => .stepped,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
-                    self.work.borrowMut().finish(evaluator.releaseDomain());
+                    self.work.borrowMut().finish(evaluator.releases);
                     break :completed .{ .output = result };
                 },
             },
@@ -1291,7 +1291,7 @@ const MergeDriver = struct {
     }
 };
 
-fn splitPrimitive(evaluator: *Machine) MachineError!void {
+fn splitPrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var separator = try evaluator.popValue();
     defer separator.deinit();
@@ -1359,7 +1359,7 @@ const NarrowSplitKernel = struct {
         }
     };
 
-    pub fn prepare(_: *Machine, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+    pub fn prepare(_: *Unit, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
         return .{
             .text_len = @intCast(operands[0].list.length()),
             .separator_len = @intCast(operands[1].list.length()),
@@ -1471,13 +1471,13 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
             }
         };
 
-        pub fn prepare(evaluator: *Machine, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Unit, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
             const text_len: usize = @intCast(operands[0].list.length());
             return .{
-                .allocator = evaluator.allocator(),
+                .allocator = evaluator.allocator,
                 .text_len = text_len,
                 .separator_len = @intCast(operands[1].list.length()),
-                .parts = try evaluator.allocator().alloc(Part, text_len + 1),
+                .parts = try evaluator.allocator.alloc(Part, text_len + 1),
             };
         }
 
@@ -1637,7 +1637,7 @@ const AnyCharReader = union(enum) {
     }
 };
 
-fn joinPrimitive(evaluator: *Machine) MachineError!void {
+fn joinPrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var separator = try evaluator.popValue();
     defer separator.deinit();
@@ -1669,7 +1669,7 @@ const JoinDriver = struct {
     separator_mode: bool = false,
     source: ?heap.Owned(AnyCharReader) = null,
 
-    pub fn advance(evaluator: *Machine, self: *JoinDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *JoinDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         var block: [kernel_flat.block_size]u32 = undefined;
@@ -1685,7 +1685,7 @@ const JoinDriver = struct {
                         for (block[0..copied]) |codepoint| self.max_codepoint = @max(self.max_codepoint, codepoint);
                         self.source_index += copied;
                         if (self.source_index != source_count) return .stepped;
-                        self.source.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.source.?.deinit(evaluator.releases, evaluator.allocator);
                         self.source = null;
                         self.source_index = 0;
                         self.separator_profiled = true;
@@ -1694,7 +1694,7 @@ const JoinDriver = struct {
                     }
                     self.separator_profiled = true;
                     self.writer = .init(try kernel_flat.CodepointWriter.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         self.total,
                         self.max_codepoint,
                     ));
@@ -1724,7 +1724,7 @@ const JoinDriver = struct {
                 for (block[0..copied]) |codepoint| self.max_codepoint = @max(self.max_codepoint, codepoint);
                 self.source_index += copied;
                 if (self.source_index != source_count) return .stepped;
-                self.source.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.source.?.deinit(evaluator.releases, evaluator.allocator);
                 self.source = null;
                 self.source_index = 0;
                 self.part_index += 1;
@@ -1745,7 +1745,7 @@ const JoinDriver = struct {
                 }
                 const source_count = self.source.?.borrow().len();
                 if (self.source_index == source_count) {
-                    self.source.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.source.?.deinit(evaluator.releases, evaluator.allocator);
                     self.source = null;
                     self.source_index = 0;
                     if (self.separator_mode or self.part_index + 1 == count) {
@@ -1769,7 +1769,7 @@ const JoinDriver = struct {
     }
 };
 
-fn formatPrimitive(evaluator: *Machine) MachineError!void {
+fn formatPrimitive(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var template = try evaluator.popValue();
     defer template.deinit();
@@ -1779,10 +1779,10 @@ fn formatPrimitive(evaluator: *Machine) MachineError!void {
         return evaluator.typeError("a value list and a template string");
     }
     const value_count: usize = @intCast(values.borrow().list.length());
-    const replacements = try evaluator.allocator().alloc(RenderedReplacement, value_count);
+    const replacements = try evaluator.allocator.alloc(RenderedReplacement, value_count);
     var replacements_owner: ?[]RenderedReplacement = replacements;
-    errdefer if (replacements_owner) |owned| evaluator.allocator().free(owned);
-    const replacement_values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), value_count);
+    errdefer if (replacements_owner) |owned| evaluator.allocator.free(owned);
+    const replacement_values = try heap.OwnedValueBuffer.init(evaluator.releases, value_count);
     replacements_owner = null;
     try evaluator.startDriver(FormatDriver{
         .values = .init(values.take()),
@@ -1869,7 +1869,7 @@ const FormatDriver = struct {
         };
     }
 
-    pub fn advance(evaluator: *Machine, self: *FormatDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *FormatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
@@ -1879,7 +1879,7 @@ const FormatDriver = struct {
                     if (scan.replacement_index != self.replacements.borrow().len) {
                         return evaluator.fail(.contract, "format has more values than placeholders");
                     }
-                    const output = try evaluator.allocator().alloc(u32, scan.output_count);
+                    const output = try evaluator.allocator.alloc(u32, scan.output_count);
                     self.state.borrowMut().* = .{ .fill = .{ .output = .init(output) } };
                     continue;
                 }
@@ -1908,7 +1908,7 @@ const FormatDriver = struct {
                         scan.replacement_index += 1;
                     } else {
                         const renderer = try printer.OwnedStringCursor.init(
-                            evaluator.allocator(),
+                            evaluator.allocator,
                             replacement,
                         );
                         self.state.borrowMut().* = .{ .render = .{
@@ -1928,11 +1928,11 @@ const FormatDriver = struct {
                 .pending => return .stepped,
                 .complete => |bytes| {
                     const scan = render.scan;
-                    render.renderer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    render.renderer.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .{ .materialize_replacement = .{
                         .scan = scan,
                         .rendered = .init(bytes),
-                        .materializer = .init(.init(evaluator.allocator(), bytes)),
+                        .materializer = .init(.init(evaluator.allocator, bytes)),
                     } };
                     return .stepped;
                 },
@@ -1945,10 +1945,10 @@ const FormatDriver = struct {
                 .complete => |text| {
                     var scan = materialize.scan;
                     materialize.materializer.deinit(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                     );
-                    materialize.rendered.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    materialize.rendered.deinit(evaluator.releases, evaluator.allocator);
                     self.replacements.borrow()[scan.replacement_index] = .{ .text = text };
                     self.replacement_values.borrowMut().appendOwned(text);
                     try addFormatCount(evaluator, &scan.output_count, @intCast(text.list.length()));
@@ -1981,7 +1981,7 @@ const FormatDriver = struct {
                 if (fill.cursor == count) {
                     std.debug.assert(fill.output_index == fill.output.borrow().len);
                     const materializer = list.CodepointMaterializer.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         fill.output.borrow(),
                     );
                     self.state.borrowMut().* = .{ .materialize = .{
@@ -2010,7 +2010,7 @@ const FormatDriver = struct {
             .materialize => |*materialize| return switch (try materialize.materializer.borrowMut().advance(work)) {
                 .pending => .stepped,
                 .complete => |result| completed: {
-                    materialize.materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    materialize.materializer.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .{ .complete = .init(materialize.output.take()) };
                     break :completed .{ .output = result };
                 },
@@ -2024,7 +2024,7 @@ const FormatDriver = struct {
 };
 
 fn addFormatCount(
-    evaluator: *Machine,
+    evaluator: *Unit,
     count: *usize,
     amount: usize,
 ) MachineError!void {

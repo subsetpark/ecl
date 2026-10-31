@@ -18,7 +18,7 @@ const list = @import("../list.zig");
 const poll = @import("../poll.zig");
 
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 const max_uncompressed_bytes: usize = 1_073_741_824;
 const max_members: usize = 100_000;
@@ -44,26 +44,26 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn openTgz(evaluator: *Machine) MachineError!void {
+fn openTgz(evaluator: *Unit) MachineError!void {
     var bytes = try evaluator.popValue();
     errdefer bytes.deinit();
     if (bytes.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes.borrow());
+    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes.borrow());
     try evaluator.startDriver(UnpackDriver{
-        .allocator = evaluator.allocator(),
+        .allocator = evaluator.allocator,
         .io = null,
         .authority = .none,
         .bytes_value = .init(bytes.take()),
         .source = .init(.view),
-        .entries = .init(.init(evaluator.allocator())),
+        .entries = .init(.init(evaluator.allocator)),
         .state = .{ .parsing = .{ .encode_bytes = .{ .byte = .init(encoder), .target = .view } } },
     });
 }
-fn nextMember(evaluator: *Machine) MachineError!void {
+fn nextMember(evaluator: *Unit) MachineError!void {
     var archive = try evaluator.popValue();
     errdefer archive.deinit();
     if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
-    const driver = try evaluator.allocator().create(MemberDriver);
+    const driver = try evaluator.allocator.create(MemberDriver);
     // SAFETY: reading initializes path and metadata before the text phase uses them.
     driver.* = .{ .archive = archive.take(), .path = undefined, .metadata = undefined };
     evaluator.adoptDriver(driver);
@@ -79,7 +79,7 @@ const MemberDriver = struct {
         if (self.state == .text) self.state.text.retire(releases);
         releases.releaseValue(self.archive);
     }
-    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *@This()) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .reading) {
             self.metadata = (document.next(self.archive, &self.path) catch |err| switch (err) {
@@ -87,9 +87,9 @@ const MemberDriver = struct {
                 error.Invalid => return evaluator.fail(.domain, "archive member range is invalid"),
             }) orelse {
                 self.state = .complete;
-                return .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{}) };
+                return .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator, evaluator.releases, &.{}) };
             };
-            self.state = .{ .text = .init(evaluator.allocator(), self.path[0..self.metadata.length]) };
+            self.state = .{ .text = .init(evaluator.allocator, self.path[0..self.metadata.length]) };
         }
         return switch (self.state.text.advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -99,8 +99,8 @@ const MemberDriver = struct {
             .complete => |path| result: {
                 self.state.text.deinit();
                 self.state = .complete;
-                defer evaluator.releaseDomain().releaseValue(path);
-                break :result .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+                defer evaluator.releases.releaseValue(path);
+                break :result .{ .output = try @import("../dict.zig").fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
                     .{ .{ .symbol = .{ .name = try intern.intern("path") } }, path },
                     .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern(@tagName(self.metadata.kind)) } } },
                     .{ .{ .symbol = .{ .name = try intern.intern("size") } }, .{ .int = @intCast(self.metadata.size) } },
@@ -109,7 +109,7 @@ const MemberDriver = struct {
         };
     }
 };
-fn readMember(evaluator: *Machine) MachineError!void {
+fn readMember(evaluator: *Unit) MachineError!void {
     var maximum_value = try evaluator.popValue();
     defer maximum_value.deinit();
     if (maximum_value.borrow() != .int) return evaluator.typeError("an integer read maximum");
@@ -118,9 +118,9 @@ fn readMember(evaluator: *Machine) MachineError!void {
     var archive = try evaluator.popValue();
     errdefer archive.deinit();
     if (!document.isArchive(archive.borrow())) return evaluator.typeError("an archive resource");
-    const driver = try evaluator.allocator().create(MemberReadDriver);
-    errdefer evaluator.allocator().destroy(driver);
-    const buffer = try evaluator.allocator().alloc(u8, @intCast(maximum));
+    const driver = try evaluator.allocator.create(MemberReadDriver);
+    errdefer evaluator.allocator.destroy(driver);
+    const buffer = try evaluator.allocator.alloc(u8, @intCast(maximum));
     driver.* = .{ .archive = archive.take(), .buffer = buffer };
     evaluator.adoptDriver(driver);
 }
@@ -135,11 +135,11 @@ const MemberReadDriver = struct {
         allocator.free(self.buffer);
         releases.releaseValue(self.archive);
     }
-    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *@This()) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .reading) {
             const count = document.read(self.archive, self.buffer) catch return evaluator.fail(.io, "archive resource is closed");
-            self.state = .{ .bytes = .init(evaluator.allocator(), self.buffer[0..count]) };
+            self.state = .{ .bytes = .init(evaluator.allocator, self.buffer[0..count]) };
         }
         return switch (try self.state.bytes.advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -152,11 +152,11 @@ const MemberReadDriver = struct {
     }
 };
 
-fn sha256(evaluator: *Machine) MachineError!void {
+fn sha256(evaluator: *Unit) MachineError!void {
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
+    const encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes_value.borrow());
     try evaluator.startDriver(Sha256Driver{
         .bytes_value = .init(bytes_value.take()),
         .encoder = .init(encoder),
@@ -175,7 +175,7 @@ const Sha256Driver = struct {
     rendered: [64]u8 = @splat(0),
     text: ?heap.Owned(storage.ByteStringMaterializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *Sha256Driver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *Sha256Driver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -198,7 +198,7 @@ const Sha256Driver = struct {
         if (self.text == null) {
             self.hasher.final(&self.digest);
             self.rendered = std.fmt.bytesToHex(self.digest, .lower);
-            self.text = .init(.init(evaluator.allocator(), &self.rendered));
+            self.text = .init(.init(evaluator.allocator, &self.rendered));
         }
         return switch (try self.text.?.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -207,7 +207,7 @@ const Sha256Driver = struct {
     }
 };
 
-fn unpackTgz(evaluator: *Machine) MachineError!void {
+fn unpackTgz(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     var destination = try evaluator.popValue();
     errdefer destination.deinit();
@@ -218,12 +218,12 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     var bytes_value = try evaluator.popValue();
     errdefer bytes_value.deinit();
     if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
-    const access = evaluator.unit.inherited.runtime().filesystem_access;
-    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
-    const path_encoder = storage.StringEncoder.init(evaluator.allocator(), destination.borrow());
-    const entries = poll.ChunkList(Entry).init(evaluator.allocator());
+    const access = evaluator.inherited.runtime().filesystem_access;
+    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator, bytes_value.borrow());
+    const path_encoder = storage.StringEncoder.init(evaluator.allocator, destination.borrow());
+    const entries = poll.ChunkList(Entry).init(evaluator.allocator);
     try evaluator.startDriver(UnpackDriver{
-        .allocator = evaluator.allocator(),
+        .allocator = evaluator.allocator,
         .io = fsport.hostIo(access),
         .authority = .{ .filesystem = access },
         .bytes_value = .init(bytes_value.take()),
@@ -533,11 +533,11 @@ const UnpackDriver = struct {
         cleanup: CleanupWork,
     };
 
-    pub fn advance(evaluator: *Machine, self: *UnpackDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *UnpackDriver) MachineError!machine.WorkProgress {
         return self.completion.advance(evaluator, self);
     }
 
-    pub fn advanceOperation(self: *UnpackDriver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    pub fn advanceOperation(self: *UnpackDriver, evaluator: *Unit) MachineError!driver_completion.Progress {
         try evaluator.pollKernel();
         return switch (self.state) {
             .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
@@ -553,7 +553,7 @@ const UnpackDriver = struct {
 
     fn advanceParsing(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         parsing: *Parsing,
     ) MachineError!driver_completion.Progress {
         return switch (parsing.*) {
@@ -570,7 +570,7 @@ const UnpackDriver = struct {
 
     fn advanceActive(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         active: *Active,
     ) MachineError!driver_completion.Progress {
         return switch (active.work) {
@@ -659,7 +659,7 @@ const UnpackDriver = struct {
 
     fn encodeBytes(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         encoding: *@FieldType(Parsing, "encode_bytes"),
     ) MachineError!driver_completion.Progress {
         switch (encoding.byte.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -673,7 +673,7 @@ const UnpackDriver = struct {
             .pending => return .stepped,
             .complete => |bytes| {
                 const target = takeEncodeTarget(&encoding.target);
-                encoding.byte.deinit(evaluator.releaseDomain(), self.allocator);
+                encoding.byte.deinit(evaluator.releases, self.allocator);
                 self.state = .{ .parsing = switch (target) {
                     .view => .{ .allocate_tar = .{ .bytes = .init(bytes), .target = .view } },
                     .unpack => |path| .{ .encode_destination = .{
@@ -688,7 +688,7 @@ const UnpackDriver = struct {
 
     fn encodeDestination(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         encoding: *@FieldType(Parsing, "encode_destination"),
     ) MachineError!driver_completion.Progress {
         switch (encoding.destination.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -709,7 +709,7 @@ const UnpackDriver = struct {
                     .none => unreachable,
                 }
                 const bytes = encoding.bytes.take();
-                encoding.destination.deinit(evaluator.releaseDomain(), self.allocator);
+                encoding.destination.deinit(evaluator.releases, self.allocator);
                 self.state = .{ .parsing = .{ .allocate_tar = .{
                     .bytes = .init(bytes),
                     .target = .{ .unpack = .init(path) },
@@ -723,7 +723,7 @@ const UnpackDriver = struct {
     /// archive byte is decompressed.
     fn authorizeExtraction(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         access: *external.FilesystemAccess,
         path: []const u8,
     ) MachineError!void {
@@ -744,7 +744,7 @@ const UnpackDriver = struct {
 
     fn allocateTar(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         allocation: *EncodedInputs,
     ) MachineError!driver_completion.Progress {
         const compressed = allocation.bytes.borrow().bytes();
@@ -779,7 +779,7 @@ const UnpackDriver = struct {
 
     fn decompress(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         decompression: *@FieldType(Parsing, "decompress"),
     ) MachineError!driver_completion.Progress {
         const output = decompression.tar.borrow();
@@ -798,7 +798,7 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "gzip size does not match its footer");
         const inputs = takeEncodedInputs(&decompression.inputs);
         const tar = decompression.tar.take();
-        decompression.decoder.deinit(evaluator.releaseDomain(), self.allocator);
+        decompression.decoder.deinit(evaluator.releases, self.allocator);
         self.state = .{ .parsing = .{ .verify = .{
             .inputs = inputs,
             .tar = .init(tar),
@@ -808,7 +808,7 @@ const UnpackDriver = struct {
 
     fn verifyGzip(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         verification: *@FieldType(Parsing, "verify"),
     ) MachineError!driver_completion.Progress {
         const output = verification.tar.borrow();
@@ -848,7 +848,7 @@ const UnpackDriver = struct {
 
     fn initializeSlots(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         initialization: *@FieldType(Parsing, "initialize_slots"),
     ) MachineError!driver_completion.Progress {
         const slots = initialization.slots.borrow();
@@ -871,8 +871,8 @@ const UnpackDriver = struct {
         return .stepped;
     }
 
-    fn publishView(self: *UnpackDriver, evaluator: *Machine, archive: *Archive) MachineError!driver_completion.Progress {
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing")));
+    fn publishView(self: *UnpackDriver, evaluator: *Unit, archive: *Archive) MachineError!driver_completion.Progress {
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing")));
         const result = document.adopt(scope, archive.tar.borrow(), self.entries.borrow()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return evaluator.fail(.cancelled, "archive scope is closing"),
@@ -888,7 +888,7 @@ const UnpackDriver = struct {
 
     fn readTarHeader(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         archive: *Archive,
         scanning: *Scanning,
     ) MachineError!driver_completion.Progress {
@@ -937,7 +937,7 @@ const UnpackDriver = struct {
         if (typeflag == 'L') {
             if (header_size == 0 or header_size > max_path_bytes + 1)
                 return self.failDomain(evaluator, "GNU long name exceeds the path limit");
-            if (context.pending_path) |*old| old.deinit(evaluator.releaseDomain(), self.allocator);
+            if (context.pending_path) |*old| old.deinit(evaluator.releases, self.allocator);
             const raw = tar[data_offset..header_data_end];
             const trimmed = std.mem.trimEnd(u8, raw, "\x00");
             context.pending_path = .init(try self.allocator.dupe(u8, trimmed));
@@ -988,7 +988,7 @@ const UnpackDriver = struct {
 
     fn parsePaxRecord(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         archive: *Archive,
         scanning: *Scanning,
         pax: *Pax,
@@ -1023,7 +1023,7 @@ const UnpackDriver = struct {
 
     fn scanPaxRecord(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         archive: *Archive,
         scanning: *Scanning,
         scan: *@FieldType(ScanWork, "scan_pax"),
@@ -1042,7 +1042,7 @@ const UnpackDriver = struct {
         if (std.mem.eql(u8, key, "path")) {
             if (field.len == 0 or field.len > max_path_bytes)
                 return self.failDomain(evaluator, "PAX path exceeds the path limit");
-            if (scanning.context.pending_path) |*old| old.deinit(evaluator.releaseDomain(), self.allocator);
+            if (scanning.context.pending_path) |*old| old.deinit(evaluator.releases, self.allocator);
             scanning.context.pending_path = .init(try self.allocator.dupe(u8, field));
         } else if (std.mem.eql(u8, key, "size")) {
             if (field.len == 0 or field.len > 20)
@@ -1080,7 +1080,7 @@ const UnpackDriver = struct {
 
     fn insertMember(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         archive: *Archive,
         scanning: *Scanning,
         insertion: *@FieldType(ScanWork, "insert_member"),
@@ -1109,7 +1109,7 @@ const UnpackDriver = struct {
 
     fn trailingZeroes(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         archive: *Archive,
         scanning: *Scanning,
     ) MachineError!driver_completion.Progress {
@@ -1137,7 +1137,7 @@ const UnpackDriver = struct {
 
     fn materializePaths(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         scanning: *Scanning,
         paths: *@FieldType(ScanWork, "materialize_paths"),
     ) MachineError!driver_completion.Progress {
@@ -1176,7 +1176,7 @@ const UnpackDriver = struct {
     }
 
     fn materializeResult(
-        evaluator: *Machine,
+        evaluator: *Unit,
         active: *Active,
         materialization: *@FieldType(ScanWork, "materialize_result"),
     ) MachineError!driver_completion.Progress {
@@ -1200,12 +1200,12 @@ const UnpackDriver = struct {
 
     fn releaseResultInputs(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         active: *Active,
         release: *@FieldType(ScanWork, "release_result_inputs"),
     ) MachineError!driver_completion.Progress {
         if (release.release.index != release.release.built) {
-            evaluator.releaseDomain().releaseValue(
+            evaluator.releases.releaseValue(
                 release.release.values[release.release.index],
             );
             release.release.index += 1;
@@ -1239,7 +1239,7 @@ const UnpackDriver = struct {
 
     fn advancePublication(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         archive: *Archive,
         publication: *Publication,
     ) MachineError!driver_completion.Progress {
@@ -1254,7 +1254,7 @@ const UnpackDriver = struct {
                     reason.message(),
                 ),
                 .complete => |resolved| {
-                    resolving.resolver.retire(evaluator.releaseDomain());
+                    resolving.resolver.retire(evaluator.releases);
                     const result = resolving.result;
                     switch (resolved) {
                         .entry => self.destination = resolved,
@@ -1294,7 +1294,7 @@ const UnpackDriver = struct {
                 target.parent.dir.createDir(io, staged.path.borrow(), .default_dir) catch |err| switch (err) {
                     error.PathAlreadyExists => {
                         const result = staged.result;
-                        staged.path.deinit(evaluator.releaseDomain(), self.allocator);
+                        staged.path.deinit(evaluator.releases, self.allocator);
                         publication.* = .{ .stage_path = result };
                         return .yielded;
                     },
@@ -1381,7 +1381,7 @@ const UnpackDriver = struct {
         return .yielded;
     }
 
-    fn failDomain(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
+    fn failDomain(self: *UnpackDriver, evaluator: *Unit, message: []const u8) MachineError {
         _ = self;
         return evaluator.fail(.domain, message);
     }
@@ -1390,7 +1390,7 @@ const UnpackDriver = struct {
     /// words attach: the operation, root, path, and portable reason.
     fn failReason(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         kind: machine.ErrorKind,
         reason: fsport.Reason,
         message: []const u8,
@@ -1407,13 +1407,13 @@ const UnpackDriver = struct {
         return failure;
     }
 
-    fn failIo(self: *UnpackDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
+    fn failIo(self: *UnpackDriver, evaluator: *Unit, message: []const u8, err: anyerror) MachineError {
         return self.failReason(evaluator, .io, fsport.reasonForError(err), message);
     }
 
     fn failDestinationExists(
         self: *UnpackDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         message: []const u8,
     ) MachineError {
         const failure = self.failReason(evaluator, .io, .already_exists, message);

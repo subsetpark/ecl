@@ -31,7 +31,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "result", .effect = "exchange -- value", .doc = "Wait and claim a result once; a later claim raises `contract.", .primitive = result },
 };
 
-fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {
+fn endpoint(evaluator: *machine.Unit) machine.MachineError!void {
     var selector = try evaluator.popValue();
     defer selector.deinit();
     var source = try evaluator.popValue();
@@ -48,7 +48,7 @@ fn endpoint(evaluator: *machine.Machine) machine.MachineError!void {
 /// The byte-stream primitives are published as `fd.core`; `port` keeps the
 /// resource and exchange words. They live here because they share the
 /// endpoint and transfer machinery with the message words.
-pub fn read(evaluator: *machine.Machine) machine.MachineError!void {
+pub fn read(evaluator: *machine.Unit) machine.MachineError!void {
     var maximum = try evaluator.popValue();
     defer maximum.deinit();
     if (maximum.borrow() != .int) return evaluator.typeError("a positive byte count");
@@ -58,10 +58,10 @@ pub fn read(evaluator: *machine.Machine) machine.MachineError!void {
     const backend = ReadBackend.fromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
     backend.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending reader");
     errdefer backend.endRead();
-    const buffer = try evaluator.allocator().alloc(u8, @min(@as(usize, @intCast(maximum.borrow().int)), backend.readCapacity()));
-    errdefer evaluator.allocator().free(buffer);
-    const driver = try evaluator.allocator().create(ReadDriver);
-    driver.* = .{ .allocator = evaluator.allocator(), .port = item.take(), .backend = backend, .buffer = buffer };
+    const buffer = try evaluator.allocator.alloc(u8, @min(@as(usize, @intCast(maximum.borrow().int)), backend.readCapacity()));
+    errdefer evaluator.allocator.free(buffer);
+    const driver = try evaluator.allocator.create(ReadDriver);
+    driver.* = .{ .allocator = evaluator.allocator, .port = item.take(), .backend = backend, .buffer = buffer };
     evaluator.adoptDriver(driver);
 }
 
@@ -69,14 +69,14 @@ pub fn read(evaluator: *machine.Machine) machine.MachineError!void {
 /// chunk at a time into the endpoint's read-ahead; what follows the newline
 /// stays there for the next read. At EOF the rest of the stream is the line,
 /// so `[]` means EOF and only EOF.
-pub fn readLine(evaluator: *machine.Machine) machine.MachineError!void {
+pub fn readLine(evaluator: *machine.Unit) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
     const backend = ReadBackend.fromValue(item.borrow()) orelse return evaluator.typeError("a readable byte endpoint");
     backend.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending reader");
     errdefer backend.endRead();
-    const driver = try evaluator.allocator().create(LineReadDriver);
-    driver.* = .{ .allocator = evaluator.allocator(), .port = item.take(), .backend = backend };
+    const driver = try evaluator.allocator.create(LineReadDriver);
+    driver.* = .{ .allocator = evaluator.allocator, .port = item.take(), .backend = backend };
     evaluator.adoptDriver(driver);
 }
 
@@ -114,7 +114,7 @@ const LineReadDriver = struct {
         self.state = .{ .materializing = .{ .line = line, .materializer = .init(self.allocator, line) } };
     }
 
-    pub fn advance(evaluator: *machine.Machine, self: *LineReadDriver) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *LineReadDriver) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (self.state == .reading) {
@@ -168,7 +168,7 @@ const ReadBackend = struct {
     pub fn readSource(self: ReadBackend) @import("../external.zig").ReadinessSource {
         return self.reader.readSource();
     }
-    pub fn read(self: ReadBackend, evaluator: *machine.Machine, buffer: []u8) machine.MachineError!transfer.ReadProgress {
+    pub fn read(self: ReadBackend, evaluator: *machine.Unit, buffer: []u8) machine.MachineError!transfer.ReadProgress {
         return switch (self.reader.read(buffer)) {
             .pending => .pending,
             .eof => .eof,
@@ -176,7 +176,7 @@ const ReadBackend = struct {
             .failed => |failure| transportFailure(evaluator, failure),
         };
     }
-    fn fill(self: ReadBackend, evaluator: *machine.Machine, max: usize) machine.MachineError!transfer.ReadProgress {
+    fn fill(self: ReadBackend, evaluator: *machine.Unit, max: usize) machine.MachineError!transfer.ReadProgress {
         return switch (try self.reader.fill(max)) {
             .pending => .pending,
             .eof => .eof,
@@ -186,7 +186,7 @@ const ReadBackend = struct {
     }
 };
 
-pub fn write(evaluator: *machine.Machine) machine.MachineError!void {
+pub fn write(evaluator: *machine.Unit) machine.MachineError!void {
     var input = try evaluator.popValue();
     errdefer input.deinit();
     if (input.borrow() != .list) return evaluator.typeError("a byte list");
@@ -201,8 +201,8 @@ pub fn write(evaluator: *machine.Machine) machine.MachineError!void {
         error.Finished => evaluator.fail(.io, "endpoint input is finished"),
     };
     errdefer permit.cancel();
-    const driver = try evaluator.allocator().create(WriteDriver);
-    driver.* = .init(evaluator.allocator(), item.take(), input.take(), .{}, permit);
+    const driver = try evaluator.allocator.create(WriteDriver);
+    driver.* = .init(evaluator.allocator, item.take(), input.take(), .{}, permit);
     evaluator.adoptDriver(driver);
 }
 
@@ -210,7 +210,7 @@ const WriteDriver = transfer.WriteDriver(WriteBackend);
 const WriteBackend = struct {
     pub const WritePermit = *endpoints.WritePermit;
     pub const invalid_byte_message = "fd.write contains a value outside 0...255";
-    pub fn write(_: WriteBackend, evaluator: *machine.Machine, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
+    pub fn write(_: WriteBackend, evaluator: *machine.Unit, permit: WritePermit, buffer: []const u8) machine.MachineError!transfer.WriteProgress {
         return switch (permit.write(buffer)) {
             .pending => .pending,
             .written => |count| .{ .written = count },
@@ -219,23 +219,23 @@ const WriteBackend = struct {
     }
 };
 
-pub fn finish(evaluator: *machine.Machine) machine.MachineError!void {
+pub fn finish(evaluator: *machine.Unit) machine.MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const capability = endpoints.Endpoint.fromValue(item.borrow()) orelse return evaluator.typeError("a writable endpoint");
     if (capability.writer()) |writer| writer.finish() else if (capability.sender()) |queue| queue.finish() else return evaluator.typeError("a writable endpoint");
 }
 
-fn send(evaluator: *machine.Machine) machine.MachineError!void {
+fn send(evaluator: *machine.Unit) machine.MachineError!void {
     var input = try evaluator.popValue();
     defer input.deinit();
     var endpoint_value = try evaluator.popValue();
     defer endpoint_value.deinit();
     const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message sender");
     const queue = capability.sender() orelse return evaluator.typeError("a message sender");
-    const driver = try evaluator.allocator().create(SendDriver);
-    errdefer evaluator.allocator().destroy(driver);
-    const validating = try message.Message.create(evaluator.allocator(), input.borrow(), .{});
+    const driver = try evaluator.allocator.create(SendDriver);
+    errdefer evaluator.allocator.destroy(driver);
+    const validating = try message.Message.create(evaluator.allocator, input.borrow(), .{});
     driver.* = .{ .endpoint = endpoint_value.take(), .queue = queue, .state = .{ .validating = validating } };
     evaluator.adoptDriver(driver);
 }
@@ -255,7 +255,7 @@ const SendDriver = struct {
         }
         releases.releaseValue(self.endpoint);
     }
-    pub fn advance(evaluator: *machine.Machine, self: *SendDriver) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *SendDriver) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .validating) {
             const input = self.state.validating;
@@ -267,7 +267,7 @@ const SendDriver = struct {
             if (progress == .pending) return .stepped;
             const envelope = try self.queue.envelope(input.validated().?);
             self.state = .{ .ready = envelope };
-            input.retire(evaluator.releaseDomain());
+            input.retire(evaluator.releases);
         }
         switch (self.queue.send(self.state.ready)) {
             .accepted => {
@@ -282,14 +282,14 @@ const SendDriver = struct {
     }
 };
 
-fn receive(evaluator: *machine.Machine) machine.MachineError!void {
+fn receive(evaluator: *machine.Unit) machine.MachineError!void {
     var endpoint_value = try evaluator.popValue();
     defer endpoint_value.deinit();
     const capability = endpoints.Endpoint.fromValue(endpoint_value.borrow()) orelse return evaluator.typeError("a message receiver");
     const queue = capability.receiver() orelse return evaluator.typeError("a message receiver");
     queue.beginRead() catch return evaluator.fail(.contract, "endpoint already has a pending receiver");
     errdefer queue.endRead();
-    const driver = try evaluator.allocator().create(ReceiveDriver);
+    const driver = try evaluator.allocator.create(ReceiveDriver);
     driver.* = .{ .endpoint = endpoint_value.take(), .queue = queue };
     evaluator.adoptDriver(driver);
 }
@@ -305,18 +305,18 @@ const ReceiveDriver = struct {
     }
     const Preparation = struct {
         pub const Error = machine.MachineError;
-        evaluator: *machine.Machine,
+        evaluator: *machine.Unit,
         pub fn prepare(self: *@This(), value: Value) Error!Value {
-            return dict.fromUniquePairs(self.evaluator.allocator(), self.evaluator.releaseDomain(), &.{
+            return dict.fromUniquePairs(self.evaluator.allocator, self.evaluator.releases, &.{
                 .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("message") } } },
                 .{ .{ .symbol = .{ .name = try intern.intern("value") } }, value },
             });
         }
         pub fn release(self: *@This(), value: Value) void {
-            self.evaluator.releaseDomain().releaseValue(value);
+            self.evaluator.releases.releaseValue(value);
         }
     };
-    pub fn advance(evaluator: *machine.Machine, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *ReceiveDriver) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const scope = try callingScope(evaluator);
         const output = try evaluator.reserveStack(1);
@@ -329,22 +329,22 @@ const ReceiveDriver = struct {
         switch (delivery) {
             .pending => try evaluator.park(.{ .external = self.queue.source() }),
             .failed => |failure| return transportFailure(evaluator, failure),
-            .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{.{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("eof") } } }})),
+            .eof => return output.output(try dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{.{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern("eof") } } }})),
             .message => |event| return output.output(event),
         }
         return evaluator.afterStep();
     }
 };
 
-fn open(evaluator: *machine.Machine) machine.MachineError!void {
+fn open(evaluator: *machine.Unit) machine.MachineError!void {
     try startRequest(evaluator, .factory);
 }
 
-fn begin(evaluator: *machine.Machine) machine.MachineError!void {
+fn begin(evaluator: *machine.Unit) machine.MachineError!void {
     try startRequest(evaluator, .operation_selector);
 }
 
-fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zig").PortVariant) machine.MachineError!void {
+fn startRequest(evaluator: *machine.Unit, comptime role: @import("../value.zig").PortVariant) machine.MachineError!void {
     var input = try evaluator.popValue();
     defer input.deinit();
     var capability = try evaluator.popValue();
@@ -358,9 +358,9 @@ fn startRequest(evaluator: *machine.Machine, comptime role: @import("../value.zi
     if (role == .operation_selector) {
         if (!operation_selector.?.accepts(resource.?.borrow())) return evaluator.typeError("a resource of the selector's issuing kind");
     }
-    const driver = try evaluator.allocator().create(Request);
-    errdefer evaluator.allocator().destroy(driver);
-    const validated = try message.Message.create(evaluator.allocator(), input.borrow(), if (role == .factory) factory.?.messageLimits() else operation_selector.?.messageLimits());
+    const driver = try evaluator.allocator.create(Request);
+    errdefer evaluator.allocator.destroy(driver);
+    const validated = try message.Message.create(evaluator.allocator, input.borrow(), if (role == .factory) factory.?.messageLimits() else operation_selector.?.messageLimits());
     driver.* = .{
         .capability = capability.take(),
         .kind = if (role == .operation_selector)
@@ -402,7 +402,7 @@ const Request = struct {
         }
     }
 
-    pub fn advance(evaluator: *machine.Machine, self: *Request) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *Request) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .validating) {
             const progress = self.message.advance(evaluator.workBudget()) catch |err| return switch (err) {
@@ -483,31 +483,31 @@ const Request = struct {
     }
 };
 
-fn factoryFailure(evaluator: *machine.Machine, failure: factories.Failure) machine.MachineError {
+fn factoryFailure(evaluator: *machine.Unit, failure: factories.Failure) machine.MachineError {
     return evaluator.failWithErrorData(failure);
 }
-fn transportFailure(evaluator: *machine.Machine, failure: bytes.Failure) machine.MachineError {
+fn transportFailure(evaluator: *machine.Unit, failure: bytes.Failure) machine.MachineError {
     return switch (failure) {
         .out_of_memory => error.OutOfMemory,
         .report => |report| evaluator.fail(report.kind, report.message[0..report.len]),
     };
 }
 
-fn cancel(evaluator: *machine.Machine) machine.MachineError!void {
+fn cancel(evaluator: *machine.Unit) machine.MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
     exchange.cancel();
 }
 
-fn shutdown(evaluator: *machine.Machine) machine.MachineError!void {
+fn shutdown(evaluator: *machine.Unit) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
     const resource = Resource.fromValue(item.borrow()) orelse return evaluator.typeError("a resource");
     try evaluator.startDriver(Observe{ .owner = .init(item.take()), .target = .{ .resource = resource }, .mode = .shutdown });
 }
 
-fn close(evaluator: *machine.Machine) machine.MachineError!void {
+fn close(evaluator: *machine.Unit) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
     if (endpoints.Endpoint.fromValue(item.borrow())) |capability| {
@@ -536,7 +536,7 @@ const CloseEndpoint = struct {
     endpoint: *endpoints.Endpoint,
     requested: bool = false,
 
-    pub fn advance(evaluator: *machine.Machine, self: *CloseEndpoint) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *CloseEndpoint) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.requested) {
             self.endpoint.close();
@@ -550,15 +550,15 @@ const CloseEndpoint = struct {
     }
 };
 
-fn awaitExchange(evaluator: *machine.Machine) machine.MachineError!void {
+fn awaitExchange(evaluator: *machine.Unit) machine.MachineError!void {
     return observe(evaluator, .observe);
 }
 
-fn result(evaluator: *machine.Machine) machine.MachineError!void {
+fn result(evaluator: *machine.Unit) machine.MachineError!void {
     return observe(evaluator, .claim);
 }
 
-fn observe(evaluator: *machine.Machine, mode: Observe.Mode) machine.MachineError!void {
+fn observe(evaluator: *machine.Unit, mode: Observe.Mode) machine.MachineError!void {
     var item = try evaluator.popValue();
     errdefer item.deinit();
     const exchange = exchanges.Exchange.fromValue(item.borrow()) orelse return evaluator.typeError("an exchange");
@@ -577,7 +577,7 @@ const Observe = struct {
     target: Target,
     mode: Mode,
 
-    pub fn advance(evaluator: *machine.Machine, self: *Observe) machine.MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *machine.Unit, self: *Observe) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         switch (self.target) {
             .resource => |resource| {
@@ -620,10 +620,10 @@ const Observe = struct {
     }
 };
 
-fn callingScope(evaluator: *machine.Machine) machine.MachineError!*scheduler.TaskScope {
-    return @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "port scope is closing")));
+fn callingScope(evaluator: *machine.Unit) machine.MachineError!*scheduler.TaskScope {
+    return @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "port scope is closing")));
 }
-fn publicationFailure(evaluator: *machine.Machine, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
+fn publicationFailure(evaluator: *machine.Unit, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.ScopeClosing => evaluator.fail(.cancelled, "port scope is closing"),

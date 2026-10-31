@@ -12,7 +12,7 @@ const support = @import("kernel_support.zig");
 
 const Value = value.Value;
 const Header = value.ListHandle;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 const Application = machine.IsolatedApplication;
 const ApplicationStep = machine.ApplicationStep;
@@ -39,13 +39,13 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try core.installBuiltins(&definitions);
 }
 
-fn call(evaluator: *Machine) MachineError!void {
+fn call(evaluator: *Unit) MachineError!void {
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     try evaluator.callOwned(quotation.take().list);
 }
 
-fn ifWord(evaluator: *Machine) MachineError!void {
+fn ifWord(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     var otherwise = try evaluator.popValue();
     defer otherwise.deinit();
@@ -59,7 +59,7 @@ fn ifWord(evaluator: *Machine) MachineError!void {
     try evaluator.callOwned(if (selected_then) then.take().list else otherwise.take().list);
 }
 
-fn whileWord(evaluator: *Machine) MachineError!void {
+fn whileWord(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var body = try evaluator.popValue();
     defer body.deinit();
@@ -68,7 +68,7 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     if (body.borrow() != .list or condition.borrow() != .list)
         return evaluator.typeError("two quotations/lists");
     const provenance_target = try evaluator.applicationProvenanceTarget();
-    const state = try evaluator.allocator().create(WhileState);
+    const state = try evaluator.allocator.create(WhileState);
     state.* = .{
         .condition = .init(condition.take().list),
         .body = .init(body.take().list),
@@ -81,7 +81,7 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     var owned = heap.Owned(*WhileState).init(state);
     state.checkpoint.borrowMut().beginCapture();
     if (!(state.checkpoint.borrowMut().advance(evaluator) catch |err| {
-        owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        owned.deinit(evaluator.releases, evaluator.allocator);
         return err;
     })) return evaluator.startDriver(WhileStartDriver{ .state = owned });
     try evaluator.beginInlineApplication(owned.take().application(state.condition.borrow()));
@@ -107,25 +107,25 @@ const WhileCheckpoint = struct {
         self.index = 0;
     }
     /// Advances the capture or restore in hand; true once it is finished.
-    fn advance(self: *WhileCheckpoint, evaluator: *Machine) error{OutOfMemory}!bool {
+    fn advance(self: *WhileCheckpoint, evaluator: *Unit) error{OutOfMemory}!bool {
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.phase) {
             .release => {
                 const depth = evaluator.available();
                 if (self.values) |*buffer| {
                     if (buffer.capacity() < depth) {
-                        buffer.retirePartial(evaluator.releaseDomain());
+                        buffer.retirePartial(evaluator.releases);
                         self.values = null;
                     } else if (buffer.len() != 0) {
                         const last = buffer.len() - 1;
                         const item = buffer.items()[last];
                         buffer.setLen(last);
-                        evaluator.releaseDomain().releaseValue(item);
+                        evaluator.releases.releaseValue(item);
                         continue;
                     }
                 }
                 if (self.values == null)
-                    self.values = try heap.ListBuilder(.generic_spine).init(evaluator.allocator(), 0, depth);
+                    self.values = try heap.ListBuilder(.generic_spine).init(evaluator.allocator, 0, depth);
                 self.depth = depth;
                 self.phase = .capture;
             },
@@ -195,7 +195,7 @@ const WhileState = struct {
     /// finishes it and resumes the loop in `pending`.
     fn finishWork(
         self: *WhileState,
-        evaluator: *Machine,
+        evaluator: *Unit,
         pending: @FieldType(WhileState, "phase"),
     ) MachineError!?ApplicationStep {
         if (try self.checkpoint.borrowMut().advance(evaluator)) return self.resumeAfter(pending);
@@ -213,7 +213,7 @@ const WhileState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *WhileState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -243,7 +243,7 @@ const WhileState = struct {
 const WhileStartDriver = struct {
     state: heap.Owned(*WhileState),
 
-    pub fn advance(evaluator: *Machine, self: *WhileStartDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *WhileStartDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
         try evaluator.pollKernel();
@@ -261,7 +261,7 @@ const WhileStartDriver = struct {
 const WhileWorkDriver = struct {
     state: *WhileState,
 
-    pub fn advance(evaluator: *Machine, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.state.word);
         try evaluator.pollKernel();
         return if (try self.state.checkpoint.borrowMut().advance(evaluator)) .completed else .stepped;
@@ -283,7 +283,7 @@ const TimesState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *TimesState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -297,7 +297,7 @@ const TimesState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn times(evaluator: *Machine) MachineError!void {
+fn times(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -308,7 +308,7 @@ fn times(evaluator: *Machine) MachineError!void {
     if (count_value.borrow().int < 0)
         return evaluator.fail(.domain, "times requires a nonnegative count");
     if (count_value.borrow().int == 0) return;
-    const state = try evaluator.allocator().create(TimesState);
+    const state = try evaluator.allocator.create(TimesState);
     state.* = .{
         .quotation = .init(quotation.take().list),
         .site = evaluator.applicationSite(),
@@ -322,13 +322,13 @@ fn times(evaluator: *Machine) MachineError!void {
 /// `(swap literal compose call)` stays authoritative; matching it lets the
 /// protected value ride in a continuation instead of building a capture
 /// quotation and a composition on every application.
-pub fn dipForIdiom(evaluator: *Machine) MachineError!void {
+pub fn dipForIdiom(evaluator: *Unit) MachineError!void {
     std.debug.assert(evaluator.available() >= 2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     var protected = try evaluator.popValue();
     defer protected.deinit();
-    const state = try evaluator.allocator().create(DipState);
+    const state = try evaluator.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
         .protected = .init(protected.take()),
@@ -354,7 +354,7 @@ const DipState = struct {
     /// application completes, so a failing quotation leaves it to this
     /// driver's field ownership rather than to the rolled-back stack.
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *DipState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -380,10 +380,10 @@ const GuardCheckpoint = struct {
     index: usize = 0,
     phase: enum { capture, ready, discard, reserve, restore } = .capture,
 
-    fn init(evaluator: *Machine) error{OutOfMemory}!heap.Owned(GuardCheckpoint) {
+    fn init(evaluator: *Unit) error{OutOfMemory}!heap.Owned(GuardCheckpoint) {
         const depth = evaluator.available();
         return .init(.{
-            .values = try .init(evaluator.releaseDomain(), depth),
+            .values = try .init(evaluator.releases, depth),
             .depth = depth,
         });
     }
@@ -395,7 +395,7 @@ const GuardCheckpoint = struct {
             .phase = self.phase,
         };
     }
-    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Machine) bool {
+    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Unit) bool {
         std.debug.assert(self.phase == .capture and evaluator.available() == self.depth);
         const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
@@ -411,7 +411,7 @@ const GuardCheckpoint = struct {
     }
     fn advanceRestore(
         self: *GuardCheckpoint,
-        evaluator: *Machine,
+        evaluator: *Unit,
     ) error{OutOfMemory}!bool {
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.phase) {
@@ -478,18 +478,18 @@ const GuardControl = struct {
 };
 
 fn beginGuardTarget(
-    evaluator: *Machine,
+    evaluator: *Unit,
     control: *heap.Owned(GuardControl),
     target: GuardTarget,
 ) MachineError!void {
     switch (target) {
         .predicate => |quotation| {
-            const state = try evaluator.allocator().create(GuardPredicateState);
+            const state = try evaluator.allocator.create(GuardPredicateState);
             state.* = .{ .control = .init(control.take()) };
             try evaluator.beginInlineApplication(state.application(quotation));
         },
         .action => |quotation| {
-            const state = try evaluator.allocator().create(GuardActionState);
+            const state = try evaluator.allocator.create(GuardActionState);
             state.* = .{ .control = .init(control.take()) };
             try evaluator.beginInlineApplication(state.application(quotation));
         },
@@ -501,12 +501,12 @@ const GuardSnapshotDriver = struct {
     control: heap.Owned(GuardControl),
     target: GuardTarget,
 
-    pub fn advance(evaluator: *Machine, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
         if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
-        defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        defer control.deinit(evaluator.releases, evaluator.allocator);
         const target = self.target;
         evaluator.retireDriver(self);
         try beginGuardTarget(evaluator, &control, target);
@@ -519,12 +519,12 @@ const GuardRestoreDriver = struct {
     control: heap.Owned(GuardControl),
     target: GuardTarget,
 
-    pub fn advance(evaluator: *Machine, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
         try evaluator.pollKernel();
         if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(evaluator)) return .stepped;
         var control = heap.Owned(GuardControl).init(self.control.take());
-        defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        defer control.deinit(evaluator.releases, evaluator.allocator);
         const target = self.target;
         evaluator.retireDriver(self);
         if (target != .done) try beginGuardTarget(evaluator, &control, target);
@@ -541,7 +541,7 @@ const GuardPredicateState = struct {
         return machine.typedApplication(self, quotation, control.site, 0);
     }
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *GuardPredicateState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -573,7 +573,7 @@ const GuardActionState = struct {
         return launched;
     }
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *GuardActionState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -674,15 +674,15 @@ const LinrecBranch = enum { base, recurse };
 const LinrecSnapshotDriver = struct {
     level: heap.Owned(LinrecLevel),
 
-    pub fn advance(evaluator: *Machine, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.level.borrow().word);
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
         if (!checkpoint.advanceCapture(evaluator)) return .stepped;
         var level = heap.Owned(LinrecLevel).init(self.level.take());
-        defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        defer level.deinit(evaluator.releases, evaluator.allocator);
         evaluator.retireDriver(self);
-        const state = try evaluator.allocator().create(LinrecPredicateState);
+        const state = try evaluator.allocator.create(LinrecPredicateState);
         state.* = .{ .level = .init(level.take()) };
         try evaluator.beginInlineApplication(state.application());
         return .detached;
@@ -695,17 +695,17 @@ const LinrecRestoreDriver = struct {
     level: heap.Owned(LinrecLevel),
     branch: LinrecBranch,
 
-    pub fn advance(evaluator: *Machine, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.level.borrow().word);
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
         if (!try checkpoint.advanceRestore(evaluator)) return .stepped;
         var level = heap.Owned(LinrecLevel).init(self.level.take());
-        defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        defer level.deinit(evaluator.releases, evaluator.allocator);
         const branch = self.branch;
         evaluator.retireDriver(self);
-        level.borrowMut().releaseCheckpoint(evaluator.releaseDomain(), evaluator.allocator());
-        const state = try evaluator.allocator().create(LinrecApplicationState);
+        level.borrowMut().releaseCheckpoint(evaluator.releases, evaluator.allocator);
+        const state = try evaluator.allocator.create(LinrecApplicationState);
         state.* = .{
             .level = .init(level.take()),
             .phase = if (branch == .base) .base else .pre,
@@ -731,7 +731,7 @@ const LinrecPredicateState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *LinrecPredicateState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -772,7 +772,7 @@ const LinrecApplicationState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *LinrecApplicationState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -805,7 +805,7 @@ const LinrecApplicationState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn linrec(evaluator: *Machine) MachineError!void {
+fn linrec(evaluator: *Unit) MachineError!void {
     try evaluator.require(4);
     var post = try evaluator.popValue();
     defer post.deinit();
@@ -836,7 +836,7 @@ fn linrec(evaluator: *Machine) MachineError!void {
     }) });
 }
 
-fn cond(evaluator: *Machine) MachineError!void {
+fn cond(evaluator: *Unit) MachineError!void {
     var clauses = try evaluator.popValue();
     defer clauses.deinit();
     if (clauses.borrow() != .list) {
@@ -861,7 +861,7 @@ const CondDriver = struct {
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *CondDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *CondDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const clauses = self.clauses.borrow();
         const count: usize = @intCast(clauses.list.length());
@@ -919,7 +919,7 @@ const IterationState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *IterationState,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -927,7 +927,7 @@ const IterationState = struct {
         evaluator.setActiveWord(self.word);
         evaluator.chargeContinuationStep();
         const base: usize = window.base();
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse
+        const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
                 self.quotation.borrow(),
@@ -953,7 +953,7 @@ const IterationState = struct {
 
     fn resumeCollect(
         self: *IterationState,
-        evaluator: *Machine,
+        evaluator: *Unit,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -980,7 +980,7 @@ const IterationState = struct {
 
     fn resumeFor(
         self: *IterationState,
-        evaluator: *Machine,
+        evaluator: *Unit,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1001,7 +1001,7 @@ const IterationState = struct {
 
     fn resumeFold(
         self: *IterationState,
-        evaluator: *Machine,
+        evaluator: *Unit,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1036,21 +1036,21 @@ const IterationState = struct {
         return self.step(2);
     }
 
-    fn resumeInfra(evaluator: *Machine, base: usize) MachineError!?ApplicationStep {
+    fn resumeInfra(evaluator: *Unit, base: usize) MachineError!?ApplicationStep {
         try InfraResultDriver.install(evaluator, base);
         return null;
     }
 
-    fn installCollected(self: *IterationState, evaluator: *Machine) error{OutOfMemory}!void {
+    fn installCollected(self: *IterationState, evaluator: *Unit) error{OutOfMemory}!void {
         const values = self.results.?.take();
         self.results = null;
         try evaluator.startDriver(CollectedDriver{
-            .materializer = .init(.init(evaluator.allocator(), values.values())),
+            .materializer = .init(.init(evaluator.allocator, values.values())),
             .values = .init(values),
         });
     }
 
-    fn pushInputs(self: *IterationState, evaluator: *Machine) MachineError!void {
+    fn pushInputs(self: *IterationState, evaluator: *Unit) MachineError!void {
         const left = self.left.borrow();
         try evaluator.pushBorrowed(if (self.kind == .for_word and left == .dict)
             dict.valueAt(left.dict, self.index)
@@ -1120,7 +1120,7 @@ const UpdateApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *UpdateApplication,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -1128,7 +1128,7 @@ const UpdateApplication = struct {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
         evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse
+        const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
                 state.quotation.borrow(),
@@ -1168,7 +1168,7 @@ const UpdateWorkDriver = struct {
     state: heap.Owned(*UpdateState),
 
     fn launchApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *UpdateWorkDriver,
     ) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
@@ -1177,13 +1177,13 @@ const UpdateWorkDriver = struct {
         var stack = try evaluator.reserveStack(1);
         stack.pushBorrowed(state.values.borrow().values()[state.positions.?.borrow()[0]]);
         state.phase = .apply;
-        const application_state = try evaluator.allocator().create(UpdateApplication);
+        const application_state = try evaluator.allocator.create(UpdateApplication);
         application_state.* = .{ .state = .init(self.state.take()) };
         try evaluator.beginIsolatedApplication(application_state.application());
         return .completed;
     }
 
-    fn listPosition(evaluator: *Machine, state: *const UpdateState, selector: Value) MachineError!usize {
+    fn listPosition(evaluator: *Unit, state: *const UpdateState, selector: Value) MachineError!usize {
         if (selector != .int) return evaluator.typeError("an integer list index");
         if (selector.int < 0) return evaluator.fail(.domain, "update index is negative");
         const position = std.math.cast(usize, selector.int) orelse
@@ -1193,7 +1193,7 @@ const UpdateWorkDriver = struct {
         return position;
     }
 
-    pub fn advance(evaluator: *Machine, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         evaluator.setActiveWord(state.word);
         try evaluator.pollKernel();
@@ -1214,11 +1214,11 @@ const UpdateWorkDriver = struct {
                         state.position_count += 1;
                     },
                     .complete => {
-                        state.selector_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        state.selector_cursor.?.deinit(evaluator.releases, evaluator.allocator);
                         state.selector_cursor = null;
-                        state.positions = .init(try evaluator.allocator().alloc(usize, state.position_count));
+                        state.positions = .init(try evaluator.allocator.alloc(usize, state.position_count));
                         state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
-                            evaluator.allocator(),
+                            evaluator.allocator,
                             state.selector.borrow(),
                         ));
                         state.phase = if (state.mode == .list_selector) .fill_positions else .find_positions;
@@ -1237,7 +1237,7 @@ const UpdateWorkDriver = struct {
                         state.position_index += 1;
                     },
                     .complete => {
-                        state.selector_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        state.selector_cursor.?.deinit(evaluator.releases, evaluator.allocator);
                         state.selector_cursor = null;
                         state.phase = .copy_values;
                     },
@@ -1255,7 +1255,7 @@ const UpdateWorkDriver = struct {
                     else
                         state.selector.borrow();
                     state.finder = .init(dict.FindCursor.initHeader(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         state.collection.borrow().dict,
                         state.requested_key.?,
                     ));
@@ -1269,7 +1269,7 @@ const UpdateWorkDriver = struct {
                         if (found == null)
                             return evaluator.fail(.domain, "update could not find the dict key");
                         positions[state.position_index] = state.finder.?.borrow().foundIndex().?;
-                        state.finder.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        state.finder.?.deinit(evaluator.releases, evaluator.allocator);
                         state.finder = null;
                         state.requested_key = null;
                         state.position_index += 1;
@@ -1291,7 +1291,7 @@ const UpdateWorkDriver = struct {
                 const pairs = state.pairs.?.borrow();
                 if (state.copy_index == pairs.len) {
                     state.dict_materializer = .init(try dict.Materializer.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         pairs,
                         false,
                     ));
@@ -1308,15 +1308,15 @@ const UpdateWorkDriver = struct {
             .materialize_list => {
                 if (state.list_materializer == null)
                     state.list_materializer = .init(.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         state.values.borrow().values(),
                     ));
                 return switch (try state.list_materializer.?.borrowMut().advance(work)) {
                     .pending => .stepped,
                     .complete => |result| completed: {
                         state.list_materializer.?.deinit(
-                            evaluator.releaseDomain(),
-                            evaluator.allocator(),
+                            evaluator.releases,
+                            evaluator.allocator,
                         );
                         state.list_materializer = null;
                         break :completed .{ .output = result };
@@ -1337,15 +1337,15 @@ const UpdateWorkDriver = struct {
     }
 };
 
-fn update(evaluator: *Machine) MachineError!void {
+fn update(evaluator: *Unit) MachineError!void {
     return startUpdate(evaluator, .core_selector);
 }
 
-pub fn updateDictKeysForModule(evaluator: *Machine) MachineError!void {
+pub fn updateDictKeysForModule(evaluator: *Unit) MachineError!void {
     return startUpdate(evaluator, .dictionary_key_list);
 }
 
-fn startUpdate(evaluator: *Machine, policy: UpdatePolicy) MachineError!void {
+fn startUpdate(evaluator: *Unit, policy: UpdatePolicy) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -1364,17 +1364,17 @@ fn startUpdate(evaluator: *Machine, policy: UpdatePolicy) MachineError!void {
 }
 
 fn startUpdateOwned(
-    evaluator: *Machine,
+    evaluator: *Unit,
     policy: UpdatePolicy,
     collection_value: Value,
     selector_value: Value,
     quotation_value: Value,
 ) MachineError!void {
-    var quotation = heap.OwnedValue.init(evaluator.releaseDomain(), quotation_value);
+    var quotation = heap.OwnedValue.init(evaluator.releases, quotation_value);
     defer quotation.deinit();
-    var selector = heap.OwnedValue.init(evaluator.releaseDomain(), selector_value);
+    var selector = heap.OwnedValue.init(evaluator.releases, selector_value);
     defer selector.deinit();
-    var collection = heap.OwnedValue.init(evaluator.releaseDomain(), collection_value);
+    var collection = heap.OwnedValue.init(evaluator.releases, collection_value);
     defer collection.deinit();
 
     const mode: UpdateMode = switch (collection.borrow()) {
@@ -1392,11 +1392,11 @@ fn startUpdateOwned(
         .list_selector => @intCast(collection.borrow().list.length()),
         .dictionary_key, .dictionary_key_list => @intCast(collection.borrow().dict.length()),
     };
-    var values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), collection_count);
+    var values = try heap.OwnedValueBuffer.init(evaluator.releases, collection_count);
     defer values.deinit();
     var expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "value", "--", "value" }),
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "value", "--", "value" }),
     );
     defer expected.deinit();
     const initial_phase: UpdatePhase = switch (mode) {
@@ -1405,11 +1405,11 @@ fn startUpdateOwned(
         .dictionary_key_list => .find_positions,
     };
 
-    const state = try evaluator.allocator().create(UpdateState);
+    const state = try evaluator.allocator.create(UpdateState);
     var state_owner: ?*UpdateState = state;
     errdefer if (state_owner) |owned| heap.destroyDriver(
-        evaluator.releaseDomain(),
-        evaluator.allocator(),
+        evaluator.releases,
+        evaluator.allocator,
         owned,
     );
     state.* = .{
@@ -1427,7 +1427,7 @@ fn startUpdateOwned(
     if (mode == .list_selector) {
         if (state.selector.borrow() == .list) {
             state.selector_cursor = .init(try support.PervasiveSelectorCursor.init(
-                evaluator.allocator(),
+                evaluator.allocator,
                 state.selector.borrow(),
             ));
             state.phase = .count_positions;
@@ -1440,7 +1440,7 @@ fn startUpdateOwned(
                 return evaluator.fail(.domain, "update index is out of bounds");
             if (position >= collection_count)
                 return evaluator.fail(.domain, "update index is out of bounds");
-            state.positions = .init(try evaluator.allocator().alloc(usize, 1));
+            state.positions = .init(try evaluator.allocator.alloc(usize, 1));
             state.positions.?.borrow()[0] = position;
             state.phase = .copy_values;
         }
@@ -1449,8 +1449,8 @@ fn startUpdateOwned(
             @intCast(state.selector.borrow().list.length())
         else
             1;
-        state.positions = .init(try evaluator.allocator().alloc(usize, position_count));
-        state.pairs = .init(try evaluator.allocator().alloc(dict.Pair, collection_count));
+        state.positions = .init(try evaluator.allocator.alloc(usize, position_count));
+        state.pairs = .init(try evaluator.allocator.alloc(dict.Pair, collection_count));
         state.phase = .find_positions;
     }
     state_owner = null;
@@ -1462,7 +1462,7 @@ const CollectedDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
-    pub fn advance(evaluator: *Machine, self: *CollectedDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *CollectedDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
@@ -1473,7 +1473,7 @@ const CollectedDriver = struct {
                 },
             }
         }
-        self.values.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.values.deinit(evaluator.releases, evaluator.allocator);
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
@@ -1523,16 +1523,16 @@ const StencilBootstrapDriver = struct {
 
     /// Copies the next granted run of a typed input's window straight into a
     /// window of the input's own representation; null when the input is boxed.
-    fn fillTyped(self: *StencilBootstrapDriver, evaluator: *Machine) MachineError!?bool {
+    fn fillTyped(self: *StencilBootstrapDriver, evaluator: *Unit) MachineError!?bool {
         const control = self.control.borrow();
         const input = control.input.borrow().list;
         switch (input.kind()) {
             inline .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4 => |kind| {
                 if (self.typed_window == null) self.typed_window = .init(.{
-                    .builder = try heap.AnyListBuilder.init(evaluator.allocator(), kind, control.width, control.width),
+                    .builder = try heap.AnyListBuilder.init(evaluator.allocator, kind, control.width, control.width),
                 });
                 var reader = heap.LeafReader(kind).acquire(input);
-                defer reader.release(evaluator.releaseDomain());
+                defer reader.release(evaluator.releases);
                 const run = evaluator.workBudget().take(control.width - self.fill_index);
                 const items = switch (self.typed_window.?.borrowMut().builder) {
                     inline else => |*builder| if (@TypeOf(builder.items()) == []heap.LeafElement(kind)) builder.items() else unreachable,
@@ -1546,7 +1546,7 @@ const StencilBootstrapDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *StencilBootstrapDriver,
     ) MachineError!machine.WorkProgress {
         evaluator.setActiveWord(self.control.borrow().word);
@@ -1568,7 +1568,7 @@ const StencilBootstrapDriver = struct {
             }
             if (self.fill_index != control.width) return .stepped;
             self.materializer = .init(.init(
-                evaluator.allocator(),
+                evaluator.allocator,
                 self.window_values.borrow().values(),
             ));
         }
@@ -1579,14 +1579,14 @@ const StencilBootstrapDriver = struct {
     }
 
     /// Hands the finished window to the quotation; consumes `window`.
-    fn apply(self: *StencilBootstrapDriver, evaluator: *Machine, window: Value) MachineError!machine.WorkProgress {
-        var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
+    fn apply(self: *StencilBootstrapDriver, evaluator: *Unit, window: Value) MachineError!machine.WorkProgress {
+        var window_owner = heap.OwnedValue.init(evaluator.releases, window);
         defer window_owner.deinit();
-        const state = try evaluator.allocator().create(StencilApplication);
+        const state = try evaluator.allocator.create(StencilApplication);
         var state_owner: ?*StencilApplication = state;
         errdefer if (state_owner) |owned| heap.destroyDriver(
-            evaluator.releaseDomain(),
-            evaluator.allocator(),
+            evaluator.releases,
+            evaluator.allocator,
             owned,
         );
         state.* = .{ .control = .init(self.control.take()) };
@@ -1615,7 +1615,7 @@ const StencilApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *StencilApplication,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -1623,7 +1623,7 @@ const StencilApplication = struct {
         const control = self.control.borrowMut();
         evaluator.setActiveWord(control.word);
         evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse
+        const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
                 control.quotation.borrow(),
@@ -1645,14 +1645,14 @@ const StencilApplication = struct {
         if (control.index == control.count) {
             const values = control.results.take();
             try evaluator.startDriver(CollectedDriver{
-                .materializer = .init(.init(evaluator.allocator(), values.values())),
+                .materializer = .init(.init(evaluator.allocator, values.values())),
                 .values = .init(values),
             });
             return null;
         }
         const stack = try evaluator.reserveStack(1);
         const window_values = try heap.OwnedValueBuffer.init(
-            evaluator.releaseDomain(),
+            evaluator.releases,
             control.width,
         );
         const next = StencilBootstrapDriver{
@@ -1667,7 +1667,7 @@ const StencilApplication = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn stencil(evaluator: *Machine) MachineError!void {
+fn stencil(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -1689,13 +1689,13 @@ fn stencil(evaluator: *Machine) MachineError!void {
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "window", "--", "result" }),
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "window", "--", "result" }),
     );
     defer expected.deinit();
-    var results = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+    var results = try heap.OwnedValueBuffer.init(evaluator.releases, count);
     defer results.deinit();
-    var window_values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), width);
+    var window_values = try heap.OwnedValueBuffer.init(evaluator.releases, width);
     defer window_values.deinit();
     const stack = try evaluator.reserveStack(1);
     const control = StencilControl{
@@ -1749,14 +1749,14 @@ const UnfoldState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *UnfoldState,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
         evaluator.chargeContinuationStep();
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse
+        const observed = window.observed(evaluator.stack.items.len) orelse
             return evaluator.applicationContractError(
                 site,
                 switch (self.phase) {
@@ -1779,7 +1779,7 @@ const UnfoldState = struct {
 
     fn resumePredicate(
         self: *UnfoldState,
-        evaluator: *Machine,
+        evaluator: *Unit,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1799,7 +1799,7 @@ const UnfoldState = struct {
             return self.nextStep();
         }
         const count = self.items.borrow().count;
-        const buffer = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+        const buffer = try heap.OwnedValueBuffer.init(evaluator.releases, count);
         const iterator = self.items.borrow().iterator();
         try evaluator.pushOwned(self.current.take());
         try evaluator.startDriver(UnfoldCollectDriver{
@@ -1814,7 +1814,7 @@ const UnfoldState = struct {
 
     fn resumeStep(
         self: *UnfoldState,
-        evaluator: *Machine,
+        evaluator: *Unit,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1832,7 +1832,7 @@ const UnfoldState = struct {
         defer next_state.deinit();
         try self.items.borrowMut().append(item.borrow());
         try self.values.borrowMut().appendOwned(item.take());
-        self.current.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.current.deinit(evaluator.releases, evaluator.allocator);
         self.current = .init(next_state.take());
         self.index += 1;
         self.phase = .predicate;
@@ -1852,7 +1852,7 @@ const UnfoldCollectDriver = struct {
     count: usize,
 
     pub fn advance(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *UnfoldCollectDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1863,7 +1863,7 @@ const UnfoldCollectDriver = struct {
         const result = self.result.take();
         evaluator.retireDriver(self);
         try evaluator.startDriver(CollectedDriver{
-            .materializer = .init(.init(evaluator.allocator(), result.values())),
+            .materializer = .init(.init(evaluator.allocator, result.values())),
             .values = .init(result),
         });
         return .detached;
@@ -1872,7 +1872,7 @@ const UnfoldCollectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn unfold(evaluator: *Machine) MachineError!void {
+fn unfold(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     var step_quotation = try evaluator.popQuotation();
     defer step_quotation.deinit();
@@ -1881,24 +1881,24 @@ fn unfold(evaluator: *Machine) MachineError!void {
     var initial = try evaluator.popValue();
     defer initial.deinit();
     var predicate_expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "state", "--", "bool" }),
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "state", "--", "bool" }),
     );
     defer predicate_expected.deinit();
     var step_expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "state", "--", "state", "item" }),
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "state", "--", "state", "item" }),
     );
     defer step_expected.deinit();
     var values = heap.Owned(heap.OwnedValueChain).init(
-        try .init(evaluator.releaseDomain()),
+        try .init(evaluator.releases),
     );
-    defer values.deinit(evaluator.releaseDomain(), evaluator.allocator());
-    const state = try evaluator.allocator().create(UnfoldState);
+    defer values.deinit(evaluator.releases, evaluator.allocator);
+    const state = try evaluator.allocator.create(UnfoldState);
     var state_owner: ?*UnfoldState = state;
     errdefer if (state_owner) |owned| heap.destroyDriver(
-        evaluator.releaseDomain(),
-        evaluator.allocator(),
+        evaluator.releases,
+        evaluator.allocator,
         owned,
     );
     state.* = .{
@@ -1908,7 +1908,7 @@ fn unfold(evaluator: *Machine) MachineError!void {
         .predicate_expected = .init(predicate_expected.take()),
         .step_expected = .init(step_expected.take()),
         .values = .init(values.take()),
-        .items = .init(.init(evaluator.allocator())),
+        .items = .init(.init(evaluator.allocator)),
         .site = evaluator.applicationSite(),
         .word = evaluator.activeWordId(),
     };
@@ -1922,14 +1922,14 @@ const InfraResultDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
-    fn install(evaluator: *Machine, base: usize) error{OutOfMemory}!void {
+    fn install(evaluator: *Unit, base: usize) error{OutOfMemory}!void {
         try evaluator.startDriver(InfraResultDriver{
             .base = base,
-            .materializer = .init(.init(evaluator.allocator(), evaluator.unit.stack.items[base..])),
+            .materializer = .init(.init(evaluator.allocator, evaluator.stack.items[base..])),
         });
     }
 
-    pub fn advance(evaluator: *Machine, self: *InfraResultDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *InfraResultDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
@@ -1941,11 +1941,11 @@ const InfraResultDriver = struct {
             }
         }
         const work = evaluator.workBudget();
-        while (evaluator.unit.stack.items.len != self.base and work.spend()) {
+        while (evaluator.stack.items.len != self.base and work.spend()) {
             var discarded = try evaluator.popValue();
             discarded.deinit();
         }
-        if (evaluator.unit.stack.items.len != self.base) return .stepped;
+        if (evaluator.stack.items.len != self.base) return .stepped;
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
@@ -1959,7 +1959,7 @@ const InfraBootstrapDriver = struct {
     stack: machine.StackReservation,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const iteration = self.iteration.borrow();
         const end = self.index + evaluator.workBudget().take(iteration.count - self.index);
@@ -1978,18 +1978,18 @@ const InfraBootstrapDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn each(evaluator: *Machine) MachineError!void {
+fn each(evaluator: *Unit) MachineError!void {
     return evaluator.continueWithIdiom(.each, statelessFallback(eachGeneric));
 }
-fn eachGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
+fn eachGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
     return startUnaryIteration(evaluator, .each);
 }
 
-fn forWord(evaluator: *Machine) MachineError!void {
+fn forWord(evaluator: *Unit) MachineError!void {
     return startUnaryIteration(evaluator, .for_word);
 }
 
-fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!void {
+fn startUnaryIteration(evaluator: *Unit, kind: IterationKind) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2003,7 +2003,7 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
     if (kind == .each and input.borrow() == .dict) {
         const keys = dict.keysOf(input.borrow().dict);
         heap.retainValue(keys);
-        var selector = heap.OwnedValue.init(evaluator.releaseDomain(), keys);
+        var selector = heap.OwnedValue.init(evaluator.releases, keys);
         defer selector.deinit();
         return startUpdateOwned(
             evaluator,
@@ -2028,9 +2028,9 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
+        evaluator.releases,
         try effectValue(
-            evaluator.allocator(),
+            evaluator.allocator,
             if (kind == .each) &.{ "a", "--", "b" } else &.{ "a", "--" },
         ),
     );
@@ -2044,18 +2044,18 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), state);
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
     const state = state_owner.?;
-    if (kind == .each) state.results = .init(try .init(evaluator.releaseDomain(), count));
+    if (kind == .each) state.results = .init(try .init(evaluator.releases, count));
     try state.pushInputs(evaluator);
     state_owner = null;
     try evaluator.beginIsolatedApplication(state.application(1));
 }
 
-fn zipWith(evaluator: *Machine) MachineError!void {
+fn zipWith(evaluator: *Unit) MachineError!void {
     return evaluator.continueWithIdiom(.zip_with, statelessFallback(zipWithGeneric));
 }
-fn zipWithGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
+fn zipWithGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2080,8 +2080,8 @@ fn zipWithGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "a", "b", "--", "c" }),
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "a", "b", "--", "c" }),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
@@ -2093,40 +2093,40 @@ fn zipWithGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), state);
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
     const state = state_owner.?;
-    state.results = .init(try .init(evaluator.releaseDomain(), count));
+    state.results = .init(try .init(evaluator.releases, count));
     try state.pushInputs(evaluator);
     state_owner = null;
     try evaluator.beginIsolatedApplication(state.application(2));
 }
 
-fn fold(evaluator: *Machine) MachineError!void {
+fn fold(evaluator: *Unit) MachineError!void {
     return evaluator.continueWithIdiom(.fold, statelessFallback(foldGeneric));
 }
-fn foldGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
+fn foldGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
     return startFold(evaluator, .fold);
 }
 
-fn scan(evaluator: *Machine) MachineError!void {
+fn scan(evaluator: *Unit) MachineError!void {
     return evaluator.continueWithIdiom(.scan, statelessFallback(scanGeneric));
 }
-fn scanGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
+fn scanGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
     return startFold(evaluator, .scan);
 }
 
 fn statelessFallback(
-    comptime run: *const fn (*Machine, ?*anyopaque) MachineError!void,
+    comptime run: *const fn (*Unit, ?*anyopaque) MachineError!void,
 ) machine.FallbackSource {
     return .{ .make_fn = struct {
-        fn make(_: ?*const anyopaque, _: *Machine) machine.IdiomFallback {
+        fn make(_: ?*const anyopaque, _: *Unit) machine.IdiomFallback {
             return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
         }
     }.make };
 }
 fn deinitStatelessFallback(_: *heap.ReleaseDomain, _: std.mem.Allocator, _: ?*anyopaque) void {}
 
-fn startFold(evaluator: *Machine, kind: IterationKind) MachineError!void {
+fn startFold(evaluator: *Unit, kind: IterationKind) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2146,8 +2146,8 @@ fn startFold(evaluator: *Machine, kind: IterationKind) MachineError!void {
         return;
     }
     var expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "acc", "a", "--", "acc" }),
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "acc", "a", "--", "acc" }),
     );
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
@@ -2159,16 +2159,16 @@ fn startFold(evaluator: *Machine, kind: IterationKind) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), state);
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
     const state = state_owner.?;
-    if (kind == .scan) state.results = .init(try .init(evaluator.releaseDomain(), count));
+    if (kind == .scan) state.results = .init(try .init(evaluator.releases, count));
     try evaluator.pushOwned(accumulator.take());
     try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
     state_owner = null;
     try evaluator.beginIsolatedApplication(state.application(2));
 }
 
-fn infra(evaluator: *Machine) MachineError!void {
+fn infra(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2180,8 +2180,8 @@ fn infra(evaluator: *Machine) MachineError!void {
     const state = try createIteration(evaluator, .infra, &input, null, &quotation, null, count);
     var state_owner: ?*IterationState = state;
     errdefer if (state_owner) |owned| heap.destroyDriver(
-        evaluator.releaseDomain(),
-        evaluator.allocator(),
+        evaluator.releases,
+        evaluator.allocator,
         owned,
     );
     const stack = try evaluator.reserveStack(count);
@@ -2190,7 +2190,7 @@ fn infra(evaluator: *Machine) MachineError!void {
 }
 
 fn createIteration(
-    evaluator: *Machine,
+    evaluator: *Unit,
     kind: IterationKind,
     left: *heap.OwnedValue,
     right: ?*heap.OwnedValue,
@@ -2198,7 +2198,7 @@ fn createIteration(
     expected: ?*heap.OwnedValue,
     count: usize,
 ) error{OutOfMemory}!*IterationState {
-    const state = try evaluator.allocator().create(IterationState);
+    const state = try evaluator.allocator.create(IterationState);
     state.* = .{
         .kind = kind,
         .left = .init(left.take()),
@@ -2217,8 +2217,8 @@ fn inputAt(input: Value, index: usize) Value {
     return if (input == .list) list.atUnchecked(input, index) else input;
 }
 
-fn pushGenericEmpty(evaluator: *Machine) error{OutOfMemory}!void {
-    try evaluator.pushOwned(try list.fromValuesGeneric(evaluator.allocator(), &.{}));
+fn pushGenericEmpty(evaluator: *Unit) error{OutOfMemory}!void {
+    try evaluator.pushOwned(try list.fromValuesGeneric(evaluator.allocator, &.{}));
 }
 
 fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{OutOfMemory}!Value {
@@ -2228,7 +2228,7 @@ fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{Ou
     return list.fromValuesGeneric(allocator, forms);
 }
 
-fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!bool {
+fn boolValue(evaluator: *Unit, item: *const heap.OwnedValue) MachineError!bool {
     return switch (item.borrow()) {
         .int => |integer| switch (integer) {
             0 => false,

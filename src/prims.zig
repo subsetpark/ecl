@@ -19,7 +19,7 @@ const kernel_flat = @import("kernel_flat.zig");
 const task_prims = @import("task_prims.zig");
 const test_prims = @import("test_prims.zig");
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
@@ -55,16 +55,16 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try task_prims.install(core);
     try test_prims.install(core);
 }
-fn dup(evaluator: *Machine) MachineError!void {
+fn dup(evaluator: *Unit) MachineError!void {
     try evaluator.require(1);
-    try evaluator.pushBorrowed(evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1]);
+    try evaluator.pushBorrowed(evaluator.stack.items[evaluator.stack.items.len - 1]);
 }
-fn swap(evaluator: *Machine) MachineError!void {
+fn swap(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
-    const items = evaluator.unit.stack.items;
+    const items = evaluator.stack.items;
     std.mem.swap(Value, &items[items.len - 1], &items[items.len - 2]);
 }
-fn pop(evaluator: *Machine) MachineError!void {
+fn pop(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     item.deinit();
 }
@@ -77,15 +77,15 @@ const StackSnapshot = struct {
     depth: usize,
     index: usize = 0,
 
-    fn init(evaluator: *Machine) error{OutOfMemory}!StackSnapshot {
+    fn init(evaluator: *Unit) error{OutOfMemory}!StackSnapshot {
         const depth = evaluator.available();
         return .{
-            .values = try .init(evaluator.releaseDomain(), depth),
+            .values = try .init(evaluator.releases, depth),
             .depth = depth,
         };
     }
 
-    fn advanceCapture(self: *StackSnapshot, evaluator: *Machine) bool {
+    fn advanceCapture(self: *StackSnapshot, evaluator: *Unit) bool {
         std.debug.assert(evaluator.available() == self.depth);
         const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
@@ -103,7 +103,7 @@ const StackSnapshot = struct {
     }
 };
 
-fn stack(evaluator: *Machine) MachineError!void {
+fn stack(evaluator: *Unit) MachineError!void {
     try evaluator.startDriver(StackSnapshotDriver{
         .snapshot = .init(try .init(evaluator)),
     });
@@ -116,12 +116,12 @@ const StackSnapshotDriver = struct {
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
     result: ?heap.Owned(Value) = null,
 
-    pub fn advance(evaluator: *Machine, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
 
         if (self.materializer == null) {
-            self.materializer = .init(.init(evaluator.allocator(), self.snapshot.borrow().items()));
+            self.materializer = .init(.init(evaluator.allocator, self.snapshot.borrow().items()));
             return .stepped;
         }
         if (self.result == null) switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
@@ -132,17 +132,17 @@ const StackSnapshotDriver = struct {
             },
         };
 
-        self.snapshot.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.snapshot.deinit(evaluator.releases, evaluator.allocator);
         const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
     }
 };
 
-fn cons(evaluator: *Machine) MachineError!void {
+fn cons(evaluator: *Unit) MachineError!void {
     return sequence.consForPrims(evaluator);
 }
-fn match(evaluator: *Machine) MachineError!void {
+fn match(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -154,7 +154,7 @@ fn match(evaluator: *Machine) MachineError!void {
     if (equal.matchWithoutStructure(left.borrow(), right.borrow())) |matches| {
         return evaluator.pushOwned(.{ .int = @intFromBool(matches) });
     }
-    const cursor = try equal.MatchCursor.init(evaluator.allocator(), left.borrow(), right.borrow());
+    const cursor = try equal.MatchCursor.init(evaluator.allocator, left.borrow(), right.borrow());
     try evaluator.startDriver(MatchDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
@@ -168,7 +168,7 @@ const MatchDriver = struct {
     right: heap.Owned(Value),
     cursor: heap.Owned(equal.MatchCursor),
 
-    pub fn advance(evaluator: *Machine, self: *MatchDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *MatchDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -176,7 +176,7 @@ const MatchDriver = struct {
         };
     }
 };
-fn typeWord(evaluator: *Machine) MachineError!void {
+fn typeWord(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const spelling: []const u8 = switch (item.borrow()) {
@@ -194,7 +194,7 @@ fn typeWord(evaluator: *Machine) MachineError!void {
 }
 /// Every value but a symbol pushes itself when a quotation runs it; a symbol
 /// would execute, so its form is its quoted occurrence, linked as written.
-fn literal(evaluator: *Machine) MachineError!void {
+fn literal(evaluator: *Unit) MachineError!void {
     try evaluator.require(1);
     var item = try evaluator.popValue();
     defer item.deinit();
@@ -204,7 +204,7 @@ fn literal(evaluator: *Machine) MachineError!void {
     };
     return evaluator.pushOwned(form);
 }
-fn execute(evaluator: *Machine) MachineError!void {
+fn execute(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const word = switch (item.borrow()) {
@@ -214,13 +214,13 @@ fn execute(evaluator: *Machine) MachineError!void {
     };
     try evaluator.executeWord(word);
 }
-fn parse(evaluator: *Machine) MachineError!void {
+fn parse(evaluator: *Unit) MachineError!void {
     var source_value = try evaluator.popString();
     defer source_value.deinit();
     const source = source_value.borrow();
     try evaluator.startDriver(ParseDriver{
         .source_value = .init(source_value.take()),
-        .encoder = .init(.init(evaluator.allocator(), source)),
+        .encoder = .init(.init(evaluator.allocator, source)),
     });
 }
 const ParseDriver = struct {
@@ -228,7 +228,7 @@ const ParseDriver = struct {
     source_value: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
     source: ?heap.Owned([]u8) = null,
-    pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.source == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -258,13 +258,13 @@ const NumericParseTarget = enum { integer, float };
 
 const chars_expected = "a string, symbol, word, char, or byte list";
 
-fn chars(evaluator: *Machine) MachineError!void {
+fn chars(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     switch (item.borrow()) {
         .list => {
             if (item.borrow().isString()) return evaluator.pushOwned(item.take());
-            const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator(), item.borrow());
+            const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator, item.borrow());
             try evaluator.startDriver(BytesToCharsDriver{
                 .source_value = .init(item.take()),
                 .encoder = .init(encoder),
@@ -273,7 +273,7 @@ fn chars(evaluator: *Machine) MachineError!void {
         .symbol => |id| try startSpellingChars(evaluator, id.name),
         .char => |codepoint| {
             const one = [_]u32{codepoint};
-            try evaluator.pushOwned(try list.fromCodepoints(evaluator.allocator(), &one));
+            try evaluator.pushOwned(try list.fromCodepoints(evaluator.allocator, &one));
         },
         else => return evaluator.typeError(chars_expected),
     }
@@ -281,9 +281,9 @@ fn chars(evaluator: *Machine) MachineError!void {
 
 /// Spellings are process-lifetime bytes validated as UTF-8 when interned, so
 /// the driver borrows them and owns only the string it builds.
-fn startSpellingChars(evaluator: *Machine, id: u32) MachineError!void {
+fn startSpellingChars(evaluator: *Unit, id: u32) MachineError!void {
     try evaluator.startDriver(SpellingCharsDriver{
-        .text = .init(.init(evaluator.allocator(), intern.get(id))),
+        .text = .init(.init(evaluator.allocator, intern.get(id))),
     });
 }
 
@@ -291,7 +291,7 @@ const SpellingCharsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     text: heap.Owned(kernel_storage.Utf8Materializer),
 
-    pub fn advance(evaluator: *Machine, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *SpellingCharsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.text.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -303,7 +303,7 @@ const SpellingCharsDriver = struct {
     }
 };
 
-fn invalidUtf8(evaluator: *Machine, message: []const u8) MachineError {
+fn invalidUtf8(evaluator: *Unit, message: []const u8) MachineError {
     const failure = evaluator.fail(.domain, message);
     evaluator.addErrorReason(.{ .symbol = .{ .name = intern.intern("invalid-utf8") catch return error.OutOfMemory } });
     return failure;
@@ -316,7 +316,7 @@ const BytesToCharsDriver = struct {
     bytes: ?heap.Owned(kernel_storage.ByteVector) = null,
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *BytesToCharsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.bytes == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -325,7 +325,7 @@ const BytesToCharsDriver = struct {
             .pending => return .stepped,
             .complete => |bytes| {
                 self.bytes = .init(bytes);
-                self.text = .init(.init(evaluator.allocator(), self.bytes.?.borrowMut().bytes()));
+                self.text = .init(.init(evaluator.allocator, self.bytes.?.borrowMut().bytes()));
                 return .stepped;
             },
         };
@@ -339,18 +339,18 @@ const BytesToCharsDriver = struct {
     }
 };
 
-fn bytesWord(evaluator: *Machine) MachineError!void {
+fn bytesWord(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (item.borrow() != .list) return evaluator.typeError("a string or byte list");
     if (item.borrow().isString()) {
-        const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), item.borrow());
+        const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, item.borrow());
         return evaluator.startDriver(StringBytesDriver{
             .source_value = .init(item.take()),
             .encoder = .init(encoder),
         });
     }
-    const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator(), item.borrow());
+    const encoder = kernel_storage.ByteVectorEncoder.init(evaluator.allocator, item.borrow());
     try evaluator.startDriver(ByteListIdentityDriver{
         .source_value = .init(item.take()),
         .encoder = .init(encoder),
@@ -364,7 +364,7 @@ const StringBytesDriver = struct {
     encoded: ?heap.Owned([]u8) = null,
     materializer: ?heap.Owned(list.ByteListMaterializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *StringBytesDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *StringBytesDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.encoded == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -373,7 +373,7 @@ const StringBytesDriver = struct {
             .pending => return .stepped,
             .complete => |encoded| {
                 self.encoded = .init(encoded);
-                self.materializer = .init(.init(evaluator.allocator(), self.encoded.?.borrow()));
+                self.materializer = .init(.init(evaluator.allocator, self.encoded.?.borrow()));
                 return .stepped;
             },
         };
@@ -391,7 +391,7 @@ const ByteListIdentityDriver = struct {
     source_value: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.ByteVectorEncoder),
 
-    pub fn advance(evaluator: *Machine, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ByteListIdentityDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -400,7 +400,7 @@ const ByteListIdentityDriver = struct {
             .pending => return .stepped,
             .complete => |vector| {
                 var owned = vector;
-                owned.retire(evaluator.releaseDomain(), evaluator.allocator());
+                owned.retire(evaluator.releases, evaluator.allocator);
                 return .{ .output = self.source_value.take() };
             },
         }
@@ -409,22 +409,22 @@ const ByteListIdentityDriver = struct {
 
 const SymbolConversion = enum { lookup, insert };
 
-fn symbolWord(evaluator: *Machine) MachineError!void {
+fn symbolWord(evaluator: *Unit) MachineError!void {
     return startSymbolConversion(evaluator, .lookup);
 }
 
-fn internWord(evaluator: *Machine) MachineError!void {
+fn internWord(evaluator: *Unit) MachineError!void {
     return startSymbolConversion(evaluator, .insert);
 }
 
-fn startSymbolConversion(evaluator: *Machine, mode: SymbolConversion) MachineError!void {
+fn startSymbolConversion(evaluator: *Unit, mode: SymbolConversion) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     switch (item.borrow()) {
         .symbol => try evaluator.pushOwned(item.take()),
         .list => {
             if (!item.borrow().isString()) return evaluator.typeError("a string or symbol");
-            const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), item.borrow());
+            const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, item.borrow());
             try evaluator.startDriver(SymbolConversionDriver{
                 .source_value = .init(item.take()),
                 .encoder = .init(encoder),
@@ -452,7 +452,7 @@ const SymbolConversionDriver = struct {
         insert: intern.InternInsertionCursor,
     } = .none,
 
-    pub fn advance(evaluator: *Machine, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *SymbolConversionDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.spelling == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -501,7 +501,7 @@ const SymbolConversionDriver = struct {
     }
 };
 
-fn intWord(evaluator: *Machine) MachineError!void {
+fn intWord(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     switch (item.borrow()) {
@@ -518,7 +518,7 @@ fn intWord(evaluator: *Machine) MachineError!void {
 const int_expected = "an int, char, or integer string (floor, round, or ceil convert a float)";
 const float_expected = "a float, int, or numeric string";
 
-fn floatWord(evaluator: *Machine) MachineError!void {
+fn floatWord(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     switch (item.borrow()) {
@@ -532,7 +532,7 @@ fn floatWord(evaluator: *Machine) MachineError!void {
     }
 }
 
-fn charWord(evaluator: *Machine) MachineError!void {
+fn charWord(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     switch (item.borrow()) {
@@ -565,7 +565,7 @@ const CodepointsDriver = struct {
     max_codepoint: u32 = 0,
     writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
 
-    fn scalar(evaluator: *Machine, number: i64) MachineError!u32 {
+    fn scalar(evaluator: *Unit, number: i64) MachineError!u32 {
         const narrowed = std.math.cast(u21, number) orelse
             return evaluator.fail(.domain, "char expects a Unicode scalar value");
         if (!std.unicode.utf8ValidCodepoint(narrowed))
@@ -573,7 +573,7 @@ const CodepointsDriver = struct {
         return narrowed;
     }
 
-    fn codepoint(evaluator: *Machine, item: Value) MachineError!u32 {
+    fn codepoint(evaluator: *Unit, item: Value) MachineError!u32 {
         return switch (item) {
             .char => |existing| existing,
             .int => |number| scalar(evaluator, number),
@@ -586,7 +586,7 @@ const CodepointsDriver = struct {
     /// fails it, or that reaches the surrogate range, is walked to find the
     /// faulting element. An int leaf is what arithmetic on a string produces,
     /// so this is the usual input.
-    fn profileInts(evaluator: *Machine, numbers: []const i64) MachineError!u32 {
+    fn profileInts(evaluator: *Unit, numbers: []const i64) MachineError!u32 {
         var low: i64 = std.math.maxInt(i64);
         var high: i64 = std.math.minInt(i64);
         for (numbers) |number| {
@@ -599,7 +599,7 @@ const CodepointsDriver = struct {
         return @intCast(high);
     }
 
-    pub fn advance(evaluator: *Machine, self: *CodepointsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *CodepointsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const source = self.source.borrow();
@@ -608,7 +608,7 @@ const CodepointsDriver = struct {
         while (!work.exhausted()) switch (self.phase) {
             .profile => {
                 if (self.index == count) {
-                    self.writer = .init(try .init(evaluator.allocator(), count, self.max_codepoint));
+                    self.writer = .init(try .init(evaluator.allocator, count, self.max_codepoint));
                     self.phase = .fill;
                     self.index = 0;
                     continue;
@@ -657,7 +657,7 @@ const CodepointsDriver = struct {
 };
 
 fn startNumericParse(
-    evaluator: *Machine,
+    evaluator: *Unit,
     source_value: *heap.OwnedValue,
     target: NumericParseTarget,
 ) MachineError!void {
@@ -672,7 +672,7 @@ fn startNumericParse(
     });
 }
 
-fn invalidNumericText(evaluator: *Machine, target: NumericParseTarget) MachineError {
+fn invalidNumericText(evaluator: *Unit, target: NumericParseTarget) MachineError {
     return switch (target) {
         .integer => evaluator.fail(.parse, "int expects an integer literal"),
         .float => evaluator.fail(.parse, "float expects a numeric literal"),
@@ -686,7 +686,7 @@ const NumericParseDriver = struct {
     classifier: lexer.ClassifyCursor,
     target: NumericParseTarget,
 
-    pub fn advance(evaluator: *Machine, self: *NumericParseDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *NumericParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.classifier.advance()) {
@@ -698,7 +698,7 @@ const NumericParseDriver = struct {
 
     fn finish(
         self: *NumericParseDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         classification: lexer.Classification,
     ) MachineError!machine.WorkProgress {
         return switch (classification) {
@@ -718,17 +718,17 @@ const NumericParseDriver = struct {
         };
     }
 };
-fn attempt(evaluator: *Machine) MachineError!void {
+fn attempt(evaluator: *Unit) MachineError!void {
     var input = try evaluator.popUnitInput();
-    defer input.deinit(evaluator.releaseDomain());
+    defer input.deinit(evaluator.releases);
     try evaluator.attemptOwned(input.move());
 }
-fn attemptSeedless(evaluator: *Machine) MachineError!void {
+fn attemptSeedless(evaluator: *Unit) MachineError!void {
     var input = try evaluator.popSeedlessUnitInput();
-    defer input.deinit(evaluator.releaseDomain());
+    defer input.deinit(evaluator.releases);
     try evaluator.attemptOwned(input.move());
 }
-fn raise(evaluator: *Machine) MachineError!void {
+fn raise(evaluator: *Unit) MachineError!void {
     var raised = try evaluator.popValue();
     defer raised.deinit();
     if (raised.borrow() != .dict) return evaluator.typeError("an error dict");
@@ -750,7 +750,7 @@ const RaiseDriver = struct {
     trace_index: usize = 0,
     phase: enum { lookup, trace, finish } = .lookup,
 
-    pub fn advance(evaluator: *Machine, self: *RaiseDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *RaiseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         switch (self.phase) {
             .lookup => {
@@ -759,14 +759,14 @@ const RaiseDriver = struct {
                     return .stepped;
                 }
                 if (self.lookup == null) self.lookup = .init(.initHeader(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     self.raised.borrow().dict,
                     .{ .symbol = .{ .name = self.keys[self.field_index] } },
                 ));
                 switch (try self.lookup.?.borrowMut().advance(evaluator.workBudget())) {
                     .pending => return .stepped,
                     .complete => |found| {
-                        self.lookup.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.lookup.?.deinit(evaluator.releases, evaluator.allocator);
                         self.lookup = null;
                         try self.validateField(evaluator, found);
                         if (self.phase == .lookup) self.field_index += 1;
@@ -795,7 +795,7 @@ const RaiseDriver = struct {
             },
         }
     }
-    fn validateField(self: *RaiseDriver, evaluator: *Machine, found: ?Value) MachineError!void {
+    fn validateField(self: *RaiseDriver, evaluator: *Unit, found: ?Value) MachineError!void {
         switch (self.field_index) {
             0 => if (found == null or found.? != .symbol)
                 return evaluator.typeError("an error dict containing a symbol at `kind"),
@@ -823,10 +823,10 @@ const RaiseDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-pub fn ioPp(evaluator: *Machine) MachineError!void {
+pub fn ioPp(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    const render = try printer.OwnedStringCursor.initDisplay(evaluator.allocator(), item.borrow());
+    const render = try printer.OwnedStringCursor.initDisplay(evaluator.allocator, item.borrow());
     try evaluator.startDriver(PpDriver{
         .item = .init(item.take()),
         .render = .init(render),
@@ -838,13 +838,13 @@ const PpDriver = struct {
     item: heap.Owned(Value),
     render: heap.Owned(printer.OwnedStringCursor),
 
-    pub fn advance(evaluator: *Machine, self: *PpDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *PpDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.render.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
             .complete => |rendered| completed: {
-                defer evaluator.allocator().free(rendered);
-                evaluator.unit.inherited.runtime().console.writeOutput(rendered, true) catch
+                defer evaluator.allocator.free(rendered);
+                evaluator.inherited.runtime().console.writeOutput(rendered, true) catch
                     return evaluator.fail(.io, "standard output write failed");
                 break :completed .completed;
             },
@@ -852,7 +852,7 @@ const PpDriver = struct {
     }
 };
 
-pub fn ioStack(evaluator: *Machine) MachineError!void {
+pub fn ioStack(evaluator: *Unit) MachineError!void {
     if (evaluator.available() == 0) return;
     try evaluator.startDriver(StackDisplayDriver{
         .snapshot = .init(try .init(evaluator)),
@@ -869,7 +869,7 @@ const StackDisplayDriver = struct {
     prefix_written: bool = false,
     written: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.snapshot.borrowMut().advanceCapture(evaluator)) return .stepped;
 
@@ -878,7 +878,7 @@ const StackDisplayDriver = struct {
         if (self.rendered == null) {
             if (self.render == null) {
                 self.render = .init(try printer.OwnedStringCursor.initDisplayAtColumn(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     self.snapshot.borrow().items()[self.index],
                     prefix.len,
                 ));
@@ -886,7 +886,7 @@ const StackDisplayDriver = struct {
             switch (try self.render.?.borrowMut().advance(evaluator.workBudget())) {
                 .pending => return .stepped,
                 .complete => |text| {
-                    self.render.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.render.?.deinit(evaluator.releases, evaluator.allocator);
                     self.render = null;
                     self.rendered = .init(text);
                     return .stepped;
@@ -909,7 +909,7 @@ const StackDisplayDriver = struct {
         self.written = end;
         if (!complete) return .stepped;
 
-        self.rendered.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.rendered.?.deinit(evaluator.releases, evaluator.allocator);
         self.rendered = null;
         self.prefix_written = false;
         self.written = 0;
@@ -925,21 +925,21 @@ fn stackDisplayPrefix(buffer: *[64]u8, index: usize) []const u8 {
 }
 
 fn writeStackDisplayChunk(
-    evaluator: *Machine,
+    evaluator: *Unit,
     bytes: []const u8,
     newline: bool,
 ) MachineError!void {
-    evaluator.unit.inherited.runtime().console.writeOutput(bytes, newline) catch
+    evaluator.inherited.runtime().console.writeOutput(bytes, newline) catch
         return evaluator.fail(.io, "standard output write failed");
 }
 
-pub fn ioPrin(evaluator: *Machine) MachineError!void {
+pub fn ioPrin(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popString();
     defer item.deinit();
     const string = item.borrow();
     try evaluator.startDriver(PrinDriver{
         .item = .init(item.take()),
-        .encoder = .init(.init(evaluator.allocator(), string)),
+        .encoder = .init(.init(evaluator.allocator, string)),
     });
 }
 
@@ -948,7 +948,7 @@ const PrinDriver = struct {
     item: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
 
-    pub fn advance(evaluator: *Machine, self: *PrinDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *PrinDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -959,8 +959,8 @@ const PrinDriver = struct {
         }) {
             .pending => .stepped,
             .complete => |encoded| completed: {
-                defer evaluator.allocator().free(encoded);
-                evaluator.unit.inherited.runtime().console.writeOutput(encoded, false) catch
+                defer evaluator.allocator.free(encoded);
+                evaluator.inherited.runtime().console.writeOutput(encoded, false) catch
                     return evaluator.fail(.io, "standard output write failed");
                 break :completed .completed;
             },
@@ -970,11 +970,11 @@ const PrinDriver = struct {
 /// Reads one variable from the immutable session environ snapshot. An unset
 /// variable raises an error because absence has no empty-string representation;
 /// `@attempt`/`result.or-else` is the defaulting idiom.
-fn getenv(evaluator: *Machine) MachineError!void {
+fn getenv(evaluator: *Unit) MachineError!void {
     var name_value = try evaluator.popValue();
     defer name_value.deinit();
     if (!name_value.borrow().isString()) return evaluator.typeError("a string variable name");
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), name_value.borrow());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, name_value.borrow());
     try evaluator.startDriver(GetenvDriver{
         .name_value = .init(name_value.take()),
         .encoder = .init(encoder),
@@ -989,7 +989,7 @@ const GetenvDriver = struct {
     lookup: ?machine.Environ.LookupCursor = null,
     text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *GetenvDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *GetenvDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.name == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1011,7 +1011,7 @@ const GetenvDriver = struct {
                         self.name.?.borrow(),
                         self.name_value.borrow(),
                     );
-                    self.text = .init(.init(evaluator.allocator(), bytes));
+                    self.text = .init(.init(evaluator.allocator, bytes));
                     return .stepped;
                 },
             }
@@ -1029,16 +1029,16 @@ const GetenvDriver = struct {
     }
 };
 
-fn args(evaluator: *Machine) MachineError!void {
-    try evaluator.pushBorrowed(evaluator.unit.arguments);
+fn args(evaluator: *Unit) MachineError!void {
+    try evaluator.pushBorrowed(evaluator.arguments);
 }
-fn exit(evaluator: *Machine) MachineError!void {
+fn exit(evaluator: *Unit) MachineError!void {
     var status = try evaluator.popValue();
     defer status.deinit();
     if (status.borrow() != .int or status.borrow().int < 0 or status.borrow().int > 255) {
         return evaluator.typeError("an exit status from 0 through 255");
     }
-    if (!evaluator.unit.is_root_unit or evaluator.unit.inAttempt()) {
+    if (!evaluator.is_root_unit or evaluator.inAttempt()) {
         return evaluator.fail(.domain, "exit is available only to the root unit outside @attempt");
     }
     try evaluator.park(.{ .close_scope = @intCast(status.borrow().int) });

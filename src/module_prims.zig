@@ -13,7 +13,7 @@ const reflection = @import("reflection.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 /// Removal is one directory edit; the retired generation's images release
 /// through the superseded directory's own bounded retirement.
@@ -39,21 +39,21 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// The one module constructor. The name is validated before the body runs, so
 /// a name that could never be published costs no evaluation and no effect.
 /// Only a registry change during construction can still refuse publication.
-fn defmWord(evaluator: *Machine) MachineError!void {
+fn defmWord(evaluator: *Unit) MachineError!void {
     try evaluator.require(3);
     const name = try evaluator.popSymbol();
     try startDefm(evaluator, name, try evaluator.popUnitInput());
 }
 
-fn defmSeedless(evaluator: *Machine) MachineError!void {
+fn defmSeedless(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     const name = try evaluator.popSymbol();
     try startDefm(evaluator, name, try evaluator.popSeedlessUnitInput());
 }
 
-fn startDefm(evaluator: *Machine, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
+fn startDefm(evaluator: *Unit, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
     var input = popped;
-    errdefer input.deinit(evaluator.releaseDomain());
+    errdefer input.deinit(evaluator.releases);
     try evaluator.startDriver(DefmDriver{
         .input = .init(input.move()),
         .validation = .init(name),
@@ -65,7 +65,7 @@ const DefmDriver = struct {
     input: heap.Owned(machine.OwnedUnitInput),
     validation: intern.ModuleNameCursor,
 
-    pub fn advance(evaluator: *Machine, self: *DefmDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DefmDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.validation.advance()) {
@@ -77,7 +77,7 @@ const DefmDriver = struct {
                 // name that can never publish must fail before the body runs.
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                     return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier");
-                try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
+                try evaluator.refuseReservedModule(name, evaluator.current.?.site.registration_provenance);
                 const input = self.input.take();
                 evaluator.retireDriver(self);
                 try evaluator.moduleOwned(name, input);
@@ -89,7 +89,7 @@ const DefmDriver = struct {
 };
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// through the registry and drives the owner-issued close protocol.
-fn undefmWord(evaluator: *Machine) MachineError!void {
+fn undefmWord(evaluator: *Unit) MachineError!void {
     const name = try evaluator.popSymbol();
     try evaluator.startDriver(UndefmDriver{ .validation = .init(name) });
 }
@@ -99,7 +99,7 @@ fn undefmWord(evaluator: *Machine) MachineError!void {
 /// registered more than once, and an alias still reaches its target's
 /// canonical registration. A construction body reports the name it is being
 /// built under.
-fn moduleNameWord(evaluator: *Machine) MachineError!void {
+fn moduleNameWord(evaluator: *Unit) MachineError!void {
     const home = evaluator.currentHome() orelse return evaluator.fail(
         .domain,
         "*module* is legal only in code homed in a registered module",
@@ -110,13 +110,13 @@ fn moduleNameWord(evaluator: *Machine) MachineError!void {
 /// Returns the reader source that authored the active occurrence. Source names
 /// are user-sized host input, so materialization remains scheduled and
 /// cancellable rather than hiding a traversal in the primitive callback.
-fn fileWord(evaluator: *Machine) MachineError!void {
+fn fileWord(evaluator: *Unit) MachineError!void {
     const source_name = evaluator.activeSourceName() orelse return evaluator.fail(
         .domain,
         "*file* is unavailable for code without source provenance",
     );
     try evaluator.startDriver(FileDriver{
-        .text = .init(.init(evaluator.allocator(), source_name)),
+        .text = .init(.init(evaluator.allocator, source_name)),
     });
 }
 
@@ -124,7 +124,7 @@ const FileDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     text: heap.Owned(kernel_storage.TextMaterializer),
 
-    pub fn advance(evaluator: *Machine, self: *FileDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *FileDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.text.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -137,7 +137,7 @@ const UndefmDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     validation: intern.ModuleNameCursor,
     cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
-    pub fn advance(evaluator: *Machine, self: *UndefmDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *UndefmDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -148,8 +148,8 @@ const UndefmDriver = struct {
                         .domain,
                         "undefm requires a valid module name",
                     );
-                    try evaluator.refuseReservedModule(name, evaluator.unit.current.?.site.registration_provenance);
-                    const registry = evaluator.publicationRegistry(name, evaluator.unit.current.?.site.registration_provenance);
+                    try evaluator.refuseReservedModule(name, evaluator.current.?.site.registration_provenance);
+                    const registry = evaluator.publicationRegistry(name, evaluator.current.?.site.registration_provenance);
                     self.cursor = .init(registry.removalCursor(name));
                     continue;
                 },
@@ -171,13 +171,13 @@ const UndefmDriver = struct {
 
 fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Machine) MachineError!void {
+        fn run(evaluator: *Unit) MachineError!void {
             return importWord(evaluator, visibility);
         }
     }.run;
 }
 
-fn importWord(evaluator: *Machine, visibility: env.Visibility) MachineError!void {
+fn importWord(evaluator: *Unit, visibility: env.Visibility) MachineError!void {
     try evaluator.require(2);
     const scope = try evaluator.definitionScope();
     if (visibility == .private and !scope.isUnderConstruction())
@@ -186,7 +186,7 @@ fn importWord(evaluator: *Machine, visibility: env.Visibility) MachineError!void
     errdefer requested.deinit();
     const module_id = try evaluator.popSymbol();
     const requested_count: usize = @intCast(requested.borrow().list.length());
-    const prepared = try evaluator.allocator().alloc(ImportName, requested_count);
+    const prepared = try evaluator.allocator.alloc(ImportName, requested_count);
     try evaluator.startDriver(ImportDriver.init(
         evaluator,
         module_id,
@@ -195,7 +195,7 @@ fn importWord(evaluator: *Machine, visibility: env.Visibility) MachineError!void
         visibility,
     ));
 }
-fn aliasModule(evaluator: *Machine) MachineError!void {
+fn aliasModule(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     const target = try evaluator.popSymbol();
     const short = try evaluator.popSymbol();
@@ -246,7 +246,7 @@ const ImportDriver = struct {
     }
 
     fn init(
-        evaluator: *Machine,
+        evaluator: *Unit,
         module_id: u32,
         requested: Value,
         prepared: []ImportName,
@@ -262,7 +262,7 @@ const ImportDriver = struct {
         };
     }
 
-    pub fn advance(evaluator: *Machine, self: *ImportDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ImportDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -296,7 +296,7 @@ const ImportDriver = struct {
                         self.binding_validation = null;
                         self.prepared.borrowMut().*[self.prepare_index].binding = binding;
                         self.qualifier = .init(try .init(
-                            evaluator.allocator(),
+                            evaluator.allocator,
                             intern.qualifiedName(self.module_name.?, binding),
                         ));
                         continue;
@@ -306,7 +306,7 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |qualified| {
                         self.prepared.borrowMut().*[self.prepare_index].qualified = qualified;
-                        self.qualifier.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.qualifier.?.deinit(evaluator.releases, evaluator.allocator);
                         self.qualifier = null;
                         self.binding_validation = null;
                         self.prepare_index += 1;
@@ -322,7 +322,7 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |maybe_generation| if (maybe_generation) |generation| {
                         self.generation = .init(generation);
-                        self.acquisition.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.acquisition.?.deinit(evaluator.releases, evaluator.allocator);
                         self.acquisition = null;
                         continue;
                     } else {
@@ -362,7 +362,7 @@ const ImportDriver = struct {
                         var lease = maybe_lease orelse
                             return evaluator.undefinedNameIn(requested.qualified, .qualified);
                         lease.deinit();
-                        self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.resolution.?.deinit(evaluator.releases, evaluator.allocator);
                         self.resolution = null;
                         self.validation_index += 1;
                         continue;
@@ -381,7 +381,7 @@ const ImportDriver = struct {
                     .pending => continue,
                     .complete => |maybe_lease| {
                         self.resolved = .init(maybe_lease orelse unreachable);
-                        self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.resolution.?.deinit(evaluator.releases, evaluator.allocator);
                         self.resolution = null;
                         continue;
                     },
@@ -392,7 +392,7 @@ const ImportDriver = struct {
                 // The forwarding word is written into the importing root.
                 const linker = try evaluator.rootLinker(self.scope);
                 self.forwarding_body = .init(try list.fromValuesGeneric(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     &.{.{ .symbol = .{ .name = requested.qualified, .slot = try linker.link(requested.qualified) } }},
                 ));
                 continue;
@@ -432,11 +432,11 @@ const ImportDriver = struct {
             }) {
                 .pending => {},
                 .complete => {
-                    self.publisher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.publisher.?.deinit(evaluator.releases, evaluator.allocator);
                     self.publisher = null;
-                    if (self.forwarding_body) |*body| body.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    if (self.forwarding_body) |*body| body.deinit(evaluator.releases, evaluator.allocator);
                     self.forwarding_body = null;
-                    self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.resolved.?.deinit(evaluator.releases, evaluator.allocator);
                     self.resolved = null;
                     self.publish_index += 1;
                 },
@@ -453,7 +453,7 @@ const AliasDriver = struct {
     short: ?intern.BindingName = null,
     target: ?intern.ModuleName = null,
     cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
-    pub fn advance(evaluator: *Machine, self: *AliasDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *AliasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -480,11 +480,11 @@ const AliasDriver = struct {
             if (self.cursor == null) {
                 // An alias of an embedded module could remove it, and an
                 // alias under an embedded name would claim one.
-                const provenance = evaluator.unit.current.?.site.registration_provenance;
+                const provenance = evaluator.current.?.site.registration_provenance;
                 try evaluator.refuseReservedModule(self.target.?, provenance);
                 if (intern.moduleName(intern.bindingId(self.short.?)) catch null) |short|
                     try evaluator.refuseReservedModule(short, provenance);
-                const registry = evaluator.publicationRegistry(self.target.?, evaluator.unit.current.?.site.registration_provenance);
+                const registry = evaluator.publicationRegistry(self.target.?, evaluator.current.?.site.registration_provenance);
                 self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
             }
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
@@ -501,7 +501,7 @@ const AliasDriver = struct {
     }
 };
 
-fn qualify(evaluator: *Machine) MachineError!void {
+fn qualify(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     const binding = try evaluator.popSymbol();
     const module_name = try evaluator.popSymbol();
@@ -519,7 +519,7 @@ const QualifyDriver = struct {
     binding_name: ?intern.BindingName = null,
     cursor: ?heap.Owned(intern.QualifiedCursor) = null,
 
-    pub fn advance(evaluator: *Machine, self: *QualifyDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *QualifyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -544,7 +544,7 @@ const QualifyDriver = struct {
                 },
             };
             if (self.cursor == null) self.cursor = .init(try .init(
-                evaluator.allocator(),
+                evaluator.allocator,
                 intern.qualifiedName(self.module_name.?, self.binding_name.?),
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
@@ -555,11 +555,11 @@ const QualifyDriver = struct {
         return .stepped;
     }
 };
-fn words(evaluator: *Machine) MachineError!void {
+fn words(evaluator: *Unit) MachineError!void {
     try evaluator.startDriver(WordsDriver.init(evaluator));
 }
 
-fn exportsWord(evaluator: *Machine) MachineError!void {
+fn exportsWord(evaluator: *Unit) MachineError!void {
     const requested = try evaluator.popSymbol();
     try evaluator.startDriver(ExportsDriver.init(evaluator, requested));
 }
@@ -615,34 +615,34 @@ const ExportsDriver = struct {
         }
     };
 
-    fn init(evaluator: *Machine, requested: u32) ExportsDriver {
+    fn init(evaluator: *Unit, requested: u32) ExportsDriver {
         const core_requested = intern.isReservedRegistryBytes(intern.get(requested));
         return .{
-            .allocator = evaluator.allocator(),
+            .allocator = evaluator.allocator,
             .requested = requested,
-            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator())),
+            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
             .state = .init(if (core_requested)
                 .{ .core_names = .init(reflection.VisibleNameCursor.init(
-                    .{ .environment = evaluator.currentEnv().coreView() },
-                    evaluator.currentEnv().coreView(),
-                    evaluator.unit.bindingPin(),
+                    .{ .environment = evaluator.environment.coreView() },
+                    evaluator.environment.coreView(),
+                    evaluator.bindingPin(),
                 )) }
             else
                 .{ .validate = .init(requested) }),
         };
     }
 
-    fn replace(self: *ExportsDriver, evaluator: *Machine, next: State) void {
-        self.state.borrowMut().deinit(evaluator.releaseDomain(), evaluator.allocator());
+    fn replace(self: *ExportsDriver, evaluator: *Unit, next: State) void {
+        self.state.borrowMut().deinit(evaluator.releases, evaluator.allocator);
         self.state.borrowMut().* = next;
     }
 
-    fn startSort(self: *ExportsDriver, evaluator: *Machine) MachineError!void {
+    fn startSort(self: *ExportsDriver, evaluator: *Unit) MachineError!void {
         const cursor = try reflection.SortedUniqueNameCursor.init(self.allocator, self.found.borrowMut());
         self.replace(evaluator, .{ .sort = .init(cursor) });
     }
 
-    pub fn advance(evaluator: *Machine, self: *ExportsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ExportsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -689,9 +689,9 @@ const ExportsDriver = struct {
                 .pending => {},
                 .complete => |names| {
                     var owned_names = heap.Owned(reflection.SortedUniqueNames).init(names);
-                    errdefer owned_names.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    errdefer owned_names.deinit(evaluator.releases, evaluator.allocator);
                     const values = try heap.OwnedValueBuffer.init(
-                        evaluator.releaseDomain(),
+                        evaluator.releases,
                         owned_names.borrow().items().len,
                     );
                     self.replace(evaluator, .{ .fill = .{
@@ -719,11 +719,11 @@ const ExportsDriver = struct {
     }
 };
 
-fn stdlibWord(evaluator: *Machine) MachineError!void {
+fn stdlibWord(evaluator: *Unit) MachineError!void {
     const names = comptime stdlib.sortedNames();
     var values: [names.len]Value = undefined;
     for (names, &values) |name, *slot| slot.* = .{ .symbol = .{ .name = try intern.intern(name) } };
-    return evaluator.pushOwned(try list.fromValues(evaluator.allocator(), &values));
+    return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &values));
 }
 
 const WordsDriver = struct {
@@ -764,22 +764,22 @@ const WordsDriver = struct {
         }
     };
 
-    fn init(evaluator: *Machine) WordsDriver {
+    fn init(evaluator: *Unit) WordsDriver {
         return .{
-            .allocator = evaluator.allocator(),
-            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator())),
-            .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+            .allocator = evaluator.allocator,
+            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
+            .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
             .state = .init(.{ .visible = .init(reflection.VisibleNameCursor.init(
                 .{ .scope = evaluator.currentScope() },
-                evaluator.currentEnv().coreView(),
-                evaluator.unit.bindingPin(),
+                evaluator.environment.coreView(),
+                evaluator.bindingPin(),
             )) }),
         };
     }
     fn append(self: *WordsDriver, name: u32) error{OutOfMemory}!void {
         try self.found.borrowMut().append(name);
     }
-    pub fn advance(evaluator: *Machine, self: *WordsDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -790,7 +790,7 @@ const WordsDriver = struct {
                         self.allocator,
                         self.found.borrowMut(),
                     );
-                    visible.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    visible.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .{ .postprocess = .init(cursor) };
                 },
                 .item => |name| try self.append(name),
@@ -798,7 +798,7 @@ const WordsDriver = struct {
             .postprocess => |*cursor| switch (try cursor.borrowMut().advance(work)) {
                 .pending => {},
                 .complete => |names| {
-                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    cursor.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .{ .actions = .{
                         .names = .init(names),
                         .index = 0,
@@ -830,24 +830,24 @@ const WordsDriver = struct {
                 },
             },
             .write => |*write| {
-                evaluator.unit.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                evaluator.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
                 return .completed;
             },
         };
         return .stepped;
     }
 };
-fn writeFailure(evaluator: *Machine) MachineError {
+fn writeFailure(evaluator: *Unit) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }
-fn load(evaluator: *Machine) MachineError!void {
+fn load(evaluator: *Unit) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), path_value.borrow());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, path_value.borrow());
     try evaluator.startDriver(LoadPathDriver{
         .path_value = .init(path_value.take()),
         .encoder = .init(encoder),
     });
 }
-const LoadPathDriver = machine.PathActionDriver(Machine.loadFileOwned);
+const LoadPathDriver = machine.PathActionDriver(Unit.loadFileOwned);

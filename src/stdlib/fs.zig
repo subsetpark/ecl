@@ -24,7 +24,7 @@ const machine = @import("../machine.zig");
 const poll = @import("../poll.zig");
 const value = @import("../value.zig");
 
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 const Value = value.Value;
 
@@ -148,24 +148,24 @@ const Operation = enum {
     }
 };
 
-fn reserve(evaluator: *Machine) MachineError!void {
+fn reserve(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .reserve);
 }
-fn openWriter(evaluator: *Machine) MachineError!void {
+fn openWriter(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .open_writer);
 }
-fn openReader(evaluator: *Machine) MachineError!void {
+fn openReader(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .open_reader);
 }
 
-fn openList(evaluator: *Machine) MachineError!void {
+fn openList(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .open_list);
 }
-fn nextEntry(evaluator: *Machine) MachineError!void {
+fn nextEntry(evaluator: *Unit) MachineError!void {
     var cursor = try evaluator.popValue();
     errdefer cursor.deinit();
     if (!directory.isEnumeration(cursor.borrow())) return evaluator.typeError("a directory enumeration resource");
-    const driver = try evaluator.allocator().create(NextEntry);
+    const driver = try evaluator.allocator.create(NextEntry);
     // SAFETY: reading initializes entry before the name phase uses it.
     driver.* = .{ .cursor = cursor.take(), .entry = undefined };
     evaluator.adoptDriver(driver);
@@ -180,7 +180,7 @@ const NextEntry = struct {
         if (self.state == .name) self.state.name.retire(releases);
         releases.releaseValue(self.cursor);
     }
-    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *@This()) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .reading) switch (directory.next(self.cursor)) {
             .pending => return .stepped,
@@ -188,11 +188,11 @@ const NextEntry = struct {
             .failed => |reason| return evaluator.fail(errorKindFor(reason), reason.message()),
             .end => {
                 self.state = .complete;
-                return .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{}) };
+                return .{ .output = try dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{}) };
             },
             .entry => |entry| {
                 self.entry = entry;
-                self.state = .{ .name = .init(evaluator.allocator(), self.entry.name[0..self.entry.length]) };
+                self.state = .{ .name = .init(evaluator.allocator, self.entry.name[0..self.entry.length]) };
             },
         };
         return switch (self.state.name.advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -203,8 +203,8 @@ const NextEntry = struct {
             .complete => |name| result: {
                 self.state.name.deinit();
                 self.state = .complete;
-                defer evaluator.releaseDomain().releaseValue(name);
-                break :result .{ .output = try dict.fromUniquePairs(evaluator.allocator(), evaluator.releaseDomain(), &.{
+                defer evaluator.releases.releaseValue(name);
+                break :result .{ .output = try dict.fromUniquePairs(evaluator.allocator, evaluator.releases, &.{
                     .{ .{ .symbol = .{ .name = try intern.intern("name") } }, name },
                     .{ .{ .symbol = .{ .name = try intern.intern("kind") } }, .{ .symbol = .{ .name = try intern.intern(self.entry.kind.symbol()) } } },
                 }) };
@@ -213,22 +213,22 @@ const NextEntry = struct {
     }
 };
 
-fn stageDirectory(evaluator: *Machine) MachineError!void {
+fn stageDirectory(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .stage_dir);
 }
-fn commitDirectory(evaluator: *Machine) MachineError!void {
+fn commitDirectory(evaluator: *Unit) MachineError!void {
     var stage = try evaluator.popValue();
     errdefer stage.deinit();
     if (!directory.isStage(stage.borrow())) return evaluator.typeError("a directory staging resource");
-    const driver = try evaluator.allocator().create(CommitDirectory);
+    const driver = try evaluator.allocator.create(CommitDirectory);
     driver.* = .{ .stage = stage.take() };
     evaluator.adoptDriver(driver);
 }
-fn commitFile(evaluator: *Machine) MachineError!void {
+fn commitFile(evaluator: *Unit) MachineError!void {
     var writer = try evaluator.popValue();
     errdefer writer.deinit();
     if (!directory.isStream(writer.borrow())) return evaluator.typeError("a filesystem writer resource");
-    const driver = try evaluator.allocator().create(CommitDirectory);
+    const driver = try evaluator.allocator.create(CommitDirectory);
     driver.* = .{ .stage = writer.take(), .kind = .file };
     evaluator.adoptDriver(driver);
 }
@@ -241,7 +241,7 @@ const CommitDirectory = struct {
     pub fn deinit(self: *@This(), releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
         releases.releaseValue(self.stage);
     }
-    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *@This()) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.state == .sealing) switch (if (self.kind == .directory) directory.commit(self.stage) else directory.commitFile(self.stage)) {
             .closed => return failResource(evaluator, self.stage, if (self.kind == .directory) "commit-dir" else "commit-file", .io),
@@ -261,11 +261,11 @@ const CommitDirectory = struct {
     }
 };
 
-fn failResource(evaluator: *Machine, item: Value, operation: []const u8, reason: fsport.Reason) MachineError {
+fn failResource(evaluator: *Unit, item: Value, operation: []const u8, reason: fsport.Reason) MachineError {
     const operation_symbol = try intern.intern(operation);
     const reason_symbol = try reasonSymbol(reason);
-    const path = try list.fromCodepoints(evaluator.allocator(), &.{'.'});
-    defer evaluator.releaseDomain().releaseValue(path);
+    const path = try list.fromCodepoints(evaluator.allocator, &.{'.'});
+    defer evaluator.releases.releaseValue(path);
     const failure = evaluator.fail(errorKindFor(reason), reason.message());
     evaluator.addErrorFilesystem(.{
         .operation = .{ .symbol = .{ .name = operation_symbol } },
@@ -275,7 +275,7 @@ fn failResource(evaluator: *Machine, item: Value, operation: []const u8, reason:
     return failure;
 }
 
-fn writeChunk(evaluator: *Machine) MachineError!void {
+fn writeChunk(evaluator: *Unit) MachineError!void {
     try evaluator.require(2);
     var payload = try evaluator.popValue();
     errdefer payload.deinit();
@@ -283,7 +283,7 @@ fn writeChunk(evaluator: *Machine) MachineError!void {
     var writer = try evaluator.popValue();
     errdefer writer.deinit();
     if (!directory.isStream(writer.borrow())) return evaluator.typeError("a filesystem writer resource");
-    const driver = try evaluator.allocator().create(WriteChunk);
+    const driver = try evaluator.allocator.create(WriteChunk);
     driver.* = .{ .writer = writer.take(), .payload = payload.take() };
     evaluator.adoptDriver(driver);
 }
@@ -304,7 +304,7 @@ const WriteChunk = struct {
         releases.releaseValue(self.writer);
         releases.releaseValue(self.payload);
     }
-    pub fn advance(evaluator: *Machine, self: *@This()) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *@This()) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         switch (self.state) {
             .validating => |*index| {
@@ -342,7 +342,7 @@ const WriteChunk = struct {
                     claim.fail(.limit);
                     return failResource(evaluator, self.writer, "write-chunk", .limit);
                 }
-                self.state = .{ .encoding = .init(evaluator.allocator(), self.payload) };
+                self.state = .{ .encoding = .init(evaluator.allocator, self.payload) };
             },
             .encoding => |*encoder| switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -373,71 +373,71 @@ const WriteChunk = struct {
     }
 };
 
-fn makeDirectories(evaluator: *Machine) MachineError!void {
+fn makeDirectories(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .mkdirs);
 }
-fn removeTree(evaluator: *Machine) MachineError!void {
+fn removeTree(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .remove_tree);
 }
-fn advisoryLock(evaluator: *Machine) MachineError!void {
+fn advisoryLock(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .lock);
 }
-fn openDirectory(evaluator: *Machine) MachineError!void {
+fn openDirectory(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .open_dir);
 }
-fn childDirectory(evaluator: *Machine) MachineError!void {
+fn childDirectory(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .child_dir);
 }
 
-fn readBytes(evaluator: *Machine) MachineError!void {
+fn readBytes(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .read_bytes);
 }
-fn readText(evaluator: *Machine) MachineError!void {
+fn readText(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .read_text);
 }
-fn createBytes(evaluator: *Machine) MachineError!void {
+fn createBytes(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .create_bytes);
 }
-fn createText(evaluator: *Machine) MachineError!void {
+fn createText(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .create_text);
 }
-fn replaceBytes(evaluator: *Machine) MachineError!void {
+fn replaceBytes(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .replace_bytes);
 }
-fn replaceText(evaluator: *Machine) MachineError!void {
+fn replaceText(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .replace_text);
 }
-fn publishBytes(evaluator: *Machine) MachineError!void {
+fn publishBytes(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .publish_bytes);
 }
-fn publishText(evaluator: *Machine) MachineError!void {
+fn publishText(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .publish_text);
 }
-fn stat(evaluator: *Machine) MachineError!void {
+fn stat(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .stat);
 }
-fn lstat(evaluator: *Machine) MachineError!void {
+fn lstat(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .lstat);
 }
-fn exists(evaluator: *Machine) MachineError!void {
+fn exists(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .exists);
 }
-fn listDirectory(evaluator: *Machine) MachineError!void {
+fn listDirectory(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .list);
 }
-fn mkdir(evaluator: *Machine) MachineError!void {
+fn mkdir(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .mkdir);
 }
-fn copy(evaluator: *Machine) MachineError!void {
+fn copy(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .copy);
 }
-fn rename(evaluator: *Machine) MachineError!void {
+fn rename(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .rename);
 }
-fn removeFile(evaluator: *Machine) MachineError!void {
+fn removeFile(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .remove_file);
 }
-fn removeDir(evaluator: *Machine) MachineError!void {
+fn removeDir(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .remove_dir);
 }
 
@@ -483,7 +483,7 @@ const Payload = union(enum) {
     }
 };
 
-fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
+fn begin(evaluator: *Unit, operation: Operation) MachineError!void {
     const count: usize = switch (operation.shape()) {
         .host, .root => 1,
         .unary => 2,
@@ -499,7 +499,7 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             var root = try evaluator.popValue();
             errdefer root.deinit();
             if (!validRoot(root.borrow())) return evaluator.typeError("a root symbol or directory resource");
-            const path = try list.fromCodepoints(evaluator.allocator(), &.{'.'});
+            const path = try list.fromCodepoints(evaluator.allocator, &.{'.'});
             inputs = .{ .root = root.take(), .path = path };
         },
         .host => {
@@ -570,14 +570,14 @@ fn begin(evaluator: *Machine, operation: Operation) MachineError!void {
             };
         },
     }
-    errdefer inputs.deinit(evaluator.releaseDomain());
+    errdefer inputs.deinit(evaluator.releases);
     const symbols = try Symbols.init(operation);
-    const access = evaluator.unit.inherited.runtime().filesystem_access;
-    const driver = try evaluator.allocator().create(Driver);
-    errdefer evaluator.allocator().destroy(driver);
-    const path_cursor = kernel_storage.StringEncoder.init(evaluator.allocator(), inputs.path);
+    const access = evaluator.inherited.runtime().filesystem_access;
+    const driver = try evaluator.allocator.create(Driver);
+    errdefer evaluator.allocator.destroy(driver);
+    const path_cursor = kernel_storage.StringEncoder.init(evaluator.allocator, inputs.path);
     driver.* = .{
-        .allocator = evaluator.allocator(),
+        .allocator = evaluator.allocator,
         .io = fsport.hostIo(access),
         .access = access,
         .limits = fsport.limitsOf(access),
@@ -637,7 +637,7 @@ fn errorKindFor(reason: fsport.Reason) machine.ErrorKind {
 }
 
 fn failInputs(
-    evaluator: *Machine,
+    evaluator: *Unit,
     kind: machine.ErrorKind,
     reason: fsport.Reason,
     operation: Operation,
@@ -780,11 +780,11 @@ const Driver = struct {
         cleanup_done,
     };
 
-    pub fn advance(evaluator: *Machine, self: *Driver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *Driver) MachineError!machine.WorkProgress {
         return self.completion.advance(evaluator, self);
     }
 
-    pub fn advanceOperation(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    pub fn advanceOperation(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         try evaluator.pollKernel();
         return switch (self.state) {
             .encode_path => |*cursor| self.encodePath(evaluator, cursor, .primary),
@@ -814,11 +814,11 @@ const Driver = struct {
 
     const Which = enum { primary, second };
 
-    fn fail(self: *Driver, evaluator: *Machine, reason: fsport.Reason) MachineError {
+    fn fail(self: *Driver, evaluator: *Unit, reason: fsport.Reason) MachineError {
         return failInputs(evaluator, errorKindFor(reason), reason, self.operation, self.symbols, &self.inputs);
     }
 
-    fn failMessage(self: *Driver, evaluator: *Machine, kind: machine.ErrorKind, reason: fsport.Reason, message: []const u8) MachineError {
+    fn failMessage(self: *Driver, evaluator: *Unit, kind: machine.ErrorKind, reason: fsport.Reason, message: []const u8) MachineError {
         const reason_symbol = try reasonSymbol(reason);
         const failure = evaluator.fail(kind, message);
         evaluator.addErrorFilesystem(.{
@@ -836,7 +836,7 @@ const Driver = struct {
 
     fn encodePath(
         self: *Driver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         cursor: *kernel_storage.StringEncoder,
         which: Which,
     ) MachineError!driver_completion.Progress {
@@ -871,7 +871,7 @@ const Driver = struct {
 
     fn encodeText(
         self: *Driver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!driver_completion.Progress {
         switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -890,7 +890,7 @@ const Driver = struct {
 
     fn encodeBytes(
         self: *Driver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         encoder: *kernel_storage.ByteVectorEncoder,
     ) MachineError!driver_completion.Progress {
         switch (encoder.advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -913,7 +913,7 @@ const Driver = struct {
 
     /// Grammar, root lookup, and quota checks happen before any
     /// host object is opened.
-    fn authorize(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn authorize(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         if (self.operation == .open_dir) {
             const dir = switch (fsport.openHostDirectory(self.access, self.path.?)) {
                 .directory => |dir| dir,
@@ -966,7 +966,7 @@ const Driver = struct {
 
     fn resolve(
         self: *Driver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         resolver: *fsport.Resolver,
         which: Which,
     ) MachineError!driver_completion.Progress {
@@ -995,16 +995,16 @@ const Driver = struct {
                                     error.PathTooLong => self.fail(evaluator, .limit),
                                 };
                             };
-                            resolver.retire(evaluator.releaseDomain());
+                            resolver.retire(evaluator.releases);
                             self.resolved = resolved;
                             self.state = .{ .resolve_second = next };
                             return .yielded;
                         }
-                        resolver.retire(evaluator.releaseDomain());
+                        resolver.retire(evaluator.releases);
                         self.resolved = resolved;
                     },
                     .second => {
-                        resolver.retire(evaluator.releaseDomain());
+                        resolver.retire(evaluator.releases);
                         self.second = resolved;
                     },
                 }
@@ -1014,7 +1014,7 @@ const Driver = struct {
         }
     }
 
-    fn acquireRoot(self: *Driver, evaluator: *Machine, item: Value) MachineError!RootSelection {
+    fn acquireRoot(self: *Driver, evaluator: *Unit, item: Value) MachineError!RootSelection {
         return fsport.selectRoot(self.access, item) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.UnknownRoot => return self.fail(evaluator, .unknown_root),
@@ -1023,8 +1023,8 @@ const Driver = struct {
         };
     }
 
-    fn publishDirectory(self: *Driver, evaluator: *Machine, dir: std.Io.Dir) MachineError!driver_completion.Progress {
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse {
+    fn publishDirectory(self: *Driver, evaluator: *Unit, dir: std.Io.Dir) MachineError!driver_completion.Progress {
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse {
             dir.close(self.io);
             return evaluator.fail(.cancelled, "directory scope is closing");
         }));
@@ -1040,7 +1040,7 @@ const Driver = struct {
         return .{ .output = result };
     }
 
-    fn acquireDirectory(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn acquireDirectory(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const dir = switch (self.resolved.?) {
             .directory => |d| d.dir.openDir(self.io, ".", .{ .iterate = true }),
             .entry => |entry| entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }),
@@ -1048,7 +1048,7 @@ const Driver = struct {
         return self.publishDirectory(evaluator, dir);
     }
 
-    fn act(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn act(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         return switch (self.operation) {
             .reserve => unreachable,
             .open_writer => self.beginStage(evaluator, .create),
@@ -1075,7 +1075,7 @@ const Driver = struct {
         };
     }
 
-    fn publishReservation(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn publishReservation(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const root = self.root.?;
         const ticket = if (root.reservation()) |existing| existing: {
             existing.retain();
@@ -1085,7 +1085,7 @@ const Driver = struct {
             error.Limit => return self.fail(evaluator, .limit),
         };
         defer ticket.release();
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
         const dir = root.dir().openDir(self.io, ".", .{ .iterate = true }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
         const result = directory.adoptChild(self.access, scope, dir, self.inputs.root, ticket) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1095,9 +1095,9 @@ const Driver = struct {
         return .{ .output = result };
     }
 
-    fn stageDirectory(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn stageDirectory(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
         const stage = @import("../directory_stage.zig").Stage.create(self.access, entry.parent.dir, entry.name) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return self.fail(evaluator, fsport.reasonForError(err));
@@ -1110,7 +1110,7 @@ const Driver = struct {
         return .{ .output = result };
     }
 
-    fn beginLock(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn beginLock(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
         const file = switch (fsport.openLockFile(self.io, entry.parent.dir, entry.name)) {
             .file => |file| file,
@@ -1120,12 +1120,12 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn waitForLock(self: *Driver, evaluator: *Machine, file: std.Io.File) MachineError!driver_completion.Progress {
+    fn waitForLock(self: *Driver, evaluator: *Unit, file: std.Io.File) MachineError!driver_completion.Progress {
         if (!(file.tryLock(self.io, .exclusive) catch |err| return self.fail(evaluator, fsport.reasonForError(err)))) {
             try evaluator.park(.{ .sleep = 10 });
             return .yielded;
         }
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing")));
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing")));
         // Adoption consumes the descriptor even on failure. Retirement cannot
         // close it again once the resource factory owns it.
         self.state = .complete;
@@ -1141,7 +1141,7 @@ const Driver = struct {
     /// `open-reader`: the file is opened as `read-bytes` opens it, but is
     /// adopted by the calling scope as a resource whose endpoint is the
     /// result. There is no size limit: the stream is read a chunk at a time.
-    fn openReaderEndpoint(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn openReaderEndpoint(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = switch (self.resolved.?) {
             .directory => return self.fail(evaluator, .is_directory),
             .entry => |entry| entry,
@@ -1157,7 +1157,7 @@ const Driver = struct {
             },
             .regular => {},
         }
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse {
+        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse {
             file.close(self.io);
             return evaluator.fail(.cancelled, "reader scope is closing");
         }));
@@ -1170,7 +1170,7 @@ const Driver = struct {
         return .{ .output = result };
     }
 
-    fn beginRead(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn beginRead(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = switch (self.resolved.?) {
             .directory => return self.fail(evaluator, .is_directory),
             .entry => |entry| entry,
@@ -1194,7 +1194,7 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn readStep(self: *Driver, evaluator: *Machine, read: *Read) MachineError!driver_completion.Progress {
+    fn readStep(self: *Driver, evaluator: *Unit, read: *Read) MachineError!driver_completion.Progress {
         switch (fsport.readQuantum(self.io, read.file, read.buffer, &read.offset)) {
             .pending => return .yielded,
             .failed => |reason| return self.fail(evaluator, reason),
@@ -1211,7 +1211,7 @@ const Driver = struct {
 
     fn materializeBytes(
         self: *Driver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         building: *@FieldType(State, "bytes_value"),
     ) MachineError!driver_completion.Progress {
         return switch (try building.materializer.advance(evaluator.workBudget())) {
@@ -1227,7 +1227,7 @@ const Driver = struct {
 
     fn materializeText(
         self: *Driver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         building: *@FieldType(State, "text_value"),
     ) MachineError!driver_completion.Progress {
         return switch (building.materializer.advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -1246,7 +1246,7 @@ const Driver = struct {
 
     // -- metadata -----------------------------------------------------------
 
-    fn inspect(self: *Driver, evaluator: *Machine, followed: bool) MachineError!driver_completion.Progress {
+    fn inspect(self: *Driver, evaluator: *Unit, followed: bool) MachineError!driver_completion.Progress {
         const info: std.Io.File.Stat = switch (self.resolved.?) {
             .directory => |handle| handle.dir.stat(self.io) catch |err| return self.fail(evaluator, fsport.reasonForError(err)),
             .entry => |entry| entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err|
@@ -1255,19 +1255,19 @@ const Driver = struct {
         const kind = fsport.EntryKind.fromHost(info.kind);
         if (followed and kind == .symlink) return self.fail(evaluator, .changed);
         const result = if (kind == .file)
-            try dict.fromUniquePairs(self.allocator, evaluator.releaseDomain(), &.{
+            try dict.fromUniquePairs(self.allocator, evaluator.releases, &.{
                 .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.file } } },
                 .{ .{ .symbol = .{ .name = self.symbols.size } }, .{ .int = std.math.cast(i64, info.size) orelse std.math.maxInt(i64) } },
             })
         else
-            try dict.fromUniquePairs(self.allocator, evaluator.releaseDomain(), &.{
+            try dict.fromUniquePairs(self.allocator, evaluator.releases, &.{
                 .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.entryKind(kind) } } },
             });
         self.state = .complete;
         return .{ .output = result };
     }
 
-    fn testExistence(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn testExistence(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const present: i64 = switch (self.resolved.?) {
             .directory => 1,
             .entry => |entry| present: {
@@ -1284,7 +1284,7 @@ const Driver = struct {
 
     // -- listing ------------------------------------------------------------
 
-    fn beginList(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn beginList(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const dir = switch (self.resolved.?) {
             .directory => |handle| handle.dir.openDir(self.io, ".", .{ .iterate = true }) catch |err|
                 return self.fail(evaluator, fsport.reasonForError(err)),
@@ -1304,7 +1304,7 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn collectEntries(self: *Driver, evaluator: *Machine, collect: *Collect) MachineError!driver_completion.Progress {
+    fn collectEntries(self: *Driver, evaluator: *Unit, collect: *Collect) MachineError!driver_completion.Progress {
         var observed: usize = 0;
         var observed_bytes: usize = 0;
         while (observed < fsport.listing_batch_entries and observed_bytes < fsport.listing_batch_bytes) {
@@ -1341,7 +1341,7 @@ const Driver = struct {
 
     /// Ordering draws on the unit's budget; only the completed cursor yields
     /// the sorted pointers.
-    fn orderEntries(self: *Driver, evaluator: *Machine, ordering: *Ordering) MachineError!driver_completion.Progress {
+    fn orderEntries(self: *Driver, evaluator: *Unit, ordering: *Ordering) MachineError!driver_completion.Progress {
         if (ordering.orderer.advance(evaluator.workBudget()) == .pending) return .stepped;
         const values = try self.allocator.alloc(Value, ordering.entries.count);
         const entries = ordering.entries;
@@ -1350,7 +1350,7 @@ const Driver = struct {
         return .stepped;
     }
 
-    fn buildEntries(self: *Driver, evaluator: *Machine, build: *Build) MachineError!driver_completion.Progress {
+    fn buildEntries(self: *Driver, evaluator: *Unit, build: *Build) MachineError!driver_completion.Progress {
         const work = evaluator.workBudget();
         while (!work.exhausted()) {
             if (build.built == build.sorted.len) {
@@ -1380,8 +1380,8 @@ const Driver = struct {
             };
             build.name.?.deinit();
             build.name = null;
-            defer evaluator.releaseDomain().releaseValue(name_value);
-            build.values[build.built] = try dict.fromUniquePairs(self.allocator, evaluator.releaseDomain(), &.{
+            defer evaluator.releases.releaseValue(name_value);
+            build.values[build.built] = try dict.fromUniquePairs(self.allocator, evaluator.releases, &.{
                 .{ .{ .symbol = .{ .name = self.symbols.name } }, name_value },
                 .{ .{ .symbol = .{ .name = self.symbols.kind } }, .{ .symbol = .{ .name = self.symbols.entryKind(entry.kind) } } },
             });
@@ -1390,7 +1390,7 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn materializeEntries(self: *Driver, evaluator: *Machine, result: *Result) MachineError!driver_completion.Progress {
+    fn materializeEntries(self: *Driver, evaluator: *Unit, result: *Result) MachineError!driver_completion.Progress {
         return switch (try result.materializer.advance(evaluator.workBudget())) {
             .pending => .stepped,
             .complete => |listing| complete: {
@@ -1412,10 +1412,10 @@ const Driver = struct {
 
     /// The listing retains its element dictionaries, so the construction
     /// inputs release one per step before the result is published.
-    fn releaseEntries(self: *Driver, evaluator: *Machine, release: *Release) MachineError!driver_completion.Progress {
+    fn releaseEntries(self: *Driver, evaluator: *Unit, release: *Release) MachineError!driver_completion.Progress {
         const work = evaluator.workBudget();
         while (release.index != release.built and work.spend()) {
-            evaluator.releaseDomain().releaseValue(release.values[release.index]);
+            evaluator.releases.releaseValue(release.values[release.index]);
             release.index += 1;
         }
         if (release.index != release.built) return .yielded;
@@ -1431,14 +1431,14 @@ const Driver = struct {
 
     // -- single-entry mutation ----------------------------------------------
 
-    fn requireEntry(self: *Driver, evaluator: *Machine, resolved: fsport.Resolved) MachineError!@FieldType(fsport.Resolved, "entry") {
+    fn requireEntry(self: *Driver, evaluator: *Unit, resolved: fsport.Resolved) MachineError!@FieldType(fsport.Resolved, "entry") {
         return switch (resolved) {
             .directory => self.fail(evaluator, .invalid_path),
             .entry => |entry| entry,
         };
     }
 
-    fn makeDirectory(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn makeDirectory(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
         entry.parent.dir.createDir(self.io, entry.name, .default_dir) catch |err|
             return self.fail(evaluator, fsport.reasonForError(err));
@@ -1446,7 +1446,7 @@ const Driver = struct {
         return .completed;
     }
 
-    fn makeDirectories(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn makeDirectories(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         switch (self.resolved.?) {
             .directory => {},
             .entry => |entry| entry.parent.dir.createDir(self.io, entry.name, .default_dir) catch |err| switch (err) {
@@ -1461,14 +1461,14 @@ const Driver = struct {
         return .completed;
     }
 
-    fn beginRemoveTree(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn beginRemoveTree(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
         const dir = entry.parent.dir.openDir(self.io, entry.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
         self.state = .{ .removing_tree = .init(self.io, dir) };
         return .yielded;
     }
 
-    fn removeTreeStep(self: *Driver, evaluator: *Machine, tree: *fsport.TreeRemoval) MachineError!driver_completion.Progress {
+    fn removeTreeStep(self: *Driver, evaluator: *Unit, tree: *fsport.TreeRemoval) MachineError!driver_completion.Progress {
         switch (tree.step()) {
             .pending => return .yielded,
             .failed => |reason| return self.fail(evaluator, reason),
@@ -1490,7 +1490,7 @@ const Driver = struct {
 
     const RemoveKind = enum { file, directory };
 
-    fn removeEntry(self: *Driver, evaluator: *Machine, kind: RemoveKind) MachineError!driver_completion.Progress {
+    fn removeEntry(self: *Driver, evaluator: *Unit, kind: RemoveKind) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
         const info = entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err|
             return self.fail(evaluator, fsport.reasonForError(err));
@@ -1510,7 +1510,7 @@ const Driver = struct {
         return .completed;
     }
 
-    fn renameEntry(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn renameEntry(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const source = try self.requireEntry(evaluator, self.resolved.?);
         const destination = try self.requireEntry(evaluator, self.second.?);
         fsport.renameNoReplace(self.io, source.parent.dir, source.name, destination.parent.dir, destination.name) catch |err|
@@ -1523,7 +1523,7 @@ const Driver = struct {
 
     const StageMode = enum { create, replace, publish };
 
-    fn beginStage(self: *Driver, evaluator: *Machine, mode: StageMode) MachineError!driver_completion.Progress {
+    fn beginStage(self: *Driver, evaluator: *Unit, mode: StageMode) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
         const existing = entry.parent.dir.statFile(self.io, entry.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => null,
@@ -1554,7 +1554,7 @@ const Driver = struct {
             const target = self.resolved.?;
             self.resolved = null;
             const stream = try @import("../filesystem_stream.zig").Stream.create(self.access, root, slot, target, staged);
-            const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.unit.task_scope orelse {
+            const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse {
                 stream.retire();
                 return evaluator.fail(.cancelled, "directory scope is closing");
             }));
@@ -1569,7 +1569,7 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn writeStep(self: *Driver, evaluator: *Machine, write: *Write) MachineError!driver_completion.Progress {
+    fn writeStep(self: *Driver, evaluator: *Unit, write: *Write) MachineError!driver_completion.Progress {
         switch (fsport.writeQuantum(self.io, write.staged.file.?, self.payload.?.slice(), &write.offset)) {
             .pending => return .yielded,
             .failed => |reason| return self.fail(evaluator, reason),
@@ -1582,7 +1582,7 @@ const Driver = struct {
 
     /// Publication is its own step so cancellation is observed after the
     /// last write and before the one commit syscall.
-    fn commitStep(self: *Driver, evaluator: *Machine, staged: *fsport.StagedFile) MachineError!driver_completion.Progress {
+    fn commitStep(self: *Driver, evaluator: *Unit, staged: *fsport.StagedFile) MachineError!driver_completion.Progress {
         // A copy publishes into its destination entry; every other staged
         // word publishes into the primary one.
         const entry = if (self.operation == .copy) self.second.?.entry else self.resolved.?.entry;
@@ -1602,7 +1602,7 @@ const Driver = struct {
 
     // -- copy ---------------------------------------------------------------
 
-    fn beginCopy(self: *Driver, evaluator: *Machine) MachineError!driver_completion.Progress {
+    fn beginCopy(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const source = switch (self.resolved.?) {
             .directory => return self.fail(evaluator, .not_regular),
             .entry => |entry| entry,
@@ -1646,7 +1646,7 @@ const Driver = struct {
         return .yielded;
     }
 
-    fn copyStep(self: *Driver, evaluator: *Machine, copying: *Copy) MachineError!driver_completion.Progress {
+    fn copyStep(self: *Driver, evaluator: *Unit, copying: *Copy) MachineError!driver_completion.Progress {
         if (copying.offset == copying.size) {
             var probe: [1]u8 = undefined;
             const extra = copying.file.readPositionalAll(self.io, &probe, copying.size) catch |err|

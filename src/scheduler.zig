@@ -2299,7 +2299,7 @@ pub const WorkerScheduler = enum(usize) {
 
     pub fn installTasksDriver(
         self: *const WorkerScheduler,
-        evaluator: *machine.Machine,
+        evaluator: *machine.Unit,
         scope: *TaskScope,
     ) error{OutOfMemory}!void {
         try evaluator.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
@@ -3047,7 +3047,7 @@ const TasksDriver = struct {
     filled: usize = 0,
 
     pub fn advance(
-        evaluator: *machine.Machine,
+        evaluator: *machine.Unit,
         self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();

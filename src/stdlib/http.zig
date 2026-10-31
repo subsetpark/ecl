@@ -19,7 +19,7 @@ const machine = @import("../machine.zig");
 const kernel_storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -49,19 +49,19 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn get(evaluator: *Machine) MachineError!void {
+fn get(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .text);
 }
 
-fn getBytes(evaluator: *Machine) MachineError!void {
+fn getBytes(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .bytes);
 }
 
-fn post(evaluator: *Machine) MachineError!void {
+fn post(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .{ .method = .POST }, .text);
 }
 
-fn send(evaluator: *Machine) MachineError!void {
+fn send(evaluator: *Unit) MachineError!void {
     return begin(evaluator, .{}, .text);
 }
 
@@ -80,8 +80,8 @@ const RequestFields = struct {
     params: ?Value = null,
 };
 
-fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
-    const access = evaluator.unit.inherited.runtime().http_access;
+fn begin(evaluator: *Unit, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
+    const access = evaluator.inherited.runtime().http_access;
     const deadline = worker(evaluator).deadlineAfter(access.limits().deadline_ms) catch
         return evaluator.fail(.overflow, "HTTP deadline lies beyond the clock's range");
     var request = try evaluator.popValue();
@@ -111,7 +111,7 @@ fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: Response
         .admitted = admitted,
         .limits = access.limits(),
         .deadline = deadline,
-        .allocator = evaluator.allocator(),
+        .allocator = evaluator.allocator,
         .method = method,
         .follow_redirects = defaults.follow_redirects,
         .response_mode = response_mode,
@@ -121,7 +121,7 @@ fn begin(evaluator: *Machine, defaults: RequestDefaults, response_mode: Response
     });
 }
 
-fn requestFields(evaluator: *Machine, request: Value) MachineError!RequestFields {
+fn requestFields(evaluator: *Unit, request: Value) MachineError!RequestFields {
     if (request != .dict) return evaluator.typeError("a request dict");
     if (request.dict.length() > 8)
         return evaluator.typeError("a request dict with only recognized fields");
@@ -265,7 +265,7 @@ const RequestDriver = struct {
         cleanup_destroy,
     };
 
-    pub fn advance(evaluator: *Machine, self: *RequestDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *RequestDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.deadline.reachedBy(worker(evaluator).now())) {
             self.admitted.cancel();
@@ -432,7 +432,7 @@ const RequestDriver = struct {
             .exchange => |*exchange_state| {
                 const input = exchange_state.request;
                 self.state = .running;
-                self.admitted.start(input, self.method, self.follow_redirects, @ptrCast(@alignCast(evaluator.unit.task_scope.?))) catch |err| return switch (err) {
+                self.admitted.start(input, self.method, self.follow_redirects, @ptrCast(@alignCast(evaluator.task_scope.?))) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.ScopeClosing => evaluator.fail(.cancelled, "HTTP scope is closing"),
                     else => self.failIo(evaluator, input.url, @errorName(err)),
@@ -558,8 +558,8 @@ const RequestDriver = struct {
             },
             .release_header_pairs => |*release| {
                 if (release.build.pairs.pop()) |pair| {
-                    evaluator.releaseDomain().releaseValue(pair[0]);
-                    evaluator.releaseDomain().releaseValue(pair[1]);
+                    evaluator.releases.releaseValue(pair[0]);
+                    evaluator.releases.releaseValue(pair[1]);
                     return .stepped;
                 }
                 release.build.pairs.deinit(self.allocator);
@@ -628,7 +628,7 @@ const RequestDriver = struct {
                     const results = finish.results;
                     self.state = .{ .output = results };
                     if (self.deadline.reachedBy(worker(evaluator).now())) {
-                        evaluator.releaseDomain().releaseValue(built);
+                        evaluator.releases.releaseValue(built);
                         return evaluator.fail(.timeout, "HTTP request deadline expired");
                     }
                     return .{ .output = built };
@@ -658,7 +658,7 @@ const RequestDriver = struct {
         self.state = .{ .url = .init(self.allocator, self.fields.target.?) };
     }
 
-    fn beginBody(self: *RequestDriver, evaluator: *Machine, input: RequestData) MachineError!void {
+    fn beginBody(self: *RequestDriver, evaluator: *Unit, input: RequestData) MachineError!void {
         var request = input;
         if (self.fields.body) |body| {
             const count: usize = @intCast(body.list.length());
@@ -670,13 +670,13 @@ const RequestDriver = struct {
         } else self.state = .{ .exchange = .{ .request = request } };
     }
 
-    fn overflow(self: *RequestDriver, evaluator: *Machine) MachineError {
+    fn overflow(self: *RequestDriver, evaluator: *Unit) MachineError {
         const failure = evaluator.fail(.overflow, "HTTP transfer limit exceeded");
         evaluator.addErrorPath(self.fields.target.?);
         return failure;
     }
 
-    fn failResult(self: *RequestDriver, evaluator: *Machine, failure: service.Failure) MachineError {
+    fn failResult(self: *RequestDriver, evaluator: *Unit, failure: service.Failure) MachineError {
         return switch (failure) {
             .out_of_memory => error.OutOfMemory,
             .report => |report| blk: {
@@ -690,7 +690,7 @@ const RequestDriver = struct {
 
     fn advanceEncoder(
         self: *RequestDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!kernel_storage.StringEncodeResult {
         const limit = switch (self.state) {
@@ -710,7 +710,7 @@ const RequestDriver = struct {
 
     fn failIo(
         self: *RequestDriver,
-        evaluator: *Machine,
+        evaluator: *Unit,
         url: []const u8,
         name: []const u8,
     ) MachineError {
@@ -959,6 +959,6 @@ const Chunks = struct {
     }
 };
 
-fn worker(evaluator: *Machine) *const scheduler.WorkerScheduler {
-    return @ptrCast(@alignCast(evaluator.unit.scheduler.?));
+fn worker(evaluator: *Unit) *const scheduler.WorkerScheduler {
+    return @ptrCast(@alignCast(evaluator.scheduler.?));
 }

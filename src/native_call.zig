@@ -468,7 +468,7 @@ const Transaction = struct {
     pub const ownership: heap.DriverOwnership = .self_owned;
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    active_evaluator: ?*machine.Machine = null,
+    active_evaluator: ?*machine.Unit = null,
     instance: *native_module.ModuleInstance,
     definition: *const descriptor_api.ValidatedDefinition,
     host_table: abi.HostTable,
@@ -482,28 +482,28 @@ const Transaction = struct {
     yield_requested: bool = false,
 
     fn create(
-        evaluator: *machine.Machine,
+        evaluator: *machine.Unit,
         callable: env.NativeCallable,
         definition: *const descriptor_api.ValidatedDefinition,
     ) error{ OutOfMemory, NativeCallsClosed }!*Transaction {
-        const call = try evaluator.allocator().create(Transaction);
+        const call = try evaluator.allocator.create(Transaction);
         if (!callable.instance.retainCall()) {
-            evaluator.allocator().destroy(call);
+            evaluator.allocator.destroy(call);
             return error.NativeCallsClosed;
         }
         call.* = .{
-            .allocator = evaluator.allocator(),
-            .releases = evaluator.releaseDomain(),
+            .allocator = evaluator.allocator,
+            .releases = evaluator.releases,
             .instance = callable.instance,
             .definition = definition,
             .host_table = callable.instance.mintHostTable(full_host_table),
         };
         errdefer {
             call.instance.releasePin();
-            evaluator.allocator().destroy(call);
+            evaluator.allocator.destroy(call);
         }
         if (definition.body.call.continuation_size != 0) {
-            call.continuation = try evaluator.allocator().alignedAlloc(
+            call.continuation = try evaluator.allocator.alignedAlloc(
                 u8,
                 .@"64",
                 definition.body.call.continuation_size,
@@ -625,12 +625,12 @@ const Transaction = struct {
         return result;
     }
 
-    fn activeEvaluator(self: *Transaction) *machine.Machine {
+    fn activeEvaluator(self: *Transaction) *machine.Unit {
         return self.active_evaluator.?;
     }
 
     pub fn advance(
-        evaluator: *machine.Machine,
+        evaluator: *machine.Unit,
         self: *Transaction,
     ) machine.MachineError!machine.WorkProgress {
         self.active_evaluator = evaluator;
@@ -689,7 +689,7 @@ const Transaction = struct {
 };
 
 pub fn begin(
-    evaluator: *machine.Machine,
+    evaluator: *machine.Unit,
     callable: env.NativeCallable,
 ) machine.MachineError!void {
     const definition = callable.instance.definition(callable.definition);
