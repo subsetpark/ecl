@@ -3460,7 +3460,7 @@ pub const Unit = struct {
         ) error{OutOfMemory}!void {
             const provenance = switch (entry) {
                 .source => |source| source.name,
-                .native, .builtin, .bindings => intern.get(intern.moduleId(self.request.module.name)),
+                .native, .builtin => intern.get(intern.moduleId(self.request.module.name)),
             };
             var candidate = heap.Owned([]u8).init(try evaluator.allocator.dupe(u8, provenance));
             const materializer = kernel_storage.Utf8Materializer.init(
@@ -3923,7 +3923,7 @@ pub const Unit = struct {
             const text = switch (entry) {
                 .source => |source| try evaluator.allocator.dupe(u8, source.text),
                 .native => |descriptor| return self.transferStatic(evaluator, transfer, descriptor),
-                .builtin, .bindings => return self.transferBuiltin(evaluator, transfer, entry),
+                .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
             };
             const source_name = transfer.candidate.take();
             const completion = self.sourceCompletion(transfer, .standard_library, null);
@@ -3935,21 +3935,12 @@ pub const Unit = struct {
             self: *AutoLoadDriver,
             evaluator: *Unit,
             transfer: *@FieldType(State, "transfer"),
-            entry: stdlib.Entry,
+            words: []const env.BuiltinWord,
         ) MachineError!WorkProgress {
             // The candidate is created before ownership moves: struct-literal
             // fields evaluate in order, so a failure here would otherwise
             // strand the lease and path this driver had already taken.
-            const registry = evaluator.inherited.registry;
-            const publication = switch (entry) {
-                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, self.request.module.name, .standard_library, words),
-                .bindings => |registration| registered: {
-                    const binding = try registration.bind(evaluator.allocator, &evaluator.inherited);
-                    defer binding.release();
-                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, self.request.module.name, .standard_library, binding);
-                },
-                .source, .native => unreachable,
-            };
+            const publication = try modules.Registry.BuiltinCandidateCursor.init(evaluator.inherited.registry, self.request.module.name, .standard_library, words);
             // No errdefer: from here nothing fails until `startDriver`, which
             // disposes the whole uninstalled driver's owned fields itself.
             const next = BuiltinLoadDriver{

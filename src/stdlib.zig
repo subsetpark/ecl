@@ -11,7 +11,6 @@
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");
-const module_bindings = @import("module_bindings.zig");
 const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
@@ -36,8 +35,6 @@ pub const Entry = union(enum) {
     /// the SDK deliberately withholds — an allocator, sockets, TLS — which no
     /// external module may hold and no ECL program can express.
     builtin: []const env.BuiltinWord,
-    /// Typed backend capabilities, published as ordinary module constants.
-    bindings: *const module_bindings.Registration,
 };
 
 /// Embedded ECL source plus the provenance name errors raised inside it
@@ -156,16 +153,6 @@ comptime {
                     @compileError("embedded module provenance is empty: " ++ module.name);
             },
             .native => {},
-            .bindings => |registration| {
-                for (registration.declarations(), 0..) |definition, definition_index| {
-                    env.assertStaticModuleName(definition.name);
-                    if (definition.doc.len == 0) @compileError("registered builtin capability requires documentation");
-                    for (registration.declarations()[0..definition_index]) |prior| {
-                        if (std.mem.eql(u8, definition.name, prior.name))
-                            @compileError("duplicate registered builtin capability: " ++ definition.name);
-                    }
-                }
-            },
             .builtin => |words| {
                 if (words.len == 0)
                     @compileError("embedded builtin module has no words: " ++ module.name);

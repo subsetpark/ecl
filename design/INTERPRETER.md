@@ -1750,11 +1750,7 @@ values retain that identity independently of service cleanup. Factory and select
 facades share their sealed registration storage; the registration owns the instance
 pin and descriptor index without a separately allocated dispatch wrapper. Module registration
 binds the Session I/O backend inside the adapter, so module loading does not
-select a resource backend. A generic module-constant provider carries names,
-effects, documentation, and sealed values; domain adapters own their declarations
-and typed backend access. Registration validates declaration-name uniqueness at
-compile time, so one provider cannot replace its own earlier binding during
-publication. Retained issuer metadata has no backend discriminator.
+select a resource backend. Retained issuer metadata has no backend discriminator.
 Factories register through one opaque opening
 interface: bounded configuration validation precedes admission, resumable
 openings own partial work, and resource initialization precedes stack publication.

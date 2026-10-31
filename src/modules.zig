@@ -1932,10 +1932,7 @@ pub const Registry = enum(usize) {
     pub const BuiltinCandidateCursor = struct {
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        source: union(enum) {
-            words: []const env.BuiltinWord,
-            registered: *@import("module_bindings.zig").Publication,
-        },
+        words: []const env.BuiltinWord,
         candidate: ?OwnedImage,
         word_index: usize = 0,
 
@@ -1948,54 +1945,25 @@ pub const Registry = enum(usize) {
             return .{
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
-                .source = .{ .words = words },
+                .words = words,
                 .candidate = try registry.createImage(name, provenance),
-            };
-        }
-
-        /// Borrows the issuing instance on either outcome; an initialized
-        /// cursor owns its independent pin until publication or abandonment.
-        pub fn initRegistered(
-            registry: *Registry,
-            name: intern.ModuleName,
-            provenance: RegistrationProvenance,
-            instance: *@import("module_bindings.zig").Publication,
-        ) error{OutOfMemory}!BuiltinCandidateCursor {
-            const candidate = try registry.createImage(name, provenance);
-            instance.retain();
-            return .{
-                .allocator = registry.allocator(),
-                .releases = registry.releaseDomain(),
-                .source = .{ .registered = instance },
-                .candidate = candidate,
             };
         }
 
         pub fn deinit(self: *BuiltinCandidateCursor) void {
             if (self.candidate) |*candidate| candidate.deinit();
-            switch (self.source) {
-                .words => {},
-                .registered => |instance| instance.release(),
-            }
             self.* = undefined;
         }
 
         pub const Error = error{ OutOfMemory, InvalidName };
 
         pub fn advance(self: *BuiltinCandidateCursor) Error!BuiltinCandidateProgress {
-            const length = switch (self.source) {
-                .words => |words| words.len,
-                .registered => |instance| instance.declarations().len,
-            };
-            if (self.word_index == length) {
+            if (self.word_index == self.words.len) {
                 const completed = self.candidate.?.move();
                 self.candidate = null;
                 return .{ .complete = completed };
             }
-            const word = switch (self.source) {
-                .words => |words| words[self.word_index],
-                .registered => |instance| return self.publishCapability(instance),
-            };
+            const word = self.words[self.word_index];
             // Publication retains what it is handed, so this cursor releases
             // its own reference on every path.
             const document = try self.buildDocumentation(word.doc);
@@ -2014,29 +1982,6 @@ pub const Registry = enum(usize) {
                 error.OutOfMemory => return error.OutOfMemory,
                 // The manifest validates names and holds no duplicates at
                 // compile time, and a fresh candidate is never frozen.
-                error.Frozen => return error.InvalidName,
-            };
-            self.word_index += 1;
-            return .pending;
-        }
-
-        fn publishCapability(self: *BuiltinCandidateCursor, instance: *@import("module_bindings.zig").Publication) Error!BuiltinCandidateProgress {
-            const declaration = instance.declarations()[self.word_index];
-            const capability = try instance.seal(self.word_index);
-            defer self.releases.releaseValue(capability);
-            const body = try list.fromValues(self.allocator, &.{capability});
-            defer self.releases.releaseValue(body);
-            const document = try self.buildDocumentation(declaration.doc);
-            defer self.releases.releaseHeader(env.documentationHeader(document));
-            const effect = try self.buildEffect(declaration.effect);
-            defer effect.retire(self.releases);
-            _ = self.candidate.?.publishDefinition(try intern.internNamespace(declaration.name), .{ .word = .{
-                .body = env.quotation(body.list).?,
-                .visibility = .public,
-                .effect = effect,
-                .doc = document,
-            } }) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
                 error.Frozen => return error.InvalidName,
             };
             self.word_index += 1;

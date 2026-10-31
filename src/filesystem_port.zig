@@ -74,7 +74,7 @@ pub const FilesystemOwner = struct {
     roots: []OwnedRoot,
     limits: Limits,
     live: std.atomic.Value(usize) = .init(0),
-    directory_issuer: *@import("module_bindings.zig").Identity,
+    directory_issuer: *@import("resource_issuer.zig").Identity,
 
     pub fn init(
         host: *const heap.HostCleanup,
@@ -130,7 +130,7 @@ pub const FilesystemOwner = struct {
             };
             initialized += 1;
         }
-        const directory_issuer = try @import("module_bindings.zig").Identity.create(allocator);
+        const directory_issuer = try @import("resource_issuer.zig").Identity.create(allocator);
         return .{
             .host = host,
             .io = io,
@@ -205,7 +205,7 @@ pub fn adoptLock(access_value: *external.FilesystemAccess, scope: *@import("sche
 }
 
 /// Borrow allocator and identity metadata from the operational issuer.
-pub fn resourceIssuer(access_value: *external.FilesystemAccess) *@import("module_bindings.zig").Identity {
+pub fn resourceIssuer(access_value: *external.FilesystemAccess) *@import("resource_issuer.zig").Identity {
     return ownerFromAccess(access_value).directory_issuer;
 }
 

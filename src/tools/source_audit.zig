@@ -105,7 +105,7 @@ const source_groups = [_]SourceGroup{
     embeddedGroup(true, &.{
         "scheduler.zig",        "scheduler_core.zig",     "turn_core.zig",       "external.zig",          "console.zig",           "task_prims.zig",      "archive_document.zig",
         "standard_streams.zig", "mailbox.zig",            "byte_ring.zig",       "port_transfer.zig",     "port_controller.zig",   "port_message.zig",    "port_failure.zig",
-        "port_builder.zig",     "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "module_bindings.zig", "port_endpoint.zig",
+        "port_builder.zig",     "port_bytes.zig",         "port_messages.zig",   "port_declarations.zig", "port_resource.zig",     "resource_issuer.zig", "port_endpoint.zig",
         "port_result.zig",      "port_error_data.zig",    "port_exchange.zig",   "port_operation.zig",    "port_service.zig",      "port_factory.zig",    "http_service.zig",
         "filesystem_port.zig",  "directory_resource.zig", "directory_stage.zig", "directory_order.zig",   "filesystem_stream.zig",
     }),

@@ -7,7 +7,7 @@ const scheduler = @import("scheduler.zig");
 const external = @import("external.zig");
 const resource = @import("port_resource.zig");
 const transfers = @import("port_transfer.zig");
-const Identity = @import("module_bindings.zig").Identity;
+const Identity = @import("resource_issuer.zig").Identity;
 const Value = @import("value.zig").Value;
 
 pub const path_limit = 4096;
