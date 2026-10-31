@@ -290,7 +290,7 @@ pub const PervadeCursor = struct {
     /// possibly under children it pushed; `pending` ends the turn.
     const FrameStep = enum { pending, progressed, done };
 
-    /// Typed frames charge the unit through `Context`. A list frame spends one
+    /// Typed frames charge the unit through `advanceKernel`. A list frame spends one
     /// unit per child it starts and lends the budget to its materializer, and a
     /// dict frame that is materializing or comparing hands its work to that
     /// cursor.
@@ -1358,14 +1358,14 @@ const NumericParams = struct {
 };
 
 fn failTypedScalar(
-    context: support.Context,
+    evaluator: *Unit,
     report: FaultReport,
     fault: ScalarError,
     index: usize,
 ) MachineError {
     const diagnostic = scalarDiagnostic(fault);
-    if (report.index) return context.failAt(diagnostic.kind, diagnostic.message, index);
-    return context.fail(diagnostic.kind, diagnostic.message);
+    if (report.index) return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, index);
+    return evaluator.fail(diagnostic.kind, diagnostic.message);
 }
 
 /// The next piece of a charged range. A vector loop writes its output's own
@@ -1720,7 +1720,7 @@ fn binaryKernelInto(
 
         /// The operation's range loop over these classes, as
         /// `BinaryKernel` calls it.
-        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, context: support.Context) MachineError!void {
+        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Unit) MachineError!void {
             const left: Left = if (shape == .scalar_leaf)
                 left_class.unboxed(operands[0])
             else
@@ -1731,15 +1731,15 @@ fn binaryKernelInto(
                 heap.leafElements(right_class.kind(), operands[1].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(left, right, output, placement, range)) |faulted|
-                return replayDirect(context, params.report, left, right, faulted);
+                return replayDirect(evaluator, params.report, left, right, faulted);
         }
 
-        noinline fn replayDirect(context: support.Context, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
+        noinline fn replayDirect(evaluator: *Unit, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
                 const a = if (shape == .scalar_leaf) left else left[index];
                 const b = if (shape == .leaf_scalar) right else right[index];
                 _ = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch |fault|
-                    return failTypedScalar(context, report, fault, index);
+                    return failTypedScalar(evaluator, report, fault, index);
             }
             unreachable;
         }
@@ -1838,17 +1838,17 @@ fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, 
 
         /// The operation's range loop over this class, as `UnaryKernel`
         /// calls it.
-        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, context: support.Context) MachineError!void {
+        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Unit) MachineError!void {
             const elements = heap.leafElements(operand_class.kind(), operands[0].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(elements, output, placement, range)) |faulted|
-                return replayDirect(context, params.report, elements, faulted);
+                return replayDirect(evaluator, params.report, elements, faulted);
         }
 
-        noinline fn replayDirect(context: support.Context, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
+        noinline fn replayDirect(evaluator: *Unit, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
                 _ = scalarUnary(operation, operand_class.boxed(elements[index])) catch |fault|
-                    return failTypedScalar(context, report, fault, index);
+                    return failTypedScalar(evaluator, report, fault, index);
             }
             unreachable;
         }
@@ -1910,7 +1910,7 @@ const KernelOutput = union(enum) {
 const BinaryChunk = *const anyopaque;
 
 fn BinaryLoop(comptime out: Number) type {
-    return *const fn (NumericParams, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, support.Context) MachineError!void;
+    return *const fn (NumericParams, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, *Unit) MachineError!void;
 }
 
 /// What a binary kernel runs with: the caller's parameters and the plan's
@@ -1936,9 +1936,9 @@ fn BinaryKernel(comptime out: Number) type {
             /// list and is passed over.
             pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{ 0, 1 } };
 
-            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
                 const loop: BinaryLoop(out) = @ptrCast(@alignCast(params.chunk));
-                return loop(params.numeric, operands, output, range, context);
+                return loop(params.numeric, operands, output, range, evaluator);
             }
 
             pub const finish = Output.finish;
@@ -1954,7 +1954,7 @@ fn BinaryKernel(comptime out: Number) type {
 const UnaryChunk = *const anyopaque;
 
 fn UnaryLoop(comptime out: Number) type {
-    return *const fn (NumericParams, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, support.Context) MachineError!void;
+    return *const fn (NumericParams, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, *Unit) MachineError!void;
 }
 
 const UnaryParams = struct {
@@ -1973,9 +1973,9 @@ fn UnaryKernel(comptime out: Number) type {
 
             pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{0} };
 
-            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
                 const loop: UnaryLoop(out) = @ptrCast(@alignCast(params.chunk));
-                return loop(params.numeric, operands, output, range, context);
+                return loop(params.numeric, operands, output, range, evaluator);
             }
 
             pub const finish = Output.finish;
@@ -2781,12 +2781,12 @@ fn ProgramKernel(comptime inputs: usize) type {
             };
         }
 
-        pub fn chunk(program: *ScalarProgram, operands: [arity]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(program: *ScalarProgram, operands: [arity]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
             if (output.builder) |*builder| {
                 if (output.plan) |plan| return plan.fill(builder, range);
                 return builder.writeValues(range.start, output.results[range.start..range.end]);
             }
-            if (output.plan) |plan| return runBlocks(plan, program, operands, range, context);
+            if (output.plan) |plan| return runBlocks(plan, program, operands, range, evaluator);
             // SAFETY: `load` fills the constants; inputs and results are
             // written before they are read.
             var registers: [ScalarProgram.max_registers]Value = undefined;
@@ -2796,13 +2796,13 @@ fn ProgramKernel(comptime inputs: usize) type {
                 inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
                 var failed: u8 = 0;
                 slot.* = program.run(&registers, &failed) catch |fault|
-                    return failProgram(context.evaluator, operands[inputs], program.instructions[failed], fault);
+                    return failProgram(evaluator, operands[inputs], program.instructions[failed], fault);
                 profile = profile.add(slot.*);
             }
             output.profile = profile;
         }
 
-        fn runBlocks(plan: *BlockPlan, program: *ScalarProgram, operands: [arity]Value, range: flat.Chunk, context: support.Context) MachineError!void {
+        fn runBlocks(plan: *BlockPlan, program: *ScalarProgram, operands: [arity]Value, range: flat.Chunk, evaluator: *Unit) MachineError!void {
             var start = range.start;
             while (start != range.end) {
                 const length = @min(plan.block, range.end - start);
@@ -2814,7 +2814,7 @@ fn ProgramKernel(comptime inputs: usize) type {
                         inline for (0..inputs) |input| registers[input] = programElement(operands[input], index);
                         var failed: u8 = 0;
                         const item = program.run(&registers, &failed) catch |fault|
-                            return failProgram(context.evaluator, operands[inputs], program.instructions[failed], fault);
+                            return failProgram(evaluator, operands[inputs], program.instructions[failed], fault);
                         plan.store(index, item);
                     }
                 }
@@ -2822,7 +2822,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             }
         }
 
-        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
             if (output.builder != null) return null;
             const length = if (output.plan) |plan| switch (plan.result) {
                 inline else => |items| items.len,
@@ -2917,7 +2917,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             };
         }
 
-        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
             if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
             const program = output.program;
             // SAFETY: `load` fills the constants; inputs and results are
@@ -2932,7 +2932,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
                 registers[1] = programElement(operands[0], params.start + position);
                 var failed: u8 = 0;
                 accumulator = program.run(&registers, &failed) catch |fault|
-                    return failProgram(context.evaluator, operands[1], program.instructions[failed], fault);
+                    return failProgram(evaluator, operands[1], program.instructions[failed], fault);
                 if (scan) {
                     output.results[position] = accumulator;
                     profile = profile.add(accumulator);
@@ -2941,7 +2941,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             output.profile = profile;
         }
 
-        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
             if (!scan or output.builder != null) return null;
             const length = output.results.len;
             output.builder = try heap.AnyListBuilder.init(output.allocator, output.profile.heapKind(), length, length);
@@ -3145,7 +3145,7 @@ fn reduceKernel(
         }
 
         /// Folds list indices `range` into the accumulator, in order.
-        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, context: support.Context) MachineError!void {
+        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, evaluator: *Unit) MachineError!void {
             var block = Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
@@ -3178,7 +3178,7 @@ fn reduceKernel(
                         // combinator's fault carries no list index, exactly as
                         // the per-element route reported it.
                         const diagnostic = scalarDiagnostic(fault);
-                        return context.fail(diagnostic.kind, diagnostic.message);
+                        return evaluator.fail(diagnostic.kind, diagnostic.message);
                     };
                     accumulator = accumulator_class.unboxed(next);
                     if (scan) block.items[index - piece.start] = accumulator;
@@ -3194,12 +3194,12 @@ fn reduceKernel(
 
         /// The reduction's loop over these classes, as `ReduceKernel` calls
         /// it. Its positions are the list indices after the seed.
-        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, context: support.Context) MachineError!void {
+        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, evaluator: *Unit) MachineError!void {
             return accumulate(
                 output,
                 heap.leafElements(element_class.kind(), operands[0].list),
                 .{ .start = output.base + range.start, .end = output.base + range.end },
-                context,
+                evaluator,
             );
         }
     };
@@ -3207,7 +3207,7 @@ fn reduceKernel(
 
 /// One reduction's loop over one accumulator and element class; see
 /// `ReduceKernel`.
-const ReduceChunk = *const fn ([1]Value, *ReduceOutput, flat.Chunk, support.Context) MachineError!void;
+const ReduceChunk = *const fn ([1]Value, *ReduceOutput, flat.Chunk, *Unit) MachineError!void;
 
 /// What a reduction kernel runs with: the caller's seed and start, the
 /// operation's scalar step for a seed that changes class, and the plan's
@@ -3278,8 +3278,8 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
                 return output;
             }
 
-            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
-                return params.chunk(operands, output, range, context);
+            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+                return params.chunk(operands, output, range, evaluator);
             }
 
             pub fn finish(output: *Output) Value {
@@ -3532,7 +3532,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 return shape.width;
             }
 
-            pub fn chunk(_: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
+            pub fn chunk(_: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
                 if (output.aliased()) return;
                 output.store(range.start, heap.leafElements(element.kind(), operands[0].list)[range.start..range.end]);
             }
@@ -3559,7 +3559,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 return shape.width;
             }
 
-            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, context: support.Context) MachineError!void {
+            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
                 const width = shape.width;
                 const elements = heap.leafElements(element.kind(), operands[0].list);
                 const columns = output.range(0, width);
@@ -3567,7 +3567,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 // Rows 0 and 1 in one step, as `foldLeafRow` folds a first
                 // pair, whenever the range holds both whole.
                 if (position == 0 and range.end >= 2 * width) {
-                    try step(element, context.evaluator, elements[0..width], elements[width..][0..width], columns, 0);
+                    try step(element, evaluator, elements[0..width], elements[width..][0..width], columns, 0);
                     position = 2 * width;
                 }
                 var row = position / width;
@@ -3582,7 +3582,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                             .integer => if (element == .real) unreachable else @intCast(item),
                             .real => if (element == .real) item else @floatFromInt(item),
                         };
-                    } else try step(accumulator, context.evaluator, target, items, target, column);
+                    } else try step(accumulator, evaluator, target, items, target, column);
                     position += count;
                     row += 1;
                     column = 0;

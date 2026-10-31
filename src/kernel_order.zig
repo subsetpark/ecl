@@ -139,14 +139,14 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             return .{ .ordering = std.math.order(operands[0].list.length(), operands[1].list.length()) };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-            if (comptime !comparable) return incomparable(context);
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+            if (comptime !comparable) return incomparable(evaluator);
             const left = heap.leafElements(left_kind, operands[0].list);
             const right = heap.leafElements(right_kind, operands[1].list);
             for (range.start..range.end) |index| {
                 const ordering = if (comptime floating)
                     equal.compareScalars(scalar(left_kind, left[index]), scalar(right_kind, right[index])) catch
-                        return incomparable(context)
+                        return incomparable(evaluator)
                 else
                     std.math.order(widen(left[index]), widen(right[index]));
                 if (ordering != .eq) {
@@ -157,8 +157,8 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             }
         }
 
-        fn incomparable(context: support.Context) MachineError {
-            return context.evaluator.typeError(incomparable_pair);
+        fn incomparable(evaluator: *Unit) MachineError {
+            return evaluator.typeError(incomparable_pair);
         }
 
         fn widen(element: anytype) if (lexClass(left_kind) == .char) u32 else i64 {
@@ -300,7 +300,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             };
         }
 
-        pub fn chunk(_: bool, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(_: bool, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
             const keys = heap.leafElements(kind, operands[0].list);
             switch (output.phase) {
                 .initialize => for (output.pairs[range.start..range.end], range.start..) |*pair, position| {
@@ -327,7 +327,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             }
         }
 
-        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
             const count = output.pairs.len;
             switch (output.phase) {
                 .initialize => {
@@ -350,9 +350,9 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
                 return count;
             }
             if (output.sorted_values) {
-                output.value_writer = try .init(context.allocator(), count);
+                output.value_writer = try .init(evaluator.allocator, count);
             } else {
-                output.index_writer = try .init(context.allocator(), count);
+                output.index_writer = try .init(evaluator.allocator, count);
             }
             output.phase = .output;
             return count;
@@ -811,14 +811,14 @@ fn DistinctKernel(comptime kind: value.HeapKind) type {
             return .{ .allocator = allocator, .slots = slots, .kept = try allocator.alloc(Element, length) };
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
             if (output.writer) |*writer| return writer.writeRange(range.start, output.kept[range.start..range.end]);
             for (heap.leafElements(kind, operands[0].list)[range.start..range.end]) |item| output.keep(item);
         }
 
-        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
             if (output.writer != null) return null;
-            output.writer = try .init(context.allocator(), output.kept_count);
+            output.writer = try .init(evaluator.allocator, output.kept_count);
             return output.kept_count;
         }
 

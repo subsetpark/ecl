@@ -179,7 +179,7 @@ const DrawKernel = struct {
     pub const Output = support.LeafResult(.leaf_i64);
     pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
-    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
+    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
         for (output.range(range.start, range.len()), range.start..) |*slot, index|
             slot.* = @bitCast(boundedDraw(params.state, index, params.bound));
     }
@@ -303,7 +303,7 @@ const DealKernel = struct {
         return .{ .dealer = dealer, .writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, length) };
     }
 
-    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
+    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
         output.dealer.deal(params.state, params.pool, range, output.writer.unpublishedRange(range.start, range.len()));
     }
 
@@ -381,7 +381,7 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
             };
         }
 
-        pub fn chunk(state: State, operands: [1]Value, output: *Output, range: flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(state: State, operands: [1]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
             const source = operands[0];
             switch (output.phase) {
                 .deal => output.dealer.deal(state, @intCast(source.list.length()), range, output.permutation[range.start..range.end]),
@@ -401,7 +401,7 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
 
         /// The deal is over when its cursor is; the gather then runs over
         /// the same length.
-        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .deal => {
                     output.phase = .gather;
