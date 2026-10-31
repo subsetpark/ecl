@@ -400,15 +400,15 @@ comptime {
 /// image, and the anchor is precisely the thing that outlives it. So
 /// `ModuleHome.tryPin` cannot serve a cell-originated borrow, and
 /// `tryPinAnchor` below is its counterpart for one.
-pub fn anchorHandle(home: *const ModuleHome, _: *const ExecutionAccess) *anyopaque {
+pub fn anchorHandle(home: *const ModuleHome, _: *const ExecutionAccess) *env.ImageAnchor {
     return anchorHandleInternal(home);
 }
 
-fn anchorHandleInternal(home: *const ModuleHome) *anyopaque {
+fn anchorHandleInternal(home: *const ModuleHome) *env.ImageAnchor {
     return @ptrCast(home.image().anchor);
 }
 
-fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
+fn tryPinAnchorInternal(owner: *env.ImageAnchor) ?GenerationPin {
     const anchor: *RefAnchor = @ptrCast(@alignCast(owner));
     if (!anchor.tryRetain()) return null;
     // Only now is the image pointer readable: before the CAS succeeded this
@@ -422,7 +422,7 @@ fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
 /// Split from `tryPinAnchorInternal` for the same reason `pin` is split from
 /// `pinInternal`: the audit rejects one function that both holds a capability
 /// token and casts a pointer.
-pub fn tryPinAnchor(owner: *anyopaque, _: *const ExecutionAccess) ?GenerationPin {
+pub fn tryPinAnchor(owner: *env.ImageAnchor, _: *const ExecutionAccess) ?GenerationPin {
     return tryPinAnchorInternal(owner);
 }
 
@@ -1085,7 +1085,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         var container = try env.Env.init(&host);
 
         const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-        const owner: *anyopaque = @ptrCast(image.anchor);
+        const owner: *env.ImageAnchor = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
         const cell = try container.scopeCell(&image.scope, owner);
 
@@ -1148,7 +1148,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
         var container = try env.Env.init(&host);
 
         const image = try ModuleImage.create(allocator, releases, try intern.internModuleName("image-probe"), .ordinary);
-        const owner: *anyopaque = @ptrCast(image.anchor);
+        const owner: *env.ImageAnchor = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
 
         const before_drop = counting.total_requested_bytes;

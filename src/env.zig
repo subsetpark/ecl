@@ -1543,17 +1543,21 @@ pub const Liveness = union(enum) {
     non_image,
 };
 
+/// What a module image's scope cell names to prove the image live: its
+/// reference anchor, which outlives the image. Opaque here so `env` never
+/// dereferences it and holds no dependency on `modules`.
+pub const ImageAnchor = opaque {};
+
 pub const ScopeCell = struct {
     id: ScopeId,
     scope: std.atomic.Value(?*Scope) = .init(null),
-    /// The image owner this cell names, opaque here on purpose: `env` never
-    /// dereferences it and holds no dependency on `modules`. Null for every
+    /// The image anchor this cell names. Null for every
     /// cell that names no image -- the session root and the embedded core cell
     /// -- which is what selects `Liveness.non_image`.
     ///
     /// It outlives the image, so it stays readable after retirement; that is the
     /// whole reason the borrow tests the owner rather than the scope.
-    owner: std.atomic.Value(?*anyopaque) = .init(null),
+    owner: std.atomic.Value(?*ImageAnchor) = .init(null),
     /// Core is a terminal resolution phase rather than a link in any chain, so
     /// it has no `Scope` to point at. One embedded cell carries this instead,
     /// and a primitive or embedded-prelude literal labels against it.
@@ -1568,13 +1572,13 @@ pub const ScopeCell = struct {
     /// a live image), and one naming a live scope with no owner yet (the
     /// `non_image` arm dereferencing an image with nothing held). Being the
     /// only constructor is what closes them.
-    pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: ?*anyopaque) void {
+    pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: ?*ImageAnchor) void {
         if (owner) |handle| self.owner.store(handle, .release);
         self.scope.store(scope, .release);
     }
 
     /// The image owner, or null when this cell names none.
-    pub fn ownerHandle(self: *const ScopeCell) ?*anyopaque {
+    pub fn ownerHandle(self: *const ScopeCell) ?*ImageAnchor {
         return self.owner.load(.acquire);
     }
 
@@ -2013,7 +2017,7 @@ pub const Env = enum(usize) {
     pub fn scopeIdForOwned(
         self: *Env,
         scope: *Scope,
-        owner: *anyopaque,
+        owner: *ImageAnchor,
     ) error{OutOfMemory}!ScopeId {
         return (try self.scopeCell(scope, owner)).id;
     }
@@ -2134,7 +2138,7 @@ pub const Env = enum(usize) {
     pub fn scopeCell(
         self: *Env,
         scope: *Scope,
-        owner: ?*anyopaque,
+        owner: ?*ImageAnchor,
     ) error{OutOfMemory}!*ScopeCell {
         if (scope.label_cell.load(.acquire)) |existing| {
             // A cell is born with its owner, so a later mint for the same scope
@@ -2166,7 +2170,7 @@ pub const Env = enum(usize) {
     pub fn newScopeCell(
         self: *Env,
         scope: ?*Scope,
-        owner: ?*anyopaque,
+        owner: ?*ImageAnchor,
     ) error{OutOfMemory}!*ScopeCell {
         const backing = self.privateState();
         const allocator = backing.host.allocator();

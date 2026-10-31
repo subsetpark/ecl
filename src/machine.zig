@@ -2863,7 +2863,7 @@ pub const Unit = struct {
     /// cell carries its owner anchor, so a word that escapes the image proves
     /// the image live before reading its slot.
     pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!value.SymbolLinker {
-        const owner: ?*anyopaque = if (scope.isModuleRoot())
+        const owner: ?*env.ImageAnchor = if (scope.isModuleRoot())
             modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access)
         else
             null;
@@ -5579,7 +5579,7 @@ pub const Unit = struct {
     /// The anchor of the image the running activation holds, if it holds one.
     /// A pointer compare against a cell's owner is a complete liveness proof:
     /// the activation's pin is what keeps that image alive.
-    fn runningAnchor(self: *Unit) ?*anyopaque {
+    fn runningAnchor(self: *Unit) ?*env.ImageAnchor {
         const home = self.current.?.home() orelse return null;
         return modules.anchorHandle(home, self.module_access);
     }
