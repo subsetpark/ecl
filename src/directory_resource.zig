@@ -228,7 +228,7 @@ fn Handle(comptime Object: type) type {
         pub fn wakeReasonLocked(_: *Cell, _: u64) external.Wake {
             return .ready;
         }
-        pub fn prepareScopeTransfer(self: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        pub fn prepareScopeTransfer(self: *Cell, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
             return Transfer.prepare(self, from, to);
         }
         pub fn commitScopeTransfer(self: *Cell) void {

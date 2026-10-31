@@ -102,7 +102,7 @@ fn spawnInput(evaluator: *Unit, popped: machine.OwnedUnitInput) MachineError!voi
 /// advances validation and yields between slices, while preparation, rollback
 /// and commit are driven synchronously from inside `spawn`, where the child's
 /// scope already exists and a yield would expose half-moved ownership.
-const GiveCursor = struct {
+pub const GiveCursor = struct {
     const Phase = enum { validating, preparing, rolling_back, committing, done };
 
     /// What stopped the cursor, for the prim to turn into a language error.
@@ -112,7 +112,7 @@ const GiveCursor = struct {
         transfer: heap.PortTransferError,
     };
 
-    origin: *anyopaque,
+    origin: *heap.ScopeIdentity,
     moved: Value,
     count: usize,
     /// Filled by validation, then read by preparation. An unused slot is
@@ -155,7 +155,7 @@ const GiveCursor = struct {
             self.prepared[self.ready] = heap.preparePortTransfer(
                 self.ports[self.ready].?.port,
                 self.origin,
-                @ptrCast(self.destination.?),
+                self.destination.?.identity(),
             ) catch |err| {
                 self.refusal = .{ .transfer = err };
                 return .complete;
@@ -195,7 +195,7 @@ const GiveCursor = struct {
         self.phase = .done;
     }
 
-    /// `ScopeTransfer` hooks. Preparation leaves every origin membership in
+    /// `SpawnRequest.transfer` hooks. Preparation leaves every origin membership in
     /// place, so a refusal rolls back to exactly the state before the give.
     pub fn prepareScopeTransfer(
         self: *GiveCursor,
@@ -287,7 +287,7 @@ const GiveDriver = struct {
             .quotation = self.body.list,
             .initial_stack = stack,
             .constructor = .spawn,
-            .transfer = scheduler_api.scopeTransfer(GiveCursor, &self.cursor),
+            .transfer = &self.cursor,
         }) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -342,7 +342,7 @@ fn giveInput(evaluator: *Unit, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue)
         .seeds = if (seeds) |owned| owned.take() else null,
         .body = body.take(),
         .cursor = .{
-            .origin = evaluator.task_scope.?,
+            .origin = evaluator.task_scope.?.identity(),
             .moved = moved_list,
             .count = moved_count,
         },

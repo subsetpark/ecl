@@ -74,7 +74,7 @@ const Table = struct {
     source: *const fn (*anyopaque) external.ReadinessSource,
     shutdown: *const fn (*anyopaque) Shutdown,
     release: *const fn (*anyopaque) void,
-    prepare: *const fn (*anyopaque, *anyopaque, *anyopaque) heap.PortTransferError!void,
+    prepare: *const fn (*anyopaque, *heap.ScopeIdentity, *heap.ScopeIdentity) heap.PortTransferError!void,
     commit: *const fn (*anyopaque) void,
     abort: *const fn (*anyopaque) void,
 };
@@ -111,7 +111,7 @@ fn Bridge(comptime Adapter: type) type {
         fn release(raw: *anyopaque) void {
             typed(raw).releasePort();
         }
-        fn prepare(raw: *anyopaque, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        fn prepare(raw: *anyopaque, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
             return typed(raw).prepareScopeTransfer(from, to);
         }
         fn commit(raw: *anyopaque) void {
@@ -184,7 +184,7 @@ pub const Resource = opaque {
     pub fn shutdown(self: *Resource) Shutdown {
         return self.state().table.shutdown(self.state().payload);
     }
-    pub fn prepareScopeTransfer(self: *Resource, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+    pub fn prepareScopeTransfer(self: *Resource, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
         return self.state().table.prepare(self.state().payload, from, to);
     }
     pub fn commitScopeTransfer(self: *Resource) void {

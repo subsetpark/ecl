@@ -250,7 +250,7 @@ pub const Exchange = struct {
     fn transferLive(self: *Operation) bool {
         return self.lifetime == .open;
     }
-    pub fn prepareScopeTransfer(self: *Operation, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+    pub fn prepareScopeTransfer(self: *Operation, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
         return Transfer.prepare(self, from, to);
     }
     pub fn commitScopeTransfer(self: *Operation) void {

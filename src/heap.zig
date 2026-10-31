@@ -377,7 +377,7 @@ const ProbePort = struct {
     }
 
     // A probe holds no scope membership, so there is nothing to move.
-    pub fn prepareScopeTransfer(_: *ProbePort, _: *anyopaque, _: *anyopaque) PortTransferError!void {
+    pub fn prepareScopeTransfer(_: *ProbePort, _: *ScopeIdentity, _: *ScopeIdentity) PortTransferError!void {
         return error.Closed;
     }
     pub fn commitScopeTransfer(_: *ProbePort) void {}
@@ -450,7 +450,7 @@ fn borrowedPortFailureProbe(allocator: std.mem.Allocator) !void {
         try std.testing.expectEqual(expected, portVariant(item.port));
         try std.testing.expectEqual(&payload, portPayload(ProbeBorrowedPort, expected, item.port).?);
         try std.testing.expect(portPayload(ProbeBorrowedPort, .resource, item.port) == null);
-        try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, &payload, &payload));
+        try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, @ptrCast(&payload), @ptrCast(&payload)));
         retainValue(item);
         cleanup.releaseValue(item);
         cleanup.capability().drain();
@@ -467,13 +467,13 @@ test "port borrowed roles retain identity without scope transfer authority" {
 
 test "port exchange transfer consumes its prepared authority once" {
     const Exchange = struct {
-        owner: *anyopaque,
-        prepared: ?*anyopaque = null,
+        owner: *ScopeIdentity,
+        prepared: ?*ScopeIdentity = null,
         commits: usize = 0,
         aborts: usize = 0,
 
         pub fn releasePort(_: *@This()) void {}
-        pub fn prepareScopeTransfer(self: *@This(), from: *anyopaque, to: *anyopaque) PortTransferError!void {
+        pub fn prepareScopeTransfer(self: *@This(), from: *ScopeIdentity, to: *ScopeIdentity) PortTransferError!void {
             if (self.owner != from) return error.NotOwner;
             if (self.prepared != null) return error.Busy;
             self.prepared = to;
@@ -488,26 +488,28 @@ test "port exchange transfer consumes its prepared authority once" {
             self.aborts += 1;
         }
     };
-    var origin: u8 = 0;
-    var destination: u8 = 0;
-    var payload: Exchange = .{ .owner = &origin };
+    var origin_scope: u8 = 0;
+    var destination_scope: u8 = 0;
+    const origin: *ScopeIdentity = @ptrCast(&origin_scope);
+    const destination: *ScopeIdentity = @ptrCast(&destination_scope);
+    var payload: Exchange = .{ .owner = origin };
     var cleanup = testing.Cleanup.init(std.testing.allocator);
     defer cleanup.deinit();
     const item = try createOwnedPort(Exchange, .exchange, std.testing.allocator, 43, &payload);
     defer cleanup.releaseValue(item);
     try std.testing.expectEqual(value.PortVariant.exchange, portVariant(item.port));
     try std.testing.expect(portPayload(Exchange, .resource, item.port) == null);
-    var abandoned = try preparePortTransfer(item.port, &origin, &destination);
+    var abandoned = try preparePortTransfer(item.port, origin, destination);
     abandoned.abort();
     abandoned.commit();
     try std.testing.expectEqual(@as(usize, 1), payload.aborts);
-    var moved = try preparePortTransfer(item.port, &origin, &destination);
+    var moved = try preparePortTransfer(item.port, origin, destination);
     moved.commit();
     moved.commit();
     moved.abort();
     try std.testing.expectEqual(@as(usize, 1), payload.commits);
-    try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, &origin, &destination));
-    var returned = try preparePortTransfer(item.port, &destination, &origin);
+    try std.testing.expectError(error.NotOwner, preparePortTransfer(item.port, origin, destination));
+    var returned = try preparePortTransfer(item.port, destination, origin);
     returned.commit();
 }
 
@@ -652,7 +654,11 @@ const AddressStorage = struct {
     release: *const fn (*anyopaque) void,
 };
 
-const PreparePortTransfer = *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer;
+/// A task scope's identity, for ownership comparisons only. Ports and
+/// resources compare it; none dereferences it.
+pub const ScopeIdentity = opaque {};
+
+const PreparePortTransfer = *const fn (*anyopaque, *ScopeIdentity, *ScopeIdentity) PortTransferError!PortTransfer;
 
 /// Transfer authority exists exactly for owning roles. A borrowed capability
 /// cannot accidentally acquire it by supplying a backend transfer callback.
@@ -1326,7 +1332,7 @@ fn PortReleaseAdapter(comptime Payload: type) type {
 
 fn PortTransferAdapter(comptime Payload: type) type {
     return struct {
-        fn prepare(raw: *anyopaque, from: *anyopaque, to: *anyopaque) PortTransferError!PortTransfer {
+        fn prepare(raw: *anyopaque, from: *ScopeIdentity, to: *ScopeIdentity) PortTransferError!PortTransfer {
             const payload: *Payload = @ptrCast(@alignCast(raw));
             try Payload.prepareScopeTransfer(payload, from, to);
             return .{ .context = raw, .commit_fn = commit, .abort_fn = abort };
@@ -1345,7 +1351,7 @@ fn PortTransferAdapter(comptime Payload: type) type {
 /// Every owning port kind must implement the complete transfer protocol.
 fn portPrepareTransfer(
     comptime Payload: type,
-) *const fn (*anyopaque, *anyopaque, *anyopaque) PortTransferError!PortTransfer {
+) *const fn (*anyopaque, *ScopeIdentity, *ScopeIdentity) PortTransferError!PortTransfer {
     inline for (.{ "prepareScopeTransfer", "commitScopeTransfer", "abortScopeTransfer" }) |step| {
         if (!@hasDecl(Payload, step))
             @compileError(@typeName(Payload) ++ " is a port payload and must declare " ++ step ++
@@ -1409,8 +1415,8 @@ pub fn createBorrowedPort(
 /// heap: callers move ports without ever holding a backend pointer.
 pub fn preparePortTransfer(
     header: *const PortHandle,
-    from: *anyopaque,
-    to: *anyopaque,
+    from: *ScopeIdentity,
+    to: *ScopeIdentity,
 ) PortTransferError!PortTransfer {
     const storage = portStorage(header);
     return switch (storage.role) {

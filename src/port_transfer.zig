@@ -44,8 +44,8 @@ pub fn ScopeTransfer(
     comptime live: fn (*Cell) bool,
 ) type {
     return struct {
-        pub fn prepare(cell: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
-            const destination: *scheduler.TaskScope = @ptrCast(@alignCast(to));
+        pub fn prepare(cell: *Cell, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
+            const destination = scheduler.TaskScope.fromIdentity(to);
             std.Io.Threaded.mutexLockUncancelable(&cell.mutex);
             const rejected: ?heap.PortTransferError = if (!live(cell)) error.Closed else switch (ownership(cell).*) {
                 .none, .provisional => error.Closed,
@@ -67,7 +67,7 @@ pub fn ScopeTransfer(
 
         const Publication = struct {
             cell: *Cell,
-            origin: *anyopaque,
+            origin: *heap.ScopeIdentity,
             pub fn lock(self: *@This()) void {
                 std.Io.Threaded.mutexLockUncancelable(&self.cell.mutex);
             }
