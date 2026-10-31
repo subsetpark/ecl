@@ -22,6 +22,7 @@ const standard_streams = @import("standard_streams.zig");
 const resolution_core = @import("resolution_core.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
+const scheduler_api = @import("scheduler.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -1859,11 +1860,11 @@ pub const ParkRequest = union(enum) {
     sleep: u63,
     close_scope: u8,
     external: external.ReadinessSource,
-    external_until: struct { source: external.ReadinessSource, deadline: @import("scheduler.zig").Deadline },
+    external_until: struct { source: external.ReadinessSource, deadline: scheduler_api.Deadline },
     /// Park on a task mailbox, for a message or for space to queue one. A
     /// deadline resumes the driver exactly as readiness does, so a timed
     /// receive hands back a value instead of raising.
-    mailbox: struct { source: external.ReadinessSource, deadline: ?@import("scheduler.zig").Deadline },
+    mailbox: struct { source: external.ReadinessSource, deadline: ?scheduler_api.Deadline },
 
     /// The one value graph owned by every parking request that carries one.
     /// Scheduler setup, abandonment, and ordinary deinit all use this mapping.
@@ -2378,8 +2379,8 @@ pub const Unit = struct {
     idiom_hits: u64 = 0,
     /// The idiom hits that were phrases continued by following words.
     phrase_hits: u64 = 0,
-    scheduler: ?*const anyopaque = null,
-    task_scope: ?*anyopaque = null,
+    scheduler: ?*const scheduler_api.WorkerScheduler = null,
+    task_scope: ?*scheduler_api.TaskScope = null,
     is_root_unit: bool = true,
     /// For a child unit, the `@` word that constructed it.
     constructor: UnitConstructor = .spawn,

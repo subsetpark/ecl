@@ -872,7 +872,7 @@ const UnpackDriver = struct {
     }
 
     fn publishView(self: *UnpackDriver, evaluator: *Unit, archive: *Archive) MachineError!driver_completion.Progress {
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing")));
+        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "archive scope is closing");
         const result = document.adopt(scope, archive.tar.borrow(), self.entries.borrow()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ScopeClosing => return evaluator.fail(.cancelled, "archive scope is closing"),

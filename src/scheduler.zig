@@ -2224,7 +2224,7 @@ pub const WorkerScheduler = enum(usize) {
         if (request == .close_scope) {
             const status = request.close_scope;
             _ = unit.takeParkRequest();
-            self.closeRootScope(@ptrCast(@alignCast(unit.task_scope.?)));
+            self.closeRootScope(unit.task_scope.?);
             unit.installParkResume(.{ .scope_closed = status });
             return;
         }

@@ -9,7 +9,6 @@ const machine = @import("machine.zig");
 const modules = @import("modules.zig");
 const poll = @import("poll.zig");
 const module_snapshot = @import("module_snapshot.zig");
-const scheduler_api = @import("scheduler.zig");
 
 const Value = value.Value;
 const Unit = machine.Unit;
@@ -307,11 +306,7 @@ const InvocationDriver = struct {
                     var target = invocation.enter(evaluator.module_access);
                     defer target.deinit();
                     const home = target.home(evaluator.module_access);
-                    const scheduler: *const scheduler_api.WorkerScheduler =
-                        @ptrCast(@alignCast(evaluator.scheduler.?));
-                    const scope: *scheduler_api.TaskScope =
-                        @ptrCast(@alignCast(evaluator.task_scope.?));
-                    const task = scheduler.spawn(scope, .{
+                    const task = evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
                         .parent_unit = evaluator,
                         .site = .{ .module = home },
                         .quotation = target.quotation(),

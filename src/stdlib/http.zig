@@ -82,7 +82,7 @@ const RequestFields = struct {
 
 fn begin(evaluator: *Unit, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
     const access = evaluator.inherited.runtime().http_access;
-    const deadline = worker(evaluator).deadlineAfter(access.limits().deadline_ms) catch
+    const deadline = evaluator.scheduler.?.deadlineAfter(access.limits().deadline_ms) catch
         return evaluator.fail(.overflow, "HTTP deadline lies beyond the clock's range");
     var request = try evaluator.popValue();
     errdefer request.deinit();
@@ -267,7 +267,7 @@ const RequestDriver = struct {
 
     pub fn advance(evaluator: *Unit, self: *RequestDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.deadline.reachedBy(worker(evaluator).now())) {
+        if (self.deadline.reachedBy(evaluator.scheduler.?.now())) {
             self.admitted.cancel();
             const failure = evaluator.fail(.timeout, "HTTP request deadline expired");
             evaluator.addErrorPath(self.fields.target.?);
@@ -432,7 +432,7 @@ const RequestDriver = struct {
             .exchange => |*exchange_state| {
                 const input = exchange_state.request;
                 self.state = .running;
-                self.admitted.start(input, self.method, self.follow_redirects, @ptrCast(@alignCast(evaluator.task_scope.?))) catch |err| return switch (err) {
+                self.admitted.start(input, self.method, self.follow_redirects, evaluator.task_scope.?) catch |err| return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     error.ScopeClosing => evaluator.fail(.cancelled, "HTTP scope is closing"),
                     else => self.failIo(evaluator, input.url, @errorName(err)),
@@ -627,7 +627,7 @@ const RequestDriver = struct {
                     finish.dictionary.deinit();
                     const results = finish.results;
                     self.state = .{ .output = results };
-                    if (self.deadline.reachedBy(worker(evaluator).now())) {
+                    if (self.deadline.reachedBy(evaluator.scheduler.?.now())) {
                         evaluator.releases.releaseValue(built);
                         return evaluator.fail(.timeout, "HTTP request deadline expired");
                     }
@@ -958,7 +958,3 @@ const Chunks = struct {
         allocator.destroy(chunk);
     }
 };
-
-fn worker(evaluator: *Unit) *const scheduler.WorkerScheduler {
-    return @ptrCast(@alignCast(evaluator.scheduler.?));
-}

@@ -11,7 +11,6 @@ const dict = @import("../dict.zig");
 const env = @import("../env.zig");
 const intern = @import("../intern.zig");
 const machine = @import("../machine.zig");
-const scheduler_api = @import("../scheduler.zig");
 const value = @import("../value.zig");
 
 const Unit = machine.Unit;
@@ -50,12 +49,8 @@ fn untag(domain: Domain, item: Value) error{OutOfMemory}!?i64 {
     return payload.int;
 }
 
-fn scheduler(evaluator: *Unit) *const scheduler_api.WorkerScheduler {
-    return @ptrCast(@alignCast(evaluator.scheduler.?));
-}
-
 fn now(evaluator: *Unit) MachineError!void {
-    const instant = scheduler(evaluator).monotonicMilliseconds();
+    const instant = evaluator.scheduler.?.monotonicMilliseconds();
     try evaluator.pushOwned(try tagged(evaluator, .monotonic, instant));
 }
 
@@ -64,7 +59,7 @@ fn elapsed(evaluator: *Unit) MachineError!void {
     defer item.deinit();
     const start = (try untag(.monotonic, item.borrow())) orelse
         return evaluator.typeError("a {monotonic milliseconds} instant from clock.now");
-    const current = scheduler(evaluator).monotonicMilliseconds();
+    const current = evaluator.scheduler.?.monotonicMilliseconds();
     const delta = std.math.sub(i64, current, start) catch
         return evaluator.fail(.overflow, "clock.elapsed left the millisecond range");
     try evaluator.pushOwned(.{ .int = delta });
@@ -75,7 +70,7 @@ fn unix(evaluator: *Unit) MachineError!void {
         .host => |io| std.math.cast(i64, @divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms)) orelse
             return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
         .fixed => |timestamp| timestamp,
-        .anchored => |base| std.math.add(i64, base, scheduler(evaluator).monotonicMilliseconds()) catch
+        .anchored => |base| std.math.add(i64, base, evaluator.scheduler.?.monotonicMilliseconds()) catch
             return evaluator.fail(.overflow, "clock.unix left the millisecond range"),
     };
     try evaluator.pushOwned(try tagged(evaluator, .unix, milliseconds));
@@ -89,7 +84,7 @@ fn sleep(evaluator: *Unit) MachineError!void {
     const duration: u63 = @intCast(item.borrow().int);
     // The clock only moves forward, so a deadline the clock cannot reach now
     // cannot be reached at registration either; refuse it before parking.
-    scheduler(evaluator).checkDeadline(duration) catch
+    evaluator.scheduler.?.checkDeadline(duration) catch
         return evaluator.fail(.overflow, "clock.sleep deadline lies beyond the clock's range");
     // The deadline itself is captured by the scheduler at registration, after
     // this primitive returns, and a zero duration is already expired there:
