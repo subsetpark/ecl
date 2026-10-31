@@ -110,6 +110,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # Zig never evicts stale outputs, so each restore-then-save cycle adds
+      # the new commit's artifacts to everything before it. Bucketing the key
+      # by ISO week makes the first run of each week start cold, bounding
+      # that accumulation to one week of commits.
+      - name: Compute cache week
+        id: cache-week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Restore Zig compilation artifacts
         id: zig-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -117,10 +125,10 @@ jobs:
           path: |
             ${{ env.ZIG_GLOBAL_CACHE_HOST }}
             ${{ env.ZIG_LOCAL_CACHE_HOST }}
-          key: ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-${{ github.sha }}
+          key: ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ steps.cache-week.outputs.week }}-${{ inputs.cache_scope }}-${{ github.sha }}
           restore-keys: |
-            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-
-            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-
+            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ steps.cache-week.outputs.week }}-${{ inputs.cache_scope }}-
+            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ steps.cache-week.outputs.week }}-
 
       - name: Set up Ubuntu and Zig
         run: |
@@ -433,6 +441,14 @@ jobs:
       - name: Stop Ubuntu container
         if: always()
         run: docker rm --force ecl-ci || true
+
+      - name: Report Zig cache size
+        if: success()
+        run: |
+          du -sh "$ZIG_GLOBAL_CACHE_HOST" "$ZIG_LOCAL_CACHE_HOST" || true
+          du -sh "$ZIG_GLOBAL_CACHE_HOST"/* "$ZIG_LOCAL_CACHE_HOST"/* 2>/dev/null | sort -h || true
+          echo "Largest local output directories:"
+          du -s "$ZIG_LOCAL_CACHE_HOST"/o/* 2>/dev/null | sort -n | tail -10 || true
 
       - name: Save Zig compilation artifacts
         if: success() && inputs.save_cache && steps.zig-cache.outputs.cache-hit != 'true'

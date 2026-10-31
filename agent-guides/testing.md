@@ -89,8 +89,12 @@ tier.
   read-only. The reusable build-type workflow also
   persists host-mounted Zig local and global caches under a key containing the
   runner OS, architecture, Zig and Pantagruel versions, optimization mode,
-  cooperating-job scope, and commit; a new commit may restore the previous
-  mode-specific prefix and let Zig validate its content-addressed entries. Do
+  ISO week, cooperating-job scope, and commit; a new commit may restore the
+  previous mode-specific prefix within the same week and let Zig validate its
+  content-addressed entries. Zig never evicts stale outputs, so the week
+  bucket is what bounds a cache's growth. Only master pushes save the general
+  caches; pull requests restore master's and save nothing, except the OOM
+  producer, whose sweeps consume its cache within the same run. Do
   not run this locally. `zig build test`
   alone is a five-minute round trip after a one-line change, and re-running
   the matrix by hand replaces CI's evidence with a slower copy of it.

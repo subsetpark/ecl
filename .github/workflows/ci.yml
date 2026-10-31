@@ -16,11 +16,16 @@ permissions:
   contents: read
 
 jobs:
+  # Only master saves the general caches; pull requests restore master's and
+  # never save, so each push does not add another ~1 GB entry per lane. The
+  # OOM producer still saves on pull requests because its sweeps restore the
+  # artifact it compiles within the same run.
   debug:
     name: Debug tiers
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: debug
+      save_cache: ${{ github.event_name != 'pull_request' }}
       run_precommit: ${{ github.event_name == 'pull_request' }}
       run_quality: ${{ github.event_name != 'pull_request' }}
       run_full_suite: ${{ github.event_name != 'pull_request' }}
@@ -38,6 +43,7 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: safe
+      save_cache: ${{ github.event_name != 'pull_request' }}
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
