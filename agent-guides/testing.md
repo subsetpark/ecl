@@ -81,8 +81,12 @@ tier.
   expensive or least portable to run locally. Pushes to master and manual
   runs add the full Debug suite, bounded fuzz campaigns, eight-worker
   concurrency, and ReleaseFast snapshots.
-  Each optimization mode owns one long-lived job so its later tiers reuse its
-  Zig cache and emitted artifacts. The reusable build-type workflow also
+  Debug owns one long-lived job so its later tiers reuse its Zig cache and
+  emitted artifacts. ReleaseSafe instead runs the suite and each slow side
+  check (Memcheck, Git snapshots, the benchmark smoke, eight workers) as
+  parallel lanes; those side checks build their own artifacts anyway, so
+  only the suite lane saves the shared cache and the side lanes restore it
+  read-only. The reusable build-type workflow also
   persists host-mounted Zig local and global caches under a key containing the
   runner OS, architecture, Zig and Pantagruel versions, optimization mode,
   cooperating-job scope, and commit; a new commit may restore the previous
