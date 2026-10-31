@@ -912,7 +912,7 @@ uninterned vectors.
 ### Conversions
 
 Conversion between kinds is explicit and names its target. `chars` yields a
-value's text content as a string: a string unchanged, a symbol's or word's
+value's text content as a string: a string unchanged, a symbol's
 spelling, a char as a one-element string, or a byte list decoded as UTF-8. A
 byte list is an integer list whose every element is 0 through 255; bytes that
 are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``. `bytes` is the

@@ -15,13 +15,13 @@ const doc_text = @import("doc.zig");
 const reader_types = @import("reader_types.zig");
 const modules = @import("modules.zig");
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 const Mode = enum { def, defp, test_declaration };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Machine) MachineError!void {
+        fn run(evaluator: *Unit) MachineError!void {
             return define(evaluator, mode);
         }
     }.run;
@@ -54,7 +54,7 @@ const Annotation = struct {
     }
 };
 
-fn define(evaluator: *Machine, mode: Mode) MachineError!void {
+fn define(evaluator: *Unit, mode: Mode) MachineError!void {
     try evaluator.require(2);
     const private = mode == .defp;
     const scope = try evaluator.definitionScope();
@@ -87,7 +87,7 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     });
 }
 
-fn unbind(evaluator: *Machine) MachineError!void {
+fn unbind(evaluator: *Unit) MachineError!void {
     try evaluator.require(1);
     const scope = try evaluator.definitionScope();
     const name = try evaluator.popSymbol();
@@ -117,7 +117,7 @@ const UnbindDriver = struct {
         }
     };
 
-    pub fn advance(evaluator: *Machine, self: *UnbindDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *UnbindDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -234,11 +234,11 @@ const DefineDriver = struct {
         }
     };
 
-    fn malformed(evaluator: *Machine) MachineError {
+    fn malformed(evaluator: *Unit) MachineError {
         return evaluator.fail(.domain, "malformed definition annotation");
     }
 
-    pub fn advance(evaluator: *Machine, self: *DefineDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *DefineDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
@@ -247,8 +247,8 @@ const DefineDriver = struct {
                 if (scan.index == count) {
                     if (scan.separator_at == null and scan.colon_at == null) {
                         scan.candidate.deinit(
-                            evaluator.releaseDomain(),
-                            evaluator.allocator(),
+                            evaluator.releases,
+                            evaluator.allocator,
                         );
                         self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                         continue;
@@ -320,14 +320,14 @@ const DefineDriver = struct {
                     self.state.borrowMut().* = .{ .prepare_effect = context };
                 } else {
                     validation.context.source.deinit(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                     );
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                 }
             },
             .prepare_effect => |*context| {
-                const items = try evaluator.allocator().alloc(Value, context.effect_end);
+                const items = try evaluator.allocator.alloc(Value, context.effect_end);
                 const moved = context.*;
                 self.state.borrowMut().* = .{ .copy_effect = .{
                     .context = moved,
@@ -337,7 +337,7 @@ const DefineDriver = struct {
             .copy_effect => |*copy| {
                 if (copy.index == copy.context.effect_end) {
                     const materializer = list.ValueMaterializer.init(
-                        evaluator.allocator(),
+                        evaluator.allocator,
                         copy.items.borrow(),
                     );
                     const context = copy.context;
@@ -365,13 +365,13 @@ const DefineDriver = struct {
                         materialization.context.separator_at.?,
                     );
                     materialization.materializer.deinit(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                     );
-                    materialization.items.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    materialization.items.deinit(evaluator.releases, evaluator.allocator);
                     materialization.context.source.deinit(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                     );
                     self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                     return .stepped;
@@ -428,8 +428,8 @@ const DefineDriver = struct {
                         self.annotation.borrow().doc_value,
                     );
                     if (publication.source) |*source| source.deinit(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
+                        evaluator.releases,
+                        evaluator.allocator,
                     );
                     self.state.borrowMut().* = .{ .publishing_test = cursor };
                     continue;
@@ -483,7 +483,7 @@ const DefineDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn doc(evaluator: *Machine) MachineError!void {
+fn doc(evaluator: *Unit) MachineError!void {
     const requested = try evaluator.popSymbol();
     return installLookup(evaluator, requested);
 }
@@ -497,7 +497,7 @@ const ReflectionResolution = union(enum) {
 /// module, destroy the current driver and hand the symbol plus primitive call
 /// back to the machine's ordinary load/retry protocol.
 fn resolveForReflection(
-    evaluator: *Machine,
+    evaluator: *Unit,
     driver: anytype,
     requested: u32,
     outcome: machine.ResolutionOutcome,
@@ -516,7 +516,7 @@ fn resolveForReflection(
 /// values. There is no counterpart for a binding's stored body: nothing lifts a
 /// published body out of the home it resolves against, which is what keeps a
 /// quotation's scope label impossible to re-site.
-fn installLookup(evaluator: *Machine, requested: u32) MachineError!void {
+fn installLookup(evaluator: *Unit, requested: u32) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
         .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
@@ -528,9 +528,9 @@ const DocumentNormalization = struct {
     document: heap.Owned(Value),
     normalizer: heap.Owned(doc_text.NormalizeCursor),
 
-    fn init(evaluator: *Machine, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
+    fn init(evaluator: *Unit, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
         const item: Value = .{ .list = env.documentationHeader(document) };
-        const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator(), item);
+        const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator, item);
         heap.retainValue(item);
         return .{ .document = .init(item), .normalizer = .init(normalizer) };
     }
@@ -554,7 +554,7 @@ const LookupDriver = struct {
     requested: u32,
     resolution: heap.Owned(machine.ResolutionCursor),
     normalization: heap.Owned(DocumentNormalization) = .none,
-    pub fn advance(evaluator: *Machine, self: *LookupDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -573,7 +573,7 @@ const LookupDriver = struct {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
                     };
-                    defer resolved.deinit(evaluator.allocator());
+                    defer resolved.deinit(evaluator.allocator);
                     const document = resolved.lease.spec().doc orelse
                         return evaluator.fail(.domain, "binding has no documentation");
                     self.normalization = .init(try .init(evaluator, document));
@@ -584,7 +584,7 @@ const LookupDriver = struct {
     }
 };
 
-fn declaredEffect(evaluator: *Machine) MachineError!void {
+fn declaredEffect(evaluator: *Unit) MachineError!void {
     const requested = try evaluator.popSymbol();
     try evaluator.startDriver(EffectDriver{
         .requested = requested,
@@ -600,7 +600,7 @@ const EffectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
     resolution: heap.Owned(machine.ResolutionCursor),
-    pub fn advance(evaluator: *Machine, self: *EffectDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *EffectDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.resolution.borrowMut().advance()) {
@@ -610,9 +610,9 @@ const EffectDriver = struct {
                     .retry => |progress| return progress,
                     .resolved => |resolution| resolution,
                 };
-                defer resolved.deinit(evaluator.allocator());
+                defer resolved.deinit(evaluator.allocator);
                 const declared = resolved.lease.spec().effect orelse
-                    return .{ .output = try list.fromValues(evaluator.allocator(), &.{}) };
+                    return .{ .output = try list.fromValues(evaluator.allocator, &.{}) };
                 declared.retain();
                 return .{ .output = .{ .list = declared.header() } };
             },
@@ -621,7 +621,7 @@ const EffectDriver = struct {
     }
 };
 
-fn which(evaluator: *Machine) MachineError!void {
+fn which(evaluator: *Unit) MachineError!void {
     const requested = try evaluator.popSymbol();
     try evaluator.startDriver(WhichDriver.init(evaluator, requested));
 }
@@ -690,10 +690,10 @@ const WhichDriver = struct {
         }
     };
 
-    fn init(evaluator: *Machine, requested: u32) WhichDriver {
+    fn init(evaluator: *Unit, requested: u32) WhichDriver {
         return .{
             .requested = requested,
-            .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+            .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
             .state = .init(.{ .resolve = .init(
                 machine.ResolutionCursor.initAtCurrent(evaluator, requested),
             ) }),
@@ -760,7 +760,7 @@ const WhichDriver = struct {
         }
         base.step += 1;
     }
-    pub fn advance(evaluator: *Machine, self: *WhichDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *WhichDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -776,7 +776,7 @@ const WhichDriver = struct {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
                     };
-                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    cursor.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .{ .shadow = .{
                         .resolved = .init(resolved),
                         .cursor = .init(machine.ShadowCursor.init(evaluator, self.requested)),
@@ -787,7 +787,7 @@ const WhichDriver = struct {
                 .pending => {},
                 .complete => |shadows| {
                     const resolved = shadow.resolved.take();
-                    shadow.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    shadow.cursor.deinit(evaluator.releases, evaluator.allocator);
                     self.state.borrowMut().* = .{ .base_actions = .{
                         .context = .{
                             .resolved = .init(resolved),
@@ -826,7 +826,7 @@ const WhichDriver = struct {
                 },
             },
             .write => |*write| {
-                evaluator.unit.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                evaluator.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
                 return .completed;
             },
         };
@@ -834,7 +834,7 @@ const WhichDriver = struct {
     }
 };
 
-fn see(evaluator: *Machine) MachineError!void {
+fn see(evaluator: *Unit) MachineError!void {
     const requested = try evaluator.popSymbol();
     try evaluator.startDriver(SeeDriver.init(evaluator, requested));
 }
@@ -897,10 +897,10 @@ const SeeDriver = struct {
         }
     };
 
-    fn init(evaluator: *Machine, requested: u32) SeeDriver {
+    fn init(evaluator: *Unit, requested: u32) SeeDriver {
         return .{
             .requested = requested,
-            .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+            .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
             .state = .init(.{ .resolve = .init(
                 machine.ResolutionCursor.initAtCurrent(evaluator, requested),
             ) }),
@@ -987,7 +987,7 @@ const SeeDriver = struct {
         plan.step += 1;
     }
 
-    pub fn advance(evaluator: *Machine, self: *SeeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *SeeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -1003,7 +1003,7 @@ const SeeDriver = struct {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
                     };
-                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    cursor.deinit(evaluator.releases, evaluator.allocator);
                     var context: Context = .{ .resolved = .init(resolved) };
                     const document = resolved.lease.spec().doc orelse {
                         self.state.borrowMut().* = .{ .plan = .{
@@ -1015,14 +1015,14 @@ const SeeDriver = struct {
                         continue;
                     };
                     const normalization = DocumentNormalization.init(evaluator, document) catch |err| {
-                        context.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        context.deinit(evaluator.releases, evaluator.allocator);
                         return err;
                     };
                     self.state.borrowMut().* = .{ .normalize = .{ .context = context, .normalization = normalization } };
                 },
             },
             .normalize => |*normalize| if (try normalize.normalization.advance(work)) |normalized| {
-                normalize.normalization.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                normalize.normalization.deinit(evaluator.releases, evaluator.allocator);
                 var context = normalize.context;
                 context.document = .init(normalized);
                 self.state.borrowMut().* = .{ .plan = .{
@@ -1045,7 +1045,7 @@ const SeeDriver = struct {
             },
             .format => |*format_state| {
                 const rendered = formatter.format(
-                    evaluator.allocator(),
+                    evaluator.allocator,
                     format_state.source.borrow(),
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -1056,14 +1056,14 @@ const SeeDriver = struct {
                     error.InvalidUtf8, error.InvalidSource => unreachable,
                 };
                 const context = format_state.context;
-                format_state.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                format_state.source.deinit(evaluator.releases, evaluator.allocator);
                 self.state.borrowMut().* = .{ .write = .{
                     .context = context,
                     .rendered = .init(rendered),
                 } };
             },
             .write => |*write| {
-                evaluator.unit.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                evaluator.inherited.runtime().console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
                 return .completed;
             },
         };
@@ -1071,6 +1071,6 @@ const SeeDriver = struct {
     }
 };
 
-fn writeFailure(evaluator: *Machine) MachineError {
+fn writeFailure(evaluator: *Unit) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }

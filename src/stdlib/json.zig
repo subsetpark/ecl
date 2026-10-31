@@ -22,7 +22,7 @@ const env = @import("../env.zig");
 const machine = @import("../machine.zig");
 const kernel_storage = @import("../kernel_storage.zig");
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -40,12 +40,12 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn parse(evaluator: *Machine) MachineError!void {
+fn parse(evaluator: *Unit) MachineError!void {
     var text = try evaluator.popString();
     defer text.deinit();
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), text.borrow());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, text.borrow());
     try evaluator.startDriver(ParseDriver{
-        .allocator = evaluator.allocator(),
+        .allocator = evaluator.allocator,
         .text = .init(text.take()),
         .encoder = .init(encoder),
     });
@@ -87,7 +87,7 @@ const ParseDriver = struct {
         pairs: ?[]dict.Pair = null,
     };
 
-    pub fn advance(evaluator: *Machine, self: *ParseDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *ParseDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.bytes == null) {
             switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -129,7 +129,7 @@ const ParseDriver = struct {
             switch (token) {
                 .object_begin => try self.frames.append(self.allocator, .{ .kind = .object }),
                 .array_begin => try self.frames.append(self.allocator, .{ .kind = .array }),
-                .object_end, .array_end => try self.closeFrame(evaluator.releaseDomain()),
+                .object_end, .array_end => try self.closeFrame(evaluator.releases),
                 .null => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("null") } }),
                 .true => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("true") } }),
                 .false => try self.place(evaluator, .{ .symbol = .{ .name = try intern.intern("false") } }),
@@ -147,7 +147,7 @@ const ParseDriver = struct {
         return .stepped;
     }
 
-    fn failParse(self: *ParseDriver, evaluator: *Machine) MachineError {
+    fn failParse(self: *ParseDriver, evaluator: *Unit) MachineError {
         _ = self;
         return evaluator.fail(.parse, "json.parse rejected malformed JSON");
     }
@@ -212,7 +212,7 @@ const ParseDriver = struct {
         frame.values.deinit(self.allocator);
     }
 
-    fn advanceBuilding(self: *ParseDriver, evaluator: *Machine) MachineError!?Value {
+    fn advanceBuilding(self: *ParseDriver, evaluator: *Unit) MachineError!?Value {
         const building = &self.building.?;
         const result: ?Value = switch (building.target) {
             .values => |*materializer| switch (try materializer.advance(evaluator.workBudget())) {
@@ -240,7 +240,7 @@ const ParseDriver = struct {
             .pairs => |*materializer| materializer.deinit(),
             .text => |*materializer| materializer.deinit(),
         }
-        self.releaseCollected(evaluator.releaseDomain());
+        self.releaseCollected(evaluator.releases);
         return built;
     }
 
@@ -264,14 +264,14 @@ const ParseDriver = struct {
     /// Installs one finished value as an object key, an object value, an array
     /// element, or the document root. The value is owned on entry, so a failed
     /// append releases it rather than stranding it.
-    fn place(self: *ParseDriver, evaluator: *Machine, item: Value) error{OutOfMemory}!void {
+    fn place(self: *ParseDriver, evaluator: *Unit, item: Value) error{OutOfMemory}!void {
         if (self.frames.items.len == 0) {
             self.root = item;
             return;
         }
         const frame = &self.frames.items[self.frames.items.len - 1];
         frame.values.append(self.allocator, item) catch |err| {
-            evaluator.releaseDomain().releaseValue(item);
+            evaluator.releases.releaseValue(item);
             return err;
         };
     }
@@ -310,7 +310,7 @@ const ParseDriver = struct {
 };
 
 /// Integral in-range numbers become ints; everything else becomes a float.
-fn numberValue(evaluator: *Machine, text: []const u8) MachineError!Value {
+fn numberValue(evaluator: *Unit, text: []const u8) MachineError!Value {
     if (std.json.isNumberFormattedLikeAnInteger(text)) {
         if (std.fmt.parseInt(i64, text, 10)) |number| {
             return .{ .int = number };
@@ -321,11 +321,11 @@ fn numberValue(evaluator: *Machine, text: []const u8) MachineError!Value {
     return .{ .float = number };
 }
 
-fn emit(evaluator: *Machine) MachineError!void {
+fn emit(evaluator: *Unit) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     try evaluator.startDriver(EmitDriver{
-        .allocator = evaluator.allocator(),
+        .allocator = evaluator.allocator,
         .item = .init(item.take()),
     });
 }
@@ -360,7 +360,7 @@ const EmitDriver = struct {
     started: bool = false,
     materializer: ?kernel_storage.TextMaterializer = null,
 
-    pub fn advance(evaluator: *Machine, self: *EmitDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Unit, self: *EmitDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.materializer) |*materializer| {
             return switch (try materializer.advance(evaluator.workBudget())) {
@@ -387,7 +387,7 @@ const EmitDriver = struct {
         return .stepped;
     }
 
-    fn step(self: *EmitDriver, evaluator: *Machine) MachineError!void {
+    fn step(self: *EmitDriver, evaluator: *Unit) MachineError!void {
         const frame = &self.frames.items[self.frames.items.len - 1];
         switch (frame.*) {
             .value => |item| {
@@ -461,7 +461,7 @@ const EmitDriver = struct {
 
     /// Starts rendering one value, writing scalars outright and pushing a
     /// cursor for anything user-sized.
-    fn begin(self: *EmitDriver, evaluator: *Machine, item: Value) MachineError!void {
+    fn begin(self: *EmitDriver, evaluator: *Unit, item: Value) MachineError!void {
         switch (item) {
             .int => |number| {
                 // SAFETY: written by bufPrint before it is read.
@@ -515,7 +515,7 @@ const EmitDriver = struct {
     }
 
     /// Object names are the one place a symbol renders as a string.
-    fn beginKey(self: *EmitDriver, evaluator: *Machine, key: Value) MachineError!void {
+    fn beginKey(self: *EmitDriver, evaluator: *Unit, key: Value) MachineError!void {
         if (key.isString()) {
             try self.out.append(self.allocator, '"');
             try self.frames.append(self.allocator, .{ .text = .{ .item = key, .index = 0 } });
@@ -529,7 +529,7 @@ const EmitDriver = struct {
         return evaluator.fail(.type, "json.emit requires string or symbol dictionary keys");
     }
 
-    fn appendEscaped(self: *EmitDriver, evaluator: *Machine, codepoint: u32) MachineError!void {
+    fn appendEscaped(self: *EmitDriver, evaluator: *Unit, codepoint: u32) MachineError!void {
         switch (codepoint) {
             '"' => try self.out.appendSlice(self.allocator, "\\\""),
             '\\' => try self.out.appendSlice(self.allocator, "\\\\"),

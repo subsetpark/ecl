@@ -12,7 +12,7 @@ const module_snapshot = @import("module_snapshot.zig");
 const scheduler_api = @import("scheduler.zig");
 
 const Value = value.Value;
-const Machine = machine.Machine;
+const Unit = machine.Unit;
 const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
@@ -164,7 +164,7 @@ const DiscoveryDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *DiscoveryDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -173,7 +173,7 @@ const DiscoveryDriver = struct {
             .discover => switch (self.cursor.?.advance()) {
                 .pending => _ = work.spend(),
                 .item => |found| {
-                    try self.items.ensureUnusedCapacity(evaluator.allocator(), 1);
+                    try self.items.ensureUnusedCapacity(evaluator.allocator, 1);
                     const item = Collected{ .module = found.module, .source = found.source, .metadata = found.metadata };
                     item.retain();
                     self.items.appendAssumeCapacity(item);
@@ -187,14 +187,14 @@ const DiscoveryDriver = struct {
             },
             .sort => {
                 if (self.sorter == null)
-                    self.sorter = try .init(evaluator.allocator(), self.items.items, {});
+                    self.sorter = try .init(evaluator.allocator, self.items.items, {});
                 switch (self.sorter.?.advance(work) catch |err| switch (err) {}) {
                     .pending => _ = work.spend(),
                     .complete => {
                         self.sorter.?.deinit();
                         self.sorter = null;
                         self.values = try heap.OwnedValueBuffer.init(
-                            evaluator.releaseDomain(),
+                            evaluator.releases,
                             self.items.items.len,
                         );
                         self.phase = .descriptors;
@@ -207,8 +207,8 @@ const DiscoveryDriver = struct {
                     continue;
                 }
                 self.values.?.appendOwned(try descriptorValue(
-                    evaluator.allocator(),
-                    evaluator.releaseDomain(),
+                    evaluator.allocator,
+                    evaluator.releases,
                     self.keys,
                     self.items.items[self.descriptor_index],
                 ));
@@ -225,11 +225,11 @@ const DiscoveryDriver = struct {
     }
 };
 
-fn discover(evaluator: *Machine) MachineError!void {
-    const access = evaluator.unit.inherited.test_observation orelse
+fn discover(evaluator: *Unit) MachineError!void {
+    const access = evaluator.inherited.test_observation orelse
         return evaluator.fail(.domain, "tests is available only in a test Session");
     const keys = try DescriptorKeys.init();
-    const driver = try evaluator.allocator().create(DiscoveryDriver);
+    const driver = try evaluator.allocator.create(DiscoveryDriver);
     driver.* = .{
         .cursor = access.discoveryCursor(),
         .keys = keys,
@@ -262,33 +262,33 @@ const InvocationDriver = struct {
         self.descriptor.deinit(releases, allocator);
     }
 
-    fn invalid(evaluator: *Machine) MachineError {
+    fn invalid(evaluator: *Unit) MachineError {
         return evaluator.fail(
             .domain,
             "@test requires a descriptor produced by tests",
         );
     }
 
-    fn missingOutcome(evaluator: *Machine) error{OutOfMemory}!Value {
+    fn missingOutcome(evaluator: *Unit) error{OutOfMemory}!Value {
         var failure = machine.EclErr.init(.domain, "test descriptor names no current test");
-        defer failure.retire(evaluator.releaseDomain());
+        defer failure.retire(evaluator.releases);
         const payload = try machine.errorValue(
-            evaluator.allocator(),
-            evaluator.releaseDomain(),
+            evaluator.allocator,
+            evaluator.releases,
             &failure,
             .{},
             null,
         );
         return machine.outcomeDict(
-            evaluator.allocator(),
-            evaluator.releaseDomain(),
+            evaluator.allocator,
+            evaluator.releases,
             "err",
             payload,
         );
     }
 
     pub fn advance(
-        evaluator: *Machine,
+        evaluator: *Unit,
         self: *InvocationDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -304,15 +304,15 @@ const InvocationDriver = struct {
                         return .{ .output = try missingOutcome(evaluator) };
                     var invocation = maybe_invocation.?;
                     defer invocation.deinit();
-                    var target = invocation.enter(evaluator.unit.module_access);
+                    var target = invocation.enter(evaluator.module_access);
                     defer target.deinit();
-                    const home = target.home(evaluator.unit.module_access);
+                    const home = target.home(evaluator.module_access);
                     const scheduler: *const scheduler_api.WorkerScheduler =
-                        @ptrCast(@alignCast(evaluator.unit.scheduler.?));
+                        @ptrCast(@alignCast(evaluator.scheduler.?));
                     const scope: *scheduler_api.TaskScope =
-                        @ptrCast(@alignCast(evaluator.unit.task_scope.?));
+                        @ptrCast(@alignCast(evaluator.task_scope.?));
                     const task = scheduler.spawn(scope, .{
-                        .parent_unit = evaluator.unit,
+                        .parent_unit = evaluator,
                         .site = .{ .module = home },
                         .quotation = target.quotation(),
                         .constructor = .@"test",
@@ -325,8 +325,8 @@ const InvocationDriver = struct {
                         // @test requests no resource transfer.
                         error.Transfer => unreachable,
                     };
-                    const allocator = evaluator.allocator();
-                    const releases = evaluator.releaseDomain();
+                    const allocator = evaluator.allocator;
+                    const releases = evaluator.releases;
                     evaluator.detachWorkDriver(self);
                     self.deinit(releases, allocator);
                     allocator.destroy(self);
@@ -355,7 +355,7 @@ const InvocationDriver = struct {
                 .complete => |maybe_name| {
                     self.name_validation = null;
                     self.test_name = maybe_name orelse return invalid(evaluator);
-                    self.lookup = evaluator.unit.inherited.test_execution.?.lookupCursor(
+                    self.lookup = evaluator.inherited.test_execution.?.lookupCursor(
                         self.module_name.?,
                         self.test_name.?,
                         self.source_id,
@@ -394,15 +394,15 @@ const InvocationDriver = struct {
     }
 };
 
-fn invoke(evaluator: *Machine) MachineError!void {
-    if (evaluator.unit.inherited.test_execution == null)
+fn invoke(evaluator: *Unit) MachineError!void {
+    if (evaluator.inherited.test_execution == null)
         return evaluator.fail(.domain, "@test is available only in a test Session");
     var descriptor = try evaluator.popValue();
     defer descriptor.deinit();
     if (descriptor.borrow() != .dict)
         return evaluator.fail(.domain, "@test requires a descriptor produced by tests");
     const keys = try DescriptorKeys.init();
-    const driver = try evaluator.allocator().create(InvocationDriver);
+    const driver = try evaluator.allocator.create(InvocationDriver);
     driver.* = .{
         .descriptor = .init(descriptor.take()),
         .keys = keys,

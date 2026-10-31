@@ -220,7 +220,7 @@ pub fn ReadDriver(comptime Backend: type) type {
             releases.releaseValue(self.port);
         }
 
-        pub fn advance(evaluator: *machine.Machine, self: *Self) machine.MachineError!machine.WorkProgress {
+        pub fn advance(evaluator: *machine.Unit, self: *Self) machine.MachineError!machine.WorkProgress {
             try evaluator.pollKernel();
             if (self.state == .reading) {
                 const count = switch (try self.backend.read(evaluator, self.buffer)) {
@@ -290,7 +290,7 @@ pub fn WriteDriver(comptime Backend: type) type {
             releases.releaseValue(self.port);
         }
 
-        pub fn advance(evaluator: *machine.Machine, self: *Self) machine.MachineError!machine.WorkProgress {
+        pub fn advance(evaluator: *machine.Unit, self: *Self) machine.MachineError!machine.WorkProgress {
             try evaluator.pollKernel();
             if (self.state == .encoding) {
                 const progress = self.state.encoding.encoder.advance(evaluator.workBudget()) catch |err| switch (err) {

@@ -52,7 +52,7 @@ pub const NumberKind = enum { integer, float };
 pub const Classification = union(enum) {
     int: i64,
     float: f64,
-    word,
+    symbol,
     out_of_range: NumberKind,
 };
 
@@ -161,7 +161,7 @@ pub fn spellingReadsBare(spelling: []const u8) bool {
     if (!poll.drive(bool, &cursor, .{})) return false;
     if (std.mem.indexOfScalar(u8, spelling, '\'') != null) return false;
     if (spelling.len >= 2 and spelling[0] == '<' and spelling[spelling.len - 1] == '>') return false;
-    return classify(spelling) == .word;
+    return classify(spelling) == .symbol;
 }
 
 pub const SymbolProgress = poll.Progress(bool);
@@ -198,7 +198,7 @@ pub const SymbolCursor = struct {
     }
     pub fn advance(self: *SymbolCursor) SymbolProgress {
         // The one dotted name the language spells for itself: the anonymous
-        // after row of a stack effect. It lexes as an ordinary word so an
+        // after row of a stack effect. It lexes as an ordinary symbol so an
         // annotation needs no reader mode, and is reserved as a binding name.
         if (std.mem.eql(u8, self.token, row_token)) return .{ .complete = self.allow_dots };
         if (self.index == self.token.len) return .{ .complete = !self.delimited and self.segment_len != 0 };
@@ -308,7 +308,7 @@ pub const ClassifyCursor = struct {
         if (!self.float_valid or self.mantissa_before == 0 or
             (self.dot_seen and self.mantissa_after == 0) or
             (self.exponent_seen and self.exponent_digits == 0) or
-            (!self.dot_seen and !self.exponent_seen)) return .word;
+            (!self.dot_seen and !self.exponent_seen)) return .symbol;
         if (self.significand_digits == 0) return .{ .float = if (self.negative) -0.0 else 0.0 };
         const omitted = self.total_significant - self.significand_digits;
         var exponent = (if (self.exponent_negative) -self.explicit_exponent else self.explicit_exponent) -
@@ -344,7 +344,7 @@ pub const ClassifyCursor = struct {
                 return .{ .complete = if (self.unsigned.len != 0 and self.decimal_valid)
                     self.finishInteger()
                 else
-                    .word };
+                    .symbol };
             if (self.decimal_valid and self.decimal_any and self.decimal_previous_digit)
                 return .{ .complete = self.finishInteger() };
             return .{ .complete = self.finishFloat() };

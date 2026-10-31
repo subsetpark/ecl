@@ -452,7 +452,7 @@ pub const SpanArchiveOwner = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        word_linker: value.WordLinker,
+        symbol_linker: value.SymbolLinker,
     ) reader.Error!reader.ReadResult {
         const backing = self.privateState();
         return reader.readCode(
@@ -461,7 +461,7 @@ pub const SpanArchiveOwner = enum(usize) {
             source,
             diag,
             backing.runtime.identity_issuer.constructionNamespace(),
-            word_linker,
+            symbol_linker,
         );
     }
 
@@ -531,7 +531,7 @@ pub const SpanArchive = enum(usize) {
     pub const AdmittedConstructionBody = opaque {
         pub fn begin(
             self: *AdmittedConstructionBody,
-            linker: value.WordLinker,
+            linker: value.SymbolLinker,
         ) RescopeCursor {
             const backing = admittedConstructionBacking(self);
             const archive = backing.archive;
@@ -618,7 +618,7 @@ pub const SpanArchive = enum(usize) {
         self: *SpanArchive,
         body: *heap.Owned(*value.ListHandle),
     ) error{OutOfMemory}!PreparedConstructionBody {
-        // A specialized leaf holds no word and no container, so re-scoping it
+        // A specialized leaf holds no symbol and no container, so re-scoping it
         // could not change anything even if it were admitted.
         if (body.borrow().kind() != .generic_spine)
             return .{ .unchanged = .init(body.take()) };
@@ -636,7 +636,7 @@ pub const SpanArchive = enum(usize) {
     pub const RescopeProgress = poll.Progress(*value.ListHandle);
 
     /// A resumable, non-recursive re-scoping of one admitted body: a copy of
-    /// the same reader text with `scope` on every word occurrence in its
+    /// the same reader text with `scope` on every symbol occurrence in its
     /// reader-built subtree.
     ///
     /// Two properties are structural rather than reviewed. The frame stack is
@@ -661,11 +661,11 @@ pub const SpanArchive = enum(usize) {
 
         /// One in-progress dict container.
         ///
-        /// Re-scoping changes only a word's resolution metadata, and neither
+        /// Re-scoping changes only a symbol's resolution metadata, and neither
         /// equality nor hashing looks at it, so the copy's hashes are the
         /// source's hashes: the header is shared and nothing is rehashed or
         /// compared. A keys or vals list that is not a generic spine cannot
-        /// hold a word or a container either, so it is shared too and its half
+        /// hold a symbol or a container either, so it is shared too and its half
         /// of the traversal has nothing to write.
         const DictFrame = struct {
             source: *value.DictHandle,
@@ -700,8 +700,8 @@ pub const SpanArchive = enum(usize) {
         archive: SpanArchive,
         source: heap.Owned(*value.ListHandle),
         root_projection: IndexedSpan,
-        /// Links each word to its slot in the image the body is becoming.
-        linker: value.WordLinker,
+        /// Links each symbol to its slot in the image the body is becoming.
+        linker: value.SymbolLinker,
         frames: std.ArrayList(Frame) = .empty,
         started: bool = false,
 
@@ -880,7 +880,7 @@ pub const SpanArchive = enum(usize) {
                 .dict => |nested| {
                     // A dict inside admitted text is text too, which is what makes
                     // `{'a (k)} 'd setp` behave like `[(k)] 'd setp`. When
-                    // neither half can hold a word there is nothing to copy.
+                    // neither half can hold a symbol there is nothing to copy.
                     const payload = heap.dictStorageConst(nested).payload();
                     const rewrite_keys = payload.keys.kind() == .generic_spine;
                     const rewrite_vals = payload.vals.kind() == .generic_spine;
@@ -964,7 +964,7 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        word_linker: value.WordLinker,
+        symbol_linker: value.SymbolLinker,
     ) reader.ReadCursor {
         return .initCode(
             self.allocator(),
@@ -973,7 +973,7 @@ pub const SpanArchive = enum(usize) {
             source,
             diag,
             self.provenanceNamespace(),
-            word_linker,
+            symbol_linker,
         );
     }
 
@@ -1205,10 +1205,10 @@ pub const SpanArchive = enum(usize) {
             source_name: []const u8,
             source: []const u8,
             diag: *reader.Diag,
-            word_linker: value.WordLinker,
+            symbol_linker: value.SymbolLinker,
         ) error{OutOfMemory}!SourceIngestBacking {
             const cursor = try archive.allocator().create(reader.ReadCursor);
-            cursor.* = archive.readCursor(source_name, source, diag, word_linker);
+            cursor.* = archive.readCursor(source_name, source, diag, symbol_linker);
             return .{
                 .archive = archive,
                 .state = .{ .reading = cursor },
@@ -1409,11 +1409,11 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        word_linker: value.WordLinker,
+        symbol_linker: value.SymbolLinker,
     ) error{OutOfMemory}!SourceIngestCursor {
         const backing = try self.allocator().create(SourceIngestBacking);
         errdefer self.allocator().destroy(backing);
-        backing.* = try .init(self, source_name, source, diag, word_linker);
+        backing.* = try .init(self, source_name, source, diag, symbol_linker);
         return .fromBacking(backing);
     }
 
@@ -1580,7 +1580,7 @@ fn prepareForTest(
     return fixture.archive.prepareConstructionBody(&body);
 }
 
-/// Links every word to the same slot, `context[0]`.
+/// Links every symbol to the same slot, `context[0]`.
 fn constantLink(context: [2]usize, _: u32) error{OutOfMemory}!u32 {
     return @intCast(context[0]);
 }
@@ -1782,7 +1782,7 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
     }
     try std.testing.expectEqual(root.length(), copy.length());
 
-    // Every word occurrence in the copy names the requested scope, and the
+    // Every symbol occurrence in the copy names the requested scope, and the
     // source's do not; the quoted name `go` stays quoted under its new link.
     var words: usize = 0;
     var quoted: usize = 0;

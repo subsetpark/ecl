@@ -685,10 +685,9 @@ pub const Session = enum(usize) {
         core.stack = .empty;
         defer finishRootUnit(core, &unit);
         try machine.initialize(&unit, root.borrow().list, .empty);
-        var evaluator = machine.Machine{ .unit = &unit };
         const started = switch (target) {
-            .module => |name| evaluator.loadModuleOnly(name),
-            .source => |source| evaluator.loadSourceOnly(source),
+            .module => |name| unit.loadModuleOnly(name),
+            .source => |source| unit.loadSourceOnly(source),
         };
         started catch |err| switch (err) {
             error.OutOfMemory => {
@@ -1225,10 +1224,10 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             terminal: completion.Completion = .{},
             first: bool = true,
 
-            pub fn advance(evaluator: *machine.Machine, self: *@This()) machine.MachineError!machine.WorkProgress {
+            pub fn advance(evaluator: *machine.Unit, self: *@This()) machine.MachineError!machine.WorkProgress {
                 return self.terminal.advance(evaluator, self);
             }
-            pub fn advanceOperation(self: *@This(), evaluator: *machine.Machine) machine.MachineError!completion.Progress {
+            pub fn advanceOperation(self: *@This(), evaluator: *machine.Unit) machine.MachineError!completion.Progress {
                 if (self.first) {
                     self.first = false;
                     _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 8);
@@ -1265,7 +1264,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
             mode: enum { output, empty, failure, chain, forever, exhausted_output, exhausted_empty, exhausted_chain },
             remaining: u8 = 2,
 
-            pub fn advance(evaluator: *machine.Machine, self: *@This()) machine.MachineError!machine.WorkProgress {
+            pub fn advance(evaluator: *machine.Unit, self: *@This()) machine.MachineError!machine.WorkProgress {
                 if (evaluator.workBudget().exhausted()) return evaluator.fail(.user, "driver ran on an exhausted turn");
                 try evaluator.pollKernel();
                 if (self.remaining != 0) {
@@ -1299,49 +1298,49 @@ test "invocation effects: completion owns immediate deferred nested and failing 
                 };
             }
         };
-        fn immediate(evaluator: *machine.Machine) machine.MachineError!void {
+        fn immediate(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.pushOwned(.{ .int = 11 });
         }
-        fn hostYield(evaluator: *machine.Machine) machine.MachineError!void {
+        fn hostYield(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(YieldingDriver{});
         }
-        fn empty(_: *machine.Machine) machine.MachineError!void {}
-        fn deferred(evaluator: *machine.Machine) machine.MachineError!void {
+        fn empty(_: *machine.Unit) machine.MachineError!void {}
+        fn deferred(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .output });
         }
-        fn wrong(evaluator: *machine.Machine) machine.MachineError!void {
+        fn wrong(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .empty });
         }
-        fn failure(evaluator: *machine.Machine) machine.MachineError!void {
+        fn failure(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .failure });
         }
-        fn chain(evaluator: *machine.Machine) machine.MachineError!void {
+        fn chain(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .chain });
         }
-        fn forever(evaluator: *machine.Machine) machine.MachineError!void {
+        fn forever(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .forever });
         }
-        fn exhaustedOutput(evaluator: *machine.Machine) machine.MachineError!void {
+        fn exhaustedOutput(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .exhausted_output, .remaining = 0 });
         }
-        fn exhaustedEmpty(evaluator: *machine.Machine) machine.MachineError!void {
+        fn exhaustedEmpty(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .exhausted_empty, .remaining = 0 });
         }
-        fn exhaustedChain(evaluator: *machine.Machine) machine.MachineError!void {
+        fn exhaustedChain(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.startDriver(Driver{ .mode = .exhausted_chain, .remaining = 0 });
         }
-        fn freshTurn(evaluator: *machine.Machine) machine.MachineError!void {
+        fn freshTurn(evaluator: *machine.Unit) machine.MachineError!void {
             if (evaluator.remainingKernelFuel() < 128) return evaluator.fail(.user, "successor ran without a fresh allowance");
             try evaluator.pushOwned(.{ .int = 1 });
         }
-        fn shortTurn(evaluator: *machine.Machine) machine.MachineError!void {
+        fn shortTurn(evaluator: *machine.Unit) machine.MachineError!void {
             _ = evaluator.workBudget().take(evaluator.remainingKernelFuel() -| 100);
         }
-        fn nested(evaluator: *machine.Machine) machine.MachineError!void {
+        fn nested(evaluator: *machine.Unit) machine.MachineError!void {
             var body = try evaluator.popQuotation();
             try evaluator.callOwned(body.take().list);
         }
-        fn reflect(evaluator: *machine.Machine) machine.MachineError!void {
+        fn reflect(evaluator: *machine.Unit) machine.MachineError!void {
             try evaluator.executeWord(.{ .name = try intern.intern("which") });
         }
     };
@@ -1449,7 +1448,7 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
                 unreachable;
             }
         };
-        pub fn write(self: *@This(), evaluator: *machine.Machine, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
+        pub fn write(self: *@This(), evaluator: *machine.Unit, _: WritePermit, bytes: []const u8) machine.MachineError!@import("port_transfer.zig").WriteProgress {
             if (bytes.len == 0 or bytes.len > evaluator.remainingKernelFuel())
                 return evaluator.fail(.user, "write exceeds remaining allowance");
             self.counts.calls += 1;
@@ -1464,7 +1463,6 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
     try std.testing.expect((try runtime.runUnit("write-budget.ecl", "")) == .ok);
     var unit = Session.initRootUnit(runtime.coreState());
     defer unit.deinit();
-    var evaluator: machine.Machine = .{ .unit = &unit };
     const Driver = @import("port_transfer.zig").WriteDriver(Probe);
     for ([_]usize{ 5, machine.kernel_poll_quantum }) |length| {
         const items = try std.testing.allocator.alloc(Value, length);
@@ -1476,13 +1474,13 @@ test "port writes share the remaining turn allowance with boxed byte encoding" {
         defer driver.deinit(unit.releases, std.testing.allocator);
         const grant = if (length == 5) 8 else length;
         unit.kernel_budget = poll.testing.budget(grant);
-        try std.testing.expect((try Driver.advance(&evaluator, &driver)) == .stepped);
+        try std.testing.expect((try Driver.advance(&unit, &driver)) == .stepped);
         try std.testing.expectEqual(grant - length, probe.written);
         try std.testing.expectEqual(@as(usize, 0), unit.kernel_budget.remaining);
         try std.testing.expectEqual(@as(usize, if (length == 5) 1 else 0), probe.calls);
         while (!probe.finished) {
             unit.kernel_budget = poll.testing.budget(7);
-            _ = try Driver.advance(&evaluator, &driver);
+            _ = try Driver.advance(&unit, &driver);
         }
         try std.testing.expectEqual(length, probe.written);
     }
