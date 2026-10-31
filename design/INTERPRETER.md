@@ -673,6 +673,12 @@ binding version that published it, and a removal is published as a snapshot
 with no binding. Publication makes a fully built snapshot visible at a version
 newer than every live pin, and a pin taken afterwards observes it.
 
+Authority to publish into a root comes only from the root, as an opaque
+handle that cannot be retargeted: a session or core-building scope issues a top-level
+publisher, and a module image a module publisher that also ends its
+construction. Core is published through one typestate capability minted with
+its Env and consumed when core freezes, so core is built at most once.
+
 A unit that cannot define pins the version current at its creation and reads a
 session slot's newest snapshot at or before it, walking back through the chain
 only for a name redefined since. A pinned reader counts itself on the cell

@@ -1358,21 +1358,33 @@ pub const Scope = struct {
     /// bodies here used to be for.
     pub fn publisher(self: *Scope) ScopePublisher {
         return switch (self.storage) {
-            .session, .core_build => .{ .top = .{ .scope = self } },
+            .session, .core_build => .{ .top = .init(self) },
             .module_root => |target| .{ .module = .init(target) },
         };
     }
 };
-/// Authority to publish top-level bindings into one scope.
-pub const TopPublisher = struct {
-    scope: *Scope,
+/// Authority to publish top-level bindings into one scope. Only the scope
+/// issues it, so a holder cannot target a module root or reach the scope.
+pub const TopPublisher = enum(usize) {
+    invalid = 0,
+    _,
+
+    fn init(scope: *Scope) TopPublisher {
+        return @fromBackingInt(@intCast(@intFromPtr(scope)));
+    }
+
+    fn target(self: TopPublisher) *Environment {
+        std.debug.assert(self != .invalid);
+        const scope: *Scope = @ptrFromInt(@backingInt(self));
+        return scope.writableEnvironment();
+    }
 
     pub fn publish(
         self: TopPublisher,
         name: intern.NamespaceName,
         publication: TopPublication,
     ) BindError!*BindingCell {
-        return self.scope.writableEnvironment().bind(name, BindingSpec.fromTop(publication));
+        return self.target().bind(name, BindingSpec.fromTop(publication));
     }
 
     pub fn cursor(
@@ -1380,10 +1392,7 @@ pub const TopPublisher = struct {
         name: intern.NamespaceName,
         publication: TopPublication,
     ) error{OutOfMemory}!Environment.BindCursor {
-        return self.scope.writableEnvironment().bindCursor(
-            name,
-            BindingSpec.fromTop(publication),
-        );
+        return self.target().bindCursor(name, BindingSpec.fromTop(publication));
     }
 };
 
@@ -1452,6 +1461,7 @@ pub const ScopePublisher = union(enum) {
     module: ModulePublisher,
 };
 comptime {
+    heap.requireOpaqueMutation(TopPublisher);
     heap.requireOpaqueMutation(ModulePublisher);
 }
 
@@ -2222,8 +2232,12 @@ pub const Env = enum(usize) {
             error.Frozen => unreachable,
         };
     }
-    pub fn beginCoreBuild(self: *Env) BuildingEnv {
-        return .{ .target = self };
+    /// A fresh Env together with the one capability that may build its
+    /// core. No other factory issues a `BuildingEnv`, so the core is built at
+    /// most once and never after it freezes.
+    pub fn initBuilding(host_owner: *heap.HostOwner) error{OutOfMemory}!struct { Env, BuildingEnv } {
+        const environment = try init(host_owner);
+        return .{ environment, BuildingEnv.init(environment) };
     }
     pub fn sessionRoot(self: *Env, allocator: std.mem.Allocator) Scope {
         return Scope.direct(allocator, .{ .session = &self.privateState().session });
@@ -2237,11 +2251,23 @@ pub const Env = enum(usize) {
 };
 comptime {
     heap.requireOpaqueHostRoot(Env, EnvState);
+    heap.requireOpaqueMutation(BuildingEnv);
 }
 /// Typestate capability for the only phase in which core publication is
-/// legal. `finish` consumes the capability and freezes the core.
-pub const BuildingEnv = struct {
-    target: *Env,
+/// legal. `finish` consumes the capability and freezes the core. It is an
+/// opaque handle minted only by `Env.initBuilding`.
+pub const BuildingEnv = enum(usize) {
+    invalid = 0,
+    _,
+
+    fn init(environment: Env) BuildingEnv {
+        return @fromBackingInt(@backingInt(environment));
+    }
+
+    fn target(self: BuildingEnv) Env {
+        std.debug.assert(self != .invalid);
+        return @fromBackingInt(@backingInt(self));
+    }
 
     const BuiltinEffect = struct {
         value: value.Value,
@@ -2298,7 +2324,8 @@ pub const BuildingEnv = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidName => unreachable,
             };
-            const core = &builder.target.privateState().core;
+            var environment = builder.target();
+            const core = &environment.privateState().core;
             const document_value = try machine.stringValue(core.allocator, core.releases, definition.doc);
             defer core.releases.releaseValue(document_value);
             const builtin_effect: ?BuiltinEffect = if (data.effect) |*effect|
@@ -2306,7 +2333,7 @@ pub const BuildingEnv = struct {
             else
                 null;
             defer if (builtin_effect) |effect| core.releases.releaseValue(effect.value);
-            try builder.target.installCoreSpec(install_name, .{
+            try environment.installCoreSpec(install_name, .{
                 .binding = .{ .builtin = definition.primitive },
                 .effect = if (builtin_effect) |effect| effect.validated else null,
                 .doc = documentation(document_value.list).?,
@@ -2319,7 +2346,8 @@ pub const BuildingEnv = struct {
         comptime token_count: usize,
         effect: *const StaticBuiltin.EffectData,
     ) error{OutOfMemory}!BuiltinEffect {
-        const core = &self.target.privateState().core;
+        var environment = self.target();
+        const core = &environment.privateState().core;
         var tokens: [token_count]value.Value = undefined;
         for (effect.tokens, &tokens) |token, *destination| {
             const id = try intern.intern(token);
@@ -2337,7 +2365,8 @@ pub const BuildingEnv = struct {
         name: intern.NamespaceName,
         body: *Quotation,
     ) error{OutOfMemory}!void {
-        try self.target.installCoreSpec(name, .{
+        var environment = self.target();
+        try environment.installCoreSpec(name, .{
             .binding = .{ .word = body },
         });
     }
@@ -2362,29 +2391,31 @@ pub const BuildingEnv = struct {
             try descriptor.install(self);
         }
     }
-    pub fn runtime(self: *BuildingEnv) *Env {
-        return self.target;
+    /// The Env under construction, for the bootstrap Unit that evaluates the
+    /// prelude against it. It grants no core publication; that stays here.
+    pub fn runtime(self: *const BuildingEnv) Env {
+        return self.target();
     }
     pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .{ .core_build = &self.target.privateState().core });
+        var environment = self.target();
+        return Scope.direct(allocator, .{ .core_build = &environment.privateState().core });
     }
     /// Recognizes the core's trusted definitions against their final bindings,
     /// then freezes the core. On failure the core is not frozen and the builder
     /// is not consumed, so the session that owns it does not start.
     pub fn finish(self: *BuildingEnv, recognizer: ?FreezeRecognizer) error{OutOfMemory}!void {
-        const core = &self.target.privateState().core;
-        const core_scope = @backingInt(self.target.coreScopeId());
+        var environment = self.target();
+        const core = &environment.privateState().core;
+        const core_scope = @backingInt(environment.coreScopeId());
         if (recognizer) |selected| try core.recognizeDirect(.{
             .own = core,
             .core = null,
             .own_scope = core_scope,
             .core_scope = core_scope,
-            .slots = &self.target.privateState().slot_index,
+            .slots = &environment.privateState().slot_index,
         }, selected);
         core.freeze();
-        // SAFETY: Finishing consumes the builder; invalidation catches reuse
-        // after its target environment becomes immutable.
-        self.* = undefined;
+        self.* = .invalid;
     }
 };
 

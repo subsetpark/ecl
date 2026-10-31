@@ -51,7 +51,7 @@ pub fn installSource(
 ) Error!void {
     const allocator = host.allocator();
     const release_domain = heap.hostDomain(host);
-    const environment = building.runtime();
+    var environment = building.runtime();
     var archive = archive_owner.view();
     var diag: reader.Diag = .{};
     // Core alone is the chain for a primitive or an embedded prelude
@@ -90,7 +90,7 @@ pub fn installSource(
         release_domain,
         executionAccess(),
         .empty,
-        environment,
+        &environment,
         &archive,
         .{ .registry = registry, .phase = .bootstrap },
         arguments.borrow(),

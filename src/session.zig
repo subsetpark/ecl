@@ -344,9 +344,8 @@ pub const Session = enum(usize) {
             host_owner.cleanup().drain();
             allocator.destroy(host_owner);
         }
-        var environment = try env.Env.init(host_owner);
+        var environment, var building = try env.Env.initBuilding(host_owner);
         errdefer environment.deinit();
-        var building = environment.beginCoreBuild();
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();

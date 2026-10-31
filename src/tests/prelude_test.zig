@@ -197,9 +197,8 @@ fn expectInvalidPrelude(source: []const u8) !void {
     const allocator = std.testing.allocator;
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    var environment = try env.Env.init(&host);
+    var environment, var building = try env.Env.initBuilding(&host);
     defer environment.deinit();
-    var building = environment.beginCoreBuild();
     try prims.install(&building);
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
