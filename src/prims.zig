@@ -710,7 +710,7 @@ const NumericParseDriver = struct {
                 .integer => invalidNumericText(evaluator, self.target),
                 .float => .{ .output = .{ .float = number } },
             },
-            .word => invalidNumericText(evaluator, self.target),
+            .symbol => invalidNumericText(evaluator, self.target),
             .out_of_range => switch (self.target) {
                 .integer => evaluator.fail(.overflow, "int result is outside int64"),
                 .float => evaluator.fail(.overflow, "float input is outside the ECL numeric range"),

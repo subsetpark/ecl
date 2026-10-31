@@ -73,7 +73,7 @@ test "decimal literals round-trip float bits without exponent scaling or double 
     try std.testing.expectEqual(long.len + 1, steps);
     try std.testing.expect(lexer.classify("1e309") == .out_of_range);
     for ([_][]const u8{ "1e", "1e+", ".1", "1.", "1.0_0", "1e+-2", "1e2e3" }) |source|
-        try std.testing.expect(lexer.classify(source) == .word);
+        try std.testing.expect(lexer.classify(source) == .symbol);
 }
 
 fn retireReadCursor(cursor: *reader.ReadCursor, releases: *heap.ReleaseDomain) void {

@@ -2028,7 +2028,7 @@ pub const Env = enum(usize) {
     /// Links words to their names' slots in the root `root` names. The root
     /// must outlive every use of the linker: the reader or construction that
     /// holds it runs inside that root.
-    pub fn linker(self: *Env, root: *ScopeCell) value.WordLinker {
+    pub fn linker(self: *Env, root: *ScopeCell) value.SymbolLinker {
         return .{
             .context = .{ @backingInt(self.*), @intFromPtr(root) },
             .link_fn = linkFromContext,

@@ -145,7 +145,7 @@ pub const LowerCursor = struct {
                 .pending => {},
                 .complete => |kind| {
                     const name = self.names[classification.index];
-                    if (kind != .word) return self.failName(name);
+                    if (kind != .symbol) return self.failName(name);
                     names_state.work = .{ .symbol = .{
                         .index = classification.index,
                         .cursor = .initSegment(name.bytes),

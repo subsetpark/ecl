@@ -1091,7 +1091,7 @@ fn isLiteralValueForm(form_item: *const Form) bool {
             true
         else switch (lexer.classify(bytes)) {
             .int, .float => true,
-            .word, .out_of_range => false,
+            .symbol, .out_of_range => false,
         },
     };
 }
@@ -1314,7 +1314,7 @@ fn wordBytes(form_item: *const Form) ?[]const u8 {
         else => return null,
     };
     return switch (lexer.classify(bytes)) {
-        .word => if (lexer.validSymbol(bytes)) bytes else null,
+        .symbol => if (lexer.validSymbol(bytes)) bytes else null,
         else => null,
     };
 }

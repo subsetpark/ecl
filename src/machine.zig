@@ -2873,7 +2873,7 @@ pub const Machine = struct {
     /// Links words written into `scope`, a root, to its name slots. An image's
     /// cell carries its owner anchor, so a word that escapes the image proves
     /// the image live before reading its slot.
-    pub fn rootLinker(self: *Machine, scope: *env.Scope) error{OutOfMemory}!value.WordLinker {
+    pub fn rootLinker(self: *Machine, scope: *env.Scope) error{OutOfMemory}!value.SymbolLinker {
         const owner: ?*anyopaque = if (scope.isModuleRoot())
             modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.unit.module_access)
         else
@@ -4290,16 +4290,6 @@ pub const Machine = struct {
         try self.startDriver(SourceDriver{
             .text = .init(.{ .owned = .{ .source_name = source_name, .source = source } }),
             .completion = .init(completion),
-        });
-    }
-    fn sourceBorrowed(
-        self: *Machine,
-        source_name: []const u8,
-        source: []const u8,
-    ) error{OutOfMemory}!void {
-        try self.startDriver(SourceDriver{
-            .text = .init(.{ .borrowed = .{ .source_name = source_name, .source = source } }),
-            .completion = .init(.{ .session = null }),
         });
     }
     const SourceDriver = struct {
@@ -6297,7 +6287,10 @@ pub fn initializeSource(
     defer empty.deinit();
     try initialize(unit, empty.borrow().list, .empty);
     var evaluator = Machine{ .unit = unit };
-    try evaluator.sourceBorrowed(source_name, source);
+    try evaluator.startDriver(Machine.SourceDriver{
+        .text = .init(.{ .borrowed = .{ .source_name = source_name, .source = source } }),
+        .completion = .init(.{ .session = null }),
+    });
 }
 
 pub fn runSlice(unit: *Unit) MachineError!RunStatus {
