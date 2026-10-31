@@ -25,7 +25,7 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: debug
-      save_cache: ${{ github.event_name != 'pull_request' }}
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_precommit: ${{ github.event_name == 'pull_request' }}
       run_quality: ${{ github.event_name != 'pull_request' }}
       run_full_suite: ${{ github.event_name != 'pull_request' }}
@@ -43,7 +43,7 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: safe
-      save_cache: ${{ github.event_name != 'pull_request' }}
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
@@ -119,6 +119,7 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: fast
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_snapshots: true
 
   git-macos:
