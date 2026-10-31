@@ -319,15 +319,6 @@ pub const Session = enum(usize) {
     consumed = 0,
     _,
 
-    const BlockingMutationTurn = struct {
-        scheduler: *scheduler_api.Scheduler,
-
-        fn deinit(self: *BlockingMutationTurn) void {
-            self.scheduler.settleRootRetirement();
-            self.* = undefined;
-        }
-    };
-
     fn coreState(self: *const Session) *SessionCore {
         std.debug.assert(self.* != .consumed);
         const erased: *OpaqueSessionCore = @ptrFromInt(@backingInt(self.*));
@@ -567,8 +558,7 @@ pub const Session = enum(usize) {
         source: []const u8,
     ) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
-        var mutation_turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer mutation_turn.deinit();
+        defer core.scheduler.settleRootRetirement();
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
@@ -788,8 +778,7 @@ pub const Session = enum(usize) {
             if (!try self.loadModuleForObservation(prefix[0..separator])) return .empty;
         }
         const core = self.coreState();
-        var turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer turn.deinit();
+        defer core.scheduler.settleRootRetirement();
         var found = poll.ChunkList(u32).init(core.allocator());
         defer found.retire(core.releaseDomain());
 
@@ -942,8 +931,7 @@ pub const Session = enum(usize) {
         publication: env.TopPublication,
     ) error{OutOfMemory}!void {
         const core = self.coreState();
-        var mutation_turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer mutation_turn.deinit();
+        defer core.scheduler.settleRootRetirement();
         return core.environment.define(name, publication);
     }
     fn schedulerWorkerThreadCountForTest(self: *const Session) usize {
