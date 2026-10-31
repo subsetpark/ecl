@@ -1024,10 +1024,10 @@ const Driver = struct {
     }
 
     fn publishDirectory(self: *Driver, evaluator: *Unit, dir: std.Io.Dir) MachineError!driver_completion.Progress {
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse {
+        const scope = evaluator.task_scope orelse {
             dir.close(self.io);
             return evaluator.fail(.cancelled, "directory scope is closing");
-        }));
+        };
         const adoption = if (self.operation == .open_list)
             directory.adoptEnumeration(self.access, scope, dir, self.inputs.root, if (self.root) |root| root.reservation() else null)
         else
@@ -1085,7 +1085,7 @@ const Driver = struct {
             error.Limit => return self.fail(evaluator, .limit),
         };
         defer ticket.release();
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
+        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing");
         const dir = root.dir().openDir(self.io, ".", .{ .iterate = true }) catch |err| return self.fail(evaluator, fsport.reasonForError(err));
         const result = directory.adoptChild(self.access, scope, dir, self.inputs.root, ticket) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1097,7 +1097,7 @@ const Driver = struct {
 
     fn stageDirectory(self: *Driver, evaluator: *Unit) MachineError!driver_completion.Progress {
         const entry = try self.requireEntry(evaluator, self.resolved.?);
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing")));
+        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "directory scope is closing");
         const stage = @import("../directory_stage.zig").Stage.create(self.access, entry.parent.dir, entry.name) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return self.fail(evaluator, fsport.reasonForError(err));
@@ -1125,7 +1125,7 @@ const Driver = struct {
             try evaluator.park(.{ .sleep = 10 });
             return .yielded;
         }
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing")));
+        const scope = evaluator.task_scope orelse return evaluator.fail(.cancelled, "lock scope is closing");
         // Adoption consumes the descriptor even on failure. Retirement cannot
         // close it again once the resource factory owns it.
         self.state = .complete;
@@ -1157,10 +1157,10 @@ const Driver = struct {
             },
             .regular => {},
         }
-        const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse {
+        const scope = evaluator.task_scope orelse {
             file.close(self.io);
             return evaluator.fail(.cancelled, "reader scope is closing");
-        }));
+        };
         // Adoption consumes the descriptor on either outcome.
         self.state = .complete;
         const result = directory.adoptReader(self.access, scope, file) catch |err| switch (err) {
@@ -1554,10 +1554,10 @@ const Driver = struct {
             const target = self.resolved.?;
             self.resolved = null;
             const stream = try @import("../filesystem_stream.zig").Stream.create(self.access, root, slot, target, staged);
-            const scope: *@import("../scheduler.zig").TaskScope = @ptrCast(@alignCast(evaluator.task_scope orelse {
+            const scope = evaluator.task_scope orelse {
                 stream.retire();
                 return evaluator.fail(.cancelled, "directory scope is closing");
-            }));
+            };
             const result = directory.adoptStream(self.access, scope, stream, self.inputs.root) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.ScopeClosing => return evaluator.fail(.cancelled, "directory scope is closing"),

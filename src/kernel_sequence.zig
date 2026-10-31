@@ -174,7 +174,7 @@ const FlatGatherDriver = struct {
 
     pub fn advance(evaluator: *Unit, self: *FlatGatherDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (try self.cursor.nextRange(.{ .evaluator = evaluator })) |range| {
+        if (try self.cursor.nextRange(evaluator)) |range| {
             const source = self.source.borrow();
             for (range.start..range.end) |index| {
                 const position = list.atUnchecked(self.indices.borrow(), index).int;
@@ -296,7 +296,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             return heap.leafElements(.leaf_u8, mask.list)[0..@intCast(mask.list.length())];
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             const source = operands[0];
             const length: usize = @intCast(source.list.length());
             const all = counts(operands[1]);
@@ -315,7 +315,7 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
                         offset += piece;
                     }
                     for (block[inside..]) |count| {
-                        if (count != 0) return context.fail(.domain, "at index is out of bounds");
+                        if (count != 0) return evaluator.fail(.domain, "at index is out of bounds");
                     }
                     output.index = range.end;
                 },
@@ -352,15 +352,15 @@ fn CompressKernel(comptime kind: value.HeapKind) type {
             }
         }
 
-        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
             if (output.phase == .fill) return null;
             output.phase = .fill;
             output.index = 0;
             if (output.total == 0) {
-                output.empty = try list.fromValues(context.allocator(), &.{});
+                output.empty = try list.fromValues(evaluator.allocator, &.{});
                 return null;
             }
-            output.writer = try .init(context.allocator(), output.total);
+            output.writer = try .init(evaluator.allocator, output.total);
             // A bound on the fill's work; done ends it once every position is read.
             return output.positions +| output.total;
         }
@@ -600,12 +600,12 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
             return .{};
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             switch (output.phase) {
                 .count => if (typed)
-                    try countTyped(output, context, heap.leafElements(kind.?, operands[0].list)[range.start..range.end])
+                    try countTyped(output, evaluator, heap.leafElements(kind.?, operands[0].list)[range.start..range.end])
                 else for (range.start..range.end) |index|
-                    try countOne(output, context, list.atUnchecked(operands[0], index)),
+                    try countOne(output, evaluator, list.atUnchecked(operands[0], index)),
                 .fill => if (typed) {
                     const items = heap.leafElements(kind.?, operands[0].list);
                     if (output.mask) fillMask(output, range.len(), items) else fill(output, range.len(), TypedCounts{ .items = items });
@@ -613,12 +613,12 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
             }
         }
 
-        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
             if (output.phase == .fill) return null;
             // Every index the fill stores is below the count of counts.
             if (output.index != 0 and std.math.cast(i64, output.index - 1) == null)
-                return context.fail(.overflow, "where index exceeds integer range");
-            output.writer = try .init(context.allocator(), output.total);
+                return evaluator.fail(.overflow, "where index exceeds integer range");
+            output.writer = try .init(evaluator.allocator, output.total);
             // A bound on the fill's work; done ends it once the result is full.
             const units = output.index +| output.total;
             output.index = 0;
@@ -689,19 +689,19 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
 
         /// Validates and adds the count at `index`: the exact per-element
         /// check, which reports the first failing position.
-        fn countOne(output: *Output, context: support.Context, item: Value) MachineError!void {
-            if (item != .int) return context.failAt(.type, "where expected integer counts", output.index);
-            if (item.int < 0) return context.failAt(.domain, "where counts must be non-negative", output.index);
+        fn countOne(output: *Output, evaluator: *Unit, item: Value) MachineError!void {
+            if (item != .int) return evaluator.failAtIndex(.type, "where expected integer counts", output.index);
+            if (item.int < 0) return evaluator.failAtIndex(.domain, "where counts must be non-negative", output.index);
             const repetitions = std.math.cast(usize, item.int) orelse
-                return context.failAt(.overflow, "where count exceeds addressable size", output.index);
+                return evaluator.failAtIndex(.overflow, "where count exceeds addressable size", output.index);
             if (repetitions > 1) output.mask = false;
             output.total = std.math.add(usize, output.total, repetitions) catch
-                return context.fail(.overflow, "where result is too large");
+                return evaluator.fail(.overflow, "where result is too large");
             output.index += 1;
         }
 
         /// Counts one range of a typed list, a block at a time.
-        fn countTyped(output: *Output, context: support.Context, counts: []const Count) MachineError!void {
+        fn countTyped(output: *Output, evaluator: *Unit, counts: []const Count) MachineError!void {
             var offset: usize = 0;
             while (offset != counts.len) {
                 const block = counts[offset..][0..@min(kernel_flat.block_size, counts.len - offset)];
@@ -714,7 +714,7 @@ fn WhereKernel(comptime kind: ?value.HeapKind) type {
                         continue;
                     } else |_| {}
                 }
-                for (block) |item| try countOne(output, context, .{ .int = item });
+                for (block) |item| try countOne(output, evaluator, .{ .int = item });
             }
         }
 
@@ -831,17 +831,17 @@ fn FirstWhereKernel(comptime kind: ?value.HeapKind) type {
             return .{ .index = length };
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             if (kind) |typed| {
                 for (heap.leafElements(typed, operands[0].list)[range.start..range.end], range.start..) |item, index| {
                     if (typed == .leaf_i64 and item < 0)
-                        return context.failAt(.domain, "first-where counts must be non-negative", index);
+                        return evaluator.failAtIndex(.domain, "first-where counts must be non-negative", index);
                     if (item != 0) return output.find(index);
                 }
             } else for (range.start..range.end) |index| {
                 const item = list.atUnchecked(operands[0], index);
-                if (item != .int) return context.failAt(.type, "first-where expected integer counts", index);
-                if (item.int < 0) return context.failAt(.domain, "first-where counts must be non-negative", index);
+                if (item != .int) return evaluator.failAtIndex(.type, "first-where expected integer counts", index);
+                if (item.int < 0) return evaluator.failAtIndex(.domain, "first-where counts must be non-negative", index);
                 if (item.int != 0) return output.find(index);
             }
         }
@@ -940,7 +940,7 @@ fn ScalarMembershipKernel(comptime haystack_kind: value.HeapKind) type {
             return .{};
         }
 
-        pub fn chunk(needle: Value, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(needle: Value, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
             for (heap.leafElements(haystack_kind, operands[0].list)[range.start..range.end]) |candidate| {
                 if (scalarMatchesElement(haystack_kind, needle, candidate)) {
                     output.found = true;
@@ -1047,7 +1047,7 @@ fn LeafMembershipKernel(
             };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
             const needles = heap.leafElements(needle_kind, operands[0].list);
             switch (output.phase) {
                 .table => for (needles[range.start..range.end]) |needle| output.table.insert(equal.LeafMatchKey.of(needle_kind, needle)),
@@ -1069,7 +1069,7 @@ fn LeafMembershipKernel(
             return output.phase == .scan and output.table.unfound == 0;
         }
 
-        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .table => {
                     output.phase = .scan;
@@ -1788,7 +1788,7 @@ const RangeKernel = struct {
     pub const Output = support.LeafResult(.leaf_i64);
     pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
-    pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+    pub fn chunk(_: void, _: [0]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
         for (output.range(range.start, range.len()), range.start..) |*slot, index| slot.* = @intCast(index);
     }
 
@@ -2257,12 +2257,12 @@ fn MatrixKernel(comptime kind: value.HeapKind) type {
             return .{ .spine = try heap.OwnedValueBuffer.init(evaluator.releases, shape.rows) };
         }
 
-        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(shape: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             const source = heap.leafElements(kind, operands[0].list);
             var position = range.start;
             while (position != range.end) {
                 const column = position % shape.columns;
-                if (output.row == null) output.row = try heap.LeafWriter(kind).init(context.allocator(), shape.columns);
+                if (output.row == null) output.row = try heap.LeafWriter(kind).init(evaluator.allocator, shape.columns);
                 const out = output.row.?.unpublishedRange(column, @min(shape.columns - column, range.end - position));
                 var from = position % source.len;
                 var written: usize = 0;
@@ -2765,8 +2765,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             pub fn mayOverwrite(shape: CopyShape, _: usize) bool {
                 return shape == .contiguous;
             }
-            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+                return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), null, null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2779,8 +2779,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// list with room for the right becomes the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{0} };
 
-            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+                return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), heap.leafElements(other_kind, operands[1].list), null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2793,8 +2793,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// so the index list may become the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{1} };
 
-            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
-                return copyRange(context, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
+            pub fn chunk(shape: CopyShape, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+                return copyRange(evaluator, shape, heap.leafElements(kind, operands[0].list), null, heap.leafElements(index_kind, operands[1].list), output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2809,9 +2809,9 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
             /// the result.
             pub const result: ?support.ResultShape = .{ .kind = out_kind, .overwritable = &.{} };
 
-            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+            pub fn chunk(shape: CopyShape, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
                 const source: []const Element = if (range.end > 1) heap.leafElements(kind, operands[0].list) else &.{};
-                return copyRange(context, shape, source, null, null, output.range(range.start, range.len()), range);
+                return copyRange(evaluator, shape, source, null, null, output.range(range.start, range.len()), range);
             }
             pub const finish = Result.finish;
         };
@@ -2829,7 +2829,7 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
         /// own buffer for the shapes `Single` and `Concat` allow; each shape
         /// writes its range in place, with no staging block.
         fn copyRange(
-            context: support.Context,
+            evaluator: *Unit,
             shape: CopyShape,
             source: []const Element,
             other: ?[]const Other,
@@ -2862,8 +2862,8 @@ fn CopyKernels(comptime kind: value.HeapKind, comptime other_kind: value.HeapKin
                 .gather => {
                     const indices = gather_indices.?[range.start..range.end];
                     if (kernel_flat.firstIndexFault(Index, indices, source.len)) |fault| return switch (fault.kind) {
-                        .negative => context.fail(.domain, "at index is negative"),
-                        .out_of_bounds => context.fail(.domain, "at index is out of bounds"),
+                        .negative => evaluator.fail(.domain, "at index is negative"),
+                        .out_of_bounds => evaluator.fail(.domain, "at index is out of bounds"),
                     };
                     for (out, indices) |*slot, position| slot.* = source[@intCast(position)];
                 },

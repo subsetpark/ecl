@@ -452,7 +452,7 @@ pub const SpanArchiveOwner = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        symbol_linker: value.SymbolLinker,
+        symbol_linker: ?env.SymbolLinker,
     ) reader.Error!reader.ReadResult {
         const backing = self.privateState();
         return reader.readCode(
@@ -531,7 +531,7 @@ pub const SpanArchive = enum(usize) {
     pub const AdmittedConstructionBody = opaque {
         pub fn begin(
             self: *AdmittedConstructionBody,
-            linker: value.SymbolLinker,
+            linker: env.SymbolLinker,
         ) RescopeCursor {
             const backing = admittedConstructionBacking(self);
             const archive = backing.archive;
@@ -701,7 +701,7 @@ pub const SpanArchive = enum(usize) {
         source: heap.Owned(*value.ListHandle),
         root_projection: IndexedSpan,
         /// Links each symbol to its slot in the image the body is becoming.
-        linker: value.SymbolLinker,
+        linker: env.SymbolLinker,
         frames: std.ArrayList(Frame) = .empty,
         started: bool = false,
 
@@ -964,7 +964,7 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        symbol_linker: value.SymbolLinker,
+        symbol_linker: ?env.SymbolLinker,
     ) reader.ReadCursor {
         return .initCode(
             self.allocator(),
@@ -1205,7 +1205,7 @@ pub const SpanArchive = enum(usize) {
             source_name: []const u8,
             source: []const u8,
             diag: *reader.Diag,
-            symbol_linker: value.SymbolLinker,
+            symbol_linker: ?env.SymbolLinker,
         ) error{OutOfMemory}!SourceIngestBacking {
             const cursor = try archive.allocator().create(reader.ReadCursor);
             cursor.* = archive.readCursor(source_name, source, diag, symbol_linker);
@@ -1409,7 +1409,7 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
-        symbol_linker: value.SymbolLinker,
+        symbol_linker: ?env.SymbolLinker,
     ) error{OutOfMemory}!SourceIngestCursor {
         const backing = try self.allocator().create(SourceIngestBacking);
         errdefer self.allocator().destroy(backing);
@@ -1510,20 +1510,30 @@ const ArchiveFixture = struct {
     owner: heap.HostOwner,
     archive_owner: SpanArchiveOwner,
     archive: SpanArchive,
+    /// Links re-scoped symbols into core, a root that never retires.
+    environment: env.Env,
 
     fn init(self: *ArchiveFixture, allocator: std.mem.Allocator) !void {
         self.* = .{
             .owner = .init(allocator),
             .archive_owner = .consumed,
             .archive = .invalid,
+            .environment = .consumed,
         };
         self.archive_owner = try SpanArchiveOwner.init(&self.owner);
+        errdefer self.archive_owner.deinit();
         self.archive = self.archive_owner.view();
+        self.environment = try env.Env.init(&self.owner);
     }
 
     fn deinit(self: *ArchiveFixture) void {
+        self.environment.deinit();
         self.archive_owner.deinit();
         self.owner.cleanup().drain();
+    }
+
+    fn linker(self: *ArchiveFixture) env.SymbolLinker {
+        return self.environment.linker(self.environment.coreCell());
     }
 
     /// Reads one source and absorbs it, returning the archive-owned root.
@@ -1533,7 +1543,7 @@ const ArchiveFixture = struct {
             "spans-test.ecl",
             source,
             &diag,
-            .unlinked,
+            null,
         );
         defer {
             while (!ingestion.advanceRetirement())
@@ -1580,19 +1590,13 @@ fn prepareForTest(
     return fixture.archive.prepareConstructionBody(&body);
 }
 
-/// Links every symbol to the same slot, `context[0]`.
-fn constantLink(context: [2]usize, _: u32) error{OutOfMemory}!u32 {
-    return @intCast(context[0]);
-}
-
 fn admittedForTest(
     fixture: *ArchiveFixture,
     header: *value.ListHandle,
-    slot: u32,
 ) !SpanArchive.RescopeCursor {
     const prepared = try prepareForTest(fixture, header);
     return switch (prepared) {
-        .admitted => |admitted| admitted.begin(.{ .context = .{ slot, 0 }, .link_fn = constantLink }),
+        .admitted => |admitted| admitted.begin(fixture.linker()),
         .unchanged => |owned| {
             var body = owned;
             body.deinit(heap.hostDomain(fixture.owner.cleanup()), fixture.archive.allocator());
@@ -1612,7 +1616,7 @@ fn sourceIngestAllocationProbe(allocator: std.mem.Allocator) !void {
         "spans-ingest-oom.ecl",
         "(1) `one def",
         &diag,
-        .unlinked,
+        null,
     );
     defer {
         while (!ingestion.advanceRetirement())
@@ -1645,7 +1649,7 @@ test "spans: public source ingestion handle relocates between advances" {
         "spans-relocated-ingest.ecl",
         "(1) `one def",
         &diag,
-        .unlinked,
+        null,
     );
     var live = true;
     defer {
@@ -1674,7 +1678,7 @@ test "spans: public source ingestion handle relocates between advances" {
         "spans-relocated-abandon.ecl",
         "(2) `two def",
         &diag,
-        .unlinked,
+        null,
     );
     var abandoned_live = true;
     defer {
@@ -1758,7 +1762,7 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
 
     const root = try fixture.absorbSource("(1 +) `go def");
     var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
-        try admittedForTest(&fixture, root, 7),
+        try admittedForTest(&fixture, root),
     );
     defer cursor.deinit(releases, fixture.archive.allocator());
     const copy = try drive(&fixture, cursor.borrowMut());
@@ -1793,7 +1797,9 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
         const source = list.atUnchecked(.{ .list = root }, index).symbol.slot;
         try std.testing.expectEqual(env.isQuoted(source), env.isQuoted(item.symbol.slot));
         if (env.isQuoted(item.symbol.slot)) quoted += 1;
-        try std.testing.expectEqual(@as(u32, 7), env.unquoted(item.symbol.slot));
+        const linked = try fixture.linker().link(item.symbol.name);
+        try std.testing.expect(linked != 0);
+        try std.testing.expectEqual(linked, env.unquoted(item.symbol.slot));
         try std.testing.expectEqual(@as(u32, 0), env.unquoted(source));
     }
     try std.testing.expect(words != 0);
@@ -1814,7 +1820,7 @@ test "spans: every re-scope step is one budget unit, publication included" {
             "q (dup) r (dup)} `d def",
     );
     var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
-        try admittedForTest(&fixture, root, 3),
+        try admittedForTest(&fixture, root),
     );
     defer cursor.deinit(releases, fixture.archive.allocator());
 
@@ -1853,7 +1859,7 @@ test "spans: settled lineage storage tracks only live copies" {
         // a directory page per 256 rounds the way a history-proportional
         // directory would.
         for (0..64) |_| {
-            var cursor = try admittedForTest(&fixture, root, 5);
+            var cursor = try admittedForTest(&fixture, root);
             releases.releaseHeader(try drive(&fixture, &cursor));
             cursor.deinit();
             // Recycling happens at destruction, and destruction is deferred
@@ -1862,7 +1868,7 @@ test "spans: settled lineage storage tracks only live copies" {
         }
         const warmed = counting.total_requested_bytes;
         for (0..1024) |_| {
-            var cursor = try admittedForTest(&fixture, root, 5);
+            var cursor = try admittedForTest(&fixture, root);
             releases.releaseHeader(try drive(&fixture, &cursor));
             cursor.deinit();
             fixture.owner.cleanup().drain();
@@ -1911,7 +1917,7 @@ test "spans: an abandoned re-scope releases its partial copy" {
     // built nested headers, and a partly copied index, and every one of them
     // goes back. The test allocator reports a leak if any does not.
     for (1..24) |steps| {
-        var cursor = try admittedForTest(&fixture, root, 9);
+        var cursor = try admittedForTest(&fixture, root);
         for (0..steps) |_| {
             var work: poll.WorkBudget = .init(1);
             if (try cursor.advance(&work) == .complete) unreachable;

@@ -422,7 +422,7 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 }
 
 /// Every trusted definition a direct entry can recognize, by name.
-const direct_names = blk: {
+pub const direct_names = blk: {
     var names: [registry.len][]const u8 = undefined;
     var count: usize = 0;
     for (registry) |entry| {
@@ -440,14 +440,9 @@ const direct_names = blk: {
     break :blk final;
 };
 
-/// Decides each trusted definition's direct entry when its environment
+/// Decides one trusted definition's direct entry when its environment
 /// freezes, against bindings that can no longer change.
-pub const freeze_recognizer: env.FreezeRecognizer = .{
-    .names = &direct_names,
-    .recognize = recognizeTrusted,
-};
-
-fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quotation) ?env.DirectIdiom {
+pub fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quotation) ?env.DirectIdiom {
     const phrase: Value = .{ .list = env.quotationHeader(body) };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
@@ -814,7 +809,7 @@ fn applyPhrase(evaluator: *Unit, first: u16) MachineError!machine.TrustedOutcome
             _ = evaluator.commitDirectIdiomTrace();
             // The fused pass reports as `at` would: it is the only word that
             // can fault, and a builtin has no site inside a body.
-            evaluator.setActiveWord(owner.trace_word);
+            evaluator.active_word = owner.trace_word;
             var mask = try evaluator.popValue();
             defer mask.deinit();
             var source = try evaluator.popValue();
@@ -828,7 +823,7 @@ fn applyPhrase(evaluator: *Unit, first: u16) MachineError!machine.TrustedOutcome
         evaluator.phrase_hits += 1;
         evaluator.skipFollowingForms(count);
         _ = evaluator.commitDirectIdiomTrace();
-        if (idiom.active_word) |word| evaluator.setActiveWord(.plain(word));
+        if (idiom.active_word) |word| evaluator.active_word = .plain(word);
         var shape_owner = try evaluator.popValue();
         defer shape_owner.deinit();
         var input = try evaluator.popValue();
@@ -1201,7 +1196,7 @@ fn canApplyEntry(evaluator: *Unit, entry: RegistryEntry) bool {
 }
 
 fn applyEntry(evaluator: *Unit, entry: RegistryEntry, capture: Capture) MachineError!void {
-    if (capture.active_word) |word| evaluator.setActiveWord(.plain(word));
+    if (capture.active_word) |word| evaluator.active_word = .plain(word);
     try switch (entry.operation) {
         .unary => |operation| switch (entry.context) {
             .direct => unaryPrimitive(operation)(evaluator),

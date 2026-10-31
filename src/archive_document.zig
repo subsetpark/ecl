@@ -7,7 +7,7 @@ const scheduler = @import("scheduler.zig");
 const external = @import("external.zig");
 const resource = @import("port_resource.zig");
 const transfers = @import("port_transfer.zig");
-const Identity = @import("module_bindings.zig").Identity;
+const Identity = @import("resource_issuer.zig").Identity;
 const Value = @import("value.zig").Value;
 
 pub const path_limit = 4096;
@@ -119,7 +119,7 @@ const Cell = struct {
     pub fn wakeReasonLocked(_: *Cell, _: u64) external.Wake {
         return .ready;
     }
-    pub fn prepareScopeTransfer(self: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+    pub fn prepareScopeTransfer(self: *Cell, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
         return Transfer.prepare(self, from, to);
     }
     pub fn commitScopeTransfer(self: *Cell) void {

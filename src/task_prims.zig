@@ -38,21 +38,13 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "`task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}` when nothing arrives in time. A deadline beyond any instant the scheduler clock can report is `` `overflow ``. `` `domain `` outside a task." },
 };
 
-fn scheduler(evaluator: *Unit) *const scheduler_api.WorkerScheduler {
-    return @ptrCast(@alignCast(evaluator.scheduler.?));
-}
-
-fn scope(evaluator: *Unit) *scheduler_api.TaskScope {
-    return @ptrCast(@alignCast(evaluator.task_scope.?));
-}
-
 fn spawnTask(
     evaluator: *Unit,
     quotation: *value.ListHandle,
     initial_stack: machine.InitialStack,
     constructor: machine.UnitConstructor,
 ) MachineError!Value {
-    return scheduler(evaluator).spawn(scope(evaluator), .{
+    return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
         .parent_unit = evaluator,
         .site = .{ .inherited = .{
             .scope = evaluator.currentScope(),
@@ -93,11 +85,10 @@ fn spawnSeedless(evaluator: *Unit) MachineError!void {
 fn spawnInput(evaluator: *Unit, popped: machine.OwnedUnitInput) MachineError!void {
     var input = popped;
     defer input.deinit(evaluator.releases);
-    const borrowed = input.borrow();
     const task = try spawnTask(
         evaluator,
-        borrowed.quotation(),
-        borrowed.initialStack(null),
+        input.quotation(),
+        input.initialStack(null),
         .spawn,
     );
     try evaluator.pushOwned(task);
@@ -111,7 +102,7 @@ fn spawnInput(evaluator: *Unit, popped: machine.OwnedUnitInput) MachineError!voi
 /// advances validation and yields between slices, while preparation, rollback
 /// and commit are driven synchronously from inside `spawn`, where the child's
 /// scope already exists and a yield would expose half-moved ownership.
-const GiveCursor = struct {
+pub const GiveCursor = struct {
     const Phase = enum { validating, preparing, rolling_back, committing, done };
 
     /// What stopped the cursor, for the prim to turn into a language error.
@@ -121,7 +112,7 @@ const GiveCursor = struct {
         transfer: heap.PortTransferError,
     };
 
-    origin: *anyopaque,
+    origin: *heap.ScopeIdentity,
     moved: Value,
     count: usize,
     /// Filled by validation, then read by preparation. An unused slot is
@@ -164,7 +155,7 @@ const GiveCursor = struct {
             self.prepared[self.ready] = heap.preparePortTransfer(
                 self.ports[self.ready].?.port,
                 self.origin,
-                @ptrCast(self.destination.?),
+                self.destination.?.identity(),
             ) catch |err| {
                 self.refusal = .{ .transfer = err };
                 return .complete;
@@ -204,7 +195,7 @@ const GiveCursor = struct {
         self.phase = .done;
     }
 
-    /// `ScopeTransfer` hooks. Preparation leaves every origin membership in
+    /// `SpawnRequest.transfer` hooks. Preparation leaves every origin membership in
     /// place, so a refusal rolls back to exactly the state before the give.
     pub fn prepareScopeTransfer(
         self: *GiveCursor,
@@ -287,7 +278,7 @@ const GiveDriver = struct {
             .{ .borrowed_seeds = self.moved.list }
         else
             .{ .borrowed_pair = .{ .deep = self.moved.list, .seeds = self.seeds.?.list } };
-        return scheduler(evaluator).spawn(scope(evaluator), .{
+        return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
             .parent_unit = evaluator,
             .site = .{ .inherited = .{
                 .scope = evaluator.currentScope(),
@@ -296,7 +287,7 @@ const GiveDriver = struct {
             .quotation = self.body.list,
             .initial_stack = stack,
             .constructor = .spawn,
-            .transfer = scheduler_api.scopeTransfer(GiveCursor, &self.cursor),
+            .transfer = &self.cursor,
         }) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -351,7 +342,7 @@ fn giveInput(evaluator: *Unit, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue)
         .seeds = if (seeds) |owned| owned.take() else null,
         .body = body.take(),
         .cursor = .{
-            .origin = evaluator.task_scope.?,
+            .origin = evaluator.task_scope.?.identity(),
             .moved = moved_list,
             .count = moved_count,
         },
@@ -370,11 +361,11 @@ fn cancel(evaluator: *Unit) MachineError!void {
     var task = try evaluator.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
-    scheduler(evaluator).cancelOwned(task.take());
+    evaluator.scheduler.?.cancelOwned(task.take());
 }
 
 fn cancelSelf(evaluator: *Unit) MachineError!void {
-    if (!scheduler(evaluator).cancelScopeOwner(scope(evaluator)))
+    if (!evaluator.scheduler.?.cancelScopeOwner(evaluator.task_scope.?))
         return evaluator.fail(.domain, "task.cancel-self is legal only inside a task");
 }
 
@@ -382,7 +373,7 @@ fn address(evaluator: *Unit) MachineError!void {
     var task = try evaluator.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
-    try evaluator.pushOwned(try scheduler(evaluator).taskAddress(task.borrow()));
+    try evaluator.pushOwned(try evaluator.scheduler.?.taskAddress(task.borrow()));
 }
 
 fn selfAddress(evaluator: *Unit) MachineError!void {
@@ -393,7 +384,7 @@ fn selfAddress(evaluator: *Unit) MachineError!void {
 /// The executing task's mailbox. The root has none: it owns tasks but is
 /// not one, so nothing could ever address it.
 fn ownMailbox(evaluator: *Unit, comptime word: []const u8) MachineError!*mailbox.Mailbox {
-    return scheduler(evaluator).currentMailbox(scope(evaluator)) orelse
+    return evaluator.scheduler.?.currentMailbox(evaluator.task_scope.?) orelse
         evaluator.fail(.domain, word ++ " is legal only inside a task");
 }
 
@@ -464,7 +455,7 @@ fn receiveFor(evaluator: *Unit) MachineError!void {
     if (duration.borrow().int < 0) return evaluator.fail(.domain, "task.receive-for duration must be nonnegative");
     _ = try ownMailbox(evaluator, "task.receive-for");
     const milliseconds: u63 = @intCast(duration.borrow().int);
-    const deadline = scheduler(evaluator).deadlineAfter(milliseconds) catch
+    const deadline = evaluator.scheduler.?.deadlineAfter(milliseconds) catch
         return evaluator.fail(.overflow, "task.receive-for deadline lies beyond the clock's range");
     try evaluator.startDriver(ReceiveDriver{ .deadline = deadline });
 }
@@ -478,7 +469,7 @@ const ReceiveDriver = struct {
 
     pub fn advance(evaluator: *Unit, self: *ReceiveDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const own = scheduler(evaluator).currentMailbox(scope(evaluator)).?;
+        const own = evaluator.scheduler.?.currentMailbox(evaluator.task_scope.?).?;
         if (own.dequeue()) |message| {
             if (self.deadline == null) return .{ .output = message.value };
             return .{ .output = try machine.outcomeDict(
@@ -489,7 +480,7 @@ const ReceiveDriver = struct {
             ) };
         }
         if (self.deadline) |deadline| {
-            if (deadline.reachedBy(scheduler(evaluator).now())) {
+            if (deadline.reachedBy(evaluator.scheduler.?.now())) {
                 var timeout = machine.EclErr.init(.timeout, "task.receive-for timed out");
                 defer timeout.retire(evaluator.releases);
                 const failure = try machine.errorValue(
@@ -513,7 +504,7 @@ const ReceiveDriver = struct {
 };
 
 fn tasks(evaluator: *Unit) MachineError!void {
-    try scheduler(evaluator).installTasksDriver(evaluator, scope(evaluator));
+    try evaluator.scheduler.?.installTasksDriver(evaluator, evaluator.task_scope.?);
 }
 
 fn awaitAny(evaluator: *Unit) MachineError!void {
@@ -540,7 +531,7 @@ fn awaitFor(evaluator: *Unit) MachineError!void {
     if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
     if (duration.borrow().int < 0) return evaluator.fail(.domain, "task.await-for duration must be nonnegative");
     const milliseconds: u63 = @intCast(duration.borrow().int);
-    scheduler(evaluator).checkDeadline(milliseconds) catch
+    evaluator.scheduler.?.checkDeadline(milliseconds) catch
         return evaluator.fail(.overflow, "task.await-for deadline lies beyond the clock's range");
     try evaluator.park(.{ .deadline = .{
         .task = task.take(),

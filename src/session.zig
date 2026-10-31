@@ -14,7 +14,6 @@ const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
 const prelude = @import("prelude.zig");
-const idioms = @import("idioms.zig");
 const printer = @import("print.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
@@ -319,15 +318,6 @@ pub const Session = enum(usize) {
     consumed = 0,
     _,
 
-    const BlockingMutationTurn = struct {
-        scheduler: *scheduler_api.Scheduler,
-
-        fn deinit(self: *BlockingMutationTurn) void {
-            self.scheduler.settleRootRetirement();
-            self.* = undefined;
-        }
-    };
-
     fn coreState(self: *const Session) *SessionCore {
         std.debug.assert(self.* != .consumed);
         const erased: *OpaqueSessionCore = @ptrFromInt(@backingInt(self.*));
@@ -353,9 +343,8 @@ pub const Session = enum(usize) {
             host_owner.cleanup().drain();
             allocator.destroy(host_owner);
         }
-        var environment = try env.Env.init(host_owner);
+        var environment, var building = try env.Env.initBuilding(host_owner);
         errdefer environment.deinit();
-        var building = environment.beginCoreBuild();
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
@@ -401,7 +390,7 @@ pub const Session = enum(usize) {
         errdefer archive_owner.deinit();
         const archive = archive_owner.view();
         var bootstrap_cancelled: std.atomic.Value(bool) = .init(false);
-        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled, idioms.freeze_recognizer) catch |err| switch (err) {
+        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
@@ -567,8 +556,7 @@ pub const Session = enum(usize) {
         source: []const u8,
     ) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
-        var mutation_turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer mutation_turn.deinit();
+        defer core.scheduler.settleRootRetirement();
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
@@ -613,8 +601,6 @@ pub const Session = enum(usize) {
                 .ecl_path = core.ecl_path,
                 .module_snapshot = core.module_snapshot,
                 .idiom_mode = core.idiom_mode,
-                .phrase_recognizer = .{ .offered = idioms.tryApply, .trusted = idioms.applyTrusted, .headed = idioms.applyHeaded },
-                .freeze_recognizer = idioms.freeze_recognizer,
                 .phase = .{ .runtime = .{
                     .native_loader = core.native_owner.loader(),
                     .console = &core.console,
@@ -788,8 +774,7 @@ pub const Session = enum(usize) {
             if (!try self.loadModuleForObservation(prefix[0..separator])) return .empty;
         }
         const core = self.coreState();
-        var turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer turn.deinit();
+        defer core.scheduler.settleRootRetirement();
         var found = poll.ChunkList(u32).init(core.allocator());
         defer found.retire(core.releaseDomain());
 
@@ -942,8 +927,7 @@ pub const Session = enum(usize) {
         publication: env.TopPublication,
     ) error{OutOfMemory}!void {
         const core = self.coreState();
-        var mutation_turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer mutation_turn.deinit();
+        defer core.scheduler.settleRootRetirement();
         return core.environment.define(name, publication);
     }
     fn schedulerWorkerThreadCountForTest(self: *const Session) usize {

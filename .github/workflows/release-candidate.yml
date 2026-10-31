@@ -18,6 +18,7 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: debug
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_precommit: true
       run_quality: true
       run_full_suite: true
@@ -33,9 +34,11 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: safe
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
+      run_git_snapshots: true
       run_memcheck: true
       run_workers_eight: true
       run_performance_smoke: true
@@ -97,7 +100,9 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: fast
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
+      run_git_snapshots: true
       run_snapshots: true

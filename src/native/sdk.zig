@@ -608,7 +608,6 @@ pub fn word(
                 return;
             };
             const call = NativeCall.adapterPointer(&call_state);
-            var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
             var reschedule_state: if (uses_reschedule) NativeRescheduleType.AdapterState else void = if (uses_reschedule)
                 NativeRescheduleType.initAdapter(&call_state.invocation) catch {
                     output.* = .{ .tag = .fail, .adapter_status = 1 };
@@ -620,7 +619,7 @@ pub fn word(
             arguments[0] = call;
             inline for (function.param_types[1..], 1..) |parameter_type, index| {
                 const T = parameter_type.?;
-                if (comptime T == *BuildValues) arguments[index] = @ptrCast(&build_state) else arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state);
+                if (comptime T == *BuildValues) arguments[index] = @ptrCast(&call_state.invocation) else arguments[index] = NativeRescheduleType.adapterPointer(&reschedule_state);
             }
             const result = @call(.auto, callback, arguments);
             const outcome = result catch |err| switch (err) {

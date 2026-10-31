@@ -446,7 +446,7 @@ fn ListPutKernel(comptime kind: value.HeapKind) type {
             return if (aliased) 1 else length;
         }
 
-        pub fn chunk(put: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(put: Params, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
             if (output.aliased()) return output.store(put.index, &.{put.replacement});
             const out = output.range(range.start, range.len());
             @memcpy(out, heap.leafElements(kind, operands[0].list)[range.start..range.end]);
@@ -539,12 +539,12 @@ fn VectorPutKernel(
             };
         }
 
-        pub fn chunk(atom: Params, operands: [arity]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(atom: Params, operands: [arity]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             const indices = heap.leafElements(index_kind, operands[1].list);
             switch (output.phase) {
                 .validate => if (kernel_flat.firstIndexFault(Index, indices[range.start..range.end], output.count)) |fault| return switch (fault.kind) {
-                    .negative => context.fail(.domain, "put index is negative"),
-                    .out_of_bounds => context.fail(.domain, "put index is out of bounds"),
+                    .negative => evaluator.fail(.domain, "put index is negative"),
+                    .out_of_bounds => evaluator.fail(.domain, "put index is out of bounds"),
                 },
                 .copy => output.result.store(range.start, heap.leafElements(kind, operands[0].list)[range.start..range.end]),
                 .scatter => {
@@ -564,7 +564,7 @@ fn VectorPutKernel(
             }
         }
 
-        pub fn next(_: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .validate => if (!output.result.aliased()) {
                     output.phase = .copy;
@@ -971,7 +971,7 @@ fn DelOneKernel(comptime kind: value.HeapKind) type {
             return length - 1;
         }
 
-        pub fn chunk(removed: usize, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: support.Context) MachineError!void {
+        pub fn chunk(removed: usize, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
             const source = heap.leafElements(kind, operands[0].list);
             const left_end = @min(range.end, removed);
             // Over its source the left part is already in place.
@@ -1016,14 +1016,14 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
             };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             switch (output.phase) {
                 .initialize => @memset(output.removed[range.start..range.end], false),
                 .mark => {
                     const run = heap.leafElements(index_kind, operands[1].list)[range.start..range.end];
                     if (kernel_flat.firstIndexFault(Index, run, output.removed.len)) |fault| return switch (fault.kind) {
-                        .negative => context.fail(.domain, "del index is negative"),
-                        .out_of_bounds => context.fail(.domain, "del index is out of bounds"),
+                        .negative => evaluator.fail(.domain, "del index is negative"),
+                        .out_of_bounds => evaluator.fail(.domain, "del index is out of bounds"),
                     };
                     for (run) |index| {
                         const slot = &output.removed[@intCast(index)];
@@ -1044,14 +1044,14 @@ fn DelManyKernel(comptime kind: value.HeapKind, comptime index_kind: value.HeapK
             }
         }
 
-        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .initialize => {
                     output.phase = .mark;
                     return output.selected;
                 },
                 .mark => {
-                    output.writer = try .init(context.allocator(), output.removed.len - output.removed_count);
+                    output.writer = try .init(evaluator.allocator, output.removed.len - output.removed_count);
                     output.phase = .copy;
                     return output.removed.len;
                 },
@@ -1366,20 +1366,20 @@ const NarrowSplitKernel = struct {
         };
     }
 
-    pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+    pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
         const text = heap.leafElements(.leaf_char1, operands[0].list);
         const separator = heap.leafElements(.leaf_char1, operands[1].list);
         switch (output.phase) {
             .count => count(output, text, separator, range),
-            .fill => try fill(output, context, text, separator, range.len()),
+            .fill => try fill(output, evaluator, text, separator, range.len()),
         }
     }
 
-    pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+    pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
         switch (output.phase) {
             .count => {
                 output.part_count += 1;
-                output.spine = try heap.OwnedValueBuffer.init(context.releaseDomain(), output.part_count);
+                output.spine = try heap.OwnedValueBuffer.init(evaluator.releases, output.part_count);
                 output.cursor = 0;
                 output.phase = .fill;
                 return output.text_len + output.part_count;
@@ -1416,12 +1416,12 @@ const NarrowSplitKernel = struct {
     /// Emits whole parts while `units` last: one unit to begin a part, one
     /// per codepoint copied. The part that exhausts the budget is still
     /// emitted whole, so a part is never left half built across steps.
-    fn fill(output: *Output, context: support.Context, text: []const u8, separator: []const u8, units: usize) error{OutOfMemory}!void {
+    fn fill(output: *Output, evaluator: *Unit, text: []const u8, separator: []const u8, units: usize) error{OutOfMemory}!void {
         var remaining = units;
         while (remaining != 0 and output.emitted != output.part_count) {
             const end = find(text, separator, output.cursor);
             const part = text[output.cursor..end];
-            var builder = try heap.ListBuilder(.leaf_char1).init(context.allocator(), part.len, part.len);
+            var builder = try heap.ListBuilder(.leaf_char1).init(evaluator.allocator, part.len, part.len);
             @memcpy(builder.items()[0..part.len], part);
             output.spine.?.appendOwned(.{ .list = builder.finish() });
             output.emitted += 1;
@@ -1481,16 +1481,16 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
             };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, context: support.Context) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
             const text = heap.leafElements(text_kind, operands[0].list);
             switch (output.phase) {
                 .scan => scan(output, text, heap.leafElements(separator_kind, operands[1].list), range),
                 .profile => profile(output, text, range.len()),
-                .fill => try fill(output, context, text, range.len()),
+                .fill => try fill(output, evaluator, text, range.len()),
             }
         }
 
-        pub fn next(context: support.Context, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .scan => {
                     if (output.separator_len != 0) output.record(.{
@@ -1501,7 +1501,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                     return partCodepoints(output);
                 },
                 .profile => {
-                    output.spine = try heap.OwnedValueBuffer.init(context.releaseDomain(), output.part_count);
+                    output.spine = try heap.OwnedValueBuffer.init(evaluator.releases, output.part_count);
                     output.part = 0;
                     output.offset = 0;
                     output.phase = .fill;
@@ -1567,7 +1567,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
 
         /// Spends `units` on the fill: one to begin each part, then one per
         /// codepoint written; a part is appended to the spine once full.
-        fn fill(output: *Output, context: support.Context, text: anytype, units: usize) error{OutOfMemory}!void {
+        fn fill(output: *Output, evaluator: *Unit, text: anytype, units: usize) error{OutOfMemory}!void {
             var remaining = units;
             while (true) {
                 if (output.writer) |*writer| {
@@ -1591,7 +1591,7 @@ fn SplitKernel(comptime text_kind: value.HeapKind, comptime separator_kind: valu
                 }
                 if (remaining == 0 or output.part == output.part_count) return;
                 const part = output.parts[output.part];
-                output.writer = try kernel_flat.CodepointWriter.init(context.allocator(), part.end - part.start, part.max_codepoint);
+                output.writer = try kernel_flat.CodepointWriter.init(evaluator.allocator, part.end - part.start, part.max_codepoint);
                 remaining -= 1;
             }
         }

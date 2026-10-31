@@ -1,6 +1,8 @@
 # A reusable build-type lane. Host-mounted local and global Zig caches survive
 # its main glibc container, its separate TSan container, and later workflow
 # jobs. Tiers in one invocation also keep one long-lived Ubuntu container.
+# Parallel side lanes that share a cache scope set save_cache: false so the
+# lane that compiles the most owns the saved key.
 name: Build type
 
 on:
@@ -14,6 +16,10 @@ on:
         description: Compilation-cache namespace for cooperating jobs
         default: build
         type: string
+      save_cache:
+        description: Save the compilation cache when the lane succeeds
+        default: true
+        type: boolean
       run_precommit:
         default: false
         type: boolean
@@ -33,6 +39,9 @@ on:
         default: false
         type: boolean
       run_native_acceptance:
+        default: false
+        type: boolean
+      run_git_snapshots:
         default: false
         type: boolean
       run_memcheck:
@@ -101,16 +110,25 @@ jobs:
         with:
           persist-credentials: false
 
+      # Zig never evicts stale outputs, so each restore-then-save cycle adds
+      # the new commit's artifacts to everything before it. Bucketing the key
+      # by ISO week makes the first run of each week start cold, bounding
+      # that accumulation to one week of commits.
+      - name: Compute cache week
+        id: cache-week
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: Restore Zig compilation artifacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: zig-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ${{ env.ZIG_GLOBAL_CACHE_HOST }}
             ${{ env.ZIG_LOCAL_CACHE_HOST }}
-          key: ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-${{ github.sha }}
+          key: ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ steps.cache-week.outputs.week }}-${{ inputs.cache_scope }}-${{ github.sha }}
           restore-keys: |
-            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-
-            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-
+            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ steps.cache-week.outputs.week }}-${{ inputs.cache_scope }}-
+            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ steps.cache-week.outputs.week }}-
 
       - name: Set up Ubuntu and Zig
         run: |
@@ -363,7 +381,7 @@ jobs:
           '
 
       - name: Standalone Git snapshot acceptance
-        if: inputs.run_native_acceptance
+        if: inputs.run_git_snapshots
         run: >-
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-git-extension test-pkg-fetch
@@ -423,3 +441,20 @@ jobs:
       - name: Stop Ubuntu container
         if: always()
         run: docker rm --force ecl-ci || true
+
+      - name: Report Zig cache size
+        if: success()
+        run: |
+          du -sh "$ZIG_GLOBAL_CACHE_HOST" "$ZIG_LOCAL_CACHE_HOST" || true
+          du -sh "$ZIG_GLOBAL_CACHE_HOST"/* "$ZIG_LOCAL_CACHE_HOST"/* 2>/dev/null | sort -h || true
+          echo "Largest local output directories:"
+          du -s "$ZIG_LOCAL_CACHE_HOST"/o/* 2>/dev/null | sort -n | tail -10 || true
+
+      - name: Save Zig compilation artifacts
+        if: success() && inputs.save_cache && steps.zig-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.ZIG_GLOBAL_CACHE_HOST }}
+            ${{ env.ZIG_LOCAL_CACHE_HOST }}
+          key: ${{ steps.zig-cache.outputs.cache-primary-key }}

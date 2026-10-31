@@ -16,11 +16,16 @@ permissions:
   contents: read
 
 jobs:
+  # Only master saves the general caches; pull requests restore master's and
+  # never save, so each push does not add another ~1 GB entry per lane. The
+  # OOM producer still saves on pull requests because its sweeps restore the
+  # artifact it compiles within the same run.
   debug:
     name: Debug tiers
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: debug
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_precommit: ${{ github.event_name == 'pull_request' }}
       run_quality: ${{ github.event_name != 'pull_request' }}
       run_full_suite: ${{ github.event_name != 'pull_request' }}
@@ -31,17 +36,50 @@ jobs:
       run_differential: true
       run_tsan: true
 
+  # ReleaseSafe tiers run as parallel lanes. The suite lane compiles the most
+  # and owns the saved cache; the side lanes restore it but never save it.
   release-safe:
-    name: ReleaseSafe tiers
+    name: ReleaseSafe suite
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: safe
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
+
+  release-safe-memcheck:
+    name: ReleaseSafe Valgrind Memcheck
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      save_cache: false
       run_memcheck: true
-      run_workers_eight: ${{ github.event_name != 'pull_request' }}
+
+  release-safe-git:
+    name: ReleaseSafe Git snapshot acceptance
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      save_cache: false
+      run_git_snapshots: true
+
+  release-safe-performance:
+    name: ReleaseSafe WorkDriver benchmark smoke
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      save_cache: false
       run_performance_smoke: true
+
+  release-safe-workers:
+    name: ReleaseSafe eight-worker concurrency
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: safe
+      save_cache: false
+      run_workers_eight: true
 
   oom-compile:
     name: Compile shared OOM artifact
@@ -81,6 +119,7 @@ jobs:
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: fast
+      save_cache: ${{ github.ref == 'refs/heads/master' }}
       run_snapshots: true
 
   git-macos:

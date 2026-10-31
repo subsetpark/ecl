@@ -13,6 +13,10 @@ const Backing = struct {
     map: *module_map.Validated,
     sources: []SourceState,
     start_dir: []u8,
+
+    fn source(self: *const Backing, id: ArtifactId) *SourceState {
+        return &self.sources[@backingInt(id)];
+    }
 };
 const SourceState = struct {
     owner: *Backing,
@@ -32,12 +36,12 @@ pub const SourceScope = opaque {
     }
     pub fn scopeId(self: *const SourceScope) ScopeId {
         const source = self.state();
-        return source.owner.map.artifacts()[@backingInt(source.artifact)].scope;
+        return source.owner.map.artifact(source.artifact).scope;
     }
     pub fn location(self: *const SourceScope) Match {
         const source = self.state();
-        const artifact = source.owner.map.artifacts()[@backingInt(source.artifact)];
-        const scope = source.owner.map.scopes()[@backingInt(artifact.scope)];
+        const artifact = source.owner.map.artifact(source.artifact);
+        const scope = source.owner.map.scope(artifact.scope);
         return .{ .scope_name = scope.name, .root = scope.root, .relative_path = artifact.path, .scope_id = artifact.scope, .artifact_id = source.artifact, .kind = artifact.kind };
     }
     pub fn registry(self: *const SourceScope) *modules.Registry {
@@ -45,7 +49,7 @@ pub const SourceScope = opaque {
     }
     pub fn exports(self: *const SourceScope, name: intern.ModuleName) bool {
         const source = self.state();
-        const names = source.owner.map.artifacts()[@backingInt(source.artifact)].exports;
+        const names = source.owner.map.artifact(source.artifact).exports;
         var low: usize = 0;
         var high: usize = names.len;
         // Validation caps exports at 65,536; membership takes at most 17 comparisons.
@@ -82,7 +86,7 @@ pub const Snapshot = opaque {
             allocator.free(source.absolute_path);
         };
         for (sources, map.artifacts(), 0..) |*source, artifact, index| {
-            const absolute = try std.fs.path.join(allocator, &.{ map.scopes()[@backingInt(artifact.scope)].root, artifact.path });
+            const absolute = try std.fs.path.join(allocator, &.{ map.scope(artifact.scope).root, artifact.path });
             errdefer allocator.free(absolute);
             source.* = .{ .owner = owned, .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .absolute_path = absolute, .private_registry = try modules.Registry.init(host) };
             built += 1;
@@ -91,7 +95,7 @@ pub const Snapshot = opaque {
         return fromBacking(owned);
     }
     pub fn sourceScope(self: *const Snapshot, artifact: ArtifactId) *const SourceScope {
-        return @ptrCast(&self.backing().sources[@backingInt(artifact)]);
+        return @ptrCast(self.backing().source(artifact));
     }
     pub fn sourcePathCursor(self: *const Snapshot, path: []const u8) error{OutOfMemory}!SourcePathCursor {
         const owner = self.backing();
@@ -113,14 +117,14 @@ pub const Snapshot = opaque {
         return .{ .owner = self.backing() };
     }
     pub fn artifactCommitted(self: *const Snapshot, artifact: ArtifactId) bool {
-        return self.backing().sources[@backingInt(artifact)].committed.load(.acquire);
+        return self.backing().source(artifact).committed.load(.acquire);
     }
     /// Only the artifact-loading lease mints commit authority after verification.
     pub fn commitArtifact(self: *const Snapshot, commit: modules.ArtifactCommit) void {
-        self.backing().sources[@backingInt(commit.artifact())].committed.store(true, .release);
+        self.backing().source(commit.artifact()).committed.store(true, .release);
     }
     pub fn artifactModules(self: *const Snapshot, artifact: ArtifactId) []const intern.ModuleName {
-        return self.backing().map.artifacts()[@backingInt(artifact)].exports;
+        return self.backing().map.artifact(artifact).exports;
     }
     pub fn deinit(self: *Snapshot) void {
         const owned = self.backing();
@@ -214,15 +218,15 @@ pub const LookupCursor = struct {
                 return .pending;
             },
             .visibility => |*visibility| {
-                const artifact = self.owner.map.artifacts()[@backingInt(visibility.artifact)];
-                const scope = self.owner.map.scopes()[@backingInt(artifact.scope)];
-                const consumer = if (self.consumer) |id| self.owner.map.scopes()[@backingInt(id)] else null;
+                const artifact = self.owner.map.artifact(visibility.artifact);
+                const scope = self.owner.map.scope(artifact.scope);
+                const consumer = if (self.consumer) |id| self.owner.map.scope(id) else null;
                 if (consumer) |current| {
                     if (visibility.edge < current.visible.len) {
                         const visible = current.visible[visibility.edge] == artifact.scope;
                         visibility.edge += 1;
                         if (!visible) return .pending;
-                        const source: *const SourceScope = @ptrCast(&self.owner.sources[@backingInt(visibility.artifact)]);
+                        const source: *const SourceScope = @ptrCast(self.owner.source(visibility.artifact));
                         self.phase = .complete;
                         return .{ .complete = .{ .matched = source.location() } };
                     }

@@ -7,7 +7,7 @@ const external = @import("external.zig");
 const scheduler = @import("scheduler.zig");
 const transfers = @import("port_transfer.zig");
 const resource = @import("port_resource.zig");
-const Identity = @import("module_bindings.zig").Identity;
+const Identity = @import("resource_issuer.zig").Identity;
 const Stage = @import("directory_stage.zig").Stage;
 const Stream = @import("filesystem_stream.zig").Stream;
 const fs = @import("filesystem_port.zig");
@@ -228,7 +228,7 @@ fn Handle(comptime Object: type) type {
         pub fn wakeReasonLocked(_: *Cell, _: u64) external.Wake {
             return .ready;
         }
-        pub fn prepareScopeTransfer(self: *Cell, from: *anyopaque, to: *anyopaque) heap.PortTransferError!void {
+        pub fn prepareScopeTransfer(self: *Cell, from: *heap.ScopeIdentity, to: *heap.ScopeIdentity) heap.PortTransferError!void {
             return Transfer.prepare(self, from, to);
         }
         pub fn commitScopeTransfer(self: *Cell) void {

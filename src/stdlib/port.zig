@@ -621,7 +621,7 @@ const Observe = struct {
 };
 
 fn callingScope(evaluator: *machine.Unit) machine.MachineError!*scheduler.TaskScope {
-    return @ptrCast(@alignCast(evaluator.task_scope orelse return evaluator.fail(.cancelled, "port scope is closing")));
+    return evaluator.task_scope orelse evaluator.fail(.cancelled, "port scope is closing");
 }
 fn publicationFailure(evaluator: *machine.Unit, err: error{ OutOfMemory, ScopeClosing, Overflow }) machine.MachineError {
     return switch (err) {

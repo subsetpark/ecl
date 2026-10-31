@@ -10,6 +10,7 @@ const core = @import("scheduler_core.zig");
 const external = @import("external.zig");
 const poll = @import("poll.zig");
 const mailbox = @import("mailbox.zig");
+const task_prims = @import("task_prims.zig");
 
 // A callback borrows only the current executor's allowance. No pointer to a
 // stack-owned budget crosses a suspension or enters an extension descriptor.
@@ -1158,6 +1159,18 @@ pub const TaskScope = struct {
         return .{ .scheduler = scheduler };
     }
 
+    /// This scope's identity, for the ownership comparisons ports and
+    /// resources make without naming the scope type.
+    pub fn identity(self: *TaskScope) *external.ScopeIdentity {
+        return @ptrCast(self);
+    }
+
+    /// The scope an identity names. Every identity is minted by `identity`,
+    /// so this is its exact inverse.
+    pub fn fromIdentity(scope: *external.ScopeIdentity) *TaskScope {
+        return @ptrCast(@alignCast(scope));
+    }
+
     pub fn pending(self: *TaskScope) usize {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
@@ -1275,7 +1288,7 @@ pub const ExternalGroup = opaque {
         return self.state().phase == .open;
     }
     pub fn ownsMembership(self: *@This(), token: external.ScopeMembership) bool {
-        return token.owningScope() == @as(*anyopaque, @ptrCast(&self.state().scope));
+        return token.owningScope() == self.state().scope.identity();
     }
     pub fn close(self: *@This()) void {
         const owned = self.state();
@@ -1309,7 +1322,7 @@ pub const ExternalGroup = opaque {
     }
 };
 
-const ExternalNode = struct {
+pub const ExternalNode = struct {
     allocator: std.mem.Allocator,
     scope: *TaskScope,
     member: external.ScopeMember,
@@ -1345,8 +1358,8 @@ const ExternalNode = struct {
         self.release();
     }
 
-    pub fn externalMembershipScope(self: *ExternalNode) *anyopaque {
-        return @ptrCast(self.scope);
+    pub fn scopeIdentity(self: *ExternalNode) *external.ScopeIdentity {
+        return self.scope.identity();
     }
 };
 
@@ -1490,7 +1503,7 @@ const ScopeCancellationCursor = struct {
             const node = takeExternalCancellationNode(self.scope) orelse return true;
             if (!node.cancellation_sent) {
                 node.cancellation_sent = true;
-                node.member.cancel(@ptrCast(node.scope));
+                node.member.cancel(node.scope.identity());
             }
             node.release();
         }
@@ -1512,55 +1525,10 @@ pub const SpawnSite = union(enum) {
     module: *modules.ModuleHome,
 };
 
-/// Moves external resources from the spawning scope into the child's scope as
-/// part of constructing the child, so a resource is never unowned and never
-/// visible to the child before it is owned by the child's scope. The scheduler
-/// knows nothing about what is being moved: `prepare` attaches to the new
-/// scope while leaving the originals in place, `commit` swaps them in and
-/// releases the originals, and `abort` undoes a prepare when a later step of
-/// the spawn fails.
-pub const ScopeTransfer = struct {
-    context: *anyopaque,
-    prepare_fn: *const fn (*anyopaque, *TaskScope) ScopeTransferError!void,
-    commit_fn: *const fn (*anyopaque) void,
-    abort_fn: *const fn (*anyopaque) void,
-};
-
 /// The scheduler learns only that a transfer refused. Which resource refused
 /// and why is recorded by the caller in its own transfer context, so the
 /// language-level error can name the port and the reason.
 pub const ScopeTransferError = error{ OutOfMemory, Transfer };
-
-fn ScopeTransferAdapters(comptime Context: type) type {
-    return struct {
-        fn prepare(raw: *anyopaque, destination: *TaskScope) ScopeTransferError!void {
-            const context: *Context = @ptrCast(@alignCast(raw));
-            return Context.prepareScopeTransfer(context, destination);
-        }
-
-        fn commit(raw: *anyopaque) void {
-            const context: *Context = @ptrCast(@alignCast(raw));
-            Context.commitScopeTransfer(context);
-        }
-
-        fn abort(raw: *anyopaque) void {
-            const context: *Context = @ptrCast(@alignCast(raw));
-            Context.abortScopeTransfer(context);
-        }
-    };
-}
-
-/// Erase a typed transfer context into the three steps `spawn` drives. The
-/// context outlives the spawn call, which is the caller's obligation.
-pub fn scopeTransfer(comptime Context: type, context: *Context) ScopeTransfer {
-    const adapters = ScopeTransferAdapters(Context);
-    return .{
-        .context = @ptrCast(context),
-        .prepare_fn = adapters.prepare,
-        .commit_fn = adapters.commit,
-        .abort_fn = adapters.abort,
-    };
-}
 
 pub const SpawnRequest = struct {
     parent_unit: *machine.Unit,
@@ -1570,8 +1538,13 @@ pub const SpawnRequest = struct {
     /// Which constructor made this child, so an underflow against its floor
     /// can name the word the caller actually wrote.
     constructor: machine.UnitConstructor = .spawn,
-    /// Resources the child's scope must own before the child can run.
-    transfer: ?ScopeTransfer = null,
+    /// Moves external resources from the spawning scope into the child's
+    /// scope as part of constructing the child, so a resource is never
+    /// unowned and never visible to the child before the child's scope owns
+    /// it: prepare attaches to the new scope leaving the originals in place,
+    /// commit swaps them in and releases the originals, and abort undoes a
+    /// prepare when a later step of the spawn fails.
+    transfer: ?*task_prims.GiveCursor = null,
 };
 
 pub const SpawnError = error{ OutOfMemory, Io };
@@ -2023,15 +1996,15 @@ pub const WorkerScheduler = enum(usize) {
         // Attach the moved resources to the child's scope while the scope is
         // still private: nothing can reach it, so a failure here unwinds by
         // dropping the new memberships and the originals never moved.
-        if (request.transfer) |transfer| try transfer.prepare_fn(transfer.context, &cell.scope);
-        errdefer if (request.transfer) |transfer| transfer.abort_fn(transfer.context);
+        if (request.transfer) |transfer| try transfer.prepareScopeTransfer(&cell.scope);
+        errdefer if (request.transfer) |transfer| transfer.abortScopeTransfer();
         const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);
         cell.header_state = .{ .published = header };
         cell.publication = .{ .active = execution };
         // Past this point the spawn cannot fail, so the swap is safe to make
         // permanent: the child's scope owns the resources and the spawning
         // scope no longer does.
-        if (request.transfer) |transfer| transfer.commit_fn(transfer.context);
+        if (request.transfer) |transfer| transfer.commitScopeTransfer();
 
         std.Io.Threaded.mutexLockUncancelable(&state_.tree_mutex);
         std.Io.Threaded.mutexLockUncancelable(&parent.mutex);
@@ -2112,7 +2085,7 @@ pub const WorkerScheduler = enum(usize) {
             } else scope.external_first = node;
             scope.external_last = node;
             node.linked = true;
-            token.* = external.scopeMembership(ExternalNode, node);
+            token.* = .{ .node = node };
         };
         guard.publish(tokens);
         published = true;
@@ -2224,7 +2197,7 @@ pub const WorkerScheduler = enum(usize) {
         if (request == .close_scope) {
             const status = request.close_scope;
             _ = unit.takeParkRequest();
-            self.closeRootScope(@ptrCast(@alignCast(unit.task_scope.?)));
+            self.closeRootScope(unit.task_scope.?);
             unit.installParkResume(.{ .scope_closed = status });
             return;
         }
@@ -3463,16 +3436,16 @@ test "native: scope transfers preserve their owner through rollback and allocati
                 detached.detachAll();
             }
             try @import("port_transfer.zig").publishScope(Member, &member, &origin, Member.owner);
-            try std.testing.expectError(error.NotOwner, Member.Transfer.prepare(&member, &stranger, &destination));
+            try std.testing.expectError(error.NotOwner, Member.Transfer.prepare(&member, stranger.identity(), destination.identity()));
             try std.testing.expectEqual(@as(usize, 0), destination.pending());
-            try Member.Transfer.prepare(&member, &origin, &destination);
-            try std.testing.expectError(error.Busy, Member.Transfer.prepare(&member, &origin, &stranger));
+            try Member.Transfer.prepare(&member, origin.identity(), destination.identity());
+            try std.testing.expectError(error.Busy, Member.Transfer.prepare(&member, origin.identity(), stranger.identity()));
             Member.Transfer.abort(&member);
             try std.testing.expectEqual(@as(usize, 0), destination.pending());
             try std.testing.expectEqual(@as(usize, 1), origin.pending());
-            try Member.Transfer.prepare(&member, &origin, &destination);
+            try Member.Transfer.prepare(&member, origin.identity(), destination.identity());
             Member.Transfer.commit(&member);
-            try std.testing.expectError(error.NotOwner, Member.Transfer.prepare(&member, &origin, &stranger));
+            try std.testing.expectError(error.NotOwner, Member.Transfer.prepare(&member, origin.identity(), stranger.identity()));
             runtime.worker().closeRootScope(&origin);
             runtime.worker().closeRootScope(&stranger);
             try std.testing.expectEqual(@as(usize, 0), member.cancellations);

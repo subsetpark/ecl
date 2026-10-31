@@ -673,6 +673,12 @@ binding version that published it, and a removal is published as a snapshot
 with no binding. Publication makes a fully built snapshot visible at a version
 newer than every live pin, and a pin taken afterwards observes it.
 
+Authority to publish into a root comes only from the root, as an opaque
+handle that cannot be retargeted: a session or core-building scope issues a
+top-level publisher, and a module image a module publisher that also ends its
+construction. Core is published through one typestate capability minted with
+its Env and consumed when core freezes, so core is built at most once.
+
 A unit that cannot define pins the version current at its creation and reads a
 session slot's newest snapshot at or before it, walking back through the chain
 only for a name redefined since. A pinned reader counts itself on the cell
@@ -1370,10 +1376,13 @@ Worker-pool roots wait for completion without competing for the executor queue,
 while cooperative roots continue servicing bounded work until completion.
 
 External readiness uses the same arbitration rather than a parallel scheduler.
-`external.zig` supplies nominal type-erased readiness and scope-membership
+`external.zig` supplies nominal type-erased readiness and scope-member
 handles whose callbacks state ownership on registration, failed registration,
-wake loss, cancellation, and detach. A process pipe or terminal event may wake
-a Unit, but scheduler code never imports process backend types. Detaching an
+wake loss, cancellation, and detach; a scope membership is the scheduler's own
+member node, the one consuming detach authority. Ports and resources compare
+owning scopes through an opaque scope identity and never name the scope type.
+A process pipe or terminal event may wake a Unit, but scheduler code never
+imports process backend types. Detaching an
 external member first unlinks it, then releases every list, token, and
 cancellation-cursor reference and the member capability itself; only that
 node's final release decrements the scope's child count and publishes
@@ -1750,11 +1759,7 @@ values retain that identity independently of service cleanup. Factory and select
 facades share their sealed registration storage; the registration owns the instance
 pin and descriptor index without a separately allocated dispatch wrapper. Module registration
 binds the Session I/O backend inside the adapter, so module loading does not
-select a resource backend. A generic module-constant provider carries names,
-effects, documentation, and sealed values; domain adapters own their declarations
-and typed backend access. Registration validates declaration-name uniqueness at
-compile time, so one provider cannot replace its own earlier binding during
-publication. Retained issuer metadata has no backend discriminator.
+select a resource backend. Retained issuer metadata has no backend discriminator.
 Factories register through one opaque opening
 interface: bounded configuration validation precedes admission, resumable
 openings own partial work, and resource initialization precedes stack publication.

@@ -4,7 +4,7 @@ const std = @import("std");
 const heap = @import("heap.zig");
 const external = @import("external.zig");
 const fs = @import("filesystem_port.zig");
-const Identity = @import("module_bindings.zig").Identity;
+const Identity = @import("resource_issuer.zig").Identity;
 
 const State = struct {
     issuer: *Identity,

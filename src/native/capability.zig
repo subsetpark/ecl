@@ -283,10 +283,6 @@ pub const Invocation = struct {
     }
 };
 
-pub const BuildState = struct {
-    invocation: *Invocation,
-};
-
 pub const BuildResult = union(enum) {
     candidate: Candidate,
     yield_required,
@@ -300,12 +296,12 @@ pub const BuildAppendResult = enum {
 };
 
 pub const BuildValues = opaque {
-    fn state(self: *BuildValues) *BuildState {
+    fn invocation(self: *BuildValues) *Invocation {
         return @ptrCast(@alignCast(self));
     }
 
     pub fn scalar(self: *BuildValues, item: Scalar) error{ OutOfMemory, InvalidValue }!Candidate {
-        return self.state().invocation.makeCandidate(item);
+        return self.invocation().makeCandidate(item);
     }
 
     /// Fixed-chunk staging of scalar words. Once either read mode starts, no
@@ -360,7 +356,7 @@ pub const BuildValues = opaque {
 
     fn bulk(self: *BuildValues, slot: u32, action: abi.BulkAction, kind: abi.BulkKind, count: u64, reverse: bool, words: []u64, output: *abi.Candidate) error{OutOfMemory}!BuildAppendResult {
         if (words.len > abi.max_bulk_units) return .invalid;
-        return buildAppendResult((self.state().invocation.host.bulk_build orelse unreachable)(self.state().invocation.context, slot, action, kind, count, @intFromBool(reverse), words.ptr, @intCast(words.len), output));
+        return buildAppendResult((self.invocation().host.bulk_build orelse unreachable)(self.invocation().context, slot, action, kind, count, @intFromBool(reverse), words.ptr, @intCast(words.len), output));
     }
 
     /// Append one value to a host-owned, exact-size list builder. `slot` is a
@@ -373,8 +369,8 @@ pub const BuildValues = opaque {
         item_count: u64,
         item: Candidate,
     ) error{OutOfMemory}!BuildAppendResult {
-        return buildAppendResult((self.state().invocation.host.build_list_append orelse unreachable)(
-            self.state().invocation.context,
+        return buildAppendResult((self.invocation().host.build_list_append orelse unreachable)(
+            self.invocation().context,
             slot,
             item_count,
             @backingInt(item),
@@ -388,8 +384,8 @@ pub const BuildValues = opaque {
     ) error{OutOfMemory}!BuildResult {
         var output: abi.Candidate = 0;
         return buildResult(
-            (self.state().invocation.host.build_list_finish orelse unreachable)(
-                self.state().invocation.context,
+            (self.invocation().host.build_list_finish orelse unreachable)(
+                self.invocation().context,
                 slot,
                 item_count,
                 &output,
@@ -405,8 +401,8 @@ pub const BuildValues = opaque {
         key: Candidate,
         item: Candidate,
     ) error{OutOfMemory}!BuildAppendResult {
-        return buildAppendResult((self.state().invocation.host.build_dict_append orelse unreachable)(
-            self.state().invocation.context,
+        return buildAppendResult((self.invocation().host.build_dict_append orelse unreachable)(
+            self.invocation().context,
             slot,
             entry_count,
             @backingInt(key),
@@ -421,8 +417,8 @@ pub const BuildValues = opaque {
     ) error{OutOfMemory}!BuildResult {
         var output: abi.Candidate = 0;
         return buildResult(
-            (self.state().invocation.host.build_dict_finish orelse unreachable)(
-                self.state().invocation.context,
+            (self.invocation().host.build_dict_finish orelse unreachable)(
+                self.invocation().context,
                 slot,
                 entry_count,
                 &output,

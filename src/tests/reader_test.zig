@@ -126,7 +126,7 @@ test "span archive rejects a substitutable provenance issuer" {
     var archive = archive_owner.view();
 
     var diag: reader.Diag = .{};
-    var parsed = switch (try archive_owner.read("issuer.ecl", "(1)", &diag, .unlinked)) {
+    var parsed = switch (try archive_owner.read("issuer.ecl", "(1)", &diag, null)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };
@@ -203,7 +203,7 @@ test "span archive cancellation keeps committed location storage alive" {
     var archive = archive_owner.view();
 
     var diag: reader.Diag = .{};
-    var parsed = switch (try archive_owner.read("cancelled-absorb.ecl", "(1)", &diag, .unlinked)) {
+    var parsed = switch (try archive_owner.read("cancelled-absorb.ecl", "(1)", &diag, null)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };

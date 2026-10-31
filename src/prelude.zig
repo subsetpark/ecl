@@ -24,7 +24,6 @@ pub fn install(
     registry: *modules.Registry,
     archive_owner: *spans.SpanArchiveOwner,
     cancelled: *const std.atomic.Value(bool),
-    recognizer: ?env.FreezeRecognizer,
 ) Error!void {
     return installSource(
         host,
@@ -34,7 +33,6 @@ pub fn install(
         cancelled,
         "prelude.ecl",
         @embedFile("prelude.ecl"),
-        recognizer,
     );
 }
 
@@ -46,12 +44,10 @@ pub fn installSource(
     cancelled: *const std.atomic.Value(bool),
     source_name: []const u8,
     source: []const u8,
-    /// Decides trusted definitions' idioms when the finished core freezes.
-    recognizer: ?env.FreezeRecognizer,
 ) Error!void {
     const allocator = host.allocator();
     const release_domain = heap.hostDomain(host);
-    const environment = building.runtime();
+    var environment = building.runtime();
     var archive = archive_owner.view();
     var diag: reader.Diag = .{};
     // Core alone is the chain for a primitive or an embedded prelude
@@ -90,9 +86,11 @@ pub fn installSource(
         release_domain,
         executionAccess(),
         .empty,
-        environment,
+        &environment,
         &archive,
-        .{ .registry = registry, .phase = .bootstrap },
+        // Phrases are recognized only once the core is frozen and the session
+        // runs; the bootstrap unit evaluates the prelude generically.
+        .{ .registry = registry, .idiom_mode = .generic_only, .phase = .bootstrap },
         arguments.borrow(),
         cancelled,
     );
@@ -112,5 +110,5 @@ pub fn installSource(
         },
     };
     if (unit.stack.items.len != 0) return error.InvalidPrelude;
-    try building.finish(recognizer);
+    try building.finish();
 }

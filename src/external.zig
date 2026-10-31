@@ -6,6 +6,7 @@
 //! membership without giving either side access to the other's representation.
 
 const std = @import("std");
+const scheduler = @import("scheduler.zig");
 
 /// A keyed list of registered readiness waits over one cell type. The cell
 /// supplies a mutex, this wait list, retained readiness ownership, and locked
@@ -278,7 +279,7 @@ pub fn readinessSource(comptime Payload: type, payload: *Payload, key: u64) Read
 
 /// One scheduler-owned reference to an external resource attached to a task
 /// scope. Cancellation is idempotent; release consumes the retained reference.
-pub const ScopeIdentity = opaque {};
+pub const ScopeIdentity = @import("heap.zig").ScopeIdentity;
 
 pub const ScopeMember = struct {
     context: ?*anyopaque,
@@ -339,26 +340,24 @@ pub fn scopeMember(comptime Payload: type, payload: *Payload) ScopeMember {
 /// external member. The backend stores this token and invokes it after its
 /// terminal cleanup is complete.
 pub const ScopeMembership = struct {
-    context: ?*anyopaque,
-    detach_fn: *const fn (*anyopaque) void,
-    scope_fn: *const fn (*anyopaque) *anyopaque,
+    node: ?*scheduler.ExternalNode,
 
     pub fn detach(self: *ScopeMembership) void {
-        const context = self.context orelse return;
-        self.context = null;
-        self.detach_fn(context);
+        const node = self.node orelse return;
+        self.node = null;
+        node.detachExternalMembership();
     }
 
     /// The scope this membership is linked into, or null once detached. A
     /// backend that transfers a resource to another scope compares this
     /// against the scope it believes owns the resource, so a caller cannot
     /// give away something another scope is holding.
-    pub fn owningScope(self: *const ScopeMembership) ?*anyopaque {
-        const context = self.context orelse return null;
-        return self.scope_fn(context);
+    pub fn owningScope(self: *const ScopeMembership) ?*ScopeIdentity {
+        const node = self.node orelse return null;
+        return node.scopeIdentity();
     }
     pub fn authorizesCancellation(self: ScopeMembership, scope: *ScopeIdentity) bool {
-        return self.owningScope() == @as(*anyopaque, @ptrCast(scope));
+        return self.owningScope() == scope;
     }
 };
 
@@ -420,7 +419,7 @@ pub const Ownership = union(enum) {
 
     /// The scope that owns the resource now, or null when none does. During a
     /// transfer this is still the origin: the move is not yet authoritative.
-    pub fn owningScope(self: Ownership) ?*anyopaque {
+    pub fn owningScope(self: Ownership) ?*ScopeIdentity {
         return switch (self) {
             .none, .provisional => null,
             .owned => |current| current.owningScope(),
@@ -479,26 +478,6 @@ pub const Ownership = union(enum) {
     }
 };
 
-fn ScopeMembershipAdapters(comptime Payload: type) type {
-    return struct {
-        fn detach(raw: *anyopaque) void {
-            Payload.detachExternalMembership(@ptrCast(@alignCast(raw)));
-        }
-
-        fn owningScope(raw: *anyopaque) *anyopaque {
-            return Payload.externalMembershipScope(@ptrCast(@alignCast(raw)));
-        }
-    };
-}
-
-pub fn scopeMembership(comptime Payload: type, payload: *Payload) ScopeMembership {
-    return .{
-        .context = @ptrCast(payload),
-        .detach_fn = ScopeMembershipAdapters(Payload).detach,
-        .scope_fn = ScopeMembershipAdapters(Payload).owningScope,
-    };
-}
-
 comptime {
     if (@sizeOf(ReadinessSource) > 4 * @sizeOf(usize))
         @compileError("external readiness source exceeds its fixed capability budget");
@@ -510,7 +489,6 @@ test "external capabilities have consuming release surfaces" {
     const Probe = struct {
         refs: usize = 0,
         cancellations: usize = 0,
-        detaches: usize = 0,
 
         fn retainExternalMember(self: *@This()) void {
             self.refs += 1;
@@ -521,12 +499,6 @@ test "external capabilities have consuming release surfaces" {
         fn cancelExternalMember(self: *@This(), _: *ScopeIdentity) void {
             self.cancellations += 1;
         }
-        fn detachExternalMembership(self: *@This()) void {
-            self.detaches += 1;
-        }
-        fn externalMembershipScope(self: *@This()) *anyopaque {
-            return @ptrCast(self);
-        }
     };
     var probe: Probe = .{};
     var member = scopeMember(Probe, &probe);
@@ -536,10 +508,4 @@ test "external capabilities have consuming release surfaces" {
     member.deinit();
     try std.testing.expectEqual(@as(usize, 1), probe.cancellations);
     try std.testing.expectEqual(@as(usize, 0), probe.refs);
-    var membership = scopeMembership(Probe, &probe);
-    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&probe)), membership.owningScope());
-    membership.detach();
-    membership.detach();
-    try std.testing.expectEqual(@as(usize, 1), probe.detaches);
-    try std.testing.expectEqual(@as(?*anyopaque, null), membership.owningScope());
 }

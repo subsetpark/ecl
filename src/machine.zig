@@ -22,6 +22,8 @@ const standard_streams = @import("standard_streams.zig");
 const resolution_core = @import("resolution_core.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
+const scheduler_api = @import("scheduler.zig");
+const idioms = @import("idioms.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -1724,9 +1726,6 @@ pub const InheritedContext = struct {
     ecl_path: ?[]const u8 = null,
     module_snapshot: ?*const map_state.Snapshot = null,
     idiom_mode: IdiomMode = .automatic,
-    phrase_recognizer: ?PhraseRecognizer = null,
-    /// Decides trusted definitions' idioms when a module image freezes.
-    freeze_recognizer: ?env.FreezeRecognizer = null,
     phase: union(enum) { bootstrap, runtime: RuntimeContext },
 
     pub fn console(self: *const InheritedContext) ?*console_api.Console {
@@ -1841,13 +1840,6 @@ pub const FallbackSource = struct {
         return self.make_fn(self.context, evaluator);
     }
 };
-pub const PhraseRecognizer = struct {
-    offered: *const fn (*Unit, IdiomRequest, FallbackSource) MachineError!void,
-    trusted: *const fn (*Unit, TrustedCall) MachineError!TrustedOutcome,
-    /// Given the first registry entry a kernel word heads: true when one of
-    /// its phrases applied and consumed its following words.
-    headed: *const fn (*Unit, u16) MachineError!bool,
-};
 
 pub const ParkRequest = union(enum) {
     task: Value,
@@ -1859,11 +1851,11 @@ pub const ParkRequest = union(enum) {
     sleep: u63,
     close_scope: u8,
     external: external.ReadinessSource,
-    external_until: struct { source: external.ReadinessSource, deadline: @import("scheduler.zig").Deadline },
+    external_until: struct { source: external.ReadinessSource, deadline: scheduler_api.Deadline },
     /// Park on a task mailbox, for a message or for space to queue one. A
     /// deadline resumes the driver exactly as readiness does, so a timed
     /// receive hands back a value instead of raising.
-    mailbox: struct { source: external.ReadinessSource, deadline: ?@import("scheduler.zig").Deadline },
+    mailbox: struct { source: external.ReadinessSource, deadline: ?scheduler_api.Deadline },
 
     /// The one value graph owned by every parking request that carries one.
     /// Scheduler setup, abandonment, and ordinary deinit all use this mapping.
@@ -2378,8 +2370,8 @@ pub const Unit = struct {
     idiom_hits: u64 = 0,
     /// The idiom hits that were phrases continued by following words.
     phrase_hits: u64 = 0,
-    scheduler: ?*const anyopaque = null,
-    task_scope: ?*anyopaque = null,
+    scheduler: ?*const scheduler_api.WorkerScheduler = null,
+    task_scope: ?*scheduler_api.TaskScope = null,
     is_root_unit: bool = true,
     /// For a child unit, the `@` word that constructed it.
     constructor: UnitConstructor = .spawn,
@@ -2861,8 +2853,8 @@ pub const Unit = struct {
     /// Links words written into `scope`, a root, to its name slots. An image's
     /// cell carries its owner anchor, so a word that escapes the image proves
     /// the image live before reading its slot.
-    pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!value.SymbolLinker {
-        const owner: ?*anyopaque = if (scope.isModuleRoot())
+    pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
+        const owner: ?*env.ImageAnchor = if (scope.isModuleRoot())
             modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access)
         else
             null;
@@ -2889,9 +2881,6 @@ pub const Unit = struct {
             "definitions are legal only at root level, not inside a combinator application, @attempt, or task",
         );
         return scope;
-    }
-    pub fn sourceCursor(self: *const Unit, header: *Header) spans.SpanArchive.SourceCursor {
-        return self.archive.sourceCursor(header);
     }
     /// The source name attached to the occurrence being dispatched. The
     /// archive owns the returned bytes for at least as long as the current
@@ -3065,10 +3054,6 @@ pub const Unit = struct {
             self.locals.appendAssumeCapacity(self.stack.items[base + remaining]);
         }
         self.stack.shrinkRetainingCapacity(base);
-    }
-
-    pub fn localDepth(self: *const Unit) usize {
-        return self.locals.items.len;
     }
 
     pub fn readLocal(self: *Unit, index: usize) error{OutOfMemory}!void {
@@ -3460,7 +3445,7 @@ pub const Unit = struct {
         ) error{OutOfMemory}!void {
             const provenance = switch (entry) {
                 .source => |source| source.name,
-                .native, .builtin, .bindings => intern.get(intern.moduleId(self.request.module.name)),
+                .native, .builtin => intern.get(intern.moduleId(self.request.module.name)),
             };
             var candidate = heap.Owned([]u8).init(try evaluator.allocator.dupe(u8, provenance));
             const materializer = kernel_storage.Utf8Materializer.init(
@@ -3923,7 +3908,7 @@ pub const Unit = struct {
             const text = switch (entry) {
                 .source => |source| try evaluator.allocator.dupe(u8, source.text),
                 .native => |descriptor| return self.transferStatic(evaluator, transfer, descriptor),
-                .builtin, .bindings => return self.transferBuiltin(evaluator, transfer, entry),
+                .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
             };
             const source_name = transfer.candidate.take();
             const completion = self.sourceCompletion(transfer, .standard_library, null);
@@ -3935,21 +3920,12 @@ pub const Unit = struct {
             self: *AutoLoadDriver,
             evaluator: *Unit,
             transfer: *@FieldType(State, "transfer"),
-            entry: stdlib.Entry,
+            words: []const env.BuiltinWord,
         ) MachineError!WorkProgress {
             // The candidate is created before ownership moves: struct-literal
             // fields evaluate in order, so a failure here would otherwise
             // strand the lease and path this driver had already taken.
-            const registry = evaluator.inherited.registry;
-            const publication = switch (entry) {
-                .builtin => |words| try modules.Registry.BuiltinCandidateCursor.init(registry, self.request.module.name, .standard_library, words),
-                .bindings => |registration| registered: {
-                    const binding = try registration.bind(evaluator.allocator, &evaluator.inherited);
-                    defer binding.release();
-                    break :registered try modules.Registry.BuiltinCandidateCursor.initRegistered(registry, self.request.module.name, .standard_library, binding);
-                },
-                .source, .native => unreachable,
-            };
+            const publication = try modules.Registry.BuiltinCandidateCursor.init(evaluator.inherited.registry, self.request.module.name, .standard_library, words);
             // No errdefer: from here nothing fails until `startDriver`, which
             // disposes the whole uninstalled driver's owned fields itself.
             const next = BuiltinLoadDriver{
@@ -4980,12 +4956,6 @@ pub const Unit = struct {
         heap.retainValue(item);
         return self.pushOwned(item);
     }
-    pub fn activeWordId(self: *const Unit) intern.TraceWord {
-        return self.active_word;
-    }
-    pub fn setActiveWord(self: *Unit, word: intern.TraceWord) void {
-        self.active_word = word;
-    }
     /// Places the pending failure at `code[index]`, the position the failing
     /// path ran in place of, unless an inner position already holds it.
     pub fn setFailureSite(self: *Unit, code: *Header, index: u32) void {
@@ -5024,8 +4994,7 @@ pub const Unit = struct {
     /// Whether the words after a phrase head continue a recognized phrase,
     /// which then ran in its place.
     pub fn continuesPhrase(self: *Unit, first_entry: u16) MachineError!bool {
-        const recognizer = self.inherited.phrase_recognizer orelse return false;
-        return recognizer.headed(self, first_entry);
+        return idioms.applyHeaded(self, first_entry);
     }
     /// The forms after the dispatching word in its own code, when it was
     /// dispatched from a source position and `count` of them follow. A word
@@ -5079,15 +5048,12 @@ pub const Unit = struct {
         return error.Ecl;
     }
     /// What a module image built by this unit recognizes against when it
-    /// seals: the session's recognizer and core. Null when the unit has none.
-    /// Recognition for an image about to seal. Only a standard-library image's
-    /// definitions are trusted at dispatch, so any other image skips the work
-    /// rather than recording idioms nothing will read.
+    /// seals: the session's core. Only a standard-library image's definitions
+    /// are trusted at dispatch, so any other image skips the work rather than
+    /// recording idioms nothing will read.
     pub fn moduleRecognition(self: *Unit, provenance: modules.RegistrationProvenance) ?env.ModuleRecognition {
         if (provenance != .standard_library) return null;
-        const recognizer = self.inherited.freeze_recognizer orelse return null;
         return .{
-            .recognizer = recognizer,
             .core = self.environment.coreView(),
             .core_scope = self.environment.coreScopeId(),
             .slots = self.environment.slotDirectory(),
@@ -5095,10 +5061,7 @@ pub const Unit = struct {
     }
 
     pub fn continueWithIdiom(self: *Unit, request: IdiomRequest, source: FallbackSource) MachineError!void {
-        if (self.inherited.phrase_recognizer) |recognizer| return recognizer.offered(self, request, source);
-        var owned = source.make(self);
-        defer owned.deinit(self.releases, self.allocator);
-        return owned.run(self);
+        return idioms.tryApply(self, request, source);
     }
     /// The active word as a diagnostic spells it. A module-local word has no
     /// single interned spelling, so the rendering borrows the unit's scratch;
@@ -5600,7 +5563,7 @@ pub const Unit = struct {
     /// The anchor of the image the running activation holds, if it holds one.
     /// A pointer compare against a cell's owner is a complete liveness proof:
     /// the activation's pin is what keeps that image alive.
-    fn runningAnchor(self: *Unit) ?*anyopaque {
+    fn runningAnchor(self: *Unit) ?*env.ImageAnchor {
         const home = self.current.?.home() orelse return null;
         return modules.anchorHandle(home, self.module_access);
     }
@@ -5790,7 +5753,7 @@ pub const Unit = struct {
         const locals = self.environment.localsWords();
         self.active_word = .plain(name);
         if (name == locals.get) {
-            if (operand >= self.localDepth()) return self.fail(.domain, "_gl index is out of bounds");
+            if (operand >= self.locals.items.len) return self.fail(.domain, "_gl index is out of bounds");
             return self.readLocal(operand);
         }
         if (name == locals.load) {
@@ -5798,7 +5761,7 @@ pub const Unit = struct {
             return self.bindLocals(operand);
         }
         if (name == locals.drop) {
-            if (operand > self.localDepth()) return self.fail(.domain, "_dl count exceeds the live locals");
+            if (operand > self.locals.items.len) return self.fail(.domain, "_dl count exceeds the live locals");
             return self.unbindLocals(operand);
         }
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
@@ -6102,27 +6065,6 @@ pub const Unit = struct {
 /// cleanup, or backpressure), so its executor should let other work run.
 pub const RunStatus = enum { completed, exhausted, yielded, parked };
 
-/// A non-owning child-launch projection. The decoded owner remains alive until
-/// the scheduler has retained the quotation and initial operands into the new
-/// Unit, so a child launch never invents a second teardown protocol.
-pub const BorrowedUnitInput = struct {
-    body: *Header,
-    seeds: ?*Header,
-
-    pub fn quotation(self: BorrowedUnitInput) *Header {
-        return self.body;
-    }
-
-    pub fn initialStack(self: BorrowedUnitInput, element: ?Value) InitialStack {
-        if (element) |item| {
-            const seeds = self.seeds orelse return .{ .borrowed_element = item };
-            return .{ .borrowed_element_and_seeds = .{ .element = item, .seeds = seeds } };
-        }
-        const seeds = self.seeds orelse return .empty;
-        return .{ .borrowed_seeds = seeds };
-    }
-};
-
 /// The decoded input every unit constructor takes. It remains the one nominal
 /// owner through validation, child borrowing, fan-out transfer, and boundary
 /// handoff. Empty seeds use the null representation; otherwise it owns both
@@ -6157,9 +6099,22 @@ pub const OwnedUnitInput = enum(u128) {
         return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
     }
 
-    pub fn borrow(self: *const OwnedUnitInput) BorrowedUnitInput {
+    /// The body, borrowed: the input stays alive until the scheduler has
+    /// retained it and the initial operands into the new Unit, so a child
+    /// launch never invents a second teardown protocol.
+    pub fn quotation(self: *const OwnedUnitInput) *Header {
         std.debug.assert(self.* != .consumed);
-        return .{ .body = self.bodyHeader().?, .seeds = self.seedHeader() };
+        return self.bodyHeader().?;
+    }
+
+    pub fn initialStack(self: *const OwnedUnitInput, element: ?Value) InitialStack {
+        std.debug.assert(self.* != .consumed);
+        if (element) |item| {
+            const seeds = self.seedHeader() orelse return .{ .borrowed_element = item };
+            return .{ .borrowed_element_and_seeds = .{ .element = item, .seeds = seeds } };
+        }
+        const seeds = self.seedHeader() orelse return .empty;
+        return .{ .borrowed_seeds = seeds };
     }
 
     pub fn move(self: *OwnedUnitInput) OwnedUnitInput {
@@ -6185,7 +6140,7 @@ pub const OwnedUnitInput = enum(u128) {
 
     pub fn deinit(self: *OwnedUnitInput, releases: *heap.ReleaseDomain) void {
         if (self.seedHeader()) |items| releases.releaseHeader(items);
-        if (self.bodyHeader()) |quotation| releases.releaseHeader(quotation);
+        if (self.bodyHeader()) |body| releases.releaseHeader(body);
         self.* = .consumed;
     }
 };
@@ -6779,7 +6734,7 @@ fn continueQualifiedRequest(
         .replay, .load_only => .completed,
         .dispatch => |dispatch_request| continuation: {
             evaluator.retireDriver(driver);
-            evaluator.setActiveWord(.plain(dispatch_request.word));
+            evaluator.active_word = .plain(dispatch_request.word);
             var resolution = ResolutionCursor.initAtCurrent(evaluator, dispatch_request.word);
             resolution.context = request.context;
             try evaluator.startDriver(DispatchDriver{
@@ -6905,8 +6860,8 @@ fn executeResolved(self: *Unit, resolved: *Resolution) MachineError!void {
             // environment froze; one that recognized nothing runs as any
             // source word does.
             const trusted = resolved.origin == .core or resolved.origin == .standard_library;
-            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| if (self.inherited.phrase_recognizer) |recognizer| {
-                switch (try recognizer.trusted(self, .{ .body = body_header, .idiom = idiom })) {
+            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| {
+                switch (try idioms.applyTrusted(self, .{ .body = body_header, .idiom = idiom })) {
                     .applied => return,
                     .declined => {},
                     .offered => |request| {
@@ -6916,7 +6871,7 @@ fn executeResolved(self: *Unit, resolved: *Resolution) MachineError!void {
                             .home = resolved.home,
                             .effect = cross_home_effect,
                         };
-                        return recognizer.offered(self, request, body_fallback.source());
+                        return idioms.tryApply(self, request, body_fallback.source());
                     },
                 }
             };
