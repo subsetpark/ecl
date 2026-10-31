@@ -1,5 +1,3 @@
-pop
-
 ### set persist
 7 `persist set
 

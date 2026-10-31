@@ -1304,6 +1304,9 @@ const ModuleBoundary = struct {
 const BoundaryMode = union(enum) {
     attempt,
     module: ModuleBoundary,
+    /// `@load`: the loaded file's stack-isolated unit. Its failure is not
+    /// caught here; it propagates to the enclosing unit.
+    load,
 };
 const Boundary = struct {
     mode: BoundaryMode,
@@ -1317,7 +1320,7 @@ const Boundary = struct {
     fn deinit(self: Boundary) void {
         switch (self.mode) {
             .module => |boundary| boundary.deinit(),
-            .attempt => {},
+            .attempt, .load => {},
         }
     }
 };
@@ -2911,7 +2914,7 @@ pub const Fiber = struct {
                     if (module.image.executionHome(self.module_access).scope(self.module_access) == scope)
                         return &module.image;
                 },
-                .attempt => {},
+                .attempt, .load => {},
             }
             index = boundary.previous_boundary;
         }
@@ -4384,6 +4387,14 @@ pub const Fiber = struct {
         push,
         call: ?*const map_state.SourceScope,
         session: ?*const map_state.SourceScope,
+        /// `@load`: the source runs as a stack-isolated unit. When `seeded`,
+        /// its seed list waits on top of the caller's stack until activation
+        /// pops it, so reading the file carries no seed ownership.
+        load: struct {
+            source: ?*const map_state.SourceScope = null,
+            seeded: bool,
+            word: intern.TraceWord,
+        },
         /// Registration only: the source runs, then the loading lease and
         /// tagged qualified operation transfer to the return frame.
         register: struct {
@@ -4396,7 +4407,7 @@ pub const Fiber = struct {
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
-                .push, .call, .session => {},
+                .push, .call, .session, .load => {},
                 .register => |*register| {
                     if (register.loading) |*loading| loading.deinit();
                     if (register.path) |path| releases.releaseValue(path);
@@ -4449,6 +4460,9 @@ pub const Fiber = struct {
             locating: map_state.SourcePathCursor,
             ingesting: spans.SpanArchive.SourceIngestCursor,
             activating: *Header,
+            /// `@load` has opened its boundary and copies its seeds above it
+            /// before the file's first form runs.
+            seeding: SeedMaterializer,
             storage,
         };
 
@@ -4478,7 +4492,8 @@ pub const Fiber = struct {
             const work = evaluator.workBudget();
             while (work.spend()) switch (self.state) {
                 .start => {
-                    if ((self.completion.borrow() == .call or self.completion.borrow() == .session) and
+                    if ((self.completion.borrow() == .call or self.completion.borrow() == .session or
+                        self.completion.borrow() == .load) and
                         evaluator.inherited.module_snapshot != null)
                     {
                         const cursor = try evaluator.inherited.module_snapshot.?.sourcePathCursor(self.text.borrow().sourceName());
@@ -4493,6 +4508,7 @@ pub const Fiber = struct {
                         switch (self.completion.borrowMut().*) {
                             .call => |*context| context.* = source,
                             .session => |*context| context.* = source,
+                            .load => |*load| load.source = source,
                             else => unreachable,
                         }
                         try self.beginIngest(evaluator);
@@ -4528,6 +4544,24 @@ pub const Fiber = struct {
                 .activating => |root_header| {
                     switch (self.completion.borrowMut().*) {
                         .push => try evaluator.pushBorrowed(.{ .list = root_header }),
+                        .load => |load| {
+                            // The seed list the primitive left on top is the
+                            // only operand this unit takes from its caller.
+                            const seeds: ?Value = if (load.seeded) evaluator.takeStackOwned().? else null;
+                            const provenance: modules.RegistrationProvenance = if (load.source) |context|
+                                .{ .source = context }
+                            else
+                                .ordinary;
+                            heap.incRef(root_header);
+                            evaluator.openLoad(root_header, load.word, provenance) catch |err| {
+                                if (seeds) |item| evaluator.releases.releaseValue(item);
+                                return err;
+                            };
+                            if (seeds) |item| {
+                                self.state = .{ .seeding = .init(item.list) };
+                                return .stepped;
+                            }
+                        },
                         .call, .session => |source| {
                             heap.incRef(root_header);
                             try evaluator.callProgramOwned(root_header, .owned);
@@ -4576,6 +4610,13 @@ pub const Fiber = struct {
                     }
                     return .completed;
                 },
+                .seeding => |*materializer| {
+                    if (!try materializer.advance(evaluator, work)) return .stepped;
+                    // An empty file has no later dispatch safe point. Settle
+                    // the final seed-copy charge before completion.
+                    try evaluator.pollCancellableCompletion();
+                    return .completed;
+                },
                 .storage => unreachable,
             };
             return .stepped;
@@ -4595,6 +4636,11 @@ pub const Fiber = struct {
                     self.state = .storage;
                     break :result false;
                 },
+                .seeding => |*materializer| result: {
+                    materializer.deinit(releases, storage_allocator);
+                    self.state = .storage;
+                    break :result false;
+                },
                 .ingesting => |*ingestion| result: {
                     if (!ingestion.advanceRetirement()) break :result false;
                     self.state = .storage;
@@ -4610,8 +4656,20 @@ pub const Fiber = struct {
         }
         pub const ownership: heap.DriverOwnership = .bounded_retirement;
     };
-    pub fn loadFileOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
-        return self.fileTransferOwned(path, path_value, .{ .source = .{ .call = null } });
+    /// `path @load!`: the file runs as a stack-isolated unit on an empty stack.
+    pub fn loadFileSeedlessOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
+        return self.fileTransferOwned(path, path_value, .{ .source = .{ .load = .{
+            .seeded = false,
+            .word = self.active_word,
+        } } });
+    }
+    /// `values path @load`: as `@load!`, seeded from the list the primitive
+    /// left on top of the caller's stack.
+    pub fn loadFileSeededOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
+        return self.fileTransferOwned(path, path_value, .{ .source = .{ .load = .{
+            .seeded = true,
+            .word = self.active_word,
+        } } });
     }
     fn fileSourceOwned(
         self: *Fiber,
@@ -4653,7 +4711,7 @@ pub const Fiber = struct {
             return switch (self) {
                 .source => |completion| switch (completion) {
                     .register => |register| register.path,
-                    .push, .call, .session => null,
+                    .push, .call, .session, .load => null,
                 },
             };
         }
@@ -4991,6 +5049,11 @@ pub const Fiber = struct {
                     .constructor = "@defm",
                     .advice = "the substack is isolated from the caller's stack — " ++
                         "pass initial values in the constructor's values operand: `values (body) `name @defm`",
+                },
+                .load => .{
+                    .constructor = "@load",
+                    .advice = "the loaded file's stack is isolated from the caller's stack — " ++
+                        "pass initial values in the constructor's values operand: `values path @load`",
                 },
             };
         }
@@ -5998,6 +6061,36 @@ pub const Fiber = struct {
             word,
             body,
         );
+        self.current = .{
+            .code = body,
+            .program = .owned,
+            .position = .{ .source = 0 },
+            .site = site,
+            .traced_word = no_word,
+        };
+    }
+    /// Opens one `@load` boundary over a read source. Consuming: the body is
+    /// owned by the boundary on success and released here on every failure.
+    /// The body keeps its invoker's authority to define, so a file loaded at
+    /// the root defines into the session.
+    fn openLoad(
+        self: *Fiber,
+        body: *Header,
+        word: intern.TraceWord,
+        provenance: modules.RegistrationProvenance,
+    ) error{OutOfMemory}!void {
+        const invoker = self.current.?;
+        _ = self.suspendCurrent() catch {
+            self.releases.releaseHeader(body);
+            return error.OutOfMemory;
+        };
+        if (self.frames.items.len >= max_frame_count) {
+            self.releases.releaseHeader(body);
+            return error.OutOfMemory;
+        }
+        var site = ExecutionSite.inheriting(invoker, invoker.scope());
+        site.registration_provenance = provenance;
+        try self.openBoundary(.load, @intCast(self.stack.items.len), word, body);
         self.current = .{
             .code = body,
             .program = .owned,
@@ -7636,6 +7729,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                     return true;
                 },
                 .module => unreachable,
+                .load => try finishLoad(self, boundary.stack_base),
             }
         },
     };
@@ -7662,6 +7756,16 @@ fn finishEffectCheck(self: *Fiber, check: *EffectCheck) MachineError!void {
     if (check.takeCandidate()) |candidate|
         self.pendingFailure().site = .{ .contract_quotation = candidate };
     return failure;
+}
+/// Finishes one `@load` boundary. Like a module body, a loaded file defines
+/// and keeps no stack state, so a residual operand window is refused.
+fn finishLoad(self: *Fiber, base: u32) MachineError!void {
+    const observed = self.stack.items.len - base;
+    if (observed != 0) return self.failFmt(
+        .domain,
+        "@load file left {d} value{s} on its stack; a loaded file defines words and keeps no state",
+        .{ observed, if (observed == 1) "" else "s" },
+    );
 }
 fn finishAttempt(self: *Fiber, base: u32) MachineError!void {
     try self.startDriver(AttemptResultDriver.init(

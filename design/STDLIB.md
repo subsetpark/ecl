@@ -163,6 +163,12 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### @give!
 `( ports quotation -- task )` — *Unit constructor.* `@give` with no values operand: the child stack is the given ports alone, exactly as `ports [] (q) @give`.
 
+### @load
+`( values path -- )` — *Unit constructor.* Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
+
+### @load!
+`( path -- )` — *Unit constructor.* `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`.
+
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack from the explicit values list and run the quotation concurrently. Use `[]` for no initial values; the ambient stack never crosses the boundary. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
 
@@ -543,9 +549,6 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `x literal wrap call
 # => x
 ```
-
-### load
-`( path -- )` — Read and evaluate a source file as one transactional unit in the calling session.
 
 ### log
 `( x -- y )` — **Pervasive.** Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).

@@ -31,7 +31,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
         .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``." },
         .{ .name = "stdlib", .primitive = stdlibWord, .effect = "-- names", .doc = "Return the names of the embedded standard-library modules as a list of symbols in codepoint order." },
-        .{ .name = "load", .primitive = load, .effect = "path --", .doc = "Read and evaluate a source file as one transactional unit in the calling session." },
+        .{ .name = "@load", .primitive = loadSeeded, .effect = "values path --", .doc = "*Unit constructor.* Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive." },
+        .{ .name = "@load!", .primitive = loadSeedless, .effect = "path --", .doc = "*Unit constructor.* `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -742,14 +743,29 @@ const WordsDriver = struct {
 fn writeFailure(evaluator: *Fiber) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }
-fn load(evaluator: *Fiber) MachineError!void {
+fn loadSeedless(evaluator: *Fiber) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
     const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, path_value.borrow());
-    try evaluator.startDriver(LoadPathDriver{
+    try evaluator.startDriver(SeedlessLoadDriver{
         .path_value = .init(path_value.take()),
         .encoder = .init(encoder),
     });
 }
-const LoadPathDriver = machine.PathActionDriver(Fiber.loadFileOwned);
+/// The seed list is validated here and then left on top of the caller's
+/// stack, where the source activation pops it once the file has been read.
+fn loadSeeded(evaluator: *Fiber) MachineError!void {
+    var path_value = try evaluator.popValue();
+    defer path_value.deinit();
+    if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
+    var seeds = try evaluator.popList();
+    evaluator.pushIntoFreed(seeds.take());
+    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, path_value.borrow());
+    try evaluator.startDriver(SeededLoadDriver{
+        .path_value = .init(path_value.take()),
+        .encoder = .init(encoder),
+    });
+}
+const SeedlessLoadDriver = machine.PathActionDriver(Fiber.loadFileSeedlessOwned);
+const SeededLoadDriver = machine.PathActionDriver(Fiber.loadFileSeededOwned);

@@ -543,8 +543,8 @@ test "loader: failures and cycles are total" {
         "registered nothing under that name",
         "path \"test/acceptance/modules/orphan.ecl\"",
     });
-    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" load", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
-    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" load", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" @load!", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" @load!", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -553,7 +553,7 @@ test "loader: failures and cycles are total" {
     inline for (.{ "invalid.ecl", "incomplete.ecl" }) |filename| {
         const path = try temporary.dir.realPathFileAlloc(std.testing.io, filename, std.testing.allocator);
         defer std.testing.allocator.free(path);
-        const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" load", .{path});
+        const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" @load!", .{path});
         defer std.testing.allocator.free(source);
         try expectErrorContains(&runtime, source, &.{ "kind parse", path });
     }

@@ -452,7 +452,9 @@ storage is proportional to recursion depth rather than constant.
 ### Errors
 
 Errors are crash-only. There is no try/catch or handler quotation: an error
-propagates until the enclosing unit dies. `raise` initiates that propagation
+propagates outward through every unit it reaches until a boundary that reifies
+failure. Units nest strictly inside the task or root that opened them, so a
+unit cannot end while a unit nested in it is still running. `raise` initiates that propagation
 from an error value, and `fail` is sugar for raising an error whose kind is
 `` `user `` and whose message is the supplied string.
 
@@ -460,7 +462,9 @@ Failure is observed as data only outside an explicit boundary: `@attempt`, or
 the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success or
 `{err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
-a script's boundary is the process.
+a script's boundary is the process. Cancellation propagates the same way but
+is never data: no boundary reifies a cancellation error, so cancelling a task
+or the root fails every unit it has open, innermost first.
 
 Source-position and other diagnostic fields appear when known. Absence is
 represented by an absent field, never by a nil value. Runtime-assembled code
@@ -514,10 +518,12 @@ delimits it, and each submission runs as one unit:
 
 Running code begins further units through semantic unit constructors:
 
-- **`load`**: the loaded file is one unit inside the calling session and
-  fails atomically.
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
+- **`@load`**: runs a source file as a new unit on an isolated substack. The
+  file keeps its caller's authority to define, so a file loaded at the root
+  defines into the session, and like a module body it must leave its stack
+  empty. Its failure propagates to the enclosing unit.
 
 `@attempt` is a stack transaction, not a task scope: a task spawned inside it
 belongs to the enclosing scope and is unaffected by the `@attempt` succeeding or
@@ -580,13 +586,15 @@ constant-continuation choices for iterative and tail-recursive shapes.
 #### The `@` spelling convention
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
-— one unit per application for `@each`. The seeded constructors, `@attempt`,
-`@spawn`, `@give`, `@each`, and `@defm`, take an explicit seed-values list and
-a body quotation as separate operands. An empty seed list is written `[]`, or
-the operand is omitted by the constructor's seedless twin, spelled with a
-trailing `!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the
-ambient stack across its unit boundary. `@each` also places the iterated
-element deepest in each child stack, beneath the shared seed values.
+— one unit per application for `@each` — and `@load`, which runs a file's
+source the same way. The seeded constructors, `@attempt`, `@spawn`, `@give`,
+`@each`, `@defm`, and `@load`, take an explicit seed-values list and a body
+quotation, or for `@load` a path, as separate operands. An empty seed list is written `[]`, or the
+operand is omitted by the constructor's seedless twin, spelled with a trailing
+`!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the ambient stack
+across its unit boundary. `@each` also
+places the iterated element deepest in each child stack, beneath the shared
+seed values.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -594,7 +602,7 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `importp`, `load` — they publish without taking a quotation.
+- `import`, `importp` — they publish without taking a quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
@@ -626,6 +634,7 @@ values (q) @attempt
 values (q) @spawn
 list values (q) @each          ( element deepest in each child )
 values (body) `name @defm
+values path @load
 ```
 
 Both `values` and the body must be lists. The new unit's operand stack is
@@ -974,7 +983,7 @@ that name.
   defines words and keeps no state. Publication is an upsert: a missing name
   creates its registration, and an existing name installs the new image as the
   current generation and carries nothing else over; the latter is a reload,
-  whether `@defm` or `load` performs it. A body failure publishes
+  whether `@defm` or `@load` performs it. A body failure publishes
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
@@ -1230,9 +1239,10 @@ that name.
 Task scopes exist at exactly two places: the session root and each spawned
 task. Code runs either in a task, its *current task*, or at the session root,
 and the words that park, own, or observe bindings act on that one. A spawn is
-owned by the current task, or by the session root when no task is executing. `@attempt`, combinator applications, `load`, and module
-construction open no scope; they are stack transactions inside the enclosing
-one. A task's attached unit cannot become terminal while a task it owns is
+owned by the current task, or by the session root when no task is executing.
+`@attempt`, `@load`, and module construction open no scope; they are units
+nested inside the current task or the root. Combinator applications open
+neither a scope nor a unit. A task's attached unit cannot become terminal while a task it owns is
 active: its completion cancels the remaining owned tasks and waits for their
 complete descendant scopes to quiesce. The session root scope closes only at
 `exit` or session end. `task.pending` reports pending descendants in

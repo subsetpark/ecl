@@ -603,7 +603,7 @@ test "e2e: tests retain file-private module visibility" {
     defer script.deinit();
     try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
     var loaded = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "\"bar.ecl\" load [] (baz.answer) @attempt `err at `kind at" },
+        .argv = &.{ exe, "-e", "\"bar.ecl\" @load! [] (baz.answer) @attempt `err at `kind at" },
         .cwd = .{ .dir = scratch.dir },
     });
     defer loaded.deinit();
@@ -1243,7 +1243,7 @@ test "e2e: optional module annotation acceptance" {
 }
 
 test "e2e: direct load and ECL_PATH acceptance" {
-    var direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load io.pp" });
+    var direct = try run(&.{ build_options.ecl_exe, "-e", "[41 1] \"test/acceptance/load-stack.ecl\" @load" });
     defer direct.deinit();
     try direct.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 

@@ -3,6 +3,7 @@ module ECL_UNITS.
 import ECL_ERRORS.
 
 context Units.
+context Nesting.
 
 > This model is normative for the lifecycle of a general ECL unit; its ordered
 > entry and body values; successful completion with an ordered result stack;
@@ -30,10 +31,12 @@ context Units.
 >
 > `Begin unit` receives the complete entry-stack list and exact quotation body
 > as separate ECL list values. It selects one never-before-created unit identity, records
-> those inputs unchanged, and makes that unit active. Submissions, `load`, and
-> isolated unit constructors differ in how they supply these inputs
+> those inputs unchanged, and makes that unit active. Submissions and unit
+> constructors differ in how they supply these inputs
 > and expose the eventual outcome; those policies do not change unit execution
-> semantics.
+> semantics. `Begin unit` starts a unit with no parent: a submission's or a
+> task's. Units that running code opens inside another, such as `@attempt`,
+> `@load`, and module construction, begin through `Begin nested unit`.
 Units ~> Begin unit @ entry: Value, body: Value, value-type entry = list-type, value-type body = list-type.
 ---
 > Beginning a unit selects one never-before-created identity, records its exact
@@ -73,6 +76,12 @@ Unit.
 {Units} unit-body unit: Unit => Value.
 {Units} unit-stack unit: Unit => Value.
 {Units} unit-error unit: Unit => Value.
+> Nesting is fixed when a unit begins. A unit without a parent is a
+> submission's or a task's; its failure is observed by the Session or through
+> `task.await`, never by another unit.
+{Nesting} unit-nested? unit: Unit => Bool.
+{Nesting} unit-parent unit: Unit => Unit.
+{Nesting} unit-reifying? unit: Unit => Bool.
 ---
 > An active unit is created and is neither successful nor failed.
 all candidate: Unit, unit-active? candidate |
@@ -108,6 +117,27 @@ all candidate: Unit, unit-created? candidate |
   value-type (unit-body candidate) = list-type and
   value-type (unit-stack candidate) = list-type.
 
+> Only a created unit is nested.
+all candidate: Unit, ~unit-created? candidate | ~unit-nested? candidate.
+
+> A nested unit's parent is another created unit.
+all candidate: Unit, unit-created? candidate, unit-nested? candidate |
+  unit-created? (unit-parent candidate) and
+  unit-parent candidate != candidate.
+
+> Units nest strictly: the parent of an active nested unit is active.
+all candidate: Unit, unit-active? candidate, unit-nested? candidate |
+  unit-active? (unit-parent candidate).
+
+> A parent succeeds only if every failure nested in it was reified and was
+> not a cancellation.
+all candidate: Unit, unit-nested? candidate, unit-failed? candidate, unit-succeeded? (unit-parent candidate) |
+  unit-reifying? candidate and
+  ~cancelled-error? (unit-error candidate).
+
+> Initially no unit is nested.
+initially all candidate: Unit | ~unit-nested? candidate.
+
 > Initially no unit identity has been created or entered a lifecycle phase.
 initially all candidate: Unit |
   ~unit-created? candidate and
@@ -121,7 +151,7 @@ where
 > evaluator, makes the active unit terminal, and retains that result as the
 > unit's terminal stack. The evaluator supplies the result; it is not chosen by
 > the ECL operation that launched the unit.
-Units ~> Complete unit successfully @ unit: Unit, result: Value, unit-created? unit, unit-active? unit, value-type result = list-type.
+Units ~> Complete unit successfully @ unit: Unit, result: Value, unit-created? unit, unit-active? unit, value-type result = list-type, (all child: Unit, unit-nested? child, unit-parent child = unit | ~unit-active? child and (~unit-failed? child or (unit-reifying? child and ~cancelled-error? (unit-error child)))).
 ---
 > Successful completion makes the unit terminal and exposes the evaluator's
 > complete result stack without changing its entry stack or body.
@@ -154,7 +184,7 @@ where
 > evaluator's partial stack is neither retained nor exposed. Every error kind
 > follows this same unit transition; causes and concrete error data are outside
 > the model.
-Units ~> Complete unit with failure @ unit: Unit, error: Value, unit-created? unit, unit-active? unit, error-value? error.
+Units ~> Complete unit with failure @ unit: Unit, error: Value, unit-created? unit, unit-active? unit, error-value? error, (all child: Unit, unit-nested? child, unit-parent child = unit | ~unit-active? child).
 ---
 > Failure makes the unit terminal, records the evaluator-supplied error, and
 > restores the complete entry stack. The partial evaluator stack is not
@@ -177,3 +207,41 @@ all other: Unit, other != unit |
   unit-body' other = unit-body other and
   unit-stack' other = unit-stack other and
   unit-error' other = unit-error other.
+
+where
+
+> `Begin nested unit` opens a unit inside an active parent unit. Units nest
+> strictly: a parent cannot become terminal while a unit nested in it is
+> active. A reifying nested unit, as `@attempt` opens, turns its failure into
+> data its parent continues with. Any other nested failure propagates, so its
+> parent cannot succeed. Cancellation is never reified: a nested unit failed
+> by a cancellation error prevents its parent's success whatever boundary
+> opened it, so cancellation fails every unit of the cancelled task or root
+> from the innermost out.
+Units, Nesting ~> Begin nested unit @ parent: Unit, entry: Value, body: Value, unit-created? parent, unit-active? parent, value-type entry = list-type, value-type body = list-type.
+---
+> Beginning a nested unit is beginning a unit that also records its parent.
+> Whether its boundary reifies failure is the opener's choice and stays fixed.
+some unit: Unit, ~unit-created? unit |
+  unit-created?' unit and
+  unit-active?' unit and
+  ~unit-succeeded?' unit and
+  ~unit-failed?' unit and
+  unit-entry' unit = entry and
+  unit-body' unit = body and
+  unit-stack' unit = entry and
+  unit-error' unit = unit-error unit and
+  unit-nested?' unit and
+  unit-parent' unit = parent and
+  (all other: Unit, other != unit |
+    unit-created?' other = unit-created? other and
+    unit-active?' other = unit-active? other and
+    unit-succeeded?' other = unit-succeeded? other and
+    unit-failed?' other = unit-failed? other and
+    unit-entry' other = unit-entry other and
+    unit-body' other = unit-body other and
+    unit-stack' other = unit-stack other and
+    unit-error' other = unit-error other and
+    unit-nested?' other = unit-nested? other and
+    unit-parent' other = unit-parent other and
+    unit-reifying?' other = unit-reifying? other).

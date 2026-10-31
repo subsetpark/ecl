@@ -1242,12 +1242,11 @@ measured cost justifies fusion.
 ## 8. Scheduling and structured concurrency
 
 A `Fiber` is a green execution context. Only a submission, the prelude, and a
-task body get one. `@attempt` and module construction run as boundary frames
-inside the fiber, so one fiber carries a stack of nested units; `load` opens no
-boundary, because its failure always reaches an enclosing unit that restores
-an older stack. A fiber's role is one tagged value: a root fiber may define,
-and a task fiber may not and records the constructor that built it. No fiber
-can be a defining task or a constructed root.
+task body get one. `@attempt`, `@load`, and module construction run as
+boundary frames inside the fiber, so one fiber carries a stack of nested units.
+A fiber's role is one tagged value: a root fiber may define, and a task fiber
+may not and records the constructor that built it. No fiber can be a defining
+task or a constructed root.
 The scheduler may run Fibers cooperatively on the calling thread or on a fixed
 worker pool; both modes use the same machine, queues, wait protocol, task tree,
 and retirement domain.
@@ -1329,8 +1328,9 @@ Scopes, fibers, and units are different granularities. A `TaskScope` exists
 in exactly two places: the session root, shared by every root fiber and closed
 only at exit, and each `TaskCell`. `@attempt` and module construction are
 boundary frames inside the fiber that runs them: a stack floor that failure
-truncates to, taking no checkpoint and owning nothing. Combinator applications
-and `load` open no scope and no boundary. A spawn
+truncates to, taking no checkpoint and owning nothing. `@load` opens the same
+kind of boundary over a source file once it is read. Combinator applications
+open no scope and no boundary. A spawn
 registers under the nearest enclosing scope, so a task started inside an
 `@attempt` outlives it. The constructor primitives refuse while a
 module-construction boundary is open anywhere in the frame stack, so an image

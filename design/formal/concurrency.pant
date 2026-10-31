@@ -22,9 +22,9 @@ context Mailboxes.
 >
 > Task scopes exist at exactly two places: the session root and each spawned
 > task. A spawn is owned by the task whose attached unit is executing it, or
-> by the session root when no task is executing. Other units, such as
-> `@attempt`, combinator applications, `load`, and module construction, are
-> stack transactions and never owners: a task spawned inside one belongs to
+> by the session root when no task is executing. Nested units, such as
+> `@attempt`, `@load`, and module construction, are stack transactions and
+> never owners: a task spawned inside one belongs to
 > the enclosing scope and is unaffected by that unit's success or failure.
 > The session root closes only at `exit` or session end, which this model
 > leaves outside its actions.
@@ -277,7 +277,7 @@ where
 > general unit success transition. The evaluator supplies the final stack.
 > The attached unit can become terminal only after its own task scope has
 > quiesced.
-Units, Concurrency, Mailboxes ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency, Mailboxes ~> Complete spawned task successfully @ task: Task, result: Value, task-created? task, unit-active? (task-unit task), value-type result = list-type, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)), (all nested: Unit, unit-nested? nested, unit-parent nested = task-unit task | ~unit-active? nested and (~unit-failed? nested or (unit-reifying? nested and ~cancelled-error? (unit-error nested)))).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -331,7 +331,7 @@ where
 > general unit failure transition. The evaluator supplies the error. The
 > attached unit restores its entry stack and becomes terminal after its own
 > task scope has quiesced.
-Units, Concurrency, Mailboxes ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+Units, Concurrency, Mailboxes ~> Complete spawned task with failure @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), error-value? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)), (all nested: Unit, unit-nested? nested, unit-parent nested = task-unit task | ~unit-active? nested).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).
@@ -416,8 +416,9 @@ where
 
 > `Cancel active task` is ordinary unit failure with a cancellation error. It
 > restores the unit's entry stack and becomes terminal only after the task's
-> own descendants are quiescent.
-Units, Concurrency, Mailboxes ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)).
+> own descendants are quiescent and every unit nested in its attached unit has
+> failed, which no nested boundary reifies.
+Units, Concurrency, Mailboxes ~> Cancel active task @ task: Task, error: Value, task-created? task, unit-active? (task-unit task), cancelled-error? error, (all child: Task, task-created? child, ~root-owned? child, task-owner child = task | unit-succeeded? (task-unit child) or unit-failed? (task-unit child)), (all nested: Unit, unit-nested? nested, unit-parent nested = task-unit task | ~unit-active? nested).
 ---
 unit-created?' (task-unit task).
 ~unit-active?' (task-unit task).

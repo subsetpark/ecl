@@ -1184,6 +1184,21 @@ test "oom: core: full-session surfaces propagate every allocation failure" {
     );
 }
 
+fn seededLoadAllocationProbe(allocator: std.mem.Allocator) !void {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    // The seed list waits on the caller's stack while the file is read, then
+    // moves above the new boundary: every allocation between must unwind.
+    try runOk(&runtime, "oom-load.ecl", "[41 1] \"test/acceptance/load-seeded.ecl\" @load");
+}
+
+test "oom: core: seeded @load propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkAllAllocationFailuresParallel(std.heap.smp_allocator, seededLoadAllocationProbe);
+}
+
 const admitted_construction_source = "[] () `oom-driver @defm";
 
 fn admittedConstructionAllocationCount() !usize {
