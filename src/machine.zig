@@ -2853,7 +2853,7 @@ pub const Unit = struct {
     /// Links words written into `scope`, a root, to its name slots. An image's
     /// cell carries its owner anchor, so a word that escapes the image proves
     /// the image live before reading its slot.
-    pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!value.SymbolLinker {
+    pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
         const owner: ?*env.ImageAnchor = if (scope.isModuleRoot())
             modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access)
         else

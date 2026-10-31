@@ -1,7 +1,7 @@
 //! Public reader facade over the single resumable implementation.
 const types = @import("reader_types.zig");
 const implementation = @import("reader_cursor.zig");
-const value = @import("value.zig");
+const env = @import("env.zig");
 
 pub const Value = types.Value;
 pub const Header = types.Header;
@@ -80,7 +80,7 @@ pub fn readCode(
     source: []const u8,
     diag: *Diag,
     provenance_namespace: @import("heap.zig").CodeProvenanceNamespace,
-    symbol_linker: value.SymbolLinker,
+    symbol_linker: ?env.SymbolLinker,
 ) Error!ReadResult {
     return implementation.readCode(host, source_name, source, diag, provenance_namespace, symbol_linker);
 }

@@ -126,23 +126,6 @@ pub fn isQuotedSlot(slot: u32) bool {
     return slot & quote_flag != 0;
 }
 
-/// How a producer of symbol occurrences links each one to its name's slot in
-/// the root it writes into. Carried by value through the reader so that
-/// neither the reader nor `value.zig` depends on the environment. The
-/// context is two opaque words the link function alone interprets.
-pub const SymbolLinker = struct {
-    context: [2]usize = .{ 0, 0 },
-    link_fn: ?*const fn (context: [2]usize, name: u32) error{OutOfMemory}!u32 = null,
-
-    /// Links nothing: every symbol it produces carries slot zero.
-    pub const unlinked: SymbolLinker = .{};
-
-    pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
-        const function = self.link_fn orelse return 0;
-        return function(self.context, name);
-    }
-};
-
 pub const Value = union(Tag) {
     int: i64,
     float: f64,

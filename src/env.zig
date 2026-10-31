@@ -1538,6 +1538,23 @@ pub const Liveness = union(enum) {
     non_image,
 };
 
+/// How a producer of symbol occurrences links each one to its name's slot in
+/// the root it writes into. A reader that links nothing carries none, and
+/// every symbol it produces carries slot zero.
+pub const SymbolLinker = struct {
+    environment: Env,
+    root: *ScopeCell,
+
+    pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
+        var handle = self.environment;
+        const target = if (self.root.core)
+            &handle.privateState().core
+        else
+            self.root.scope.load(.acquire).?.writableEnvironment();
+        return @backingInt(try handle.linkSlot(self.root, target, name));
+    }
+};
+
 /// What a module image's scope cell names to prove the image live: its
 /// reference anchor, which outlives the image. Opaque here so `env` never
 /// dereferences it and holds no dependency on `modules`.
@@ -2037,21 +2054,8 @@ pub const Env = enum(usize) {
     /// Links words to their names' slots in the root `root` names. The root
     /// must outlive every use of the linker: the reader or construction that
     /// holds it runs inside that root.
-    pub fn linker(self: *Env, root: *ScopeCell) value.SymbolLinker {
-        return .{
-            .context = .{ @backingInt(self.*), @intFromPtr(root) },
-            .link_fn = linkFromContext,
-        };
-    }
-
-    fn linkFromContext(context: [2]usize, name: u32) error{OutOfMemory}!u32 {
-        var handle: Env = @fromBackingInt(context[0]);
-        const root: *ScopeCell = @ptrFromInt(context[1]);
-        const environment = if (root.core)
-            &handle.privateState().core
-        else
-            root.scope.load(.acquire).?.writableEnvironment();
-        return @backingInt(try handle.linkSlot(root, environment, name));
+    pub fn linker(self: *Env, root: *ScopeCell) SymbolLinker {
+        return .{ .environment = self.*, .root = root };
     }
 
     /// The slot a word carries, or null for an unlinked word or one whose id
