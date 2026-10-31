@@ -706,7 +706,7 @@ ecl                              start a REPL on a terminal; otherwise read stdi
 ecl -e <SOURCE> [ARGS…]          evaluate source and print the final stack
 ecl <FILE> [ARGS…]               run a UTF-8 script
 ecl <SOURCE> [ARGS…]             evaluate source and print the final stack
-ecl - [ARGS…]                    read stdin as one unit
+ecl - [ARGS…]                    read stdin as one submission
 ecl fmt <FILE|->                 format source to stdout
 ecl fmt -w <FILE>                format and atomically rewrite a file
 ecl pkg <SUBCOMMAND>             manage the current project
@@ -754,9 +754,9 @@ modes. `io.stdin` remains as `fd.in io.read`. Standard output and error are
 
 ### REPL
 
-The REPL reads one unit per logical line and continues while a delimiter or
-string remains open. Ctrl-C discards the pending unit. Ctrl-D exits at an empty
-prompt and reports an incomplete pending unit as a parse error.
+The REPL reads one submission per logical line and continues while a delimiter
+or string remains open. Ctrl-C discards the pending submission. Ctrl-D exits at
+an empty prompt and reports an incomplete pending submission as a parse error.
 
 Completion includes visible words. History is stored in
 `$HOME/.ecl_history`, keeps the last 100 single-line valid-UTF-8 entries, and

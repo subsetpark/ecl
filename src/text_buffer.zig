@@ -1,6 +1,6 @@
 //! Byte storage whose single mutation always owns its input.
 //!
-//! The edit buffer and the pending unit both hand out a slice of the bytes
+//! The edit buffer and the pending submission both hand out a slice of the bytes
 //! they hold and both grow those bytes, so a caller can pass a borrow of the
 //! storage straight back into a mutation and have it freed mid-copy. That
 //! defect appeared independently in both, which is the signature of a missing

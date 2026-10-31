@@ -522,8 +522,8 @@ pub fn build(b: *std.Build) void {
         },
         .{
             .step_name = "fuzz-pending",
-            .test_name = "fuzz: pending unit accumulates lines and lexical state",
-            .description = "Fuzz pending-unit accumulation and incremental lexical state",
+            .test_name = "fuzz: pending submission accumulates lines and lexical state",
+            .description = "Fuzz pending-submission accumulation and incremental lexical state",
         },
         .{
             .step_name = "fuzz-scheduler",

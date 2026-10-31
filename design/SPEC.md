@@ -992,7 +992,7 @@ surviving execution state at the point of failure.
 
 ##### Action
 
-> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `task.await` later reifies the attached unit's terminal outcome through the same mapping. The two therefore agree on entry stack, result envelope, and failure mapping. They differ in ownership: `@spawn` creates a task, which owns the tasks spawned inside it, while `@attempt` is a stack transaction that owns nothing, so tasks spawned inside it belong to the enclosing task or the session root. Task lifetime, ownership, and waiting behavior are governed by the concurrency model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
+> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `task.await` later reifies the attached unit's terminal outcome through the same mapping. The two therefore agree on entry stack, result envelope, and failure mapping. They differ in ownership: `@spawn` creates a task, which owns the tasks spawned inside it, while `@attempt` is a stack transaction that owns nothing, so tasks spawned inside it belong to the enclosing task or the session root. Task lifetime, ownership, and waiting behavior are governed by the concurrency model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Submissions, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
 
 **`Units`** ↝ Begin unit *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
@@ -1121,15 +1121,19 @@ before unit failure survive. A unit boundary may additionally cancel child
 tasks as specified by the concurrency semantics. A unit is not a transaction
 over the whole execution state.
 
-#### Unit delimiters
+#### Where units begin
 
-Units are delimited by the reader or by semantic unit constructors:
+A *submission* is the source text a host hands the session at once. The reader
+delimits it, and each submission runs as one unit:
 
-- **REPL**: one logical line is one unit. The reader continues the line
-  (continuation prompt) while a delimiter or string is open, so a unit is
-  the complete forms of one possibly-continued line.
-- **Script file, `-e`, stdin**: the whole source is a single unit. A
+- **REPL**: one logical line is one submission. The reader continues the line
+  (continuation prompt) while a delimiter or string is open, so a submission
+  is the complete forms of one possibly-continued line.
+- **Script file, `-e`, stdin**: the whole source is a single submission. A
   failing script dies whole — error dict to stderr, nonzero exit.
+
+Running code begins further units through semantic unit constructors:
+
 - **`load`**: the loaded file is one unit inside the calling session and
   fails atomically.
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an

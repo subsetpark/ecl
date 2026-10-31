@@ -501,15 +501,19 @@ before unit failure survive. A unit boundary may additionally cancel child
 tasks as specified by the concurrency semantics. A unit is not a transaction
 over the whole execution state.
 
-#### Unit delimiters
+#### Where units begin
 
-Units are delimited by the reader or by semantic unit constructors:
+A *submission* is the source text a host hands the session at once. The reader
+delimits it, and each submission runs as one unit:
 
-- **REPL**: one logical line is one unit. The reader continues the line
-  (continuation prompt) while a delimiter or string is open, so a unit is
-  the complete forms of one possibly-continued line.
-- **Script file, `-e`, stdin**: the whole source is a single unit. A
+- **REPL**: one logical line is one submission. The reader continues the line
+  (continuation prompt) while a delimiter or string is open, so a submission
+  is the complete forms of one possibly-continued line.
+- **Script file, `-e`, stdin**: the whole source is a single submission. A
   failing script dies whole — error dict to stderr, nonzero exit.
+
+Running code begins further units through semantic unit constructors:
+
 - **`load`**: the loaded file is one unit inside the calling session and
   fails atomically.
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an

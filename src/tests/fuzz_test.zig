@@ -615,12 +615,12 @@ test "fuzz: editor action traces preserve scalar boundaries and ownership" {
     } });
 }
 
-/// A pending unit must accumulate exactly the lines appended to it, keep its
-/// lexical state describing those bytes, and survive a caller appending a line
-/// borrowed from the unit's own source.
-fn fuzzPendingUnit(_: void, smith: *std.testing.Smith) !void {
-    var unit = try reader.PendingUnit.init(std.testing.allocator);
-    defer unit.deinit();
+/// A pending submission must accumulate exactly the lines appended to it, keep
+/// its lexical state describing those bytes, and survive a caller appending a
+/// line borrowed from the submission's own source.
+fn fuzzPendingSubmission(_: void, smith: *std.testing.Smith) !void {
+    var pending = try reader.PendingSubmission.init(std.testing.allocator);
+    defer pending.deinit();
     var expected: std.ArrayList(u8) = .empty;
     defer expected.deinit(std.testing.allocator);
     var joined: std.ArrayList(u8) = .empty;
@@ -633,43 +633,43 @@ fn fuzzPendingUnit(_: void, smith: *std.testing.Smith) !void {
             0 => {
                 var storage: [512]u8 = undefined;
                 const line = storage[0..smith.slice(&storage)];
-                try appendBoth(unit, &expected, &joined, &lines, line);
+                try appendBoth(pending, &expected, &joined, &lines, line);
             },
             1 => {
-                // A line borrowed from the unit's own storage. Growing the
-                // unit can move that storage, so the append has to own its
-                // input before it grows.
-                const borrowed = unit.source();
-                try appendBoth(unit, &expected, &joined, &lines, borrowed);
+                // A line borrowed from the submission's own storage. Growing
+                // the submission can move that storage, so the append has to
+                // own its input before it grows.
+                const borrowed = pending.source();
+                try appendBoth(pending, &expected, &joined, &lines, borrowed);
             },
             2 => {
-                unit.clear();
+                pending.clear();
                 expected.clearRetainingCapacity();
                 joined.clearRetainingCapacity();
                 lines = 0;
             },
             else => {},
         }
-        try std.testing.expectEqualSlices(u8, expected.items, unit.source());
-        try std.testing.expectEqual(expected.items.len == 0, unit.isEmpty());
+        try std.testing.expectEqualSlices(u8, expected.items, pending.source());
+        try std.testing.expectEqual(expected.items.len == 0, pending.isEmpty());
 
         // Scanning the same source in one pass must reach the same state as
         // scanning it a line at a time, which is the whole claim the
         // incremental checkpoint makes.
-        var single = try reader.PendingUnit.init(std.testing.allocator);
+        var single = try reader.PendingSubmission.init(std.testing.allocator);
         defer single.deinit();
         if (lines != 0) try single.appendLine(joined.items);
         try std.testing.expectEqualSlices(u8, expected.items, single.source());
         var probe: [64]u8 = undefined;
         const prefix = probe[0..smith.slice(&probe)];
-        try std.testing.expectEqual(unit.contextAfter(prefix), single.contextAfter(prefix));
+        try std.testing.expectEqual(pending.contextAfter(prefix), single.contextAfter(prefix));
         // Asking observes without mutating.
-        try std.testing.expectEqualSlices(u8, expected.items, unit.source());
+        try std.testing.expectEqualSlices(u8, expected.items, pending.source());
     }
 }
 
 fn appendBoth(
-    unit: reader.PendingUnit,
+    pending: reader.PendingSubmission,
     expected: *std.ArrayList(u8),
     joined: *std.ArrayList(u8),
     lines: *usize,
@@ -677,7 +677,7 @@ fn appendBoth(
 ) !void {
     const owned = try std.testing.allocator.dupe(u8, line);
     defer std.testing.allocator.free(owned);
-    try unit.appendLine(line);
+    try pending.appendLine(line);
     if (lines.* != 0) try joined.append(std.testing.allocator, '\n');
     lines.* += 1;
     try joined.appendSlice(std.testing.allocator, owned);
@@ -685,8 +685,8 @@ fn appendBoth(
     try expected.append(std.testing.allocator, '\n');
 }
 
-test "fuzz: pending unit accumulates lines and lexical state" {
-    try std.testing.fuzz({}, fuzzPendingUnit, .{ .corpus = &.{
+test "fuzz: pending submission accumulates lines and lexical state" {
+    try std.testing.fuzz({}, fuzzPendingSubmission, .{ .corpus = &.{
         "",
         "1 2 +",
         "\"unterminated",

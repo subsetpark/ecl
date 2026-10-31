@@ -18,11 +18,11 @@ pub const ReadCursor = implementation.ReadCursor;
 pub const ReadProgress = implementation.ReadProgress;
 pub const LexicalContext = implementation.LexicalContext;
 
-/// Accumulated source for a partly typed unit, and the only way to ask where
+/// Accumulated source for a partly typed submission, and the only way to ask where
 /// a cursor sits inside one. Callers that need to know whether they are in a
 /// string, a character literal, or a comment ask the tokenizer that decides
 /// it, rather than re-deriving the answer from a second scanner.
-pub const PendingUnit = implementation.PendingUnit;
+pub const PendingSubmission = implementation.PendingSubmission;
 
 /// The module constructors whose operands end in a literal name.
 pub fn isRegistrationWord(bytes: []const u8) bool {

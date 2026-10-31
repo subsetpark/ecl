@@ -401,16 +401,16 @@ pub const Editor = struct {
     pub fn takeHistoryWarning(self: *Editor) ?[]const u8 {
         return self.history.takeWarning();
     }
-    /// `pending` is the reader's own lexical state at the end of the unit so
-    /// far. The editor is handed the conclusion rather than the bytes: it
-    /// cannot re-derive lexical state, and asking a question about the unit
-    /// costs the current line rather than everything typed before it.
+    /// `pending` is the reader's own lexical state at the end of the
+    /// submission so far. The editor is handed the conclusion rather than the
+    /// bytes: it cannot re-derive lexical state, and asking a question about
+    /// the submission costs the current line rather than everything typed before it.
     pub fn readLine(
         self: *Editor,
         terminal: session.EditorTerminal,
         completion: session.CompletionObserve,
         prompt: console.Prompt,
-        pending: reader.PendingUnit,
+        pending: reader.PendingSubmission,
     ) ReadError!ReadResult {
         // Single-row editing needs a measured row and a terminal that can be
         // put into raw mode. Without either, the canonical reader is the
@@ -463,7 +463,7 @@ pub const Editor = struct {
         terminal: session.EditorTerminal,
         completion: session.CompletionObserve,
         prompt: console.Prompt,
-        pending: reader.PendingUnit,
+        pending: reader.PendingSubmission,
     ) ReadError!ReadResult {
         var buffer = try EditBuffer.init(self.allocator);
         defer buffer.deinit();
@@ -604,7 +604,7 @@ pub const Editor = struct {
         completion: session.CompletionObserve,
         prompt: console.Prompt,
         buffer: EditBuffer,
-        pending: reader.PendingUnit,
+        pending: reader.PendingSubmission,
         repeated: bool,
     ) ReadError!void {
         const prefix = completionPrefix(buffer, pending) orelse return;
@@ -636,9 +636,9 @@ pub const Editor = struct {
     }
     /// The partial name the cursor is sitting on, or null when nothing may be
     /// completed there. The reader's own tokenizer answers, resuming from the
-    /// unit's checkpoint over only the current line, so completion neither
+    /// submission's checkpoint over only the current line, so completion neither
     /// re-derives lexical state nor rescans everything typed before it.
-    fn completionPrefix(buffer: EditBuffer, pending: reader.PendingUnit) ?[]const u8 {
+    fn completionPrefix(buffer: EditBuffer, pending: reader.PendingSubmission) ?[]const u8 {
         const cursor = buffer.cursorIndex();
         const start = switch (pending.contextAfter(buffer.bytes()[0..cursor])) {
             .inert, .boundary => return null,

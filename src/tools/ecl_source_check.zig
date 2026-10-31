@@ -146,7 +146,7 @@ fn terminalWord(
     }) {
         .complete => |complete| complete,
         .incomplete => {
-            std.log.err("standard modules: {s}/{s} is an incomplete unit", .{ root, path });
+            std.log.err("standard modules: {s}/{s} is incomplete source", .{ root, path });
             return null;
         },
     };

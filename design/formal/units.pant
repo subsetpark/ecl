@@ -30,8 +30,8 @@ context Units.
 >
 > `Begin unit` receives the complete entry-stack list and exact quotation body
 > as separate ECL list values. It selects one never-before-created unit identity, records
-> those inputs unchanged, and makes that unit active. Reader-delimited units,
-> `load`, and isolated unit constructors differ in how they supply these inputs
+> those inputs unchanged, and makes that unit active. Submissions, `load`, and
+> isolated unit constructors differ in how they supply these inputs
 > and expose the eventual outcome; those policies do not change unit execution
 > semantics.
 Units ~> Begin unit @ entry: Value, body: Value, value-type entry = list-type, value-type body = list-type.

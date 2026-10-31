@@ -692,7 +692,7 @@ Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a lis
 ```
 
 ### see
-`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of their source unit, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
+`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything).

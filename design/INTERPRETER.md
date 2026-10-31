@@ -19,8 +19,8 @@ concurrency, cancellation, and live module reload.
 
 ## The system at a glance
 
-A host creates a `Session`, then submits source a unit at a time. The path
-through the implementation is:
+A host creates a `Session`, then hands it source one submission at a time: a
+REPL logical line, or a whole script. The path through the implementation is:
 
 ```text
 source bytes
@@ -121,7 +121,7 @@ advance bounded reclamation and cannot drain or destroy the root.
 
 ### Units are transactions on the persistent stack
 
-`Session.runUnit` evaluates one source unit. The Session checkpoints its
+`Session.runUnit` evaluates one submission. The Session checkpoints its
 operand stack, moves that stack into a root `Unit`, and gives the Unit a root
 scope plus inherited service capabilities. On success, the Unit's resulting
 stack becomes the Session's next persistent stack. A parse error, language
@@ -298,9 +298,9 @@ list of those values is already executable code.
 ### Lexing and reading are resumable
 
 `lexer.zig` owns UTF-8 cursor movement, spans, token classification, and lexical
-diagnostics. `reader_cursor.zig` validates UTF-8, tokenizes the unit, recognizes
-delimited lists and dictionaries, interns symbols and words, and materializes
-the resulting values. Every stage is an explicit cursor. A heap work stack
+diagnostics. `reader_cursor.zig` validates UTF-8, tokenizes the submission,
+recognizes delimited lists and dictionaries, interns symbols and words, and
+materializes the resulting values. Every stage is an explicit cursor. A heap work stack
 carries nested source independently of the Zig call stack, and a scheduler
 caller may advance the reader a bounded amount at a time.
 
@@ -319,13 +319,13 @@ literals and string-to-number conversions share this classification boundary.
 The reader distinguishes three outcomes:
 
 - a complete root quotation;
-- an incomplete unit, used by the REPL to request more physical lines; or
+- an incomplete submission, used by the REPL to request more physical lines; or
 - a parse diagnostic.
 
-Lexical state belongs to the reader. `PendingUnit` carries accumulated bytes
-and the tokenizer state derived from exactly those bytes. The line editor asks
-that state whether a unit is complete and stays independent of quote, string,
-character, and comment recognition.
+Lexical state belongs to the reader. `PendingSubmission` carries accumulated
+bytes and the tokenizer state derived from exactly those bytes. The line editor
+asks that state whether a submission is complete and stays independent of
+quote, string, character, and comment recognition.
 
 ### Words resolve when they run
 
@@ -2505,9 +2505,9 @@ completeness; the Session owns name observation; and the console owns terminal
 effects. Opaque capabilities join those layers without exposing the Session or
 pairing unrelated bytes and offsets.
 
-The REPL accumulates physical lines into one `PendingUnit`, calls the same
+The REPL accumulates physical lines into one `PendingSubmission`, calls the same
 `Session.runUnit` used by scripts, and prints the same display rendering a host
-could request. Ctrl-C discards the pending unit while preserving the Session;
+could request. Ctrl-C discards the pending submission while preserving the Session;
 stack values, definitions, modules, and history survive into the next
 successful turn.
 
