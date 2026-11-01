@@ -1151,6 +1151,17 @@ const Program = union(enum) {
     /// A sealed executable. Its code is borrowed from the executable, which
     /// the evaluation keeps alive by holding the executable's owner.
     bound: *const env.Executable,
+    /// A sealed executable the enclosing application frame owns for its
+    /// whole invocation. The frame sits beneath this evaluation and outlives
+    /// it, so the evaluation borrows the executable and its code.
+    borrowed: *const env.Executable,
+
+    fn executable(self: Program) ?*const env.Executable {
+        return switch (self) {
+            .bound, .borrowed => |sealed| sealed,
+            .incremental, .unbound => null,
+        };
+    }
 };
 
 const Eval = struct {
@@ -1195,10 +1206,11 @@ const Eval = struct {
     application_selection: ?ApplicationFrameIndex = null,
 
     /// Releases what this evaluation owns.
-    fn release(self: Eval, releases: *heap.ReleaseDomain) void {
+    inline fn release(self: Eval, releases: *heap.ReleaseDomain) void {
         switch (self.program) {
             .incremental, .unbound => releases.releaseHeader(self.code),
             .bound => |executable| executable.owner.release(releases),
+            .borrowed => {},
         }
     }
 
@@ -1207,6 +1219,7 @@ const Eval = struct {
         switch (self.program) {
             .incremental, .unbound => heap.incRef(self.code),
             .bound => |executable| executable.owner.retain(),
+            .borrowed => {},
         }
     }
 
@@ -1218,6 +1231,10 @@ const Eval = struct {
             .bound => |executable| {
                 heap.incRef(self.code);
                 executable.owner.release(releases);
+                return self.code;
+            },
+            .borrowed => {
+                heap.incRef(self.code);
                 return self.code;
             },
         }
@@ -1567,6 +1584,53 @@ const ApplicationReuse = struct {
     fn deinit(self: *ApplicationReuse, releases: *heap.ReleaseDomain) void {
         for (&self.slots) |*slot| if (slot.*) |held| {
             held.release(releases);
+            slot.* = null;
+        };
+    }
+};
+
+/// The unit's bounded cache of explicit lookups: what a symbol resolved to,
+/// valid only in the publication and under the provenance it was resolved in.
+/// An entry holds a counted definition; static ones outlive the Session's
+/// units. Consulted only by explicit lookup, never by bound dispatch.
+const LookupReuse = struct {
+    const capacity = 16;
+    const Entry = struct {
+        word: value.Symbol,
+        publication: u64,
+        provenance: u64,
+        definition: *env.Definition,
+    };
+    entries: [capacity]?Entry = @splat(null),
+
+    fn index(word: value.Symbol) usize {
+        return @intCast((@as(u64, word.name) *% 0x9E3779B97F4A7C15 ^ word.slot) % capacity);
+    }
+
+    fn find(self: *const LookupReuse, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance) ?*env.Definition {
+        const entry = self.entries[index(word)] orelse return null;
+        if (entry.word.name != word.name or entry.word.slot != word.slot or entry.publication != publication or
+            entry.provenance != BindingReuse.provenanceKey(provenance)) return null;
+        return entry.definition;
+    }
+
+    fn remember(
+        self: *LookupReuse,
+        releases: *heap.ReleaseDomain,
+        word: value.Symbol,
+        publication: u64,
+        provenance: modules.RegistrationProvenance,
+        definition: *env.Definition,
+    ) void {
+        const slot = &self.entries[index(word)];
+        if (slot.*) |old| if (old.definition.lifetime == .counted) old.definition.release(releases);
+        if (definition.lifetime == .counted) definition.retain();
+        slot.* = .{ .word = word, .publication = publication, .provenance = BindingReuse.provenanceKey(provenance), .definition = definition };
+    }
+
+    fn deinit(self: *LookupReuse, releases: *heap.ReleaseDomain) void {
+        for (&self.entries) |*slot| if (slot.*) |entry| {
+            if (entry.definition.lifetime == .counted) entry.definition.release(releases);
             slot.* = null;
         };
     }
@@ -2500,6 +2564,8 @@ pub const Unit = struct {
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
     /// Anonymous bindings this unit may reuse at an application boundary.
     reuse: BindingReuse = .{},
+    /// Explicit lookups this unit may reuse.
+    lookups: LookupReuse = .{},
     max_frames: usize = 0,
     entry_base: usize,
     stack_base: usize,
@@ -2929,6 +2995,7 @@ pub const Unit = struct {
 
     pub fn deinit(self: *Unit) void {
         self.reuse.deinit(self.releases);
+        self.lookups.deinit(self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
@@ -5603,8 +5670,7 @@ pub const Unit = struct {
         // An executable this invocation already bound for the quotation is
         // reused; otherwise the application binds when it first runs.
         const program: Program = if (application.bound.find(application.quotation)) |code| reused: {
-            code.retain();
-            break :reused .{ .bound = &code.executable };
+            break :reused .{ .borrowed = &code.executable };
         } else unbound: {
             heap.incRef(application.quotation);
             break :unbound .unbound;
@@ -5823,6 +5889,10 @@ pub const Unit = struct {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
+        if (self.inherited.phase != .bootstrap) {
+            if (self.lookups.find(word, modules.currentPublication(), self.current.?.site.registration_provenance)) |definition|
+                return invokeDefinition(self, definition, word.name);
+        }
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
         try self.startDriver(LookupDispatchDriver{
             .word = word,
@@ -5838,6 +5908,11 @@ pub const Unit = struct {
     fn bindCurrent(self: *Unit) MachineError!void {
         const current = &self.current.?;
         std.debug.assert(current.program == .unbound);
+        if (self.applicationExecutable(current.code)) |executable| {
+            self.releases.releaseHeader(current.code);
+            current.program = .{ .borrowed = executable };
+            return;
+        }
         if (self.reusableExecutable(current.code)) |code| {
             self.releases.releaseHeader(current.code);
             current.program = .{ .bound = &code.executable };
@@ -5857,17 +5932,18 @@ pub const Unit = struct {
     /// A retained executable for `code`, from the running application's own
     /// bindings or the unit's reuse cache.
     fn reusableExecutable(self: *Unit, code: *Header) ?*env.AnonymousCode {
-        if (self.current.?.application_tail) |index| {
-            switch (self.frames.items[@backingInt(index)]) {
-                .application => |*application| if (application.bound.find(code)) |found| {
-                    found.retain();
-                    return found;
-                },
-                else => {},
-            }
-        }
         if (self.inherited.phase == .bootstrap) return null;
         return self.reuse.find(code, modules.currentPublication(), self.current.?.site.registration_provenance);
+    }
+
+    /// An executable the running application already bound for `code`,
+    /// borrowed from its frame, which lives beneath the evaluation.
+    fn applicationExecutable(self: *Unit, code: *Header) ?*const env.Executable {
+        const index = self.current.?.application_tail orelse return null;
+        return switch (self.frames.items[@backingInt(index)]) {
+            .application => |*application| if (application.bound.find(code)) |found| &found.executable else null,
+            else => null,
+        };
     }
 
     /// Records a fresh binding where later applications of the same
@@ -6500,8 +6576,8 @@ fn loop(self: *Unit) MachineError!RunStatus {
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
         // A bound word follows its fixed target; everything else is a form.
-        const dispatched = if (current.program == .bound) bound: {
-            if (current.program.bound.target(index)) |target| {
+        const dispatched = if (current.program.executable()) |executable| bound: {
+            if (executable.target(index)) |target| {
                 const name = heap.valuesConst(current.code)[index].symbol.name;
                 break :bound invokeDefinition(self, target, name);
             }
@@ -6648,7 +6724,7 @@ fn formAt(code: *Header, index: u32) Value {
 fn poll(self: *Unit) MachineError!void {
     self.fuel -= 1;
 }
-fn dispatch(self: *Unit, form: Value) MachineError!void {
+inline fn dispatch(self: *Unit, form: Value) MachineError!void {
     const word = switch (form) {
         .symbol => |reference| reference,
         .int, .float, .char, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
@@ -6701,6 +6777,13 @@ const LookupDispatchDriver = struct {
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
                         defer if (counted) definition.release(evaluator.releases);
+                        if (evaluator.inherited.phase != .bootstrap) evaluator.lookups.remember(
+                            evaluator.releases,
+                            word,
+                            self.context.borrow().view.publication,
+                            self.context.borrow().provenance,
+                            definition,
+                        );
                         evaluator.retireDriver(self);
                         try invokeDefinition(evaluator, definition, word.name);
                         return .detached;
@@ -7045,6 +7128,12 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 /// word's: its effects are reflective metadata, and its arity failures are
 /// those of the code it runs.
 fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) MachineError!void {
+    // A homeless builtin has no effect boundary and no recognition: the
+    // common case, run directly.
+    if (definition.home == null) switch (definition.body) {
+        .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
+        else => {},
+    };
     const home = modules.definitionHome(definition);
     const trace_word = definitionTraceWord(definition, home, name);
     self.active_word = trace_word;
