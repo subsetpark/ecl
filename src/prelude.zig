@@ -56,7 +56,7 @@ pub fn installSource(
         source_name,
         source,
         &diag,
-        environment.linker(environment.coreCell()),
+        environment.linker(environment.coreScopeId()),
     );
     defer {
         while (!ingestion.advanceRetirement())
@@ -110,5 +110,5 @@ pub fn installSource(
         },
     };
     if (unit.stack.items.len != 0) return error.InvalidPrelude;
-    try building.finish();
+    try building.finish(machine.recognizeCore);
 }

@@ -253,13 +253,13 @@ test "combinators: definitions inside an application are refused" {
     try support.expectErrors(&.{
         .{
             .name = "each scope",
-            .source = "[1 2 3] (dup `k set k *) each",
+            .source = "[1 2 3] (dup `k set) each",
             .kind = "domain",
             .word = "def",
         },
         .{
             .name = "zip-with scope",
-            .source = "[1] [2] (pop dup `k set k pop) zip-with",
+            .source = "[1] [2] (pop dup `k set) zip-with",
             .kind = "domain",
             .word = "def",
         },
@@ -1144,7 +1144,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
-        "[1 2] (dup 1 = ([] ((a -- b) (pop 42) `f def) `m @defm) () if m.f) each",
+        "[1 2] (dup 1 = ([] ((a -- b) (pop 42) `f def) `m @defm) () if `m.f execute) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());
@@ -1178,32 +1178,20 @@ fn expectFreshStack(source: []const u8, expected: []const u8) !void {
     try expectStack(&runtime, source, expected);
 }
 
-// A unit observes the bindings that existed when it was created, plus its own
-// definitions. Each task below waits before reading the word, so it would see
-// the parent's later definition if lookup crossed units; under the rule its
-// result does not depend on scheduling.
-test "bindings: a task keeps the bindings that existed when it was spawned" {
-    try expectFreshStack("(1) `f def [] (20 clock.sleep f) @spawn (2) `f def task.await", "{ok [1]}");
-    // Through a caller: the task's `f` still reaches the `g` of its creation.
-    try expectFreshStack("(1) `g def (g) `f def [] (20 clock.sleep f) @spawn (2) `g def task.await", "{ok [1]}");
-    // Shadowing a core word after the spawn does not reach the task.
-    try expectFreshStack("[] (20 clock.sleep 1 2 +) @spawn (pop pop 42) `+ def task.await", "{ok [3]}");
-    // Several replacements after the spawn: only the first binding is kept
-    // for the task.
-    try expectFreshStack("(1) `f def [] (20 clock.sleep f) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [1]}");
-    // A name first defined after the spawn is undefined in the task.
-    try expectFreshStack("[] (20 clock.sleep g) @spawn (5) `g def task.await `err at `kind at", "undefined-word");
-    // Two tasks pinned together: the later one ends first, and the earlier
-    // one still observes the binding they shared.
-    try expectFreshStack(
-        "(1) `f def [] (40 clock.sleep f) @spawn [] (20 clock.sleep f) @spawn (2) `f def task.await swap task.await",
-        "{ok [1]} {ok [1]}",
-    );
-    // Pinned apart: each keeps its own binding, whichever ends first.
-    try expectFreshStack(
-        "(1) `f def [] (40 clock.sleep f) @spawn (2) `f def [] (20 clock.sleep f) @spawn (3) `f def task.await swap task.await",
-        "{ok [2]} {ok [1]}",
-    );
+// A task inherits no historical view: its body binds when it first runs,
+// against the definitions current then. What a definition already bound stays
+// fixed, so a task running a word reaches the targets that word was bound to
+// however the parent redefines its names afterwards.
+test "bindings: a task running bound code keeps that code's targets" {
+    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def task.await", "{ok [1]}");
+    // Through a caller: `body` still reaches the `g` it was bound to.
+    try expectFreshStack("(1) `g def (g) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `g def task.await", "{ok [1]}");
+    // Shadowing a core word after the spawn does not reach bound code.
+    try expectFreshStack("(20 clock.sleep 1 2 +) `work def [] (work) @spawn (pop pop 42) `+ def task.await", "{ok [3]}");
+    // Several replacements after the spawn change nothing either.
+    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [1]}");
+    // A task body naming an undefined word fails before running anything.
+    try expectFreshStack("[] (missing-word) @spawn task.await `err at `kind at", "undefined-word");
 }
 
 test "bindings: a task spawned after a definition observes it" {

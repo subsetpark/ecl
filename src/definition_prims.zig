@@ -14,6 +14,7 @@ const formatter = @import("formatter.zig");
 const doc_text = @import("doc.zig");
 const reader_types = @import("reader_types.zig");
 const modules = @import("modules.zig");
+const binder = @import("binder.zig");
 const Value = value.Value;
 const Unit = machine.Unit;
 const MachineError = machine.MachineError;
@@ -57,7 +58,7 @@ fn define(evaluator: *Unit, mode: Mode) MachineError!void {
     try evaluator.require(2);
     const private = mode == .defp;
     const scope = try evaluator.definitionScope();
-    if (private and scope.publisher() != .module)
+    if (private and scope.storage != .module_root)
         return evaluator.fail(.domain, "defp/setp are legal only in a module root");
     const name = try evaluator.popSymbol();
     var item = try evaluator.popValue();
@@ -91,6 +92,9 @@ const DefineDriver = struct {
     scope: *env.Scope,
     name: u32,
     item: heap.Owned(Value),
+    /// The annotation this definition consumed, kept so a definition whose
+    /// body needs a module loaded can restore its operands and run again.
+    annotation_value: ?heap.Owned(Value) = null,
     separator: u32,
     colon: u32,
     annotation: heap.Owned(Annotation),
@@ -134,11 +138,18 @@ const DefineDriver = struct {
             binding_name: intern.BindingName,
             source: ?heap.Owned(reader_types.SourceSlice),
         },
-        publishing: struct {
-            source: ?heap.Owned(reader_types.SourceSlice),
-            publisher: heap.Owned(env.Environment.BindCursor),
+        /// The reserved definition's body binding against the current view,
+        /// with the definition itself standing for a call of its own name.
+        binding: struct {
+            binding_name: intern.BindingName,
+            definition: *env.Definition,
+            context: heap.Owned(binder.Context),
+            cursor: heap.Owned(binder.BindingCursor),
         },
+        publishing_session: heap.Owned(modules.Registry.DefineCursor),
         publishing_test: modules.TestDeclarationCursor,
+        /// Ownership has passed to the directory.
+        published,
 
         pub fn deinit(
             self: *State,
@@ -161,14 +172,53 @@ const DefineDriver = struct {
                 .prepare_publish => |*publication| {
                     if (publication.source) |*source| source.deinit(releases, allocator);
                 },
-                .publishing => |*publication| {
-                    publication.publisher.deinit(releases, allocator);
-                    if (publication.source) |*source| source.deinit(releases, allocator);
+                .binding => |*binding| {
+                    binding.cursor.deinit(releases, allocator);
+                    binding.context.deinit(releases, allocator);
+                    switch (binding.definition.lifetime) {
+                        .counted => binding.definition.release(releases),
+                        .static => binding.definition.retireStatic(releases),
+                    }
                 },
-                .validate_name, .source, .publishing_test => {},
+                .publishing_session => |*cursor| cursor.deinit(releases, allocator),
+                .validate_name, .source, .publishing_test, .published => {},
             }
         }
     };
+
+    /// A word in the body did not bind. A definition never forward-references:
+    /// a miss fails at that word. A qualified word whose module may load
+    /// restores the definition's operands, rewinds to it, and runs it again
+    /// once the module is registered.
+    fn bindingMiss(
+        self: *DefineDriver,
+        evaluator: *Unit,
+        code: *value.ListHandle,
+        index: u32,
+        word: value.Symbol,
+        miss: binder.Miss,
+    ) MachineError!machine.WorkProgress {
+        switch (miss) {
+            .unknown_module_prefix, .unregistered_module => {
+                var operands: [3]Value = undefined;
+                var count: usize = 0;
+                if (self.annotation_value) |*annotation| {
+                    operands[count] = annotation.take();
+                    count += 1;
+                }
+                operands[count] = self.item.take();
+                operands[count + 1] = .{ .symbol = .{ .name = self.name } };
+                count += 2;
+                evaluator.retireDriver(self);
+                return evaluator.retryWithOperandsAfterLoad(operands[0..count], word, miss);
+            },
+            .unresolved, .retired, .alias_cycle => {
+                const failure = evaluator.failUnbound(word, miss);
+                evaluator.setFailureSite(code, index);
+                return failure;
+            },
+        }
+    }
 
     fn malformed(evaluator: *Unit) MachineError {
         return evaluator.fail(.domain, "malformed definition annotation");
@@ -201,6 +251,8 @@ const DefineDriver = struct {
                         break :document value_at;
                     } else null;
                     evaluator.discard(1);
+                    heap.retainValue(scan.candidate.borrow());
+                    self.annotation_value = .init(scan.candidate.borrow());
                     const source = scan.candidate.take();
                     self.state.borrowMut().* = .{ .validate_annotation = .{
                         .context = .{
@@ -372,33 +424,115 @@ const DefineDriver = struct {
                 }
                 const private = self.mode == .defp;
                 const visibility: env.Visibility = if (private) .private else .public;
-                const publisher = try self.scope.publishWordCursor(publication.binding_name, .{
-                    .body = env.quotation(self.item.borrow().list) orelse
-                        return evaluator.fail(.domain, "definition body has an invalid heap representation"),
-                    .source = if (publication.source) |*source| source.borrow() else null,
-                    .visibility = visibility,
-                    .effect = self.annotation.borrow().effect,
-                    .doc = self.annotation.borrow().doc_value,
-                });
-                const source: ?heap.Owned(reader_types.SourceSlice) =
-                    if (publication.source) |*owned| .init(owned.take()) else null;
-                self.state.borrowMut().* = .{ .publishing = .{
-                    .source = source,
-                    .publisher = .init(publisher),
+                const body = env.quotation(self.item.borrow().list) orelse
+                    return evaluator.fail(.domain, "definition body has an invalid heap representation");
+                var owned_source: ?reader_types.SourceSlice = if (publication.source) |*owned| owned.take() else null;
+                defer if (owned_source) |*owned| owned.deinit();
+                const source = owned_source;
+                switch (self.scope.storage) {
+                    // A module stages its definitions; the group binds when the
+                    // module is sealed.
+                    .module_root => {
+                        const image = evaluator.stagingImage(self.scope) orelse return evaluator.fail(
+                            .domain,
+                            "module definitions are legal only while the module is under construction",
+                        );
+                        try image.stageDefinition(publication.binding_name, .{ .word = .{
+                            .body = body,
+                            .source = source,
+                            .visibility = visibility,
+                            .effect = self.annotation.borrow().effect,
+                            .doc = self.annotation.borrow().doc_value,
+                        } });
+                        return .completed;
+                    },
+                    .session, .core_build => {},
+                }
+                const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
+                const definition = try env.Definition.create(
+                    evaluator.allocator,
+                    if (root == .session) .counted else .static,
+                    .{ .reserved = env.quotationHeader(body) },
+                    .{
+                        .effect = self.annotation.borrow().effect,
+                        .doc = self.annotation.borrow().doc_value,
+                        .source = source,
+                        .root = root,
+                    },
+                );
+                var context = evaluator.resolutionContext(evaluator.inherited.registry.view());
+                context.self_reference = .{
+                    .root = if (root == .session) evaluator.environment.sessionScopeId() else evaluator.environment.coreScopeId(),
+                    .name = intern.bindingId(publication.binding_name),
+                    .definition = definition,
+                };
+                const cursor = binder.BindingCursor.init(
+                    evaluator.allocator,
+                    evaluator.releases,
+                    env.quotationHeader(body),
+                ) catch |err| {
+                    context.deinit();
+                    switch (definition.lifetime) {
+                        .counted => definition.release(evaluator.releases),
+                        .static => definition.retireStatic(evaluator.releases),
+                    }
+                    return err;
+                };
+                self.state.borrowMut().* = .{ .binding = .{
+                    .binding_name = publication.binding_name,
+                    .definition = definition,
+                    .context = .init(context),
+                    .cursor = .init(cursor),
                 } };
             },
-            .publishing => |*publication| {
-                switch (publication.publisher.borrowMut().advance() catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Frozen => return evaluator.fail(
-                        .domain,
-                        "module environments are immutable after registration",
-                    ),
-                }) {
-                    .pending => _ = work.spend(),
-                    .complete => return .completed,
+            .binding => |*binding| {
+                const progress = try binding.cursor.borrowMut().advance(binding.context.borrowMut(), work);
+                const result = switch (progress) {
+                    .pending => return .stepped,
+                    .complete => |result| result,
+                };
+                switch (result) {
+                    .bound => |parts| {
+                        const definition = binding.definition;
+                        const name = binding.binding_name;
+                        binding.cursor.deinit(evaluator.releases, evaluator.allocator);
+                        binding.context.deinit(evaluator.releases, evaluator.allocator);
+                        definition.seal(evaluator.releases, parts);
+                        switch (self.scope.storage) {
+                            .session => {
+                                // The registry cursor takes the definition's
+                                // first reference.
+                                self.state.borrowMut().* = .{ .publishing_session = .init(
+                                    evaluator.inherited.registry.defineCursor(name, .{ .definition = definition }),
+                                ) };
+                            },
+                            .core_build => |publisher| {
+                                self.state.borrowMut().* = .published;
+                                publisher.publish(name, definition) catch |err| {
+                                    definition.retireStatic(evaluator.releases);
+                                    return switch (err) {
+                                        error.OutOfMemory => error.OutOfMemory,
+                                        error.Frozen => evaluator.fail(.domain, "core is sealed"),
+                                        error.Duplicate => evaluator.fail(.domain, "a core name is defined once"),
+                                    };
+                                };
+                                return .completed;
+                            },
+                            .module_root => unreachable,
+                        }
+                    },
+                    .failed => |failure| {
+                        const code = binding.cursor.borrow().code;
+                        const word = heap.valuesConst(code)[failure.index].symbol;
+                        return self.bindingMiss(evaluator, code, failure.index, word, failure.miss);
+                    },
                 }
             },
+            .publishing_session => |*cursor| switch (try cursor.borrowMut().advance()) {
+                .pending => _ = work.spend(),
+                .complete => return .completed,
+            },
+            .published => return .completed,
             .publishing_test => |*cursor| {
                 switch (cursor.advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -420,12 +554,12 @@ const DefineDriver = struct {
 };
 
 fn doc(evaluator: *Unit) MachineError!void {
-    const requested = try evaluator.popSymbol();
+    const requested = try evaluator.popWord();
     return installLookup(evaluator, requested);
 }
 
 const ReflectionResolution = union(enum) {
-    resolved: machine.Resolution,
+    resolved: machine.Reflected,
     retry: machine.WorkProgress,
 };
 
@@ -435,15 +569,18 @@ const ReflectionResolution = union(enum) {
 fn resolveForReflection(
     evaluator: *Unit,
     driver: anytype,
-    requested: u32,
-    outcome: machine.ResolutionOutcome,
+    requested: value.Symbol,
+    outcome: binder.Outcome,
 ) MachineError!ReflectionResolution {
     return switch (outcome) {
-        .resolved => |resolved| .{ .resolved = resolved },
-        .unresolved => |chain| evaluator.undefinedNameIn(requested, chain),
-        .unknown_module_prefix, .unregistered_module => {
-            evaluator.retireDriver(driver);
-            return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, outcome) };
+        .resolved => |definition| .{ .resolved = machine.Reflected.hold(evaluator, definition, requested.name) },
+        .missed => |miss| switch (miss) {
+            .unknown_module_prefix, .unregistered_module => {
+                evaluator.retireDriver(driver);
+                return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, miss) };
+            },
+            .unresolved => |chain| evaluator.undefinedNameIn(requested.name, chain),
+            .retired, .alias_cycle => evaluator.failUnbound(requested, miss),
         },
     };
 }
@@ -452,10 +589,10 @@ fn resolveForReflection(
 /// values. There is no counterpart for a binding's stored body: nothing lifts a
 /// published body out of the home it resolves against, which is what keeps a
 /// quotation's scope label impossible to re-site.
-fn installLookup(evaluator: *Unit, requested: u32) MachineError!void {
+fn installLookup(evaluator: *Unit, requested: value.Symbol) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
-        .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
+        .resolution = .init(machine.ExplicitLookup.init(evaluator, requested)),
     });
 }
 /// A binding's documentation as written, retained while it is normalized:
@@ -487,8 +624,8 @@ const DocumentNormalization = struct {
 
 const LookupDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    requested: u32,
-    resolution: heap.Owned(machine.ResolutionCursor),
+    requested: value.Symbol,
+    resolution: heap.Owned(machine.ExplicitLookup),
     normalization: heap.Owned(DocumentNormalization) = .none,
     pub fn advance(evaluator: *Unit, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -509,8 +646,8 @@ const LookupDriver = struct {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
                     };
-                    defer resolved.deinit(evaluator.allocator);
-                    const document = resolved.lease.spec().doc orelse
+                    defer resolved.deinit();
+                    const document = resolved.definition.doc orelse
                         return evaluator.fail(.domain, "binding has no documentation");
                     self.normalization = .init(try .init(evaluator, document));
                 },
@@ -521,10 +658,10 @@ const LookupDriver = struct {
 };
 
 fn declaredEffect(evaluator: *Unit) MachineError!void {
-    const requested = try evaluator.popSymbol();
+    const requested = try evaluator.popWord();
     try evaluator.startDriver(EffectDriver{
         .requested = requested,
-        .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
+        .resolution = .init(machine.ExplicitLookup.init(evaluator, requested)),
     });
 }
 
@@ -534,8 +671,8 @@ fn declaredEffect(evaluator: *Unit) MachineError!void {
 /// can equal: even `( -- )` holds its `--`.
 const EffectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    requested: u32,
-    resolution: heap.Owned(machine.ResolutionCursor),
+    requested: value.Symbol,
+    resolution: heap.Owned(machine.ExplicitLookup),
     pub fn advance(evaluator: *Unit, self: *EffectDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
@@ -546,8 +683,8 @@ const EffectDriver = struct {
                     .retry => |progress| return progress,
                     .resolved => |resolution| resolution,
                 };
-                defer resolved.deinit(evaluator.allocator);
-                const declared = resolved.lease.spec().effect orelse
+                defer resolved.deinit();
+                const declared = resolved.definition.effect orelse
                     return .{ .output = try list.fromValues(evaluator.allocator, &.{}) };
                 declared.retain();
                 return .{ .output = .{ .list = declared.header() } };
@@ -558,35 +695,31 @@ const EffectDriver = struct {
 };
 
 fn which(evaluator: *Unit) MachineError!void {
-    const requested = try evaluator.popSymbol();
+    const requested = try evaluator.popWord();
     try evaluator.startDriver(WhichDriver.init(evaluator, requested));
 }
 
 const WhichDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    requested: u32,
+    requested: value.Symbol,
     actions: heap.Owned(reflection.ActionPlan),
     state: heap.Owned(State),
 
     const OwnedContext = struct {
-        resolved: heap.Owned(machine.Resolution),
-        shadows: heap.Owned([]intern.TraceWord),
+        resolved: heap.Owned(machine.Reflected),
+        /// The core binding the resolved definition shadows, if any.
+        shadows: ?intern.TraceWord,
 
         fn deinit(
             self: *OwnedContext,
             releases: *heap.ReleaseDomain,
             allocator: std.mem.Allocator,
         ) void {
-            self.shadows.deinit(releases, allocator);
             self.resolved.deinit(releases, allocator);
         }
     };
     const State = union(enum) {
-        resolve: heap.Owned(machine.ResolutionCursor),
-        shadow: struct {
-            resolved: heap.Owned(machine.Resolution),
-            cursor: heap.Owned(machine.ShadowCursor),
-        },
+        resolve: heap.Owned(machine.ExplicitLookup),
         base_actions: struct {
             context: OwnedContext,
             step: u8,
@@ -611,10 +744,6 @@ const WhichDriver = struct {
         ) void {
             switch (self.*) {
                 .resolve => |*cursor| cursor.deinit(releases, allocator),
-                .shadow => |*shadow| {
-                    shadow.cursor.deinit(releases, allocator);
-                    shadow.resolved.deinit(releases, allocator);
-                },
                 .base_actions => |*base| base.context.deinit(releases, allocator),
                 .shadow_actions => |*shadows| shadows.context.deinit(releases, allocator),
                 .render => |*context| context.deinit(releases, allocator),
@@ -626,12 +755,12 @@ const WhichDriver = struct {
         }
     };
 
-    fn init(evaluator: *Unit, requested: u32) WhichDriver {
+    fn init(evaluator: *Unit, requested: value.Symbol) WhichDriver {
         return .{
             .requested = requested,
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
             .state = .init(.{ .resolve = .init(
-                machine.ResolutionCursor.initAtCurrent(evaluator, requested),
+                machine.ExplicitLookup.init(evaluator, requested),
             ) }),
         };
     }
@@ -644,30 +773,30 @@ const WhichDriver = struct {
     ) error{OutOfMemory}!void {
         const resolved = base.context.resolved.borrow();
         switch (base.step) {
-            0 => try self.add(.{ .name = self.requested }),
+            0 => try self.add(.{ .name = self.requested.name }),
             1 => try self.add(.{ .bytes = " -> " }),
             2 => try self.add(.{ .trace_word = resolved.trace_word }),
             3 => try self.add(.{ .bytes = " " }),
-            4 => try self.add(.{ .bytes = switch (resolved.lease.spec().binding) {
-                .word => "def",
+            4 => try self.add(.{ .bytes = switch (resolved.definition.body) {
+                .source, .reserved => "def",
                 .builtin => "primitive",
                 .native => "native",
             } }),
             5 => try self.add(.{ .bytes = " " }),
-            6 => try self.add(.{ .bytes = @tagName(resolved.lease.spec().visibility) }),
+            6 => try self.add(.{ .bytes = @tagName(resolved.definition.visibility) }),
             7 => if (resolved.home != null)
                 try self.add(.{ .bytes = " generation " }),
             8 => if (resolved.home) |home|
                 try self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } }),
-            9 => if (resolved.lease.spec().effect != null) try self.add(.{ .bytes = " " }),
-            10 => if (resolved.lease.spec().effect) |effect|
+            9 => if (resolved.definition.effect != null) try self.add(.{ .bytes = " " }),
+            10 => if (resolved.definition.effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            11 => switch (resolved.lease.spec().binding) {
+            11 => switch (resolved.definition.body) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             12 => {
-                const requirements = switch (resolved.lease.spec().binding) {
+                const requirements = switch (resolved.definition.body) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
@@ -713,21 +842,11 @@ const WhichDriver = struct {
                         .resolved => |resolution| resolution,
                     };
                     cursor.deinit(evaluator.releases, evaluator.allocator);
-                    self.state.borrowMut().* = .{ .shadow = .{
-                        .resolved = .init(resolved),
-                        .cursor = .init(machine.ShadowCursor.init(evaluator, self.requested)),
-                    } };
-                },
-            },
-            .shadow => |*shadow| switch (try shadow.cursor.borrowMut().advance()) {
-                .pending => {},
-                .complete => |shadows| {
-                    const resolved = shadow.resolved.take();
-                    shadow.cursor.deinit(evaluator.releases, evaluator.allocator);
+                    const shadows = resolved.shadows(evaluator.environment, self.requested.name);
                     self.state.borrowMut().* = .{ .base_actions = .{
                         .context = .{
                             .resolved = .init(resolved),
-                            .shadows = .init(shadows),
+                            .shadows = shadows,
                         },
                         .step = 0,
                         .requirement_index = 0,
@@ -737,7 +856,7 @@ const WhichDriver = struct {
             },
             .base_actions => |*base| try self.advanceBaseActions(base),
             .shadow_actions => |*shadows| {
-                if (shadows.index == shadows.context.shadows.borrow().len) {
+                if (shadows.index == @intFromBool(shadows.context.shadows != null)) {
                     try self.add(.{ .bytes = "\n" });
                     self.actions.borrowMut().seal();
                     const context = shadows.context;
@@ -746,7 +865,7 @@ const WhichDriver = struct {
                     try self.add(.{ .bytes = "; shadows " });
                     shadows.emit_name = true;
                 } else {
-                    try self.add(.{ .trace_word = shadows.context.shadows.borrow()[shadows.index] });
+                    try self.add(.{ .trace_word = shadows.context.shadows.? });
                     shadows.index += 1;
                     shadows.emit_name = false;
                 }
@@ -771,18 +890,18 @@ const WhichDriver = struct {
 };
 
 fn see(evaluator: *Unit) MachineError!void {
-    const requested = try evaluator.popSymbol();
+    const requested = try evaluator.popWord();
     try evaluator.startDriver(SeeDriver.init(evaluator, requested));
 }
 
 const SeeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    requested: u32,
+    requested: value.Symbol,
     actions: heap.Owned(reflection.ActionPlan),
     state: heap.Owned(State),
 
     const Context = struct {
-        resolved: heap.Owned(machine.Resolution),
+        resolved: heap.Owned(machine.Reflected),
         /// The binding's documentation, normalized.
         document: heap.Owned(Value) = .none,
 
@@ -796,7 +915,7 @@ const SeeDriver = struct {
         }
     };
     const State = union(enum) {
-        resolve: heap.Owned(machine.ResolutionCursor),
+        resolve: heap.Owned(machine.ExplicitLookup),
         normalize: struct { context: Context, normalization: DocumentNormalization },
         plan: struct {
             context: Context,
@@ -833,12 +952,12 @@ const SeeDriver = struct {
         }
     };
 
-    fn init(evaluator: *Unit, requested: u32) SeeDriver {
+    fn init(evaluator: *Unit, requested: value.Symbol) SeeDriver {
         return .{
             .requested = requested,
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
             .state = .init(.{ .resolve = .init(
-                machine.ResolutionCursor.initAtCurrent(evaluator, requested),
+                machine.ExplicitLookup.init(evaluator, requested),
             ) }),
         };
     }
@@ -857,7 +976,7 @@ const SeeDriver = struct {
             // string as prose.
             0 => if (plan.context.document.isPresent()) {
                 try self.add(.{ .bytes = "(" });
-                if (resolved.lease.spec().effect) |effect| {
+                if (resolved.definition.effect) |effect| {
                     const header = effect.header();
                     const count: usize = @intCast(header.length());
                     var index: usize = 0;
@@ -869,32 +988,32 @@ const SeeDriver = struct {
                 try self.add(.{ .bytes = ": " });
                 try self.add(.{ .document = plan.context.document.borrow() });
                 try self.add(.{ .bytes = ")" });
-            } else if (resolved.lease.spec().effect) |effect|
+            } else if (resolved.definition.effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            1 => if (resolved.lease.spec().doc != null or resolved.lease.spec().effect != null)
+            1 => if (resolved.definition.doc != null or resolved.definition.effect != null)
                 try self.add(.{ .bytes = " " }),
-            2 => switch (resolved.lease.spec().binding) {
-                .word => |word_body| if (resolved.lease.spec().source) |source|
+            2 => switch (resolved.definition.body) {
+                .source, .reserved => if (resolved.definition.source) |source|
                     try self.add(.{ .bytes = source.bytes() })
                 else
-                    try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
+                    try self.add(.{ .value = .{ .list = resolved.definition.quotationBody().? } }),
                 .builtin => try self.add(.{ .bytes = "<primitive>" }),
                 .native => try self.add(.{ .bytes = "<native:" }),
             },
-            3 => switch (resolved.lease.spec().binding) {
+            3 => switch (resolved.definition.body) {
                 .native => try self.add(.{ .trace_word = resolved.trace_word }),
                 else => {},
             },
-            4 => switch (resolved.lease.spec().binding) {
+            4 => switch (resolved.definition.body) {
                 .native => try self.add(.{ .bytes = ">" }),
                 else => {},
             },
-            5 => switch (resolved.lease.spec().binding) {
+            5 => switch (resolved.definition.body) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             6 => {
-                const requirements = switch (resolved.lease.spec().binding) {
+                const requirements = switch (resolved.definition.body) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
@@ -941,7 +1060,7 @@ const SeeDriver = struct {
                     };
                     cursor.deinit(evaluator.releases, evaluator.allocator);
                     var context: Context = .{ .resolved = .init(resolved) };
-                    const document = resolved.lease.spec().doc orelse {
+                    const document = resolved.definition.doc orelse {
                         self.state.borrowMut().* = .{ .plan = .{
                             .context = context,
                             .step = 0,

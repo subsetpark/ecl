@@ -443,23 +443,31 @@ pub fn destroyParkedAnchor(
     allocator.destroy(anchor);
 }
 
-/// One module: the frozen environment its definitions live in, the module-root
-/// scope they were published through, and the registry identity it was built
-/// for. The name is fixed before the body runs; the generation number is
-/// assigned when the registry publishes it. One object carries both because
-/// every image is published exactly once, by the path that created it.
+/// One module: the directory its definitions live in, the module-root scope
+/// its text was written in, and the registry identity it was built for. The
+/// name is fixed before the body runs; the generation number is assigned when
+/// the registry publishes it. While the constructing body runs, definitions
+/// and imports are staged; sealing turns the staged group into an immutable
+/// directory whose bodies are bound against the complete group. A published
+/// image belongs to its registry's history until Session teardown, so code
+/// bound to it and words written in it never outlive it.
 const ModuleImage = struct {
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     name: intern.ModuleName,
     provenance: RegistrationProvenance,
     /// Zero until published; reload assigns the prior generation plus one.
     generation: u64 = 0,
-    /// Set under the registry's writer lock when a later generation or a
-    /// removal replaces this one in the directory. Old code keeps running
-    /// under its pins; only a cached qualified call site consults this, to
-    /// re-resolve instead of entering a stale generation.
-    superseded: std.atomic.Value(bool) = .init(false),
-    environment: env.Environment,
+    /// Set once the registry has published the image. Before then only its
+    /// constructor may resolve against its directory.
+    published: std.atomic.Value(bool) = .init(false),
+    /// The next older image in its registry's history.
+    history_next: ?*ModuleImage = null,
+    /// Names introduced by the construction body, not yet visible to anyone.
+    staging: poll.ChunkStack(StagedName),
+    staged_count: usize = 0,
+    /// The sealed directory; null until the group is sealed.
+    names: ?env.NameMap = null,
     scope: env.Scope,
     tests: TestCatalog,
     /// The authoritative count lives in this separately owned cell, so it can outlive this
@@ -474,7 +482,8 @@ const ModuleImage = struct {
         live,
         tests: TestCatalog.TeardownCursor,
         scope: env.Scope.EmbeddedTeardownCursor,
-        environment: env.Environment.TeardownCursor,
+        staging,
+        names: env.NameMap.RawEntryCursor,
     } = .live,
 
     fn create(
@@ -484,28 +493,23 @@ const ModuleImage = struct {
         provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*ModuleImage {
         // No scope cell is minted here. An image needs one only if ECL source
-        // is stamped against it, which `moduleOwned` arranges lazily; a registry
-        // -level registration publishes definitions directly and stamps
-        // nothing, so minting here would grow live memory with every
-        // re-registration for a cell no word ever names.
+        // is stamped against it, which `moduleOwned` arranges lazily.
         const result = try allocator.create(ModuleImage);
         const anchor = allocator.create(RefAnchor) catch |err| {
             allocator.destroy(result);
             return err;
         };
         anchor.* = .{ .park = .{ .image = result } };
-        result.allocator = allocator;
-        result.name = name;
-        result.provenance = provenance;
-        result.generation = 0;
-        result.superseded = .init(false);
-        result.anchor = anchor;
-        result.minted_cell = false;
-        result.environment = env.Environment.init(allocator, releases);
-        result.scope = env.Scope.moduleRoot(allocator, &result.environment);
-        result.tests = .init(allocator);
-        result.retirement = .{};
-        result.retirement_state = .live;
+        result.* = .{
+            .allocator = allocator,
+            .releases = releases,
+            .name = name,
+            .provenance = provenance,
+            .staging = .init(allocator),
+            .scope = env.Scope.moduleRoot(allocator),
+            .tests = .init(allocator),
+            .anchor = anchor,
+        };
         return result;
     }
 
@@ -514,11 +518,7 @@ const ModuleImage = struct {
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
-    /// Reachable only from a caller that already holds this image alive, since
-    /// the home it goes through is embedded in the image. A borrow that starts
-    /// from a scope cell must acquire the *anchor* directly instead: the cell
-    /// outlives the image, so routing through the image would dereference
-    /// freed memory to find the count.
+    /// Reachable only from a caller that already holds this image alive.
     fn tryRetain(self: *ModuleImage) bool {
         return self.anchor.tryRetain();
     }
@@ -529,17 +529,28 @@ const ModuleImage = struct {
         if (old != 1) return;
         _ = self.anchor.refs.load(.acquire);
         // Before any teardown step, so a quotation labelled with this image
-        // reads a definite `retired` and never a scope under teardown. The
-        // embedded scope's own teardown takes the cell with the same swap, so
-        // exactly one of the two paths drops the owner reference.
+        // reads a definite `retired` and never a scope under teardown.
         if (self.scope.label_cell.swap(null, .acq_rel)) |cell| {
             cell.retire();
-            // A cell outlives this image and names its anchor without holding
-            // a reference, so the anchor must survive the image.
             self.minted_cell = true;
         }
         self.retirement_state = .{ .tests = .init(&self.tests) };
-        self.environment.releases.retire(self, &self.retirement);
+        self.releases.retire(self, &self.retirement);
+    }
+
+    /// Stages one name. Ownership of `entry` passes to the image on success
+    /// and stays with the caller on failure.
+    fn stage(self: *ModuleImage, name: intern.BindingName, entry: env.Entry) error{OutOfMemory}!void {
+        std.debug.assert(self.names == null);
+        try self.staging.push(.{ .name = name, .entry = entry });
+        self.staged_count += 1;
+    }
+
+    /// Whether a word written in this image may resolve against its
+    /// directory now: once published, or by the construction sealing it.
+    fn directory(self: *const ModuleImage) ?*const env.NameMap {
+        if (!self.published.load(.acquire)) return null;
+        return &(self.names orelse return null);
     }
 
     pub fn advanceRetirement(
@@ -547,47 +558,65 @@ const ModuleImage = struct {
         allocator: std.mem.Allocator,
         self: *ModuleImage,
     ) bool {
-        return switch (self.retirement_state) {
+        switch (self.retirement_state) {
             .live => unreachable,
             .tests => |*tests| {
                 if (!tests.advance(releases)) return false;
                 self.retirement_state = .{ .scope = .init(&self.scope) };
                 return false;
             },
-            .scope => |*scope| result: {
-                if (!scope.advance()) break :result false;
-                self.retirement_state = .{ .environment = .init(&self.environment) };
-                break :result false;
+            .scope => |*scope| {
+                if (!scope.advance()) return false;
+                self.retirement_state = .staging;
+                return false;
             },
-            .environment => |*environment| {
-                if (!environment.advance()) return false;
-                // The image is destroyed in full, exactly as before: contents,
-                // embedded Environment and Scope, and the allocation. Only the
-                // anchor's fate is conditional.
-                const anchor = self.anchor;
-                const stamped = self.minted_cell;
-                allocator.destroy(self);
-                if (!stamped) {
-                    // Nothing ever named this image, so nothing can observe the
-                    // anchor going away. This is the path every registry-level
-                    // registration takes.
-                    allocator.destroy(anchor);
-                    return true;
+            .staging => {
+                if (self.staging.pop()) |staged| {
+                    retireEntry(staged.entry, releases);
+                    return false;
                 }
-                // `refs` stays readable and CAS-able at zero, so a borrow that
-                // reaches this anchor from a scope cell fails its acquire
-                // rather than faulting. Freed by the host walk at the end of
-                // `Session.deinit`: valid until the final host teardown walk,
-                // which runs after execution has provably stopped, because
-                // `scheduler.deinit` is the first thing that teardown does.
-                // The image is gone, so its pointer in the anchor is dead
-                // space; the parked link takes that word.
-                anchor.park = .{ .next = null };
-                releases.parkTombstone(@ptrCast(&anchor.park));
-                return true;
+                self.staging.deinit();
+                if (self.names) |*names| {
+                    self.retirement_state = .{ .names = names.rawEntries() };
+                    return false;
+                }
             },
-        };
+            .names => |*entries| switch (entries.advance()) {
+                .pending => return false,
+                .item => |entry| {
+                    retireEntry(entry.value, releases);
+                    return false;
+                },
+                .complete => self.names.?.deinit(),
+            },
+        }
+        const anchor = self.anchor;
+        const stamped = self.minted_cell;
+        allocator.destroy(self);
+        if (!stamped) {
+            allocator.destroy(anchor);
+            return true;
+        }
+        // A cell outlives this image and names its anchor without holding a
+        // reference: `refs` stays readable at zero, so a borrow that reaches
+        // this anchor fails its acquire rather than faulting.
+        anchor.park = .{ .next = null };
+        releases.parkTombstone(@ptrCast(&anchor.park));
+        return true;
     }
+
+    fn retireEntry(entry: env.Entry, releases: *heap.ReleaseDomain) void {
+        switch (entry) {
+            .definition => |definition| definition.retireStatic(releases),
+            .alias => {},
+        }
+    }
+};
+
+/// One name a construction body introduced, owned by its image until sealing.
+const StagedName = struct {
+    name: intern.BindingName,
+    entry: env.Entry,
 };
 
 /// Nominal publication provenance. Embedded definitions retain their trusted
@@ -626,88 +655,94 @@ pub const RegistrationProvenance = union(enum) {
     }
 };
 
-pub const ModuleResolveProgress = poll.Progress(?env.BindingLease);
-/// Export lookup is always public-only: a private is absent from a module's
-/// public face, and no caller has ever wanted otherwise.
-pub const ModuleResolveCursor = struct {
-    allocator: std.mem.Allocator,
-    lookup: env.DirectLookupCursor,
+pub const ModuleLookupProgress = poll.Progress(?env.Entry);
+/// One name in a published image's directory, under a pin that keeps the image
+/// alive across a resumable lookup. Visibility is the caller's to check: an
+/// export lookup refuses private entries, and a word written in the image may
+/// use them.
+pub const ModuleNameLookupCursor = struct {
+    lookup: ?env.NameMap.RawLookupCursor,
     pin: GenerationPin,
 
-    pub fn deinit(self: *ModuleResolveCursor) void {
-        self.lookup.deinit();
+    pub fn deinit(self: *ModuleNameLookupCursor) void {
         self.pin.deinit();
         self.* = undefined;
     }
-    pub fn advance(self: *ModuleResolveCursor) ModuleResolveProgress {
-        return switch (self.lookup.advance()) {
+    pub fn advance(self: *ModuleNameLookupCursor) ModuleLookupProgress {
+        const lookup = &(self.lookup orelse return .{ .complete = null });
+        return switch (lookup.advance()) {
             .pending => .pending,
-            .complete => |maybe_lease| result: {
-                var lease = maybe_lease orelse break :result .{ .complete = null };
-                if (lease.spec().visibility == .private) {
-                    lease.deinit();
-                    break :result .{ .complete = null };
-                }
-                break :result .{ .complete = lease };
-            },
+            .complete => |found| .{ .complete = found },
         };
-    }
-    pub fn captureCell(self: *ModuleResolveCursor) void {
-        self.lookup.captureCell();
-    }
-    pub fn takeCell(self: *ModuleResolveCursor) ?env.BindingCellHandle {
-        return self.lookup.takeCell();
     }
 };
 
+/// Whether an entry is part of its module's public face.
+pub fn entryIsPublic(entry: env.Entry) bool {
+    return switch (entry) {
+        .definition => |definition| definition.visibility == .public,
+        .alias => |alias| alias.visibility == .public,
+    };
+}
+
 pub const ModulePublicNameProgress = poll.StreamProgress(u32);
 pub const ModulePublicNameCursor = struct {
-    allocator: std.mem.Allocator,
-    inner: env.NameCursor,
+    entries: ?env.NameMap.RawEntryCursor,
     pin: GenerationPin,
     pub fn deinit(self: *ModulePublicNameCursor) void {
-        self.inner.deinit();
         self.pin.deinit();
         self.* = undefined;
     }
     pub fn advance(self: *ModulePublicNameCursor) ModulePublicNameProgress {
-        return switch (self.inner.advance()) {
+        const entries = &(self.entries orelse return .complete);
+        return switch (entries.advance()) {
             .pending => .pending,
             .complete => .complete,
-            .item => |entry| result: {
-                var lease = entry.lease;
-                defer lease.deinit();
-                break :result if (lease.spec().visibility == .public)
-                    .{ .item = entry.name }
-                else
-                    .pending;
-            },
+            .item => |entry| if (entryIsPublic(entry.value))
+                .{ .item = intern.bindingId(entry.key) }
+            else
+                .pending,
         };
     }
 };
 fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
     return .{
-        .allocator = image.allocator,
-        .inner = image.environment.nameCursor(),
+        .entries = if (image.names) |*names| names.rawEntries() else null,
         .pin = ModuleHome.init(image).pinInternal(),
     };
 }
 
-/// One immutable snapshot of the registry's names. A directory owns one
-/// reference to every image it maps, so a reader holding a directory lease can
-/// retain any entry it finds, and a retired directory releases its entries as
-/// bounded work before it frees itself. Nothing else keeps a published image
-/// alive on the registry's behalf.
+/// The non-reused publication identity every registry edit advances. A
+/// binding reused across applications is keyed by it, so any publication
+/// anywhere conservatively invalidates reuse.
+var publication_epoch: std.atomic.Value(u64) = .init(1);
+
+/// The publication identity current now, for keying a reusable binding.
+pub fn currentPublication() u64 {
+    return publication_epoch.load(.acquire);
+}
+
+/// One immutable snapshot of the registry: its module names, its aliases, and
+/// for the Session's public registry the top-level name directory. A binding
+/// captures one snapshot and resolves every name against it across scheduler
+/// turns, so it never mixes publication states. A directory owns one
+/// reference to every image and counted definition it maps; a retired
+/// directory releases them as bounded work before it frees itself.
 const Directory = struct {
     const ModuleMap = poll.FixedMap(intern.ModuleName, *ModuleImage);
     const AliasMap = poll.FixedMap(intern.BindingName, intern.ModuleName);
 
     modules: ModuleMap,
     aliases: AliasMap,
+    names: env.NameMap,
     previous: ?*Directory,
     retirement: heap.ReleaseDomain.Retirement = .{},
     /// The entry walk a retirement is partway through.
-    releasing: ?ModuleMap.RawEntryCursor = null,
+    releasing: union(enum) {
+        start,
+        modules: ModuleMap.RawEntryCursor,
+        names: env.NameMap.RawEntryCursor,
+    } = .start,
 
     /// Releases one entry per step, then frees the maps and hands the next
     /// older directory to the release domain. A discarded edit candidate
@@ -718,26 +753,43 @@ const Directory = struct {
         allocator: std.mem.Allocator,
         self: *Directory,
     ) bool {
-        if (self.releasing == null) self.releasing = self.modules.rawEntries();
-        switch (self.releasing.?.advance()) {
-            .pending => return false,
-            .item => |entry| {
-                entry.value.release();
+        switch (self.releasing) {
+            .start => {
+                self.releasing = .{ .modules = self.modules.rawEntries() };
                 return false;
             },
-            .complete => {},
+            .modules => |*entries| switch (entries.advance()) {
+                .pending => return false,
+                .item => |entry| {
+                    entry.value.release();
+                    return false;
+                },
+                .complete => {
+                    self.releasing = .{ .names = self.names.rawEntries() };
+                    return false;
+                },
+            },
+            .names => |*entries| switch (entries.advance()) {
+                .pending => return false,
+                .item => |entry| {
+                    entry.value.release(releases);
+                    return false;
+                },
+                .complete => {},
+            },
         }
         const previous = self.previous;
         self.modules.deinit();
         self.aliases.deinit();
+        self.names.deinit();
         allocator.destroy(self);
         if (previous) |next| releases.retire(next, &next.retirement);
         return true;
     }
 
     /// Session teardown walks the chain synchronously: execution has already
-    /// stopped, and the host drains every image retirement this starts.
-    fn destroyChain(first: ?*Directory, allocator: std.mem.Allocator) void {
+    /// stopped, and the host drains every retirement this starts.
+    fn destroyChain(first: ?*Directory, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
         var cursor = first;
         while (cursor) |directory| {
             cursor = directory.previous;
@@ -747,8 +799,15 @@ const Directory = struct {
                 .item => |entry| entry.value.release(),
                 .complete => break,
             };
+            var names = directory.names.rawEntries();
+            while (true) switch (names.advance()) {
+                .pending => {},
+                .item => |entry| entry.value.release(releases),
+                .complete => break,
+            };
             directory.modules.deinit();
             directory.aliases.deinit();
+            directory.names.deinit();
             allocator.destroy(directory);
         }
     }
@@ -760,6 +819,10 @@ const DirectoryLease = struct {
     lease: DirectoryPublisher.Lease,
     directory: ?*const Directory,
 
+    fn clone(self: *const DirectoryLease) DirectoryLease {
+        return .{ .registry = self.registry, .lease = self.lease.clone(), .directory = self.directory };
+    }
+
     fn deinit(self: *DirectoryLease) void {
         const registry = @constCast(self.registry);
         if (self.lease.deinit()) {
@@ -769,6 +832,42 @@ const DirectoryLease = struct {
             if (retired) |first| registry.releaseDomain().retire(first, &first.retirement);
         }
         self.* = undefined;
+    }
+};
+
+/// One captured registry snapshot: what a binding or explicit lookup resolves
+/// session names and qualified module names against. Holding it retains the
+/// snapshot, not the definitions bound through it.
+pub const View = struct {
+    directory: DirectoryLease,
+    /// The publication identity read before the snapshot was captured.
+    publication: u64,
+
+    pub fn deinit(self: *View) void {
+        self.directory.deinit();
+        self.* = undefined;
+    }
+
+    /// A second hold on the same snapshot.
+    pub fn clone(self: *const View) View {
+        return .{ .directory = self.directory.clone(), .publication = self.publication };
+    }
+
+    /// One session top-level name in this snapshot.
+    pub fn sessionLookup(self: *const View, name: intern.BindingName) ?env.NameMap.RawLookupCursor {
+        const current = self.directory.directory orelse return null;
+        return current.names.rawLookup(name);
+    }
+
+    /// The image a module name or module alias selects in this snapshot.
+    pub fn acquireCursor(self: *const View, name: intern.ModuleName) Registry.AcquireCursor {
+        return Registry.AcquireCursor.initIn(self.directory.clone(), name);
+    }
+
+    /// The session's top-level names in this snapshot.
+    pub fn sessionEntries(self: *const View) ?env.NameMap.RawEntryCursor {
+        const current = self.directory.directory orelse return null;
+        return current.names.rawEntries();
     }
 };
 
@@ -925,7 +1024,29 @@ pub const ModuleHome = opaque {
     pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
         return self.pinInternal();
     }
+    /// One name in the image's published directory, or null while the image
+    /// is unpublished: a word written in an image under construction sees
+    /// none of its staged names. The caller holds the image alive.
+    pub fn lookupCursor(self: *const ModuleHome, binding: intern.BindingName) ?env.NameMap.RawLookupCursor {
+        const names = self.image().directory() orelse return null;
+        return names.rawLookup(binding);
+    }
+    /// The image's published names, or null while it is unpublished.
+    pub fn publishedEntries(self: *const ModuleHome) ?env.NameMap.RawEntryCursor {
+        const names = self.image().directory() orelse return null;
+        return names.rawEntries();
+    }
+    /// Whether the registry has published this image.
+    pub fn isPublished(self: *const ModuleHome) bool {
+        return self.image().published.load(.acquire);
+    }
 };
+
+/// The home a definition belongs to, or null for a core or session definition.
+pub fn definitionHome(definition: *const env.Definition) ?*ModuleHome {
+    const handle = definition.home orelse return null;
+    return @ptrCast(handle);
+}
 
 /// An owned execution reference to one image. The raw image is never exposed,
 /// so a pin can only be consumed by `deinit` and cannot invoke retirement
@@ -1191,16 +1312,13 @@ pub const GenerationLease = enum(usize) {
     pub fn provenance(self: GenerationLease) RegistrationProvenance {
         return self.image().provenance;
     }
-    pub fn resolveCursor(self: GenerationLease, id: u32) ModuleResolveCursor {
+    /// One name in this published generation's directory.
+    pub fn lookupCursor(self: GenerationLease, binding: intern.BindingName) ModuleNameLookupCursor {
         const retained = self.image();
-        return resolveCursorFor(retained, ModuleHome.init(retained), id);
-    }
-    /// A second observation reference to the same generation, for a holder
-    /// that outlives this one: the qualified call-site cache.
-    pub fn clone(self: GenerationLease) GenerationLease {
-        const retained = self.image();
-        retained.retain();
-        return .initRetained(retained);
+        return .{
+            .lookup = if (retained.directory()) |names| names.rawLookup(binding) else null,
+            .pin = ModuleHome.init(retained).pinInternal(),
+        };
     }
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
         return publicNameCursorFor(self.image());
@@ -1228,39 +1346,12 @@ pub const GenerationLease = enum(usize) {
         self.* = .consumed;
         return .initRetained(retained);
     }
-    /// Execution only if this exact generation is still its name's current
-    /// one. A derived call-site cache entry becomes executable this way and
-    /// is evicted when it fails.
-    pub fn tryEnterCurrent(
-        self: GenerationLease,
-        _: *const ExecutionAccess,
-    ) ?GenerationPin {
-        const retained = self.image();
-        if (retained.superseded.load(.acquire)) return null;
-        // The lease itself keeps the image alive across the current check, so
-        // this retain cannot resurrect a dead generation. A reload racing
-        // immediately after the check is equivalent to ordinary resolution
-        // linearizing immediately before that reload.
-        retained.retain();
-        return .initRetained(retained);
-    }
     pub fn deinit(self: *GenerationLease) void {
         if (self.* == .consumed) return;
         self.image().release();
         self.* = .consumed;
     }
 };
-
-/// The one export lookup. The registry contributes nothing to finding an export;
-/// what the home supplies is the pin that keeps the image alive across a
-/// resumable cursor, and which privacy applies.
-fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResolveCursor {
-    return .{
-        .allocator = image.allocator,
-        .lookup = image.environment.directLookupCursor(id),
-        .pin = home.pinInternal(),
-    };
-}
 
 /// A borrowed reference to one immutable image, valid for the call it is passed
 /// Unique ownership of an image that no registration holds yet. Every exit
@@ -1288,12 +1379,65 @@ pub const OwnedImage = enum(usize) {
     pub fn provenance(self: *const OwnedImage) RegistrationProvenance {
         return self.borrow().provenance;
     }
-    pub fn publishDefinition(
+    /// Stages one definition of the construction group. The publication's
+    /// values are retained by the staged definition; the caller keeps its own.
+    pub fn stageDefinition(
         self: *const OwnedImage,
         name: intern.BindingName,
         publication: env.ModulePublication,
-    ) env.BindError!*env.BindingCell {
-        return self.borrow().environment.modulePublisher().publish(name, publication);
+    ) error{OutOfMemory}!void {
+        const image = self.borrow();
+        const origin: env.BindingOrigin = .{ .module_local = .{ .trace_word = name } };
+        const handle: *anyopaque = @ptrCast(image);
+        const created = switch (publication) {
+            .word => |word| try env.Definition.create(image.allocator, .static, .{ .reserved = env.quotationHeader(word.body) }, .{
+                .visibility = word.visibility,
+                .origin = origin,
+                .effect = word.effect,
+                .doc = word.doc,
+                .source = word.source,
+                .root = .image,
+                .home = handle,
+            }),
+            .native => |native| try env.Definition.create(image.allocator, .static, .{ .native = native.callable }, .{
+                .visibility = native.visibility,
+                .origin = origin,
+                .effect = native.effect,
+                .doc = native.doc,
+                .root = .image,
+                .home = handle,
+            }),
+            .builtin => |primitive| try env.Definition.create(image.allocator, .static, .{ .builtin = primitive.primitive }, .{
+                .visibility = primitive.visibility,
+                .origin = origin,
+                .effect = primitive.effect,
+                .doc = primitive.doc,
+                .root = .image,
+                .home = handle,
+            }),
+        };
+        image.stage(name, .{ .definition = created }) catch |err| {
+            created.retireStatic(image.releases);
+            return err;
+        };
+    }
+    /// Stages one name alias of the construction group.
+    pub fn stageAlias(self: *const OwnedImage, name: intern.BindingName, alias: env.Alias) error{OutOfMemory}!void {
+        return self.borrow().stage(name, .{ .alias = alias });
+    }
+    /// Turns the staged names into the image's directory. Each name may be
+    /// introduced once: a duplicate fails construction.
+    pub fn groupCursor(self: *const OwnedImage) GroupCursor {
+        return .{ .image = self.borrow() };
+    }
+    /// The group's directory, for binding its own bodies. Valid once the
+    /// group cursor has completed.
+    pub fn groupDirectory(self: *const OwnedImage) *const env.NameMap {
+        return &self.borrow().names.?;
+    }
+    /// The group's entries, for binding each reserved body in turn.
+    pub fn groupEntries(self: *const OwnedImage) env.NameMap.RawEntryCursor {
+        return self.borrow().names.?.rawEntries();
     }
     pub fn testDeclarationCursor(
         self: *const OwnedImage,
@@ -1309,18 +1453,44 @@ pub const OwnedImage = enum(usize) {
             doc,
         ) } };
     }
-    /// Ends construction. Freezing the environment and consuming this
-    /// capability are one transition, so nothing that mutates an image — a
-    /// definition, a template slot — remains reachable once the image can be
-    /// registered or handed to a program. The environment's frozen flag stops
-    /// late definitions; only the typestate stops a late template write, which
-    /// has no frozen check because a sealed image has no writer.
-    /// Recognition of the image's trusted definitions happens here, against
-    /// their final bindings. If it fails the image is neither frozen nor
-    /// consumed, and the caller still owns it.
-    pub fn seal(self: *OwnedImage, recognition: ?env.ModuleRecognition) error{OutOfMemory}!SealedImage {
+    pub const LiteralSealError = error{ OutOfMemory, Duplicate, UnboundWord };
+
+    /// Seals a group whose bodies execute no words: builtin- and native-backed
+    /// modules, whose definitions are host callbacks and literal-only bodies.
+    /// Their size is fixed by a compiled-in or validated descriptor.
+    pub fn sealLiteralGroup(self: *OwnedImage) LiteralSealError!SealedImage {
         const image = self.borrow();
-        try image.environment.modulePublisher().freeze(image.scope.cellId(), recognition);
+        var group = self.groupCursor();
+        defer group.deinit();
+        while (true) switch (try group.advance()) {
+            .pending => {},
+            .complete => break,
+        };
+        var entries = self.groupEntries();
+        while (true) switch (entries.advance()) {
+            .pending => {},
+            .complete => break,
+            .item => |entry| switch (entry.value) {
+                .definition => |definition| if (definition.body == .reserved) {
+                    const code = definition.body.reserved;
+                    if (code.kind() == .generic_spine) for (heap.valuesConst(code)) |form| {
+                        if (form == .symbol and !env.isQuoted(form.symbol.slot) and env.localOperand(form.symbol.slot) == null)
+                            return error.UnboundWord;
+                    };
+                    heap.incRef(code);
+                    definition.seal(image.releases, .{ .code = code, .targets = &.{}, .dependencies = &.{} });
+                },
+                .alias => {},
+            },
+        };
+        return self.seal();
+    }
+    /// Ends construction once every body of the group is bound. Consuming
+    /// this capability is the one transition after which nothing can mutate
+    /// the image, so it can be registered or handed to a program.
+    pub fn seal(self: *OwnedImage) SealedImage {
+        const image = self.borrow();
+        std.debug.assert(image.names != null and image.staging.isEmpty());
         image.tests.freeze();
         self.* = .consumed;
         return .init(image);
@@ -1337,6 +1507,69 @@ pub const OwnedImage = enum(usize) {
         // still pinning the image keeps it alive until it unwinds.
         self.borrow().release();
         self.* = .consumed;
+    }
+};
+
+/// Builds an image's directory from its staged names in bounded steps. The
+/// partial directory belongs to the image from the first step, so abandoning
+/// the cursor leaves nothing for it to release.
+pub const GroupCursor = struct {
+    image: *ModuleImage,
+    init: ?env.NameMap.InitCursor = null,
+    put: ?env.NameMap.PutCursor = null,
+    lookup: ?struct { staged: StagedName, cursor: env.NameMap.RawLookupCursor } = null,
+    /// The name a failed construction introduced twice.
+    duplicate: ?intern.BindingName = null,
+
+    pub const Error = error{ OutOfMemory, Duplicate };
+
+    pub fn deinit(self: *GroupCursor) void {
+        if (self.init) |*cursor| cursor.deinit();
+        if (self.lookup) |pending| ModuleImage.retireEntry(pending.staged.entry, self.image.releases);
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *GroupCursor) Error!poll.Progress(void) {
+        const image = self.image;
+        if (image.names == null) {
+            if (self.init == null) self.init = env.NameMap.initCursor(image.allocator, image.staged_count);
+            const cursor = &self.init.?;
+            switch (try cursor.advance()) {
+                .pending => {},
+                .complete => |map| {
+                    self.init = null;
+                    image.names = map;
+                },
+            }
+            return .pending;
+        }
+        if (self.put) |*put| {
+            switch (put.advance()) {
+                .pending => {},
+                .complete => self.put = null,
+            }
+            return .pending;
+        }
+        if (self.lookup) |*pending| {
+            switch (pending.cursor.advance()) {
+                .pending => {},
+                .complete => |existing| {
+                    const staged = pending.staged;
+                    self.lookup = null;
+                    if (existing != null) {
+                        ModuleImage.retireEntry(staged.entry, image.releases);
+                        self.duplicate = staged.name;
+                        return error.Duplicate;
+                    }
+                    self.put = image.names.?.putCursor(staged.name, staged.entry);
+                },
+            }
+            return .pending;
+        }
+        const staged = image.staging.pop() orelse return .complete;
+        image.staged_count -= 1;
+        self.lookup = .{ .staged = staged, .cursor = image.names.?.rawLookup(staged.name) };
+        return .pending;
     }
 };
 
@@ -1487,6 +1720,10 @@ const RegistryState = struct {
     host: *const heap.HostCleanup,
     writer: std.Io.Mutex = .init,
     directories: DirectoryPublisher,
+    /// Every image this registry has published, newest first. Each holds one
+    /// reference until teardown, so code bound to a replaced image and words
+    /// written in it keep their meaning for the Session's life.
+    history: ?*ModuleImage = null,
     loading: std.atomic.Value(?*LoadingNode) = .init(null),
 };
 
@@ -1530,7 +1767,12 @@ pub const Registry = enum(usize) {
         const backing = self.privateState();
         const owner_allocator = backing.host.allocator();
         std.debug.assert(backing.directories.quiescent());
-        Directory.destroyChain(backing.directories.currentOwned(), self.allocator());
+        Directory.destroyChain(backing.directories.currentOwned(), self.allocator(), self.releaseDomain());
+        var history = backing.history;
+        while (history) |image| {
+            history = image.history_next;
+            image.release();
+        }
         var loading = backing.loading.load(.acquire);
         while (loading) |node| {
             loading = node.next;
@@ -1910,10 +2152,7 @@ pub const Registry = enum(usize) {
                     } };
                 },
             };
-            _ = self.candidate.?.publishDefinition(definition.name, publication) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Frozen => unreachable,
-            };
+            try self.candidate.?.stageDefinition(definition.name, publication);
             self.definition_index += 1;
             return .pending;
         }
@@ -1966,7 +2205,7 @@ pub const Registry = enum(usize) {
             defer self.releases.releaseHeader(env.documentationHeader(document));
             const effect = if (word.effect) |source| try self.buildEffect(source) else null;
             defer if (effect) |built| built.retire(self.releases);
-            _ = self.candidate.?.publishDefinition(
+            try self.candidate.?.stageDefinition(
                 try intern.internNamespace(word.name),
                 .{ .builtin = .{
                     .primitive = word.primitive,
@@ -1974,12 +2213,7 @@ pub const Registry = enum(usize) {
                     .effect = effect,
                     .doc = document,
                 } },
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                // The manifest validates names and holds no duplicates at
-                // compile time, and a fresh candidate is never frozen.
-                error.Frozen => return error.InvalidName,
-            };
+            );
             self.word_index += 1;
             return .pending;
         }
@@ -2022,36 +2256,43 @@ pub const Registry = enum(usize) {
 
     pub const CommitProgress = union(enum) { pending, complete: u64 };
     pub const AliasProgress = poll.Progress(void);
+    pub const DefineProgress = poll.Progress(void);
 
-    const EditKind = enum { register, alias };
+    const EditKind = enum { register, alias, define };
 
     /// The one registry mutation. Snapshot the current directory, validate the
     /// request against it, build a successor with the edit applied, and publish
     /// the successor under the writer lock if the snapshot is still current;
     /// otherwise discard the candidate and start over. A racing edit of any
     /// kind is therefore observed as exactly one restart, never as a
-    /// half-applied entry. Registration, removal, and aliasing differ only in
-    /// validation and in which entries change, so each is this cursor
-    /// specialized at compile time.
+    /// half-applied entry or a lost update. Registration, aliasing, and a
+    /// top-level definition differ only in validation and in which entries
+    /// change, so each is this cursor specialized at compile time.
     ///
-    /// The candidate owns one reference per image it copies, taken as the copy
-    /// proceeds. Both outcomes retire it through `Directory.advanceRetirement`:
-    /// publication chains it in front of the snapshot, and discard retires it
-    /// alone, so neither path releases a user-sized map in one step.
+    /// The candidate owns one reference per image and counted definition it
+    /// copies, taken as the copy proceeds. Both outcomes retire it through
+    /// `Directory.advanceRetirement`: publication chains it in front of the
+    /// snapshot, and discard retires it alone, so neither path releases a
+    /// user-sized map in one step.
     fn EditCursor(comptime kind: EditKind) type {
         return struct {
             const Self = @This();
             pub const Error = switch (kind) {
                 .register => CommitError,
                 .alias => AliasError,
+                .define => error{OutOfMemory},
             };
             pub const Progress = switch (kind) {
                 .register => CommitProgress,
                 .alias => AliasProgress,
+                .define => DefineProgress,
             };
             const Request = switch (kind) {
                 .register => SealedImage,
                 .alias => struct { short: intern.BindingName, target: intern.ModuleName },
+                // The cursor owns one reference to a counted entry until it
+                // is released; the published directory takes its own.
+                .define => struct { name: intern.BindingName, entry: env.Entry },
             };
             const ModuleLookup = Directory.ModuleMap.RawLookupCursor;
             const AliasLookup = Directory.AliasMap.RawLookupCursor;
@@ -2077,6 +2318,19 @@ pub const Registry = enum(usize) {
                     /// An alias that already names its target is a no-op.
                     same_alias: struct { canonical: intern.ModuleName, lookup: AliasLookup },
                 },
+                .define => void,
+            };
+            const Maps = struct {
+                modules: ?Directory.ModuleMap = null,
+                aliases: ?Directory.AliasMap = null,
+                names: ?env.NameMap = null,
+
+                fn deinit(self: *Maps) void {
+                    if (self.modules) |*map| map.deinit();
+                    if (self.aliases) |*map| map.deinit();
+                    if (self.names) |*map| map.deinit();
+                    self.* = .{};
+                }
             };
             const Build = struct {
                 directory: DirectoryLease,
@@ -2086,16 +2340,12 @@ pub const Registry = enum(usize) {
             const State = union(enum) {
                 snapshot,
                 validate: struct { directory: DirectoryLease, step: Validation },
-                init_modules: struct {
+                init_maps: struct {
                     directory: DirectoryLease,
                     target: Target,
-                    cursor: Directory.ModuleMap.InitCursor,
-                },
-                init_aliases: struct {
-                    directory: DirectoryLease,
-                    target: Target,
-                    modules: Directory.ModuleMap,
-                    cursor: Directory.AliasMap.InitCursor,
+                    maps: Maps,
+                    phase: enum { modules, aliases, names },
+                    cursor: ?InitCursor = null,
                 },
                 copy_modules: struct {
                     build: Build,
@@ -2109,8 +2359,25 @@ pub const Registry = enum(usize) {
                     insertion: ?Directory.AliasMap.PutCursor = null,
                 },
                 put_alias: struct { build: Build, cursor: Directory.AliasMap.PutCursor },
+                copy_names: struct {
+                    build: Build,
+                    entries: env.NameMap.RawEntryCursor,
+                    insertion: ?env.NameMap.PutCursor = null,
+                },
+                put_name: struct { build: Build, cursor: env.NameMap.PutCursor },
                 commit: Build,
                 complete,
+            };
+            const InitCursor = union(enum) {
+                modules: Directory.ModuleMap.InitCursor,
+                aliases: Directory.AliasMap.InitCursor,
+                names: env.NameMap.InitCursor,
+
+                fn deinit(self: *InitCursor) void {
+                    switch (self.*) {
+                        inline else => |*cursor| cursor.deinit(),
+                    }
+                }
             };
 
             registry: *Registry,
@@ -2118,23 +2385,25 @@ pub const Registry = enum(usize) {
             state: State = .snapshot,
 
             pub fn deinit(self: *Self) void {
-                if (kind == .register) self.request.deinit();
+                switch (kind) {
+                    .register => self.request.deinit(),
+                    .define => self.request.entry.release(self.registry.releaseDomain()),
+                    .alias => {},
+                }
                 switch (self.state) {
                     .snapshot, .complete => {},
                     .validate => |*state| state.directory.deinit(),
-                    .init_modules => |*state| {
-                        state.cursor.deinit();
-                        state.directory.deinit();
-                    },
-                    .init_aliases => |*state| {
-                        state.cursor.deinit();
-                        state.modules.deinit();
+                    .init_maps => |*state| {
+                        if (state.cursor) |*cursor| cursor.deinit();
+                        state.maps.deinit();
                         state.directory.deinit();
                     },
                     .copy_modules => |*state| self.discard(&state.build),
                     .put_module => |*state| self.discard(&state.build),
                     .copy_aliases => |*state| self.discard(&state.build),
                     .put_alias => |*state| self.discard(&state.build),
+                    .copy_names => |*state| self.discard(&state.build),
+                    .put_name => |*state| self.discard(&state.build),
                     .commit => |*build| self.discard(build),
                 }
                 self.* = undefined;
@@ -2150,6 +2419,7 @@ pub const Registry = enum(usize) {
                 return switch (kind) {
                     .register => self.request.borrow().name,
                     .alias => self.request.target,
+                    .define => unreachable,
                 };
             }
 
@@ -2157,46 +2427,7 @@ pub const Registry = enum(usize) {
                 switch (self.state) {
                     .snapshot => return self.beginSnapshot(),
                     .validate => |*state| return self.validate(state),
-                    .init_modules => |*state| switch (try state.cursor.advance()) {
-                        .pending => {},
-                        .complete => |modules| {
-                            const expected = (if (state.directory.directory) |old| old.aliases.count() else 0) + 1;
-                            self.state = .{ .init_aliases = .{
-                                .directory = state.directory,
-                                .target = state.target,
-                                .modules = modules,
-                                .cursor = Directory.AliasMap.initCursor(self.registry.allocator(), expected),
-                            } };
-                        },
-                    },
-                    .init_aliases => |*state| switch (try state.cursor.advance()) {
-                        .pending => {},
-                        .complete => |aliases| {
-                            // On failure the completed cursor frees nothing and
-                            // `deinit` still owns the module map.
-                            const candidate = self.registry.allocator().create(Directory) catch |err| {
-                                var owned = aliases;
-                                owned.deinit();
-                                return err;
-                            };
-                            candidate.* = .{
-                                .modules = state.modules,
-                                .aliases = aliases,
-                                .previous = null,
-                            };
-                            const build = Build{
-                                .directory = state.directory,
-                                .target = state.target,
-                                .candidate = candidate,
-                            };
-                            if (build.directory.directory) |old| {
-                                self.state = .{ .copy_modules = .{
-                                    .build = build,
-                                    .entries = old.modules.rawEntries(),
-                                } };
-                            } else self.enterPutModule(build);
-                        },
-                    },
+                    .init_maps => |*state| try self.advanceInit(state),
                     .copy_modules => |*state| {
                         if (state.insertion) |*insertion| switch (insertion.advance()) {
                             .pending => return .pending,
@@ -2210,7 +2441,7 @@ pub const Registry = enum(usize) {
                             .item => |entry| {
                                 const replaced = switch (kind) {
                                     .register => entry.key == state.build.target.canonical,
-                                    .alias => false,
+                                    .alias, .define => false,
                                 };
                                 if (!replaced) {
                                     entry.value.retain();
@@ -2242,6 +2473,30 @@ pub const Registry = enum(usize) {
                     },
                     .put_alias => |*state| switch (state.cursor.advance()) {
                         .pending => {},
+                        .complete => self.enterCopyNames(state.build),
+                    },
+                    .copy_names => |*state| {
+                        if (state.insertion) |*insertion| switch (insertion.advance()) {
+                            .pending => return .pending,
+                            .complete => {
+                                state.insertion = null;
+                                return .pending;
+                            },
+                        };
+                        switch (state.entries.advance()) {
+                            .pending => {},
+                            .item => |entry| {
+                                const replaced = kind == .define and entry.key == self.request.name;
+                                if (!replaced) {
+                                    entry.value.retain();
+                                    state.insertion = state.build.candidate.names.putCursor(entry.key, entry.value);
+                                }
+                            },
+                            .complete => self.enterPutName(state.build),
+                        }
+                    },
+                    .put_name => |*state| switch (state.cursor.advance()) {
+                        .pending => {},
                         .complete => self.state = .{ .commit = state.build },
                     },
                     .commit => |*build| {
@@ -2256,11 +2511,15 @@ pub const Registry = enum(usize) {
                         const outcome = self.apply(build.target);
                         build.candidate.previous = @constCast(build.directory.directory);
                         self.registry.privateState().directories.publish(build.candidate);
+                        _ = publication_epoch.fetchAdd(1, .acq_rel);
                         self.registry.unlock();
                         var published = build.*;
                         self.state = .complete;
                         published.directory.deinit();
-                        return if (kind == .register) .{ .complete = outcome } else .complete;
+                        return switch (kind) {
+                            .register => .{ .complete = outcome },
+                            .alias, .define => .complete,
+                        };
                     },
                     .complete => unreachable,
                 }
@@ -2273,12 +2532,19 @@ pub const Registry = enum(usize) {
                         return error.ReservedName,
                     .alias => if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.request.short))))
                         return error.ReservedName,
+                    .define => {},
                 }
                 var directory = self.registry.acquireDirectory();
                 const old = directory.directory orelse {
                     switch (kind) {
                         .register => {
                             self.beginBuild(directory, .{ .canonical = self.requestedName(), .prior = null });
+                            return .pending;
+                        },
+                        .define => {
+                            // SAFETY: a top-level definition edits no module
+                            // entry, so its target's canonical name is never read.
+                            self.beginBuild(directory, .{ .canonical = undefined, .prior = null });
                             return .pending;
                         },
                         .alias => {
@@ -2293,6 +2559,11 @@ pub const Registry = enum(usize) {
                     else
                         .{ .prior = old.modules.rawLookup(self.requestedName()) },
                     .alias => .{ .short_free = old.modules.rawLookup(intern.moduleNameFromBinding(self.request.short)) },
+                    .define => {
+                        // SAFETY: as above; a definition edits no module entry.
+                        self.beginBuild(directory, .{ .canonical = undefined, .prior = null });
+                        return .pending;
+                    },
                 };
                 self.state = .{ .validate = .{ .directory = directory, .step = step } };
                 return .pending;
@@ -2363,17 +2634,84 @@ pub const Registry = enum(usize) {
                             },
                         },
                     },
+                    .define => unreachable,
                 }
                 return .pending;
             }
 
             fn beginBuild(self: *Self, directory: DirectoryLease, target: Target) void {
-                const expected = (if (directory.directory) |old| old.modules.count() else 0) + 1;
-                self.state = .{ .init_modules = .{
+                self.state = .{ .init_maps = .{
                     .directory = directory,
                     .target = target,
-                    .cursor = Directory.ModuleMap.initCursor(self.registry.allocator(), expected),
+                    .maps = .{},
+                    .phase = .modules,
                 } };
+            }
+
+            fn advanceInit(self: *Self, state: *@FieldType(State, "init_maps")) error{OutOfMemory}!void {
+                const old = state.directory.directory;
+                const map_allocator = self.registry.allocator();
+                if (state.cursor == null) state.cursor = switch (state.phase) {
+                    .modules => .{ .modules = Directory.ModuleMap.initCursor(
+                        map_allocator,
+                        (if (old) |current| current.modules.count() else 0) + @intFromBool(kind == .register),
+                    ) },
+                    .aliases => .{ .aliases = Directory.AliasMap.initCursor(
+                        map_allocator,
+                        (if (old) |current| current.aliases.count() else 0) + @intFromBool(kind == .alias),
+                    ) },
+                    .names => .{ .names = env.NameMap.initCursor(
+                        map_allocator,
+                        (if (old) |current| current.names.count() else 0) + @intFromBool(kind == .define),
+                    ) },
+                };
+                switch (state.cursor.?) {
+                    .modules => |*cursor| switch (try cursor.advance()) {
+                        .pending => return,
+                        .complete => |map| {
+                            state.maps.modules = map;
+                            state.phase = .aliases;
+                        },
+                    },
+                    .aliases => |*cursor| switch (try cursor.advance()) {
+                        .pending => return,
+                        .complete => |map| {
+                            state.maps.aliases = map;
+                            state.phase = .names;
+                        },
+                    },
+                    .names => |*cursor| switch (try cursor.advance()) {
+                        .pending => return,
+                        .complete => |map| {
+                            state.maps.names = map;
+                            state.cursor = null;
+                            return self.finishInit(state);
+                        },
+                    },
+                }
+                state.cursor = null;
+            }
+
+            fn finishInit(self: *Self, state: *@FieldType(State, "init_maps")) error{OutOfMemory}!void {
+                const candidate = try self.registry.allocator().create(Directory);
+                candidate.* = .{
+                    .modules = state.maps.modules.?,
+                    .aliases = state.maps.aliases.?,
+                    .names = state.maps.names.?,
+                    .previous = null,
+                };
+                state.maps = .{};
+                const build = Build{
+                    .directory = state.directory,
+                    .target = state.target,
+                    .candidate = candidate,
+                };
+                if (build.directory.directory) |old| {
+                    self.state = .{ .copy_modules = .{
+                        .build = build,
+                        .entries = old.modules.rawEntries(),
+                    } };
+                } else self.enterPutModule(build);
             }
 
             fn enterPutModule(self: *Self, build: Build) void {
@@ -2402,26 +2740,48 @@ pub const Registry = enum(usize) {
                         .build = build,
                         .cursor = build.candidate.aliases.putCursor(self.request.short, build.target.canonical),
                     } };
+                } else self.enterCopyNames(build);
+            }
+
+            fn enterCopyNames(self: *Self, build: Build) void {
+                if (build.directory.directory) |old| {
+                    self.state = .{ .copy_names = .{
+                        .build = build,
+                        .entries = old.names.rawEntries(),
+                    } };
+                } else self.enterPutName(build);
+            }
+
+            fn enterPutName(self: *Self, build: Build) void {
+                if (kind == .define) {
+                    self.request.entry.retain();
+                    self.state = .{ .put_name = .{
+                        .build = build,
+                        .cursor = build.candidate.names.putCursor(self.request.name, self.request.entry),
+                    } };
                 } else self.state = .{ .commit = build };
             }
 
             /// The edit's effect on the images themselves, applied under the
             /// writer lock just before the candidate becomes current: a
-            /// replaced generation is marked superseded, which is
-            /// what evicts qualified call-site cache entries that still hold
-            /// it, and a published image learns its generation number.
+            /// published image learns its generation number and joins the
+            /// registry's history, which keeps it until teardown.
             fn apply(self: *Self, target: Target) switch (kind) {
                 .register => u64,
-                .alias => void,
+                .alias, .define => void,
             } {
                 switch (kind) {
                     .register => {
                         const image = self.request.borrow();
                         image.generation = if (target.prior) |prior| prior.generation + 1 else 1;
-                        if (target.prior) |prior| prior.superseded.store(true, .release);
+                        image.retain();
+                        const state = self.registry.privateState();
+                        image.history_next = state.history;
+                        state.history = image;
+                        image.published.store(true, .release);
                         return image.generation;
                     },
-                    .alias => {},
+                    .alias, .define => {},
                 }
             }
         };
@@ -2429,12 +2789,18 @@ pub const Registry = enum(usize) {
 
     pub const RegistrationCursor = EditCursor(.register);
     pub const AliasCursor = EditCursor(.alias);
+    pub const DefineCursor = EditCursor(.define);
 
     pub fn registrationCursor(self: *Registry, image: SealedImage) RegistrationCursor {
         return .{ .registry = self, .request = image };
     }
     pub fn aliasCursor(self: *Registry, short: intern.BindingName, target: intern.ModuleName) AliasCursor {
         return .{ .registry = self, .request = .{ .short = short, .target = target } };
+    }
+    /// Publishes one top-level name. The cursor takes the caller's reference
+    /// to a counted entry.
+    pub fn defineCursor(self: *Registry, name: intern.BindingName, entry: env.Entry) DefineCursor {
+        return .{ .registry = self, .request = .{ .name = name, .entry = entry } };
     }
 
     pub const AcquireProgress = poll.Progress(?GenerationLease);
@@ -2454,6 +2820,17 @@ pub const Registry = enum(usize) {
             canonical_module: Directory.ModuleMap.RawLookupCursor,
             complete,
         };
+
+        fn initIn(directory: DirectoryLease, name: intern.ModuleName) AcquireCursor {
+            return .{
+                .directory = directory,
+                .name = name,
+                .state = if (directory.directory) |current|
+                    .{ .module = current.modules.rawLookup(name) }
+                else
+                    .absent,
+            };
+        }
 
         pub fn deinit(self: *AcquireCursor) void {
             self.directory.deinit();
@@ -2499,15 +2876,13 @@ pub const Registry = enum(usize) {
         }
     };
     pub fn acquireCursor(self: *const Registry, name: intern.ModuleName) AcquireCursor {
-        const directory = self.acquireDirectory();
-        return .{
-            .directory = directory,
-            .name = name,
-            .state = if (directory.directory) |current|
-                .{ .module = current.modules.rawLookup(name) }
-            else
-                .absent,
-        };
+        return .initIn(self.acquireDirectory(), name);
+    }
+
+    /// Captures the current snapshot as one coherent view.
+    pub fn view(self: *const Registry) View {
+        const publication = currentPublication();
+        return .{ .directory = self.acquireDirectory(), .publication = publication };
     }
 
     pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);

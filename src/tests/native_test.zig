@@ -1403,24 +1403,24 @@ test "native: the static transport publishes a linked descriptor through the sam
         .complete => |candidate| break candidate,
     };
     defer candidate.deinit();
-    var candidate_sealed = try candidate.seal(null);
+    var candidate_sealed = try candidate.sealLiteralGroup();
     defer candidate_sealed.deinit();
     _ = try modules.testing.register(&registry, &candidate_sealed);
     var generation = modules.testing.acquire(&registry, requested).?;
     defer generation.deinit();
     const increment = try intern.internNamespace("increment");
-    var resolver = generation.resolveCursor(intern.namespaceId(increment));
+    var resolver = generation.lookupCursor(increment);
     defer resolver.deinit();
-    var binding = while (true) switch (resolver.advance()) {
+    const entry = while (true) switch (resolver.advance()) {
         .pending => {},
         .complete => |resolved| break resolved.?,
     };
-    defer binding.deinit();
-    try std.testing.expect(binding.spec().binding == .native);
-    try std.testing.expectEqual(@as(u32, 1), binding.spec().effect.?.inputs);
-    try std.testing.expectEqual(@as(u32, 1), binding.spec().effect.?.outputs);
-    try std.testing.expectEqual(@as(usize, 3), binding.spec().binding.native.instance.requirements().len);
-    const document = env.documentationHeader(binding.spec().doc.?);
+    const binding = entry.definition;
+    try std.testing.expect(binding.body == .native);
+    try std.testing.expectEqual(@as(u32, 1), binding.effect.?.inputs);
+    try std.testing.expectEqual(@as(u32, 1), binding.effect.?.outputs);
+    try std.testing.expectEqual(@as(usize, 3), binding.body.native.instance.requirements().len);
+    const document = env.documentationHeader(binding.doc.?);
     try std.testing.expectEqual(@as(u64, "Increment an integer.".len), document.length());
     for ("Increment an integer.", 0..) |byte, index|
         try std.testing.expectEqual(

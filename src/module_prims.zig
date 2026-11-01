@@ -136,8 +136,8 @@ fn importAs(comptime visibility: env.Visibility) env.PrimitiveImpl {
 fn importWord(evaluator: *Unit, visibility: env.Visibility) MachineError!void {
     try evaluator.require(2);
     const scope = try evaluator.definitionScope();
-    if (visibility == .private and !scope.isUnderConstruction())
-        return evaluator.fail(.domain, "importp is legal only in a module root");
+    if (visibility == .private and (!scope.isModuleRoot() or evaluator.stagingImage(scope) == null))
+        return evaluator.fail(.domain, "importp is legal only in a module root under construction");
     var requested = try evaluator.popList();
     errdefer requested.deinit();
     const module_id = try evaluator.popSymbol();
@@ -166,10 +166,12 @@ const ImportName = struct {
     qualified: u32,
 };
 
-/// Batch import validates and resolves the entire requested public surface
-/// against one pinned generation before publishing the first forwarding
-/// binding. A missing or private attribute therefore cannot leave a prefix of
-/// the request installed in the destination scope.
+/// Batch import validates the entire requested public surface against one
+/// pinned generation before publishing the first name. A missing or private
+/// attribute therefore cannot leave a prefix of the request installed in the
+/// destination scope. What it publishes are name aliases, `x -> m.x`: every
+/// later binding or lookup follows the alias, so an import never captures the
+/// target it validated.
 const ImportDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     module_id: u32,
@@ -185,21 +187,10 @@ const ImportDriver = struct {
     acquisition: ?heap.Owned(machine.ModuleLookupCursor) = null,
     generation: ?heap.Owned(modules.GenerationLease) = null,
     validation_index: usize = 0,
-    resolution: ?heap.Owned(modules.ModuleResolveCursor) = null,
+    resolution: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
     validated: bool = false,
     publish_index: usize = 0,
-    resolved: ?heap.Owned(env.BindingLease) = null,
-    forwarding_body: ?heap.Owned(Value) = null,
-    publisher: ?heap.Owned(env.Environment.BindCursor) = null,
-
-    /// Whether the attribute being published is a standard-library builtin,
-    /// which binds directly: a standard-library module name is never
-    /// registered again, so resolving its attribute now or at each call finds
-    /// the same builtin, and a forwarding body would only add an activation.
-    fn importsBuiltin(self: *const ImportDriver) bool {
-        if (self.generation.?.borrow().provenance() != .standard_library) return false;
-        return self.resolved.?.borrow().spec().binding == .builtin;
-    }
+    publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
 
     fn init(
         evaluator: *Unit,
@@ -309,15 +300,14 @@ const ImportDriver = struct {
                 }
                 const requested = self.prepared.borrow()[self.validation_index];
                 if (self.resolution == null)
-                    self.resolution = .init(self.generation.?.borrow().resolveCursor(
-                        intern.bindingId(requested.binding),
-                    ));
+                    self.resolution = .init(self.generation.?.borrow().lookupCursor(requested.binding));
                 switch (self.resolution.?.borrowMut().advance()) {
                     .pending => continue,
-                    .complete => |maybe_lease| {
-                        var lease = maybe_lease orelse
+                    .complete => |maybe_entry| {
+                        const entry = maybe_entry orelse
                             return evaluator.undefinedNameIn(requested.qualified, .qualified);
-                        lease.deinit();
+                        if (!modules.entryIsPublic(entry))
+                            return evaluator.undefinedNameIn(requested.qualified, .qualified);
                         self.resolution.?.deinit(evaluator.releases, evaluator.allocator);
                         self.resolution = null;
                         self.validation_index += 1;
@@ -328,72 +318,33 @@ const ImportDriver = struct {
 
             if (self.publish_index == self.prepared.borrow().len) return .completed;
             const requested = self.prepared.borrow()[self.publish_index];
-            if (self.resolved == null and self.publisher == null) {
-                if (self.resolution == null)
-                    self.resolution = .init(self.generation.?.borrow().resolveCursor(
-                        intern.bindingId(requested.binding),
-                    ));
-                switch (self.resolution.?.borrowMut().advance()) {
-                    .pending => continue,
-                    .complete => |maybe_lease| {
-                        self.resolved = .init(maybe_lease orelse unreachable);
-                        self.resolution.?.deinit(evaluator.releases, evaluator.allocator);
-                        self.resolution = null;
-                        continue;
-                    },
-                }
+            const alias: env.Alias = .{
+                .module = self.module_name.?,
+                .binding = requested.binding,
+                .visibility = self.visibility,
+            };
+            switch (self.scope.storage) {
+                // A module stages its imports with its definitions; a name
+                // introduced twice fails construction.
+                .module_root => {
+                    const image = evaluator.stagingImage(self.scope) orelse return evaluator.fail(
+                        .domain,
+                        "module imports are legal only while the module is under construction",
+                    );
+                    try image.stageAlias(requested.binding, alias);
+                    self.publish_index += 1;
+                    continue;
+                },
+                .core_build => return evaluator.fail(.domain, "core does not import"),
+                .session => {},
             }
-            const direct = self.importsBuiltin();
-            if (!direct and self.forwarding_body == null) {
-                // The forwarding word is written into the importing root.
-                const linker = try evaluator.rootLinker(self.scope);
-                self.forwarding_body = .init(try list.fromValuesGeneric(
-                    evaluator.allocator,
-                    &.{.{ .symbol = .{ .name = requested.qualified, .slot = try linker.link(requested.qualified) } }},
-                ));
-                continue;
-            }
-            if (self.publisher == null and direct) {
-                const lease = self.resolved.?.borrow();
-                self.publisher = .init(try self.scope.publishImportedCursor(requested.binding, .{
-                    .primitive = lease.spec().binding.builtin,
-                    .visibility = self.visibility,
-                    .effect = lease.spec().effect,
-                    .doc = lease.spec().doc,
-                    .reports_as = .plain(requested.qualified),
-                }));
-                continue;
-            }
-            if (self.publisher == null) {
-                const lease = self.resolved.?.borrow();
-                const body = env.quotation(self.forwarding_body.?.borrow().list) orelse unreachable;
-                // `import` inside a module body binds module-locally, the same
-                // way `def` does there. Reaching for top publication on a
-                // module root used to abort on an `unreachable`, which one
-                // line of ordinary source could trigger.
-                self.publisher = .init(try self.scope.publishWordCursor(requested.binding, .{
-                    .body = body,
-                    .visibility = self.visibility,
-                    .effect = lease.spec().effect,
-                    .doc = lease.spec().doc,
-                }));
-                continue;
-            }
-            switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Frozen => return evaluator.fail(
-                    .domain,
-                    "module environments are immutable after registration",
-                ),
-            }) {
+            if (self.publisher == null)
+                self.publisher = .init(evaluator.inherited.registry.defineCursor(requested.binding, .{ .alias = alias }));
+            switch (try self.publisher.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => {
                     self.publisher.?.deinit(evaluator.releases, evaluator.allocator);
                     self.publisher = null;
-                    if (self.forwarding_body) |*body| body.deinit(evaluator.releases, evaluator.allocator);
-                    self.forwarding_body = null;
-                    self.resolved.?.deinit(evaluator.releases, evaluator.allocator);
-                    self.resolved = null;
                     self.publish_index += 1;
                 },
             }
@@ -578,11 +529,7 @@ const ExportsDriver = struct {
             .requested = requested,
             .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
             .state = .init(if (core_requested)
-                .{ .core_names = .init(reflection.VisibleNameCursor.init(
-                    .{ .environment = evaluator.environment.coreView() },
-                    evaluator.environment.coreView(),
-                    evaluator.bindingPin(),
-                )) }
+                .{ .core_names = .init(reflection.VisibleNameCursor.init(.core, evaluator.environment)) }
             else
                 .{ .validate = .init(requested) }),
         };
@@ -626,7 +573,7 @@ const ExportsDriver = struct {
                     const module_name = acquire.name;
                     evaluator.retireDriver(self);
                     return evaluator.retryQualifiedOperandAfterLoad(
-                        requested,
+                        .{ .name = requested },
                         .{ .unregistered_module = module_name },
                     );
                 },
@@ -726,9 +673,8 @@ const WordsDriver = struct {
             .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator)),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
             .state = .init(.{ .visible = .init(reflection.VisibleNameCursor.init(
-                .{ .scope = evaluator.currentScope() },
-                evaluator.environment.coreView(),
-                evaluator.bindingPin(),
+                evaluator.visibleNameRoot(),
+                evaluator.environment,
             )) }),
         };
     }

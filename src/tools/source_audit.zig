@@ -47,7 +47,7 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     embeddedGroup(true, &.{
-        "machine.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
+        "machine.zig", "binder.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden

@@ -19,11 +19,12 @@ const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const standard_streams = @import("standard_streams.zig");
-const resolution_core = @import("resolution_core.zig");
 const map_state = @import("module_snapshot.zig");
 const external = @import("external.zig");
 const scheduler_api = @import("scheduler.zig");
 const idioms = @import("idioms.zig");
+const binder = @import("binder.zig");
+const reflection = @import("reflection.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -1137,8 +1138,24 @@ pub fn stringValue(
     var work = poll_api.unbounded();
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
+/// How an evaluation's words reach their targets.
+const Program = union(enum) {
+    /// Top-level source: each word is resolved when it is reached, so a
+    /// definition made by one form is visible to the next. The evaluation
+    /// owns one reference to its code.
+    incremental,
+    /// A quotation application whose binding has not run yet. Nothing in it
+    /// executes until every top-level word is bound. The evaluation owns one
+    /// reference to its code.
+    unbound,
+    /// A sealed executable. Its code is borrowed from the executable, which
+    /// the evaluation keeps alive by holding the executable's owner.
+    bound: *const env.Executable,
+};
+
 const Eval = struct {
     code: *Header,
+    program: Program,
     position: union(enum) {
         source: u32,
         // Carries the call site's next source index, but dispatches no caller
@@ -1176,6 +1193,35 @@ const Eval = struct {
     /// application. If it completes or transfers tail control, its existing
     /// code-header ownership becomes the application's selected quotation.
     application_selection: ?ApplicationFrameIndex = null,
+
+    /// Releases what this evaluation owns.
+    fn release(self: Eval, releases: *heap.ReleaseDomain) void {
+        switch (self.program) {
+            .incremental, .unbound => releases.releaseHeader(self.code),
+            .bound => |executable| executable.owner.release(releases),
+        }
+    }
+
+    /// Takes one more reference for a copy of this evaluation.
+    fn retainCopy(self: Eval) void {
+        switch (self.program) {
+            .incremental, .unbound => heap.incRef(self.code),
+            .bound => |executable| executable.owner.retain(),
+        }
+    }
+
+    /// Moves this evaluation's ownership into one code reference, for a
+    /// holder that keeps only the quotation.
+    fn intoCode(self: Eval, releases: *heap.ReleaseDomain) *Header {
+        switch (self.program) {
+            .incremental, .unbound => return self.code,
+            .bound => |executable| {
+                heap.incRef(self.code);
+                executable.owner.release(releases);
+                return self.code;
+            },
+        }
+    }
 
     fn nextIndex(self: Eval) u32 {
         return switch (self.position) {
@@ -1217,10 +1263,6 @@ const Eval = struct {
     /// quotation it invokes on a caller's behalf.
     pub fn scope(self: Eval) *env.Scope {
         return self.site.scope;
-    }
-    /// Where this body's *word references* resolve.
-    pub fn resolutionScope(self: Eval) ?*env.Scope {
-        return self.site.resolution_scope;
     }
     /// Whose privacy this body runs under.
     pub fn home(self: Eval) ?*modules.ModuleHome {
@@ -1392,17 +1434,9 @@ pub const ExecutionSite = struct {
     /// Where this body's own definitions land, and the chain it hands to any
     /// quotation it invokes on a caller's behalf.
     scope: *env.Scope,
-    /// Where this body's *word references* resolve: the chain the binding was
-    /// defined against, never whatever environment happens to be executing.
-    /// For a module word that is its image. For a core or prelude definition
-    /// it is core alone, which no scope denotes — core is a terminal phase
-    /// rather than a link in any chain — so `null` means "go straight to
-    /// core".
-    resolution_scope: ?*env.Scope,
-    /// Whose privacy this body runs under. Correlated
-    /// with the scopes but not derivable from them: a homeless word called
-    /// from module code inherits the caller's home while resolving against its
-    /// own lexical chain.
+    /// Whose privacy this body runs under. Correlated with the scope but not
+    /// derivable from it: a homeless word called from module code inherits the
+    /// caller's home. Where a word resolves is carried by the word itself.
     home: ?*modules.ModuleHome,
     /// Authority carried only while evaluating an embedded source module.
     /// A named module constructed by that source moves it into the immutable
@@ -1421,7 +1455,6 @@ pub const ExecutionSite = struct {
         const scope = unit.lexicalScope();
         return .{
             .scope = scope,
-            .resolution_scope = scope,
             .home = null,
             .defining = unit.root_defining,
             .registration_provenance = if (unit.inherited.module_snapshot) |module_snapshot|
@@ -1441,7 +1474,6 @@ pub const ExecutionSite = struct {
         const scope = home.scope(access);
         return .{
             .scope = scope,
-            .resolution_scope = scope,
             .home = home,
             .defining = defining,
             .registration_provenance = home.registrationProvenance(),
@@ -1469,7 +1501,6 @@ pub const ExecutionSite = struct {
     ) ExecutionSite {
         return .{
             .scope = scope,
-            .resolution_scope = scope,
             .home = home,
             .registration_provenance = registration_provenance,
             .defining = defining,
@@ -1500,6 +1531,107 @@ pub const IsolatedApplication = struct {
     /// Where a finite iteration keeps what its call has decided for its
     /// quotation's words.
     plan: ?*ResolutionPlan = null,
+    /// The executables this invocation has bound so far, carried from one
+    /// application to the next.
+    bound: ApplicationReuse = .{},
+
+    /// Releases an application that never became a frame.
+    fn discard(self: IsolatedApplication, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        var bound = self.bound;
+        bound.deinit(releases);
+        self.deinit_fn(releases, allocator, self.context);
+    }
+};
+
+/// The executables one combinator invocation bound for the quotations it
+/// applies, so each later application reuses them instead of binding again.
+/// A predicate and a body are separate quotations with separate bindings, so
+/// two slots cover every combinator. The invocation owns what it holds, so no
+/// cache eviction can disturb its remaining applications.
+const ApplicationReuse = struct {
+    slots: [2]?*env.AnonymousCode = .{ null, null },
+
+    fn find(self: *const ApplicationReuse, code: *Header) ?*env.AnonymousCode {
+        for (self.slots) |slot| if (slot) |held| if (held.executable.code == code) return held;
+        return null;
+    }
+
+    fn remember(self: *ApplicationReuse, code: *env.AnonymousCode) void {
+        for (&self.slots) |*slot| if (slot.* == null) {
+            code.retain();
+            slot.* = code;
+            return;
+        };
+    }
+
+    fn deinit(self: *ApplicationReuse, releases: *heap.ReleaseDomain) void {
+        for (&self.slots) |*slot| if (slot.*) |held| {
+            held.release(releases);
+            slot.* = null;
+        };
+    }
+};
+
+/// The unit's bounded cache of anonymous bindings. An entry owns its executable
+/// and, through it, its exact source quotation, so a pointer key cannot be
+/// reused by another quotation while the entry lives. It is consulted only
+/// where an application begins binding, and is valid only in the publication
+/// and under the provenance it was bound in: any publication anywhere
+/// conservatively invalidates it.
+const BindingReuse = struct {
+    const capacity = 16;
+    const Entry = struct {
+        code: *env.AnonymousCode,
+        publication: u64,
+        provenance: u64,
+    };
+    entries: [capacity]?Entry = @splat(null),
+
+    fn index(code: *Header) usize {
+        return (@intFromPtr(code) >> 4) % capacity;
+    }
+
+    fn provenanceKey(provenance: modules.RegistrationProvenance) u64 {
+        return switch (provenance) {
+            .ordinary => 0,
+            .standard_library => 1,
+            .root_scope => |scope| 2 | (@as(u64, @backingInt(scope)) << 2),
+            .source => |source| @intFromPtr(source),
+        };
+    }
+
+    fn find(
+        self: *const BindingReuse,
+        code: *Header,
+        publication: u64,
+        provenance: modules.RegistrationProvenance,
+    ) ?*env.AnonymousCode {
+        const entry = self.entries[index(code)] orelse return null;
+        if (entry.code.executable.code != code or entry.publication != publication or
+            entry.provenance != provenanceKey(provenance)) return null;
+        entry.code.retain();
+        return entry.code;
+    }
+
+    fn remember(
+        self: *BindingReuse,
+        releases: *heap.ReleaseDomain,
+        code: *env.AnonymousCode,
+        publication: u64,
+        provenance: modules.RegistrationProvenance,
+    ) void {
+        const slot = &self.entries[index(code.executable.code)];
+        if (slot.*) |old| old.code.release(releases);
+        code.retain();
+        slot.* = .{ .code = code, .publication = publication, .provenance = provenanceKey(provenance) };
+    }
+
+    fn deinit(self: *BindingReuse, releases: *heap.ReleaseDomain) void {
+        for (&self.entries) |*slot| if (slot.*) |entry| {
+            entry.code.release(releases);
+            slot.* = null;
+        };
+    }
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1566,9 +1698,13 @@ const ApplicationFrame = struct {
     provenance_nonce: ?ApplicationProvenanceNonce = null,
     /// Borrowed from the combinator state `context` names.
     plan: ?*ResolutionPlan = null,
+    /// Owned: what this invocation has bound for its quotations.
+    bound: ApplicationReuse = .{},
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
+        var bound = self.bound;
+        bound.deinit(releases);
         switch (self.mode) {
             .in_place, .isolated => {},
         }
@@ -1581,11 +1717,15 @@ const ApplicationFrame = struct {
 /// source call restore those operands before selecting `.replay`.
 const QualifiedLoadContinuation = union(enum) {
     replay,
+    /// Dispatch the exact word again by explicit lookup.
     dispatch: struct {
-        word: u32,
+        word: value.Symbol,
         site: ?ErrorSite,
         trace_parent: ?intern.TraceWord,
     },
+    /// Bind the restored evaluation again, against a view that now holds the
+    /// loaded module. Nothing in it has executed.
+    rebind,
     load_only,
 };
 const QualifiedLoadRequest = struct {
@@ -1600,7 +1740,7 @@ const SourceLoadRequest = union(enum) {
     fn preservesCaller(self: SourceLoadRequest) bool {
         return switch (self) {
             .module => |module| switch (module.operation.continuation) {
-                .replay, .dispatch => true,
+                .replay, .dispatch, .rebind => true,
                 .load_only => false,
             },
             .source => false,
@@ -1631,7 +1771,7 @@ pub const Frame = union(enum(u8)) {
     boundary: Boundary,
     fn deinit(self: Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         switch (self) {
-            .eval => |frame| releases.releaseHeader(frame.code),
+            .eval => |frame| frame.release(releases),
             .effect_check => |owned| {
                 var check = owned;
                 check.deinit(releases);
@@ -2358,7 +2498,8 @@ pub const Unit = struct {
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    module_call_sites: ModuleCallSiteCache = .{},
+    /// Anonymous bindings this unit may reuse at an application boundary.
+    reuse: BindingReuse = .{},
     max_frames: usize = 0,
     entry_base: usize,
     stack_base: usize,
@@ -2379,13 +2520,6 @@ pub const Unit = struct {
     /// Whether this unit's root activation may define. False for a task,
     /// which runs in its spawner's scope without being a root of its own.
     root_defining: bool = true,
-    /// The binding version a unit that cannot define observes for its whole
-    /// life: bindings published after it was created are invisible to it.
-    /// Null for a unit that may define, which reads current bindings and
-    /// so sees its own definitions.
-    binding_pin: ?*heap.ReleaseDomain.BindingPin = null,
-    /// Resolutions of session and core words in this unit's view of bindings.
-    binding_cache: BindingCache = .{},
     /// Protected invocation may start this child at one selected registered
     /// module generation. The Unit lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
@@ -2680,7 +2814,7 @@ pub const Unit = struct {
             }
             if (self.current) |current| {
                 self.current = null;
-                self.releases.releaseHeader(current.code);
+                current.release(self.releases);
                 consumed += 1;
                 continue;
             }
@@ -2726,6 +2860,38 @@ pub const Unit = struct {
     /// depth counts: a helper word the body calls and an `@attempt` nested in
     /// the body are still construction, so a body cannot launder a task launch
     /// through code it defines first.
+    /// The names `words` lists from where this activation runs: a session
+    /// root's top-level directory, or a published image's.
+    pub fn visibleNameRoot(self: *Unit) reflection.VisibleNameRoot {
+        const scope = self.currentScope();
+        if (scope.isModuleRoot()) if (modules.homeForModuleRootScope(scope)) |home| {
+            if (home.isPublished()) return .{ .image = .{
+                .entries = home.publishedEntries(),
+                .pin = home.pin(self.module_access),
+            } };
+            return .core;
+        };
+        if (scope.storage == .core_build) return .core;
+        return .{ .session = self.inherited.registry.view() };
+    }
+
+    /// The image under construction whose root is `scope`, found through the
+    /// open module boundaries: the one place its staged names are written.
+    pub fn stagingImage(self: *Unit, scope: *env.Scope) ?*modules.OwnedImage {
+        var index = self.boundary_index;
+        while (index) |frame_index| {
+            const boundary = &self.frames.items[@backingInt(frame_index)].boundary;
+            switch (boundary.mode) {
+                .module => |*module| {
+                    if (module.image.executionHome(self.module_access).scope(self.module_access) == scope)
+                        return &module.image;
+                },
+                .attempt => {},
+            }
+            index = boundary.previous_boundary;
+        }
+        return null;
+    }
     pub fn inModuleConstruction(self: *const Unit) bool {
         var index = self.boundary_index;
         while (index) |frame_index| {
@@ -2739,14 +2905,6 @@ pub const Unit = struct {
         try self.lifetime.pin(self.allocator, generation, self.module_access);
     }
 
-    /// Adopts the reference the dispatch's borrow already acquired, rather than
-    /// acquiring a second one for the same image.
-    pub fn adoptGeneration(
-        self: *Unit,
-        owned: *modules.GenerationPin,
-    ) error{OutOfMemory}!void {
-        try self.lifetime.adopt(self.allocator, owned);
-    }
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
     /// Includes native registration authority and a reference to the Unit's
     /// bounded lexical observations for lookup and idiom recognition. Preserve the
@@ -2769,18 +2927,9 @@ pub const Unit = struct {
         self.driver_slot_busy = false;
     }
 
-    /// The binding version this unit observes, or null when it reads the
-    /// current bindings.
-    pub fn bindingPin(self: *const Unit) ?u64 {
-        const pin = self.binding_pin orelse return null;
-        return pin.version;
-    }
-
     pub fn deinit(self: *Unit) void {
-        if (self.binding_pin) |pin| self.environment.bindingDomain().unpinBindings(pin);
-        self.binding_cache.deinit(self.allocator);
-        self.module_call_sites.deinit(self.releases);
-        if (self.current) |current| self.releases.releaseHeader(current.code);
+        self.reuse.deinit(self.releases);
+        if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
         for (self.stack.items) |item| self.releases.releaseValue(item);
@@ -2850,15 +2999,18 @@ pub const Unit = struct {
     pub fn currentScope(self: *const Unit) *env.Scope {
         return self.current.?.scope();
     }
-    /// Links words written into `scope`, a root, to its name slots. An image's
+    /// Links words written into `scope`, a root, to that root. An image's
     /// cell carries its owner anchor, so a word that escapes the image proves
-    /// the image live before reading its slot.
+    /// the image live before reading its directory.
     pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
-        const owner: ?*env.ImageAnchor = if (scope.isModuleRoot())
-            modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access)
-        else
-            null;
-        return self.environment.linker(try self.environment.scopeCell(scope, owner));
+        return switch (scope.storage) {
+            .session => self.environment.linker(self.environment.sessionScopeId()),
+            .core_build => self.environment.linker(self.environment.coreScopeId()),
+            .module_root => self.environment.linker((try self.environment.scopeCell(
+                scope,
+                modules.anchorHandle(modules.homeForModuleRootScope(scope).?, self.module_access),
+            )).id),
+        };
     }
     /// The word `name` linked to its slot in the running activation's root, as
     /// a word built at run time on that activation's behalf is.
@@ -2869,7 +3021,7 @@ pub const Unit = struct {
     /// The word `name` linked to its core slot, as a word the implementation
     /// builds for itself is: it means core's binding wherever it runs.
     pub fn coreWord(self: *Unit, name: u32) error{OutOfMemory}!value.Symbol {
-        const linker = self.environment.linker(self.environment.coreCell());
+        const linker = self.environment.linker(self.environment.coreScopeId());
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
@@ -3117,32 +3269,32 @@ pub const Unit = struct {
     /// call, then use the same loader/retry protocol as executable dispatch.
     pub fn retryQualifiedOperandAfterLoad(
         self: *Unit,
-        requested: u32,
-        outcome: ResolutionOutcome,
+        requested: value.Symbol,
+        outcome: binder.Miss,
     ) MachineError!WorkProgress {
         if (self.current == null)
-            return self.undefinedNameIn(requested, .qualified);
+            return self.undefinedNameIn(requested.name, .qualified);
         switch (outcome) {
             .unknown_module_prefix => |prefix| {
                 try self.startDriver(QualifiedLoadPreparationDriver.init(
                     prefix,
-                    .{ .qualified = requested, .context = self.current.?.site.registration_provenance, .continuation = .replay },
+                    .{ .qualified = requested.name, .context = self.current.?.site.registration_provenance, .continuation = .replay },
                     .{ .operand = requested },
                 ));
                 return .detached;
             },
             .unregistered_module => |name| {
-                try self.pushBorrowed(.{ .symbol = .{ .name = requested } });
+                try self.pushBorrowed(.{ .symbol = requested });
                 self.current.?.rewind(self.active_index);
                 try self.autoLoadModule(name, .{
-                    .qualified = requested,
+                    .qualified = requested.name,
                     .context = self.current.?.site.registration_provenance,
                     .continuation = .replay,
                 });
                 return .detached;
             },
-            .unresolved => |chain| return self.undefinedNameIn(requested, chain),
-            .resolved => unreachable,
+            .unresolved => |chain| return self.undefinedNameIn(requested.name, chain),
+            .retired, .alias_cycle => return self.failUnbound(requested, outcome),
         }
     }
     /// A batch import consumes its module symbol and requested-name list before
@@ -4021,8 +4173,14 @@ pub const Unit = struct {
                     .pending => return .stepped,
                     .complete => |candidate| {
                         var built = candidate;
-                        errdefer built.deinit();
-                        const sealed = try built.seal(evaluator.moduleRecognition(.standard_library));
+                        defer built.deinit();
+                        const sealed = built.sealLiteralGroup() catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.Duplicate, error.UnboundWord => return evaluator.fail(
+                                .contract,
+                                "builtin module declares an invalid word",
+                            ),
+                        };
                         self.commit = .init(evaluator.inherited.registry.registrationCursor(sealed));
                         return .stepped;
                     },
@@ -4134,8 +4292,11 @@ pub const Unit = struct {
                         // Sealing can fail; until it succeeds the instance and
                         // the publication stay with this driver's state.
                         var built = candidate;
-                        errdefer built.deinit();
-                        const sealed = try built.seal(evaluator.moduleRecognition(self.provenance));
+                        defer built.deinit();
+                        const sealed = built.sealLiteralGroup() catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.Duplicate, error.UnboundWord => return self.failLoad(evaluator, "native module declares an invalid word"),
+                        };
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releases,
@@ -4343,7 +4504,7 @@ pub const Unit = struct {
                         .push => try evaluator.pushBorrowed(.{ .list = root_header }),
                         .call, .session => |source| {
                             heap.incRef(root_header);
-                            try evaluator.callOwned(root_header);
+                            try evaluator.callProgramOwned(root_header, .incremental);
                             if (source) |context| {
                                 evaluator.current.?.site.registration_provenance = .{ .source = context };
                             } else if (self.completion.borrow() == .call) {
@@ -4380,6 +4541,7 @@ pub const Unit = struct {
                             };
                             evaluator.current = .{
                                 .code = root_header,
+                                .program = .incremental,
                                 .position = .{ .source = 0 },
                                 .site = site,
                                 .traced_word = no_word,
@@ -4891,6 +5053,16 @@ pub const Unit = struct {
             }
         }.accepts);
     }
+    /// A symbol operand with its link, as written: what an explicit lookup
+    /// resolves in its own root.
+    pub fn popWord(self: *Unit) MachineError!value.Symbol {
+        var item = try self.popValue();
+        defer item.deinit();
+        return switch (item.borrow()) {
+            .symbol => |word| .{ .name = word.name, .slot = env.unquoted(word.slot) },
+            else => self.typeError("a symbol name"),
+        };
+    }
     pub fn popSymbol(self: *Unit) MachineError!u32 {
         var item = try self.popValue();
         defer item.deinit();
@@ -5047,19 +5219,6 @@ pub const Unit = struct {
         }
         return error.Ecl;
     }
-    /// What a module image built by this unit recognizes against when it
-    /// seals: the session's core. Only a standard-library image's definitions
-    /// are trusted at dispatch, so any other image skips the work rather than
-    /// recording idioms nothing will read.
-    pub fn moduleRecognition(self: *Unit, provenance: modules.RegistrationProvenance) ?env.ModuleRecognition {
-        if (provenance != .standard_library) return null;
-        return .{
-            .core = self.environment.coreView(),
-            .core_scope = self.environment.coreScopeId(),
-            .slots = self.environment.slotDirectory(),
-        };
-    }
-
     pub fn continueWithIdiom(self: *Unit, request: IdiomRequest, source: FallbackSource) MachineError!void {
         return idioms.tryApply(self, request, source);
     }
@@ -5248,7 +5407,15 @@ pub const Unit = struct {
         return true;
     }
     /// Consumes a quotation header and applies it inline.
+    /// Applies a quotation dynamically: it binds before it runs.
     pub fn callOwned(self: *Unit, quotation: *Header) error{OutOfMemory}!void {
+        return self.callProgramOwned(quotation, .unbound);
+    }
+
+    /// Runs `quotation` inline with the caller, as an application that binds
+    /// first or as top-level source resolved one form at a time.
+    pub fn callProgramOwned(self: *Unit, quotation: *Header, program: Program) error{OutOfMemory}!void {
+        std.debug.assert(program != .bound);
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
         if (application_tail) |application_index| {
@@ -5263,6 +5430,7 @@ pub const Unit = struct {
         };
         self.current = .{
             .code = quotation,
+            .program = program,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = inherited_trace,
@@ -5336,9 +5504,9 @@ pub const Unit = struct {
         if (current.application_selection) |application_index| {
             const frame = &self.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
-            frame.application.selection.completeOwned(self.releases, current.code);
+            frame.application.selection.completeOwned(self.releases, current.intoCode(self.releases));
         } else {
-            self.releases.releaseHeader(current.code);
+            current.release(self.releases);
         }
     }
 
@@ -5386,14 +5554,14 @@ pub const Unit = struct {
         inherited: ?intern.TraceWord,
     ) MachineError!void {
         self.require(application.seeded) catch |err| {
-            application.deinit_fn(self.releases, self.allocator, application.context);
+            application.discard(self.releases, self.allocator);
             return err;
         };
         const base = StackWindow.init(self.stack.items.len, application.seeded) orelse unreachable;
         const provenance_target: ?ApplicationFrameIndex = switch (application.provenance) {
             .boundary => null,
             .selected_target => |target| self.validateApplicationProvenanceTarget(target) orelse {
-                application.deinit_fn(self.releases, self.allocator, application.context);
+                application.discard(self.releases, self.allocator);
                 return self.fail(.domain, "application provenance target is stale or foreign");
             },
         };
@@ -5402,7 +5570,7 @@ pub const Unit = struct {
         if (self.current != null) {
             std.debug.assert(inherited == null);
             inherited_trace = self.suspendCurrent() catch {
-                application.deinit_fn(self.releases, self.allocator, application.context);
+                application.discard(self.releases, self.allocator);
                 return error.OutOfMemory;
             };
         }
@@ -5421,6 +5589,7 @@ pub const Unit = struct {
             .traced_word = inherited_trace,
             .selection = .{},
             .plan = application.plan,
+            .bound = application.bound,
         } });
         defer continuation.deinit(self.releases, self.allocator);
         try self.appendFrame(&continuation);
@@ -5431,9 +5600,18 @@ pub const Unit = struct {
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(application.quotation);
         }
-        heap.incRef(application.quotation);
+        // An executable this invocation already bound for the quotation is
+        // reused; otherwise the application binds when it first runs.
+        const program: Program = if (application.bound.find(application.quotation)) |code| reused: {
+            code.retain();
+            break :reused .{ .bound = &code.executable };
+        } else unbound: {
+            heap.incRef(application.quotation);
+            break :unbound .unbound;
+        };
         self.current = .{
             .code = application.quotation,
+            .program = program,
             .position = .{ .source = 0 },
             // An isolated body runs in its caller's scope but is not a root,
             // so nothing it calls may define there.
@@ -5507,7 +5685,7 @@ pub const Unit = struct {
                     modules.anchorHandle(home, self.module_access),
                 );
                 var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-                    admission.?.begin(self.environment.linker(image_cell)),
+                    admission.?.begin(self.environment.linker(image_cell.id)),
                 );
                 admission = null;
                 defer cursor.deinit(self.releases, self.allocator);
@@ -5555,176 +5733,46 @@ pub const Unit = struct {
         );
         self.current = .{
             .code = body_header,
+            .program = .unbound,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
         };
     }
-    /// The anchor of the image the running activation holds, if it holds one.
-    /// A pointer compare against a cell's owner is a complete liveness proof:
-    /// the activation's pin is what keeps that image alive.
-    fn runningAnchor(self: *Unit) ?*env.ImageAnchor {
-        const home = self.current.?.home() orelse return null;
-        return modules.anchorHandle(home, self.module_access);
+    /// The context a binding or explicit lookup resolves under, over `view`,
+    /// which the context then owns.
+    pub fn resolutionContext(self: *Unit, view: modules.View) binder.Context {
+        return .{
+            .environment = self.environment,
+            .view = view,
+            .module_access = self.module_access,
+            .registry = self.inherited.registry,
+            .project = self.inherited.module_snapshot,
+            .libraries = self.inherited.libraries(),
+            .provenance = self.current.?.site.registration_provenance,
+        };
     }
 
-    /// Records what a resolution at `site` found, for the next lookup there.
-    pub fn cacheResolution(self: *Unit, site: ErrorSite, word: u32, resolved: *Resolution) void {
-        var candidate = resolved.takeCallSiteCache() orelse return;
-        if (self.inherited.module_snapshot != null) return candidate.deinit();
-        self.module_call_sites.install(self.releases, site, word, candidate);
-    }
-
-    /// Initializes `out` with what the word's slot yields, as a dispatch-ready
-    /// resolution, and returns true; returns false, leaving `out` undefined,
-    /// when the slot yields nothing a plain word may run: no binding in the
-    /// root or core, or only a private core one. `written` is the slot's root
-    /// scope, already proven live, or null for core. `retain` asks for a lease
-    /// that outlives the dispatch. The resolution is built in
-    /// the caller's storage because returning it by value cost a copy of the
-    /// whole lease on every dispatch.
-    fn slotResolution(
-        self: *Unit,
-        slot: *const env.Slot,
-        name: u32,
-        written: ?*env.Scope,
-        borrow_pin: *?modules.GenerationPin,
-        out: *Resolution,
-    ) bool {
-        // The root's own binding as this unit observes it, else core's. Only
-        // session bindings are versioned (Scope.isSession).
-        const pin = if (written != null and written.?.isSession()) self.bindingPin() else null;
-        // A task reading an image still under construction counts its lease:
-        // the constructor may replace the binding during the dispatch, and no
-        // pin keeps a module image's snapshots.
-        const counted = self.binding_pin != null and written != null and written.?.isUnderConstruction();
-        const own = slot.cell.load(.acquire);
-        const from_core = own == null or !leaseInto(own.?, pin, counted, &out.lease);
-        if (from_core) {
-            const core = slot.coreCell() orelse return false;
-            if (!leaseInto(core, null, false, &out.lease)) return false;
-        }
-        out.execution_generation = null;
-        out.home = null;
-        out.trace_word = .plain(name);
-        out.origin = .core;
-        out.defining_scope = null;
-        out.call_site_cache = null;
-        if (written == null or from_core) {
-            // Core alone is the chain, and a private core binding is not
-            // reachable by a plain word.
-            if (out.lease.spec().visibility == .private) {
-                out.lease.deinit();
-                return false;
-            }
-        } else {
-            // A module-local binding resolves against its image, which the
-            // home supplies; anything else against the root it was found in.
-            const local = out.lease.traceWord();
-            if (if (local == null) null else self.homeForSlot(written.?)) |home| {
-                out.home = home;
-                out.trace_word = homeTraceWord(home, local.?);
-                out.origin = moduleResolutionOrigin(home);
-            } else {
-                out.origin = .direct;
-                out.defining_scope = written;
-            }
-        }
-        out.borrow_pin = borrow_pin.*;
-        borrow_pin.* = null;
-        return true;
-    }
-
-    /// The number that determines this unit's view of session bindings: its
-    /// pin, or the current binding version for a unit that may define.
-    fn bindingView(self: *const Unit) u64 {
-        return self.bindingPin() orelse self.environment.bindingDomain().binding_version.load(.acquire);
-    }
-
-    /// Leases into `out` what `cell` holds for a reader pinned at `pin`, and
-    /// returns false when it holds nothing then. An uncounted borrow lasts for
-    /// this dispatch; anything kept past it is retained on its own.
-    fn leaseInto(cell: *env.BindingCell, pin: ?u64, counted: bool, out: *env.BindingLease) bool {
-        out.* = (if (counted) cell.load(pin) else cell.borrow(pin)) orelse return false;
-        return true;
-    }
-
-    /// The home a module-local binding in `image` runs under: that image's
-    /// own, or the running home when `image` is not a module root. The caller
-    /// has already proven the image live, so nothing is acquired here.
-    fn homeForSlot(self: *Unit, image: *env.Scope) ?*modules.ModuleHome {
-        return modules.homeForModuleRootScope(image) orelse self.current.?.home();
-    }
-
-    const SlotTarget = struct {
-        /// Null when the root holds no slot for the name.
-        slot: ?*const env.Slot,
-        /// The slot's root scope, proven live; null for core.
-        written: ?*env.Scope,
-    };
-
-    /// Finds a linked word's slot and proves its root live for this dispatch,
-    /// or returns `error.Retired` when the root is gone, which is a definite
-    /// failure and never a fallback that would change what the word means. An
-    /// image root is held by the running activation or pinned here, and the
-    /// pin is handed back for the dispatch to consume.
-    fn locateSlot(
-        self: *Unit,
-        raw: u32,
-        name: u32,
-        borrow_pin: *?modules.GenerationPin,
-    ) error{Retired}!SlotTarget {
-        switch (env.wordTarget(raw)) {
-            .unlinked => unreachable,
-            // executeWord and peekSlotWord take these before resolution.
-            .local => return error.Retired,
-            .slot => |id| {
-                const slot = self.environment.slot(id) orelse return error.Retired;
-                const root = slot.rootCell();
-                if (root.core) return .{ .slot = slot, .written = null };
-                return .{ .slot = slot, .written = try self.proveRoot(root, borrow_pin) };
-            },
-            .image => |scope_id| {
-                const root = switch (self.environment.scopeOf(scope_id)) {
-                    .cell => |cell| cell,
-                    .unscoped, .core, .retired => return error.Retired,
-                };
-                const scope = try self.proveRoot(root, borrow_pin);
-                return .{ .slot = self.environment.imageSlot(scope, name), .written = scope };
-            },
-        }
-    }
-
-    fn proveRoot(
-        self: *Unit,
-        root: *env.ScopeCell,
-        borrow_pin: *?modules.GenerationPin,
-    ) error{Retired}!*env.Scope {
-        const proof: env.Liveness = if (root.ownerHandle()) |owner| held: {
-            if (self.runningAnchor()) |running| {
-                if (running == owner) break :held .activation_held;
-            }
-            borrow_pin.* = modules.tryPinAnchor(owner, self.module_access) orelse return error.Retired;
-            break :held .fresh_pin;
-        } else .non_image;
-        return root.scopeUnder(proof) orelse error.Retired;
-    }
-
-    fn failRetiredWord(self: *Unit, name: u32) MachineError {
-        self.active_word = .plain(name);
-        return self.fail(.domain, "the scope this word was written in has retired");
-    }
-
-    /// A plain word for idiom recognition: initializes `out` with what its
-    /// slot yields, or returns false when that is nothing a plain word may run. Recognition only ever declines,
-    /// so this never records a failure: an unlinked word, or one whose root
-    /// has retired, is simply not a match, and generic execution reports it.
-    pub fn peekSlotWord(self: *Unit, word: value.Symbol, out: *Resolution) bool {
-        if (word.slot == 0 or env.localOperand(word.slot) != null or env.isQuoted(word.slot)) return false;
-        var borrow_pin: ?modules.GenerationPin = null;
-        defer if (borrow_pin) |*owned| owned.deinit();
-        const target = self.locateSlot(word.slot, word.name, &borrow_pin) catch return false;
-        return self.slotResolution(target.slot orelse return false, word.name, target.written, &borrow_pin, out);
+    /// What a plain word resolves to now, for idiom recognition. Only a static
+    /// definition outlives the lookup, and recognition only ever declines, so
+    /// anything else is simply not a match.
+    pub fn peekWord(self: *Unit, word: value.Symbol) ?PeekedWord {
+        if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        var context = self.resolutionContext(self.inherited.registry.view());
+        defer context.deinit();
+        var resolver = binder.Resolver.init(&context, word);
+        defer resolver.deinit();
+        const definition = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+            .resolved => |found| found,
+            .missed => return null,
+        };
+        if (definition.lifetime != .static) return null;
+        const home = modules.definitionHome(definition);
+        return .{
+            .definition = definition,
+            .trace_word = definitionTraceWord(definition, home, word.name),
+            .origin = definitionOrigin(definition, home),
+        };
     }
 
     /// The plan of the finite iteration applying the running code, when that
@@ -5767,138 +5815,149 @@ pub const Unit = struct {
         return self.fail(.domain, "a locals operand on a word that is not a locals operation");
     }
 
-    /// What `word` dispatches to in this unit's view, through the dispatch
-    /// cache, filled on a miss exactly as dispatch fills it. Null for a word
-    /// the cache does not hold (a local, a qualified or module word, one that
-    /// resolves to nothing a plain word may run).
-    pub fn cachedResolution(self: *Unit, word: value.Symbol) error{OutOfMemory}!?BindingCache.Entry {
-        if (word.slot == 0 or env.wordTarget(word.slot) != .slot) return null;
-        const view = self.bindingView();
-        if (self.binding_cache.find(word.slot, view)) |cached| return cached.*;
-        // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
-        var resolved: Resolution = undefined;
-        if (!self.peekSlotWord(word, &resolved)) return null;
-        defer resolved.deinit(self.allocator);
-        if (resolved.home != null or resolved.borrow_pin != null or resolved.execution_generation != null or
-            resolved.lease.held != .borrowed or resolved.lease.traceWord() != null) return null;
-        const entry: BindingCache.Entry = .{
-            .slot = word.slot,
-            .view = view,
-            .spec = resolved.lease.spec(),
-            .trace_word = resolved.trace_word,
-            .origin = resolved.origin,
-            .defining_scope = resolved.defining_scope,
-        };
-        try self.binding_cache.put(self.allocator, entry);
-        return entry;
-    }
-
-    /// Runs an unquoted occurrence: `dispatch` pushes a quoted one instead,
-    /// and `execute` strips the quote before calling here.
+    /// Runs an occurrence by explicit lookup, against the current publication
+    /// view: incremental top-level source, `execute`, and a word resumed after
+    /// loading. `dispatch` pushes a quoted occurrence instead, and `execute`
+    /// strips the quote before calling here.
     pub fn executeWord(self: *Unit, word: value.Symbol) MachineError!void {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
-        // A session or core word resolved before in this unit's view.
-        const cacheable = word.slot != 0 and env.wordTarget(word.slot) == .slot;
-        const view = self.bindingView();
-        if (cacheable) if (self.binding_cache.find(word.slot, view)) |cached| {
-            // A cached binding has no home, pin, or generation, so a builtin
-            // runs exactly as `executeResolved` would run it.
-            switch (cached.route) {
-                .builtin => return invokeBuiltin(self, cached.spec.reports_as orelse cached.trace_word, cached.spec.binding.builtin),
-                .source => return enterCachedWord(self, cached),
-                .resolved => {},
-            }
-            var resolved: Resolution = .{
-                .lease = .{ .releases = self.releases, .held = .{ .borrowed = cached.spec } },
-                .execution_generation = null,
-                .home = null,
-                .trace_word = cached.trace_word,
-                .origin = cached.origin,
-                .defining_scope = cached.defining_scope,
-            };
-            return executeResolved(self, &resolved);
-        };
-        // A symbol with no slot was built by the implementation for itself (an
-        // error-dict key, a trace entry, a `type` result) and means core's
-        // binding wherever it runs; every symbol a program builds is linked
-        // where it is built.
-        const linked = if (word.slot == 0) try self.coreWord(word.name) else word;
-        // A binding borrowed below stays valid for the dispatch: a unit that
-        // may define replaces bindings only by running code, which starts
-        // after the dispatch has retained what it keeps (a scheduled body, an
-        // effect, a native call); any other unit's pin keeps what it observes.
-        var borrow_pin: ?modules.GenerationPin = null;
-        errdefer if (borrow_pin) |*owned| owned.deinit();
-        const target = self.locateSlot(linked.slot, word.name, &borrow_pin) catch
-            return self.failRetiredWord(word.name);
-        const written = target.written;
-        // SAFETY: read only after `slotResolution` returns true, which initializes it.
-        var slot_resolution: Resolution = undefined;
-        if (if (target.slot) |slot| self.slotResolution(slot, word.name, written, &borrow_pin, &slot_resolution) else false) {
-            defer slot_resolution.deinit(self.allocator);
-            if (cacheable and slot_resolution.home == null and slot_resolution.borrow_pin == null and
-                slot_resolution.execution_generation == null and slot_resolution.lease.held == .borrowed and
-                slot_resolution.lease.traceWord() == null)
-            {
-                try self.binding_cache.put(self.allocator, .{
-                    .slot = word.slot,
-                    .view = view,
-                    .spec = slot_resolution.lease.spec(),
-                    .trace_word = slot_resolution.trace_word,
-                    .origin = slot_resolution.origin,
-                    .defining_scope = slot_resolution.defining_scope,
-                });
-            }
-            try executeResolved(self, &slot_resolution);
-            return;
-        }
-
-        // The slot yields nothing: a qualified name, one awaiting autoload, or
-        // an undefined word. Those resolve through the cursor, whose qualified
-        // results are cached per call site.
-        const qualified_call_site = ErrorSite{
-            .code = self.current.?.code,
-            .index = self.active_index,
-        };
-        const cached_site = self.module_call_sites.find(qualified_call_site, word.name);
-        if (self.inherited.module_snapshot == null) {
-            switch (self.module_call_sites.lookupQualified(
-                self.releases,
-                self.module_access,
-                cached_site,
-            )) {
-                .absent => {},
-                .stale => {
-                    if (comptime root_execution_metrics_enabled)
-                        self.root_execution_metrics.qualified_cache_heals += 1;
-                },
-                .hit => |resolution| {
-                    if (comptime root_execution_metrics_enabled)
-                        self.root_execution_metrics.qualified_cache_hits += 1;
-                    if (borrow_pin) |*owned| owned.deinit();
-                    borrow_pin = null;
-                    var resolved = resolution;
-                    defer resolved.deinit(self.allocator);
-                    try executeResolved(self, &resolved);
-                    return;
-                },
-            }
-        }
         self.active_word = .plain(word.name);
-        const owned_pin = borrow_pin;
-        borrow_pin = null;
-        try self.startDriver(DispatchDriver{
-            .word = word.name,
-            .call_site = qualified_call_site,
-            .resolution = .init(.init(
-                self,
-                word.name,
-                written,
-                owned_pin,
-            )),
+        const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
+        try self.startDriver(LookupDispatchDriver{
+            .word = word,
+            .site = site,
+            .context = .init(self.resolutionContext(self.inherited.registry.view())),
+            .resolver = .none,
         });
     }
+
+    /// Starts binding the current evaluation, whose application has not run.
+    /// An executable this application or this unit already bound for the same
+    /// quotation in the same publication is reused instead.
+    fn bindCurrent(self: *Unit) MachineError!void {
+        const current = &self.current.?;
+        std.debug.assert(current.program == .unbound);
+        if (self.reusableExecutable(current.code)) |code| {
+            self.releases.releaseHeader(current.code);
+            current.program = .{ .bound = &code.executable };
+            return;
+        }
+        var context = self.resolutionContext(self.inherited.registry.view());
+        const cursor = binder.BindingCursor.init(self.allocator, self.releases, current.code) catch |err| {
+            context.deinit();
+            return err;
+        };
+        try self.startDriver(BindingDriver{
+            .context = .init(context),
+            .cursor = .init(cursor),
+        });
+    }
+
+    /// A retained executable for `code`, from the running application's own
+    /// bindings or the unit's reuse cache.
+    fn reusableExecutable(self: *Unit, code: *Header) ?*env.AnonymousCode {
+        if (self.current.?.application_tail) |index| {
+            switch (self.frames.items[@backingInt(index)]) {
+                .application => |*application| if (application.bound.find(code)) |found| {
+                    found.retain();
+                    return found;
+                },
+                else => {},
+            }
+        }
+        if (self.inherited.phase == .bootstrap) return null;
+        return self.reuse.find(code, modules.currentPublication(), self.current.?.site.registration_provenance);
+    }
+
+    /// Records a fresh binding where later applications of the same
+    /// quotation will find it.
+    fn rememberExecutable(self: *Unit, code: *env.AnonymousCode, publication: u64) void {
+        if (self.current.?.application_tail) |index| {
+            switch (self.frames.items[@backingInt(index)]) {
+                .application => |*application| application.bound.remember(code),
+                else => {},
+            }
+        }
+        if (self.inherited.phase == .bootstrap) return;
+        self.reuse.remember(self.releases, code, publication, self.current.?.site.registration_provenance);
+    }
+
+    /// The failure for a word that did not bind and will not after a load.
+    pub fn failUnbound(self: *Unit, word: value.Symbol, miss: binder.Miss) MachineError {
+        self.active_word = .plain(word.name);
+        return switch (miss) {
+            .unresolved => |chain| self.undefinedWordIn(word.name, chain),
+            .unknown_module_prefix, .unregistered_module => self.undefinedWordIn(word.name, .qualified),
+            .retired => self.failRetiredWord(word.name),
+            .alias_cycle => self.failFmt(.domain, "the alias `{s}` names never reach a definition", .{intern.get(word.name)}),
+        };
+    }
+
+    /// A primitive consumed `operands` (owned, in stack order) before a word
+    /// it binds turned out to need a module loaded. Restore them, rewind the
+    /// primitive call, and run it again once the module is registered.
+    pub fn retryWithOperandsAfterLoad(
+        self: *Unit,
+        operands: []const Value,
+        word: value.Symbol,
+        miss: binder.Miss,
+    ) MachineError!WorkProgress {
+        try self.restoreOperands(operands);
+        self.current.?.rewind(self.active_index);
+        const request = QualifiedLoadRequest{
+            .qualified = word.name,
+            .context = self.current.?.site.registration_provenance,
+            .continuation = .replay,
+        };
+        switch (miss) {
+            .unknown_module_prefix => |prefix| try self.startDriver(QualifiedLoadPreparationDriver.init(prefix, request, .none)),
+            .unregistered_module => |name| try self.autoLoadModule(name, request),
+            else => unreachable,
+        }
+        return .detached;
+    }
+
+    /// Consumes `operands` on success and allocation failure alike.
+    fn restoreOperands(self: *Unit, operands: []const Value) error{OutOfMemory}!void {
+        var reservation = self.reserveStack(operands.len) catch |err| {
+            for (operands) |item| self.releases.releaseValue(item);
+            return err;
+        };
+        for (operands) |item| reservation.pushOwned(item);
+    }
+
+    /// Fails a binding or lookup miss for `word`, starting a module load when
+    /// one may make it resolvable. `continuation` says how to resume after the
+    /// load: rebind the current evaluation, or dispatch the word again.
+    fn missOrLoad(
+        self: *Unit,
+        word: value.Symbol,
+        miss: binder.Miss,
+        continuation: QualifiedLoadContinuation,
+    ) MachineError!void {
+        self.active_word = .plain(word.name);
+        const request = QualifiedLoadRequest{
+            .qualified = word.name,
+            .context = self.current.?.site.registration_provenance,
+            .continuation = continuation,
+        };
+        switch (miss) {
+            .unknown_module_prefix => |prefix| try self.startDriver(QualifiedLoadPreparationDriver.init(
+                prefix,
+                request,
+                .none,
+            )),
+            .unregistered_module => |name| try self.autoLoadModule(name, request),
+            .unresolved, .retired, .alias_cycle => return self.failUnbound(word, miss),
+        }
+    }
+
+    fn failRetiredWord(self: *Unit, name: u32) MachineError {
+        self.active_word = .plain(name);
+        return self.fail(.domain, "the scope this word was written in has retired");
+    }
+
     pub fn raiseOwned(self: *Unit, raised: Value) MachineError {
         self.installPendingFailure(EclErr.init(.user, "raised error"));
         if (self.active_word != no_word) self.pendingFailure().word = self.active_word;
@@ -5950,6 +6009,7 @@ pub const Unit = struct {
         );
         self.current = .{
             .code = body,
+            .program = .unbound,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
@@ -6021,7 +6081,7 @@ pub const Unit = struct {
         // Selection follows the invoked tail quotation. Resuming the caller
         // later must not overwrite that selection with its original body.
         caller.application_selection = null;
-        heap.incRef(invocation.code);
+        invocation.retainCopy();
         self.frames.appendAssumeCapacity(.{ .eval = caller });
         self.frames.appendAssumeCapacity(.{ .effect_check = check });
         self.max_frames = @max(self.max_frames, self.frames.items.len);
@@ -6161,7 +6221,19 @@ pub const InitialStack = union(enum) {
     borrowed_pair: struct { deep: *Header, seeds: *Header },
 };
 
+/// Starts a unit on top-level source, which resolves one form at a time.
 pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
+    return initializeProgram(unit, code, initial_stack, .incremental);
+}
+
+/// Starts a unit applying a quotation, which binds before it runs: a task's
+/// body.
+pub fn initializeApplication(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
+    return initializeProgram(unit, code, initial_stack, .unbound);
+}
+
+fn initializeProgram(unit: *Unit, code: *Header, initial_stack: InitialStack, program: Program) error{OutOfMemory}!void {
+    std.debug.assert(program != .bound);
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.terminal == .evaluating);
     std.debug.assert(unit.current == null);
@@ -6175,6 +6247,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
         heap.incRef(code);
         unit.current = .{
             .code = code,
+            .program = program,
             .position = .{ .source = 0 },
             .site = .root(unit),
             .traced_word = no_word,
@@ -6207,6 +6280,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
     heap.incRef(code);
     unit.current = .{
         .code = code,
+        .program = program,
         .position = .{ .source = 0 },
         .site = .root(unit),
         .traced_word = no_word,
@@ -6399,6 +6473,17 @@ fn loop(self: *Unit) MachineError!RunStatus {
         // Eval which resumeFrames may also have restored.
         if (self.hasWorkDriver()) continue;
         const current = &self.current.?;
+        // An application binds every top-level word before any of them runs.
+        if (current.program == .unbound) {
+            self.bindCurrent() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Ecl => {
+                    try startFailure(self);
+                    continue;
+                },
+            };
+            continue;
+        }
         const index = current.takeInstruction() orelse {
             self.retireCompletedEval(current.*);
             self.current = null;
@@ -6412,14 +6497,17 @@ fn loop(self: *Unit) MachineError!RunStatus {
             },
         };
         self.active_index = index;
-        // Code is nearly always a spine of forms; any other list runs too.
-        const form = if (current.code.kind() == .generic_spine)
-            heap.valuesConst(current.code)[index]
-        else
-            list.atUnchecked(.{ .list = current.code }, index);
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
-        dispatch(self, form) catch |err| switch (err) {
+        // A bound word follows its fixed target; everything else is a form.
+        const dispatched = if (current.program == .bound) bound: {
+            if (current.program.bound.target(index)) |target| {
+                const name = heap.valuesConst(current.code)[index].symbol.name;
+                break :bound invokeDefinition(self, target, name);
+            }
+            break :bound dispatch(self, formAt(current.code, index));
+        } else dispatch(self, formAt(current.code, index));
+        dispatched catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
                 if (self.current) |failed| self.setFailureSite(failed.code, self.active_index);
@@ -6548,6 +6636,15 @@ fn resumeTaskWait(self: *Unit, wait: TaskWaitResume) MachineError!void {
     }
 }
 
+/// The form at `index`. Code is nearly always a spine of forms; any other
+/// list runs too.
+fn formAt(code: *Header, index: u32) Value {
+    return if (code.kind() == .generic_spine)
+        heap.valuesConst(code)[index]
+    else
+        list.atUnchecked(.{ .list = code }, index);
+}
+
 fn poll(self: *Unit) MachineError!void {
     self.fuel -= 1;
 }
@@ -6579,68 +6676,94 @@ fn invokeBuiltin(self: *Unit, trace_word: intern.TraceWord, primitive: env.Primi
         return self.installPrimitiveFailure(failure_value);
     }
 }
-const DispatchDriver = struct {
-    word: u32,
-    call_site: ?ErrorSite = null,
-    resolution: heap.Owned(ResolutionCursor),
+/// Resolves one word against the current view and invokes what it finds.
+const LookupDispatchDriver = struct {
+    word: value.Symbol,
+    site: ?ErrorSite,
+    context: heap.Owned(binder.Context),
+    resolver: heap.Owned(binder.Resolver),
 
-    /// Started once per word executed, so this is the driver the inline slot
-    /// exists for.
+    /// Started once per explicitly looked-up word, so it uses the inline slot.
     pub const inline_driver = true;
+    pub const ownership: heap.DriverOwnership = .fields;
 
-    pub fn advance(self_machine: *Unit, self: *DispatchDriver) MachineError!WorkProgress {
-        try self_machine.pollKernel();
-        const work = self_machine.workBudget();
-        while (work.spend()) switch (self.resolution.borrowMut().advance()) {
+    pub fn advance(evaluator: *Unit, self: *LookupDispatchDriver) MachineError!WorkProgress {
+        if (!self.resolver.isPresent()) self.resolver = .init(binder.Resolver.init(self.context.borrowMut(), self.word));
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.resolver.borrowMut().advance(self.context.borrowMut())) {
             .pending => {},
             .complete => |outcome| {
-                const installed = self_machine.workDriver().?;
                 const word = self.word;
-                const request = QualifiedLoadRequest{
-                    .qualified = word,
-                    .context = self.resolution.borrow().context,
-                    .continuation = .{ .dispatch = .{
-                        .word = word,
-                        .site = installed.site,
-                        .trace_parent = installed.trace_parent,
-                    } },
-                };
-                self.resolution.deinit(self_machine.releases, self_machine.allocator);
-                const allocator = self_machine.allocator;
-                const call_site = self.call_site;
-                self_machine.retireDriver(self);
                 switch (outcome) {
-                    .resolved => |resolution| {
-                        var resolved = resolution;
-                        if (comptime root_execution_metrics_enabled) {
-                            if (resolved.execution_generation != null) {
-                                self_machine.root_execution_metrics.qualified_cache_misses += 1;
-                            }
-                        }
-                        if (call_site) |site| self_machine.cacheResolution(site, word, &resolved);
-                        defer resolved.deinit(allocator);
-                        try executeResolved(self_machine, &resolved);
+                    .resolved => |definition| {
+                        // The view keeps a counted definition alive; hold it
+                        // across the invocation, which retains what it keeps.
+                        const counted = definition.lifetime == .counted;
+                        if (counted) definition.retain();
+                        defer if (counted) definition.release(evaluator.releases);
+                        evaluator.retireDriver(self);
+                        try invokeDefinition(evaluator, definition, word.name);
                         return .detached;
                     },
-                    // A qualified dispatch carries its exact word and
-                    // provenance through loading, including dynamic execute.
-                    .unknown_module_prefix => |prefix| {
-                        try self_machine.startDriver(QualifiedLoadPreparationDriver.init(
-                            prefix,
-                            request,
-                            .none,
-                        ));
+                    .missed => |miss| {
+                        const site = self.site;
+                        evaluator.retireDriver(self);
+                        try evaluator.missOrLoad(word, miss, .{ .dispatch = .{ .word = word, .site = site, .trace_parent = null } });
                         return .detached;
                     },
-                    .unregistered_module => |name| return continueDispatchAfterLoad(self_machine, name, request),
-                    .unresolved => |chain| return self_machine.undefinedWordIn(request.qualified, chain),
                 }
             },
         };
         return .stepped;
     }
+};
 
+/// Binds the current evaluation's quotation before any of it runs. Success
+/// seals an anonymous executable and resumes the evaluation bound to it; a
+/// miss fails at the word it could not bind, having executed nothing, or
+/// loads the module that may make it resolvable and binds again.
+const BindingDriver = struct {
+    context: heap.Owned(binder.Context),
+    cursor: heap.Owned(binder.BindingCursor),
+
+    pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
+
+    pub fn advance(evaluator: *Unit, self: *BindingDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        const progress = try self.cursor.borrowMut().advance(self.context.borrowMut(), evaluator.workBudget());
+        const result = switch (progress) {
+            .pending => return .stepped,
+            .complete => |result| result,
+        };
+        const publication = self.context.borrow().view.publication;
+        switch (result) {
+            .bound => |parts| {
+                const code = env.AnonymousCode.create(evaluator.allocator, parts) catch |err| {
+                    parts.discard(evaluator.releases, evaluator.allocator);
+                    return err;
+                };
+                evaluator.retireDriver(self);
+                const current = &evaluator.current.?;
+                std.debug.assert(current.program == .unbound and current.code == code.executable.code);
+                evaluator.releases.releaseHeader(current.code);
+                current.program = .{ .bound = &code.executable };
+                evaluator.rememberExecutable(code, publication);
+                return .detached;
+            },
+            .failed => |failure| {
+                const word = heap.valuesConst(self.cursor.borrow().code)[failure.index].symbol;
+                const code = self.cursor.borrow().code;
+                evaluator.retireDriver(self);
+                evaluator.active_index = failure.index;
+                evaluator.missOrLoad(word, failure.miss, .rebind) catch |err| {
+                    if (err == error.Ecl) evaluator.setFailureSite(code, failure.index);
+                    return err;
+                };
+                return .detached;
+            },
+        }
+    }
 };
 
 /// Resumable boundary between a qualified miss and module loading. A prefix
@@ -6652,7 +6775,7 @@ const QualifiedLoadPreparationDriver = struct {
 
     const Restore = union(enum) {
         none,
-        operand: u32,
+        operand: value.Symbol,
     };
 
     cursor: intern.InternModuleNameCursor,
@@ -6689,7 +6812,7 @@ const QualifiedLoadPreparationDriver = struct {
                 switch (restore) {
                     .none => {},
                     .operand => |requested| {
-                        try evaluator.pushBorrowed(.{ .symbol = .{ .name = requested } });
+                        try evaluator.pushBorrowed(.{ .symbol = requested });
                         evaluator.current.?.rewind(evaluator.active_index);
                     },
                 }
@@ -6701,18 +6824,6 @@ const QualifiedLoadPreparationDriver = struct {
         return .stepped;
     }
 };
-
-/// Carries the exact dispatch request through module loading. The caller has
-/// already consumed any dynamic `execute` operand, so replaying its source
-/// instruction would not be equivalent to retrying the requested word.
-fn continueDispatchAfterLoad(
-    self: *Unit,
-    name: intern.ModuleName,
-    request: QualifiedLoadRequest,
-) MachineError!WorkProgress {
-    try self.autoLoadModule(name, request);
-    return .detached;
-}
 
 /// After an auto-load, the requested module must actually be registered.
 /// Checking that is what bounds the operation: a source that registered
@@ -6731,16 +6842,17 @@ fn continueQualifiedRequest(
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
     return switch (request.continuation) {
-        .replay, .load_only => .completed,
+        .replay, .load_only, .rebind => .completed,
         .dispatch => |dispatch_request| continuation: {
             evaluator.retireDriver(driver);
-            evaluator.active_word = .plain(dispatch_request.word);
-            var resolution = ResolutionCursor.initAtCurrent(evaluator, dispatch_request.word);
-            resolution.context = request.context;
-            try evaluator.startDriver(DispatchDriver{
+            evaluator.active_word = .plain(dispatch_request.word.name);
+            var context = evaluator.resolutionContext(evaluator.inherited.registry.view());
+            context.provenance = request.context;
+            try evaluator.startDriver(LookupDispatchDriver{
                 .word = dispatch_request.word,
-                .call_site = dispatch_request.site,
-                .resolution = .init(resolution),
+                .site = dispatch_request.site,
+                .context = .init(context),
+                .resolver = .none,
             });
             if (dispatch_request.site) |site|
                 evaluator.setWorkDriverSite(site.code, site.index);
@@ -6843,63 +6955,139 @@ const QualifiedRegistrationDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn executeResolved(self: *Unit, resolved: *Resolution) MachineError!void {
-    self.active_word = resolved.trace_word;
-    const cross_home = resolved.home != null and resolved.home != self.current.?.home();
-    // A module word's declared effect is a contract checked where a call
-    // crosses into its module, except a standard-library word's: the
-    // implementation is the standard library's author, so its effects are
-    // reflective metadata, and its arity failures are those of the code it
-    // runs.
-    const checked = cross_home and resolved.origin != .standard_library;
-    const cross_home_effect = if (checked) resolved.lease.spec().effect else null;
-    switch (resolved.lease.spec().binding) {
-        .word => |body| {
-            const body_header = env.quotationHeader(body);
-            // A trusted definition's recognition was decided when its
-            // environment froze; one that recognized nothing runs as any
-            // source word does.
-            const trusted = resolved.origin == .core or resolved.origin == .standard_library;
-            if (trusted) if (resolved.lease.spec().direct_idiom) |idiom| {
-                switch (try idioms.applyTrusted(self, .{ .body = body_header, .idiom = idiom })) {
+/// One explicit lookup of a supplied symbol, in the root its link names and
+/// against the current view: what reflection and `execute` resolve.
+pub const ExplicitLookup = struct {
+    context: binder.Context,
+    resolver: binder.Resolver,
+
+    pub fn init(evaluator: *Unit, word: value.Symbol) ExplicitLookup {
+        const context = evaluator.resolutionContext(evaluator.inherited.registry.view());
+        return .{ .context = context, .resolver = binder.Resolver.init(&context, word) };
+    }
+
+    pub fn deinit(self: *ExplicitLookup) void {
+        self.resolver.deinit();
+        self.context.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *ExplicitLookup) binder.Progress {
+        return self.resolver.advance(&self.context);
+    }
+};
+
+/// A definition an explicit lookup selected, held while reflection reads it.
+pub const Reflected = struct {
+    definition: *env.Definition,
+    trace_word: intern.TraceWord,
+    home: ?*modules.ModuleHome,
+    releases: *heap.ReleaseDomain,
+
+    /// Holds a definition the lookup's view kept alive.
+    pub fn hold(evaluator: *Unit, definition: *env.Definition, name: u32) Reflected {
+        if (definition.lifetime == .counted) definition.retain();
+        const home = modules.definitionHome(definition);
+        return .{
+            .definition = definition,
+            .trace_word = definitionTraceWord(definition, home, name),
+            .home = home,
+            .releases = evaluator.releases,
+        };
+    }
+
+    pub fn deinit(self: *Reflected) void {
+        if (self.definition.lifetime == .counted) self.definition.release(self.releases);
+        self.* = undefined;
+    }
+
+    /// The core definition this one shadows, if any: what `which` reports.
+    pub fn shadows(self: *const Reflected, environment: *env.Env, name: u32) ?intern.TraceWord {
+        if (self.definition.root == .core) return null;
+        var cursor = environment.coreLookup(@fromBackingInt(name));
+        const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse return null;
+        return switch (entry) {
+            .definition => |definition| if (definition != self.definition and definition.visibility == .public)
+                .plain(name)
+            else
+                null,
+            .alias => null,
+        };
+    }
+};
+
+/// What one definition is, as dispatch and recognition see it.
+pub const PeekedWord = struct {
+    definition: *env.Definition,
+    trace_word: intern.TraceWord,
+    origin: ResolutionOrigin,
+};
+
+pub const ResolutionOrigin = enum { direct, module, standard_library, core };
+
+fn definitionOrigin(definition: *const env.Definition, home: ?*const modules.ModuleHome) ResolutionOrigin {
+    if (home) |owner| return moduleResolutionOrigin(owner);
+    return switch (definition.root) {
+        .core => .core,
+        .session, .image => .direct,
+    };
+}
+
+/// How a call names a definition: a module-local one by its home's spelling,
+/// anything else by the name the call used.
+fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.ModuleHome, name: u32) intern.TraceWord {
+    if (home) |owner| if (definition.traceWord()) |local| return homeTraceWord(owner, local);
+    return .plain(name);
+}
+
+/// Invokes one fixed target. A module word's declared effect is a contract
+/// checked where a call crosses into its module, except a standard-library
+/// word's: its effects are reflective metadata, and its arity failures are
+/// those of the code it runs.
+fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) MachineError!void {
+    const home = modules.definitionHome(definition);
+    const trace_word = definitionTraceWord(definition, home, name);
+    self.active_word = trace_word;
+    const origin = definitionOrigin(definition, home);
+    const cross_home = home != null and home != self.current.?.home();
+    const checked = cross_home and origin != .standard_library;
+    const cross_home_effect = if (checked) definition.effect else null;
+    switch (definition.body) {
+        .source => |*executable| {
+            // A trusted definition's recognition was decided when its group
+            // sealed; one that recognized nothing runs as any source word does.
+            const trusted = origin == .core or origin == .standard_library;
+            if (trusted) if (definition.direct_idiom) |idiom| {
+                switch (try idioms.applyTrusted(self, .{ .body = executable.code, .idiom = idiom })) {
                     .applied => return,
                     .declined => {},
                     .offered => |request| {
                         const body_fallback: DirectWordFallback.Source = .{
-                            .body = body_header,
-                            .word = resolved.trace_word,
-                            .home = resolved.home,
+                            .definition = definition,
+                            .word = trace_word,
                             .effect = cross_home_effect,
                         };
                         return idioms.tryApply(self, request, body_fallback.source());
                     },
                 }
             };
-            try scheduleWord(
-                self,
-                body_header,
-                resolved.trace_word,
-                resolved.home,
-                resolved.defining_scope,
-                cross_home_effect,
-                resolved.takeBorrowPin(),
-            );
+            try scheduleWord(self, executable, trace_word, home, cross_home_effect);
         },
         .builtin => |primitive| {
             // A declared effect is the called word's contract, so its check
-            // names that word; a failure inside the builtin names the
-            // builtin, which an import reports by its qualified name.
-            if (cross_home_effect) |effect| try self.beginInvocation(effect, resolved.trace_word);
-            try invokeBuiltin(self, resolved.lease.spec().reports_as orelse resolved.trace_word, primitive);
+            // names that word; a failure inside the builtin names it too.
+            if (cross_home_effect) |effect| try self.beginInvocation(effect, trace_word);
+            try invokeBuiltin(self, trace_word, primitive);
         },
         .native => |callable| {
             if (checked) {
                 const effect = cross_home_effect orelse
                     return self.fail(.domain, "module word has no effect declaration");
-                try self.beginInvocation(effect, resolved.trace_word);
+                try self.beginInvocation(effect, trace_word);
             }
             try native_call.begin(self, callable);
         },
+        .reserved => unreachable,
     }
 }
 
@@ -6916,52 +7104,43 @@ const RetainedEffect = struct {
     }
 };
 
+/// A trusted definition's body, run when a recognizer it offered declines.
+/// Trusted definitions are static, so the fallback borrows the definition.
 const DirectWordFallback = struct {
-    body: heap.Owned(*Header),
+    definition: *env.Definition,
     word: intern.TraceWord,
-    home: ?*modules.ModuleHome,
     effect: ?heap.Owned(RetainedEffect),
-    pin: ?heap.Owned(modules.GenerationPin),
 
-    /// The trusted word's body, borrowed from its resolution until a
-    /// recognizer makes the fallback that owns it.
     const Source = struct {
-        body: *Header,
+        definition: *env.Definition,
         word: intern.TraceWord,
-        home: ?*modules.ModuleHome,
         effect: ?env.Effect,
 
         fn source(self: *const Source) FallbackSource {
             return .{ .context = self, .make_fn = make };
         }
 
-        fn make(context: ?*const anyopaque, evaluator: *Unit) IdiomFallback {
+        fn make(context: ?*const anyopaque, _: *Unit) IdiomFallback {
             const self: *const Source = @ptrCast(@alignCast(context.?));
-            heap.incRef(self.body);
+            std.debug.assert(self.definition.lifetime == .static);
             return typedIdiomFallback(DirectWordFallback{
-                .body = .init(self.body),
+                .definition = self.definition,
                 .word = self.word,
-                .home = self.home,
                 .effect = if (self.effect) |effect| .init(RetainedEffect.init(effect)) else null,
-                .pin = if (self.home) |home| .init(home.pin(evaluator.module_access)) else null,
             });
         }
     };
     pub fn run(evaluator: *Unit, self: *DirectWordFallback) MachineError!void {
         return scheduleWord(
             evaluator,
-            self.body.borrow(),
+            &self.definition.body.source,
             self.word,
-            self.home,
-            null,
+            modules.definitionHome(self.definition),
             if (self.effect) |*owned| owned.borrow().effect else null,
-            if (self.pin) |*owned| owned.take() else null,
         );
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-
-pub const ResolutionOrigin = resolution_core.Origin;
 
 fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
     return switch (home.registrationProvenance()) {
@@ -6975,147 +7154,6 @@ fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
 /// the name the image was built for, during construction as well as after.
 fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) intern.TraceWord {
     return .moduleLocal(home.name(), local);
-}
-
-/// What a qualified resolution leaves behind for its call site: the cell it
-/// found and the registration generation it was found under.
-const CallSiteCacheCandidate = struct {
-    generation: modules.GenerationLease,
-    cell: env.BindingCellHandle,
-
-    fn deinit(self: *CallSiteCacheCandidate) void {
-        self.cell.deinit();
-        self.generation.deinit();
-        self.* = undefined;
-    }
-};
-
-const CallSiteCacheLookup = union(enum) {
-    absent,
-    stale,
-    hit: Resolution,
-};
-
-/// A small, allocation-free lookaside for qualified words, indexed by the
-/// actual source call site. Each entry owns its code root and one
-/// generation-guarded target. Plain words need none: their slots answer
-/// directly. Capacity remains a hard memory bound; collisions lose
-/// performance only.
-const ModuleCallSiteCache = struct {
-    const capacity = 16;
-    const ways = 2;
-    const set_count = capacity / ways;
-    const Entry = struct {
-        code: OwnedCode,
-        index: u32,
-        word: u32,
-        target: CallSiteCacheCandidate,
-
-        fn deinit(self: *Entry, releases: *heap.ReleaseDomain) void {
-            self.target.deinit();
-            self.code.deinit(releases);
-            self.* = undefined;
-        }
-    };
-
-    entries: [capacity]?Entry = @splat(null),
-    victims: [set_count]u1 = @splat(0),
-
-    fn set(site: ErrorSite) usize {
-        return (@intFromPtr(site.code) >> 4 ^ site.index) % set_count;
-    }
-
-    fn find(self: *ModuleCallSiteCache, site: ErrorSite, word: u32) ?usize {
-        const base = set(site) * ways;
-        for (0..ways) |way| {
-            const index = base + way;
-            const candidate = &(self.entries[index] orelse continue);
-            if (candidate.code.borrow() == site.code and
-                candidate.index == site.index and
-                candidate.word == word)
-            {
-                return index;
-            }
-        }
-        return null;
-    }
-
-    fn lookupQualified(
-        self: *ModuleCallSiteCache,
-        releases: *heap.ReleaseDomain,
-        access: *const modules.ExecutionAccess,
-        found: ?usize,
-    ) CallSiteCacheLookup {
-        const slot_index = found orelse return .absent;
-        const candidate = &(self.entries[slot_index] orelse return .absent);
-        const qualified = &candidate.target;
-        const execution = qualified.generation.tryEnterCurrent(access) orelse {
-            candidate.deinit(releases);
-            self.entries[slot_index] = null;
-            return .stale;
-        };
-        // A module image is frozen once registered, so its bindings need no
-        // version.
-        const lease = qualified.cell.borrow(null).?;
-        const home = execution.home(access);
-        return .{ .hit = .{
-            .lease = lease,
-            .execution_generation = execution,
-            .home = home,
-            .trace_word = homeTraceWord(home, lease.traceWord().?),
-            .origin = moduleResolutionOrigin(home),
-        } };
-    }
-
-    fn install(
-        self: *ModuleCallSiteCache,
-        releases: *heap.ReleaseDomain,
-        site: ErrorSite,
-        word: u32,
-        candidate: CallSiteCacheCandidate,
-    ) void {
-        const set_index = set(site);
-        const base = set_index * ways;
-        const destination_index = self.find(site, word) orelse empty: {
-            for (0..ways) |way| {
-                const index = base + way;
-                if (self.entries[index] == null) break :empty index;
-            }
-            const victim = base + self.victims[set_index];
-            self.victims[set_index] ^= 1;
-            break :empty victim;
-        };
-        const destination = &self.entries[destination_index];
-        if (destination.*) |*previous| previous.deinit(releases);
-        destination.* = .{
-            .code = .retain(site.code),
-            .index = site.index,
-            .word = word,
-            .target = candidate,
-        };
-    }
-
-    fn deinit(self: *ModuleCallSiteCache, releases: *heap.ReleaseDomain) void {
-        for (&self.entries) |*entry| if (entry.*) |*live| live.deinit(releases);
-        self.* = undefined;
-    }
-};
-
-/// Which chain a failed lookup searched, reported as `'scope` in an
-/// undefined-word error.
-/// The chain a word with `written` as its resolution scope searches. A
-/// session name is invisible to a module and to a prelude word for
-/// different reasons, and saying which one applied is the difference
-/// between a puzzling failure and an obvious one.
-///
-/// It is derived from the word's own scope independently of the running
-/// activation. Since resolution moved onto the word, the two differ in
-/// exactly the interesting cases — a caller's quotation applied by a module
-/// word searches the caller, and reporting the activation's chain there
-/// would name the one place the lookup did not look.
-fn lookupChainFor(written: ?*env.Scope) LookupChain {
-    const scope = written orelse return .core;
-    return if (scope.isModuleRoot()) .module else .session;
 }
 
 pub const LookupChain = enum {
@@ -7303,167 +7341,10 @@ const PlanTree = struct {
     }
 };
 
-/// A unit's resolutions of session and core words, keyed by slot id.
-///
-/// A unit's view of those bindings is one number: its pin, or for a unit that
-/// may define, the binding version, which only its own definitions advance
-/// for the session. A resolution made in a view therefore holds while the view
-/// number is unchanged, and its borrowed specification stays valid as long:
-/// a pin keeps what it observes, and a defining unit's view moves on before
-/// anything it replaced can retire. Words whose resolution depends on more
-/// than the slot and the view are not kept: module image words (root liveness
-/// and home are the running activation's), module-local bindings (their home
-/// is the caller's), and qualified words (the registry is live).
-pub const BindingCache = struct {
-    pub const Entry = struct {
-        slot: u32,
-        view: u64,
-        spec: *const env.BindingSpec,
-        trace_word: intern.TraceWord,
-        origin: ResolutionOrigin,
-        defining_scope: ?*env.Scope,
-        /// How a dispatch runs the binding, decided when it is cached.
-        route: Route = .resolved,
-    };
-    /// A builtin runs directly and a source word without a recognition enters
-    /// its body directly; everything else is resolved in full.
-    pub const Route = enum(u8) {
-        builtin,
-        source,
-        resolved,
-
-        fn of(spec: *const env.BindingSpec) Route {
-            return switch (spec.binding) {
-                .builtin => .builtin,
-                .word => if (spec.direct_idiom == null) .source else .resolved,
-                .native => .resolved,
-            };
-        }
-    };
-    entries: []?Entry = &.{},
-    count: usize = 0,
-    /// 64 minus log2 of the table size, for multiplicative hashing.
-    shift: u6 = 0,
-
-    fn deinit(self: *BindingCache, allocator: std.mem.Allocator) void {
-        allocator.free(self.entries);
-        self.* = .{};
-    }
-    fn home(self: *const BindingCache, slot: u32) usize {
-        return @intCast((@as(u64, slot) *% 0x9E3779B97F4A7C15) >> self.shift);
-    }
-    /// The entry for `slot` made in view `view`, if any.
-    pub fn find(self: *const BindingCache, slot: u32, view: u64) ?*const Entry {
-        if (self.entries.len == 0) return null;
-        const mask = self.entries.len - 1;
-        var index = self.home(slot);
-        while (true) : (index = (index + 1) & mask) {
-            const entry = if (self.entries[index]) |*held| held else return null;
-            if (entry.slot == slot) return if (entry.view == view) entry else null;
-        }
-    }
-    /// Records `entry`, replacing one for the same slot.
-    pub fn put(self: *BindingCache, allocator: std.mem.Allocator, entry: Entry) error{OutOfMemory}!void {
-        if ((self.count + 1) * 4 > self.entries.len * 3) try self.grow(allocator);
-        var routed = entry;
-        routed.route = .of(entry.spec);
-        self.insert(routed);
-    }
-    fn insert(self: *BindingCache, entry: Entry) void {
-        const mask = self.entries.len - 1;
-        var index = self.home(entry.slot);
-        while (true) : (index = (index + 1) & mask) {
-            if (self.entries[index]) |*existing| {
-                if (existing.slot != entry.slot) continue;
-                existing.* = entry;
-                return;
-            }
-            self.entries[index] = entry;
-            self.count += 1;
-            return;
-        }
-    }
-    fn grow(self: *BindingCache, allocator: std.mem.Allocator) error{OutOfMemory}!void {
-        const old = self.entries;
-        const fresh = try allocator.alloc(?Entry, @max(16, old.len * 2));
-        @memset(fresh, null);
-        self.entries = fresh;
-        self.shift = @intCast(64 - @as(u7, std.math.log2_int(usize, fresh.len)));
-        self.count = 0;
-        for (old) |kept| if (kept) |entry| self.insert(entry);
-        allocator.free(old);
-    }
-};
-
-pub const Resolution = struct {
-    lease: env.BindingLease,
-    execution_generation: ?modules.GenerationPin,
-    home: ?*modules.ModuleHome,
-    /// The reference the borrow acquired for this dispatch, moved out of the
-    /// cursor. `scheduleWord` consumes it so no second pin is taken.
-    borrow_pin: ?modules.GenerationPin = null,
-    trace_word: intern.TraceWord,
-    origin: ResolutionOrigin,
-    /// The root this binding was found in, which is therefore where its own
-    /// reflective references resolve. Null for a core-origin binding, whose
-    /// root is core, and for a module-origin one, whose root is its image.
-    defining_scope: ?*env.Scope = null,
-    call_site_cache: ?CallSiteCacheCandidate = null,
-    /// Moves the borrow's reference out, so `deinit` will not release it.
-    pub fn takeBorrowPin(self: *Resolution) ?modules.GenerationPin {
-        const owned = self.borrow_pin;
-        self.borrow_pin = null;
-        return owned;
-    }
-
-    pub fn deinit(self: *Resolution, _: std.mem.Allocator) void {
-        if (self.call_site_cache) |*candidate| candidate.deinit();
-        self.lease.deinit();
-        if (self.execution_generation) |*generation| generation.deinit();
-        // Released only if the dispatch never scheduled a body; `scheduleWord`
-        // consumes them otherwise.
-        if (self.borrow_pin) |*pin| pin.deinit();
-        self.* = undefined;
-    }
-
-    fn takeCallSiteCache(self: *Resolution) ?CallSiteCacheCandidate {
-        const candidate = self.call_site_cache;
-        self.call_site_cache = null;
-        return candidate;
-    }
-};
-
-/// Why resolution finished. Distinguishing an unregistered module from an
-/// unknown name lets every qualified-name consumer auto-load exactly once.
-pub const ResolutionOutcome = union(enum) {
-    /// Nothing by that name is visible, and this is the chain that was
-    /// searched. The cursor knows which of its phases ran out, so it says so
-    /// rather than leaving the caller to guess from the spelling.
-    unresolved: LookupChain,
-    /// The reference is dotted and its module prefix has never been interned,
-    /// so nothing can be registered under it yet. The slice borrows the
-    /// interned spelling, which outlives every cursor.
-    unknown_module_prefix: []const u8,
-    /// The name is a well-formed qualified reference whose module is not
-    /// registered; loading that module may make it resolvable.
-    unregistered_module: intern.ModuleName,
-    resolved: Resolution,
-
-    /// The binding, if resolution produced one.
-    pub fn binding(self: ResolutionOutcome) ?Resolution {
-        return switch (self) {
-            .resolved => |resolution| resolution,
-            .unresolved, .unknown_module_prefix, .unregistered_module => null,
-        };
-    }
-};
-
-pub const ResolutionProgress = poll_api.Progress(ResolutionOutcome);
-
 /// One visibility boundary for named module observation. Private registrations
 /// are searched only in the lexical source; public lookup never searches other
 /// files' private registries, regardless of their load state.
-const EmbeddedLibraries = union(enum) {
+pub const EmbeddedLibraries = union(enum) {
     bundled,
     registered: *native_module.Loader,
     fn find(self: EmbeddedLibraries, name: intern.ModuleName) ?stdlib.Entry {
@@ -7478,6 +7359,9 @@ const EmbeddedLibraries = union(enum) {
 
 pub const ModuleLookupCursor = struct {
     registry: *modules.Registry,
+    /// The captured view public lookups read, when the lookup belongs to one
+    /// binding; a fresh snapshot otherwise.
+    view: ?modules.View = null,
     libraries: EmbeddedLibraries,
     project: ?*const map_state.Snapshot,
     context: modules.RegistrationProvenance,
@@ -7496,6 +7380,18 @@ pub const ModuleLookupCursor = struct {
         return result;
     }
 
+    /// A lookup whose public registry reads come from `view`.
+    pub fn initIn(view: *const modules.View, registry: *modules.Registry, project: ?*const map_state.Snapshot, libraries: EmbeddedLibraries, context: modules.RegistrationProvenance, name: intern.ModuleName) ModuleLookupCursor {
+        var result: ModuleLookupCursor = .{ .registry = registry, .view = view.clone(), .libraries = libraries, .project = project, .context = context, .name = name, .state = .complete };
+        if (context.sourceScope()) |local| result.state = .{ .private = local.registry().acquireCursor(name) } else result.beginPublic();
+        return result;
+    }
+
+    fn publicCursor(self: *const ModuleLookupCursor) modules.Registry.AcquireCursor {
+        if (self.view) |*captured| return captured.acquireCursor(self.name);
+        return self.registry.acquireCursor(self.name);
+    }
+
     pub fn atCurrent(evaluator: *Unit, name: intern.ModuleName) ModuleLookupCursor {
         return .init(evaluator.inherited.registry, evaluator.inherited.module_snapshot, evaluator.inherited.libraries(), evaluator.current.?.site.registration_provenance, name);
     }
@@ -7509,7 +7405,7 @@ pub const ModuleLookupCursor = struct {
                 return;
             }
         }
-        self.state = .{ .public = self.registry.acquireCursor(self.name) };
+        self.state = .{ .public = self.publicCursor() };
     }
 
     pub fn advance(self: *ModuleLookupCursor) poll_api.Progress(?modules.GenerationLease) {
@@ -7530,7 +7426,7 @@ pub const ModuleLookupCursor = struct {
                     cursor.deinit();
                     self.state = .complete;
                     if (outcome == .matched and self.project.?.artifactCommitted(outcome.matched.artifact_id)) {
-                        self.state = .{ .public = self.registry.acquireCursor(self.name) };
+                        self.state = .{ .public = self.publicCursor() };
                         break :result .pending;
                     }
                     break :result .{ .complete = null };
@@ -7554,525 +7450,17 @@ pub const ModuleLookupCursor = struct {
             .catalog => |*cursor| cursor.deinit(),
             .complete => {},
         }
+        if (self.view) |*captured| captured.deinit();
         self.* = undefined;
-    }
-};
-
-pub const ResolutionCursor = struct {
-    const Phase = enum {
-        dot,
-        prefix,
-        prefix_validate,
-        export_name,
-        export_validate,
-        qualified_acquire,
-        qualified_export,
-        /// The reserved `core.` qualifier: the binding segment is looked up as
-        /// an interned atom and then resolved in core alone, never in the
-        /// registry.
-        core_export,
-        lexical,
-        complete,
-    };
-    /// The phases are sequential and their cursors are mutually exclusive, so
-    /// they share one payload instead of each holding a permanently reserved
-    /// field. Resolving a plain word used to cost the width of every
-    /// resolution path at once — dotted-name splitting, registry acquisition,
-    /// and qualified export lookup — though it touches two of them.
-    /// `generation` stays outside the payload because it deliberately
-    /// outlives the cursor that produced it: the lease is handed to the
-    /// completed resolution.
-    const Work = union(enum) {
-        none,
-        dot: intern.LastDotCursor,
-        atom: intern.InternLookupCursor,
-        module_validation: intern.ModuleNameCursor,
-        binding_validation: intern.NamespaceCursor,
-        acquisition: ModuleLookupCursor,
-        lexical: resolution_core.LexicalCursor,
-        export_lookup: modules.ModuleResolveCursor,
-
-        /// Leased lookup cursors own storage; interning and name validation
-        /// carry only traversal positions.
-        fn deinit(self: *Work) void {
-            switch (self.*) {
-                .acquisition => |*cursor| cursor.deinit(),
-                .lexical => |*cursor| cursor.deinit(),
-                .export_lookup => |*cursor| cursor.deinit(),
-                .none, .dot, .atom, .module_validation, .binding_validation => {},
-            }
-            self.* = .none;
-        }
-    };
-    allocator: std.mem.Allocator,
-    registry: *modules.Registry,
-    libraries: EmbeddedLibraries,
-    module_snapshot: ?*const map_state.Snapshot,
-    context: modules.RegistrationProvenance,
-    module_access: *const modules.ExecutionAccess,
-    core: env.EnvironmentView,
-    current_home: ?*modules.ModuleHome,
-    word: u32,
-    spelling: []const u8,
-    phase: Phase = .dot,
-    work: Work,
-    dot_index: usize = 0,
-    qualified_name: ?intern.QualifiedName = null,
-    prefix: ?intern.ModuleName = null,
-    export_name: ?intern.BindingName = null,
-    scope: ?*env.Scope,
-    /// The chain to report when the plain walk runs out. The qualified phases
-    /// report `.qualified` instead, because a dotted name never searched the
-    /// activation's own chain at all.
-    plain_chain: LookupChain,
-    /// The binding version the resolving unit observes.
-    binding_pin: ?u64,
-    generation: ?modules.GenerationLease = null,
-    /// The reference this dispatch's borrow acquired, if it had to acquire one.
-    /// It rides here so the pin taken at the borrow is the *only* one: it is
-    /// moved into the resolution and consumed by `scheduleWord`, which
-    /// therefore does not pin again.
-    borrow_pin: ?modules.GenerationPin = null,
-
-    /// A cursor for a name that genuinely means "whatever the running chain
-    /// says": reflection like `which`, `see`, and `doc`, and the fallback paths
-    /// that re-enter resolution for a word already being dispatched.
-    ///
-    /// Named apart from `init` because the distinction is the one this branch
-    /// keeps paying for. A stamped occurrence resolves where its *text* was
-    /// written, which is rarely the running chain; the seven verbatim copies
-    /// this replaces were each a place where that difference was invisible, and
-    /// one of them -- the idiom recognizer -- silently ran core's `+` where a
-    /// module's own shadow was the answer. Reaching this from a dispatch path
-    /// now means visibly discarding a `WordRef` for its bare id, which greps.
-    pub fn initAtCurrent(evaluator: *Unit, word: u32) ResolutionCursor {
-        return .init(evaluator, word, evaluator.current.?.resolutionScope(), null);
-    }
-
-    pub fn init(
-        evaluator: *Unit,
-        word: u32,
-        written: ?*env.Scope,
-        borrow_pin: ?modules.GenerationPin,
-    ) ResolutionCursor {
-        const spelling = intern.get(word);
-        const context = if (written) |scope|
-            if (modules.homeForModuleRootScope(scope)) |home|
-                home.registrationProvenance()
-            else
-                evaluator.current.?.site.registration_provenance
-        else
-            evaluator.current.?.site.registration_provenance;
-        return .{
-            .borrow_pin = borrow_pin,
-            .allocator = evaluator.allocator,
-            .registry = evaluator.inherited.registry,
-            .libraries = evaluator.inherited.libraries(),
-            .module_snapshot = evaluator.inherited.module_snapshot,
-            .context = context,
-            .module_access = evaluator.module_access,
-            .core = evaluator.environment.coreView(),
-            .current_home = evaluator.current.?.home(),
-            .word = word,
-            .spelling = spelling,
-            .work = .{ .dot = intern.lastDotCursor(spelling) },
-            .scope = written,
-            .plain_chain = lookupChainFor(written),
-            .binding_pin = evaluator.bindingPin(),
-        };
-    }
-
-    pub fn deinit(self: *ResolutionCursor) void {
-        self.work.deinit();
-        if (self.generation) |*lease| lease.deinit();
-        // Released here only when no resolution took them: a dispatch that
-        // schedules a body moves them out first.
-        if (self.borrow_pin) |*pin| pin.deinit();
-        self.* = undefined;
-    }
-
-    /// Hands the borrow's reference to the resolution being produced.
-    fn takeBorrowPin(self: *ResolutionCursor) ?modules.GenerationPin {
-        const owned = self.borrow_pin;
-        self.borrow_pin = null;
-        return owned;
-    }
-
-    fn releaseGeneration(self: *ResolutionCursor) void {
-        if (self.generation) |*lease| lease.deinit();
-        self.generation = null;
-    }
-
-    /// The home a module-local hit executes against.
-    ///
-    /// It used to be the invoking home unconditionally, on the premise that such
-    /// a hit "came out of the image the activation is already running, because a
-    /// module body's resolution scope is rooted at that image and nothing else".
-    /// Moving scope onto the word falsified that: a quotation that escaped its
-    /// module carries its own image's scope, so the hit can come out of an image
-    /// this activation is not running — and taking the caller's home there gave
-    /// the caller's privacy to someone else's private code.
-    ///
-    /// So a hit executes against the home of the image it came out of. No
-    /// acquire happens here: the borrow in `executeWord` already proved
-    /// that image live, either by holding a fresh pin or by matching the
-    /// activation's own. Re-pinning would be a second reference for one
-    /// dispatch, and the unconditional `pin`/`retain` must never appear here —
-    /// it is a `fetchAdd` that asserts on a zero refcount and resurrects a
-    /// destroyed object in ReleaseFast.
-    fn homeForLocalHit(self: *ResolutionCursor, searched: *env.Scope) ?*modules.ModuleHome {
-        return modules.homeForModuleRootScope(searched) orelse self.current_home;
-    }
-
-    fn directResult(
-        self: *ResolutionCursor,
-        lease: env.BindingLease,
-        searched_scope: *env.Scope,
-    ) Resolution {
-        const local = lease.traceWord();
-        const home = if (local == null) null else self.homeForLocalHit(searched_scope);
-        return .{
-            .lease = lease,
-            .execution_generation = null,
-            .home = home,
-            .borrow_pin = self.takeBorrowPin(),
-            .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(self.word),
-            .origin = if (home) |resolved| moduleResolutionOrigin(resolved) else .direct,
-            // A module-local hit resolves against its image, which the home
-            // supplies; anything else resolves against the root it was found in.
-            .defining_scope = if (home != null) null else searched_scope,
-        };
-    }
-
-    /// A qualified reference resolved through a registered generation. It is
-    /// the only path that hands a generation lease to its resolution, so the
-    /// origin is always the module it named.
-    fn generationResult(
-        self: *ResolutionCursor,
-        lease: env.BindingLease,
-        captured_cell: ?env.BindingCellHandle,
-    ) Resolution {
-        var generation_lease = self.generation.?;
-        self.generation = null;
-        var cell = captured_cell;
-        const cache = cache: {
-            if (generation_lease.name() != self.prefix.?) {
-                if (cell) |*owned| owned.deinit();
-                break :cache null;
-            }
-            break :cache CallSiteCacheCandidate{
-                .generation = generation_lease.clone(),
-                .cell = cell.?,
-            };
-        };
-        const execution_generation = generation_lease.enterExecution(self.module_access);
-        const home = execution_generation.home(self.module_access);
-        return .{
-            .lease = lease,
-            .execution_generation = execution_generation,
-            .home = home,
-            .trace_word = homeTraceWord(home, lease.traceWord().?),
-            .origin = moduleResolutionOrigin(home),
-            .call_site_cache = cache,
-        };
-    }
-
-    pub fn advance(self: *ResolutionCursor) ResolutionProgress {
-        return switch (self.phase) {
-            .dot => switch (self.work.dot.advance()) {
-                .pending => .pending,
-                .complete => |maybe_dot| result: {
-                    if (maybe_dot) |dot_index| {
-                        if (dot_index == 0 or dot_index + 1 == self.spelling.len) {
-                            self.work.deinit();
-                            self.phase = .complete;
-                            break :result .{ .complete = .{ .unresolved = .qualified } };
-                        }
-                        if (intern.isReservedRegistryBytes(self.spelling[0..dot_index])) {
-                            // `core` is a scope, not a registration: skip the
-                            // registry entirely.
-                            self.dot_index = dot_index;
-                            self.plain_chain = .core;
-                            self.work = .{ .atom = intern.lookupCursor(self.spelling[dot_index + 1 ..]) };
-                            self.phase = .core_export;
-                            break :result .pending;
-                        }
-
-                        self.dot_index = dot_index;
-                        self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
-                        self.phase = .prefix;
-                    } else {
-                        self.work = .{ .lexical = .init(self.core, self.scope, self.word, self.binding_pin) };
-                        self.phase = .lexical;
-                    }
-                    break :result .pending;
-                },
-            },
-            .prefix => switch (self.work.atom.advance()) {
-                .pending => .pending,
-                .complete => |maybe_prefix| result: {
-                    const prefix = maybe_prefix orelse {
-                        self.work.deinit();
-                        self.phase = .complete;
-                        break :result .{ .complete = .{
-                            .unknown_module_prefix = self.spelling[0..self.dot_index],
-                        } };
-                    };
-                    self.work = .{ .module_validation = .init(prefix) };
-                    self.phase = .prefix_validate;
-                    break :result .pending;
-                },
-            },
-            // The module is acquired before its export name is even looked
-            // up. Only that ordering makes a qualified miss report an
-            // unregistered *module*: an export atom that no source has
-            // interned yet is exactly the state a first reference is in.
-            .prefix_validate => switch (self.work.module_validation.advance()) {
-                .pending => .pending,
-                .complete => |maybe_module| result: {
-                    self.prefix = maybe_module orelse {
-                        self.work.deinit();
-                        self.phase = .complete;
-                        break :result .{ .complete = .{ .unresolved = .qualified } };
-                    };
-                    self.work = .{ .acquisition = ModuleLookupCursor.init(self.registry, self.module_snapshot, self.libraries, self.context, self.prefix.?) };
-                    self.phase = .qualified_acquire;
-                    break :result .pending;
-                },
-            },
-            .qualified_acquire => switch (self.work.acquisition.advance()) {
-                .pending => .pending,
-                .complete => |maybe_generation| result: {
-                    self.work.deinit();
-                    self.generation = maybe_generation;
-                    if (self.generation == null) {
-                        self.phase = .complete;
-                        break :result .{ .complete = .{ .unregistered_module = self.prefix.? } };
-                    }
-                    self.work = .{ .atom = intern.lookupCursor(self.spelling[self.dot_index + 1 ..]) };
-                    self.phase = .export_name;
-                    break :result .pending;
-                },
-            },
-            .export_name => switch (self.work.atom.advance()) {
-                .pending => .pending,
-                .complete => |maybe_export| result: {
-                    const export_name = maybe_export orelse {
-                        self.work.deinit();
-                        self.releaseGeneration();
-                        self.phase = .complete;
-                        break :result .{ .complete = .{ .unresolved = .qualified } };
-                    };
-                    self.work = .{ .binding_validation = .init(export_name) };
-                    self.phase = .export_validate;
-                    break :result .pending;
-                },
-            },
-            .export_validate => switch (self.work.binding_validation.advance()) {
-                .pending => .pending,
-                .complete => |maybe_binding| result: {
-                    self.export_name = maybe_binding orelse {
-                        self.work.deinit();
-                        self.releaseGeneration();
-                        self.phase = .complete;
-                        break :result .{ .complete = .{ .unresolved = .qualified } };
-                    };
-                    self.qualified_name = intern.qualifiedName(self.prefix.?, self.export_name.?);
-                    var export_lookup = self.generation.?.resolveCursor(
-                        intern.bindingId(intern.qualifiedBinding(self.qualified_name.?)),
-                    );
-                    export_lookup.captureCell();
-                    self.work = .{ .export_lookup = export_lookup };
-                    self.phase = .qualified_export;
-                    break :result .pending;
-                },
-            },
-            .qualified_export => switch (self.work.export_lookup.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    const captured_cell = if (maybe_lease != null)
-                        self.work.export_lookup.takeCell()
-                    else
-                        null;
-                    self.work.deinit();
-                    const lease = maybe_lease orelse {
-                        self.releaseGeneration();
-                        self.phase = .complete;
-                        break :result .{ .complete = .{ .unresolved = .qualified } };
-                    };
-                    self.phase = .complete;
-                    break :result .{ .complete = .{
-                        .resolved = self.generationResult(lease, captured_cell),
-                    } };
-                },
-            },
-            .core_export => switch (self.work.atom.advance()) {
-                .pending => .pending,
-                .complete => |maybe_export| result: {
-                    // An atom no source has interned cannot name a core
-                    // binding; the miss reports the chain actually searched.
-                    const export_name = maybe_export orelse {
-                        self.work.deinit();
-                        self.phase = .complete;
-                        break :result .{ .complete = .{ .unresolved = .core } };
-                    };
-                    self.work = .{ .lexical = .init(self.core, null, export_name, null) };
-                    self.phase = .lexical;
-                    break :result .pending;
-                },
-            },
-            .lexical => switch (self.work.lexical.advance()) {
-                .pending => .pending,
-                .complete => result: {
-                    self.work.deinit();
-                    self.phase = .complete;
-                    break :result .{ .complete = .{ .unresolved = self.plain_chain } };
-                },
-                .item => |candidate| result: {
-                    self.work.deinit();
-                    self.phase = .complete;
-                    const resolved: Resolution = switch (candidate.location) {
-                        .scope => |scope| self.directResult(candidate.lease, scope),
-                        .core => .{
-                            .lease = candidate.lease,
-                            .execution_generation = null,
-                            .home = null,
-                            .borrow_pin = self.takeBorrowPin(),
-                            .trace_word = .plain(self.word),
-                            .origin = .core,
-                        },
-                    };
-                    break :result .{ .complete = .{ .resolved = resolved } };
-                },
-            },
-            .complete => unreachable,
-        };
-    }
-};
-
-pub const ShadowProgress = poll_api.Progress([]intern.TraceWord);
-pub const ShadowCursor = struct {
-    const Phase = enum { dot, lexical, materialize, complete };
-    /// Only the active parser or lexical walk occupies continuation storage.
-    const Work = union(enum) {
-        none,
-        dot: intern.DotCursor,
-        lexical: resolution_core.LexicalCursor,
-
-        fn deinit(self: *Work) void {
-            switch (self.*) {
-                .lexical => |*cursor| cursor.deinit(),
-                .none, .dot => {},
-            }
-            self.* = .none;
-        }
-    };
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    core: env.EnvironmentView,
-    word: u32,
-    phase: Phase = .dot,
-    work: Work,
-    scope: ?*env.Scope,
-    current_home: ?*modules.ModuleHome,
-    /// The binding version the resolving unit observes.
-    binding_pin: ?u64,
-    seen_winner: bool = false,
-    found: poll_api.ChunkList(intern.TraceWord),
-    output: ?[]intern.TraceWord = null,
-    iterator: ?poll_api.ChunkList(intern.TraceWord).Iterator = null,
-    output_index: usize = 0,
-
-    pub fn init(evaluator: *Unit, word: u32) ShadowCursor {
-        return .{
-            .allocator = evaluator.allocator,
-            .releases = evaluator.releases,
-            .core = evaluator.environment.coreView(),
-            .current_home = evaluator.current.?.home(),
-            .word = word,
-            .work = .{ .dot = intern.dotCursor(intern.get(word)) },
-            .scope = evaluator.current.?.resolutionScope(),
-            .found = .init(evaluator.allocator),
-            .binding_pin = evaluator.bindingPin(),
-        };
-    }
-    pub fn deinit(self: *ShadowCursor) void {
-        self.work.deinit();
-        if (self.output) |output| self.allocator.free(output);
-        self.found.retire(self.releases);
-        self.* = undefined;
-    }
-    fn record(self: *ShadowCursor, trace_word: intern.TraceWord) error{OutOfMemory}!void {
-        if (self.seen_winner) {
-            try self.found.append(trace_word);
-        } else self.seen_winner = true;
-    }
-    pub fn advance(self: *ShadowCursor) error{OutOfMemory}!ShadowProgress {
-        return switch (self.phase) {
-            .dot => switch (self.work.dot.advance()) {
-                .pending => .pending,
-                .complete => |maybe_dot| result: {
-                    self.work.deinit();
-                    if (maybe_dot != null) {
-                        self.output = try self.allocator.alloc(intern.TraceWord, 0);
-                        self.phase = .complete;
-                        break :result .{ .complete = self.takeOutput() };
-                    }
-                    self.work = .{ .lexical = .init(self.core, self.scope, self.word, self.binding_pin) };
-                    self.phase = .lexical;
-                    break :result .pending;
-                },
-            },
-            .lexical => switch (self.work.lexical.advance()) {
-                .pending => .pending,
-                .item => |loaded| result: {
-                    var candidate = loaded;
-                    defer candidate.deinit();
-                    const lease = candidate.lease;
-                    const home = switch (candidate.location) {
-                        .core => null,
-                        .scope => if (lease.traceWord() == null) null else self.current_home,
-                    };
-                    try self.record(if (home) |resolved|
-                        homeTraceWord(resolved, lease.traceWord().?)
-                    else
-                        .plain(self.word));
-                    break :result .pending;
-                },
-                .complete => result: {
-                    self.work.deinit();
-                    self.output = try self.allocator.alloc(intern.TraceWord, self.found.count);
-                    self.iterator = self.found.iterator();
-                    self.phase = .materialize;
-                    break :result .pending;
-                },
-            },
-            .materialize => if (self.iterator.?.next()) |name| result: {
-                self.output.?[self.output_index] = name.*;
-                self.output_index += 1;
-                break :result .pending;
-            } else result: {
-                self.phase = .complete;
-                break :result .{ .complete = self.takeOutput() };
-            },
-            .complete => unreachable,
-        };
-    }
-    fn takeOutput(self: *ShadowCursor) []intern.TraceWord {
-        const result = self.output.?;
-        self.output = null;
-        return result;
     }
 };
 
 fn scheduleWord(
     self: *Unit,
-    body: *Header,
+    executable: *const env.Executable,
     word: intern.TraceWord,
     resolved_home: ?*modules.ModuleHome,
-    defining_scope: ?*env.Scope,
     effect: ?env.Effect,
-    borrow_pin: ?modules.GenerationPin,
 ) MachineError!void {
     const scope = if (resolved_home) |home|
         home.scope(self.module_access)
@@ -8085,64 +7473,39 @@ fn scheduleWord(
         resolved_home.?.registrationProvenance();
     // A body defines where its caller could, and no further.
     const defining = self.current.?.site.defining;
-    // A body's words carry their own slots; this is the root reflection and
-    // unlinked words resolve against. A module word's is its image; anything
-    // else's is the root it was found in, null for a core or prelude
-    // definition, which was published against core alone.
-    const resolution_scope: ?*env.Scope = if (resolved_home) |generation|
-        generation.scope(self.module_access)
-    else
-        defining_scope;
-    // One pin per dispatch, never two. The borrow already acquired this
-    // image's reference and handed it over; re-pinning here would add a second
-    // pin-set walk to the hot path for a reference already held.
-    if (borrow_pin) |owned| {
-        var consumed = owned;
-        try self.adoptGeneration(&consumed);
-    } else if (resolved_home) |generation| try self.pinGeneration(generation);
     const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
-    return enterBody(self, body, word, .{
+    return enterBody(self, executable, word, .{
         .scope = scope,
-        .resolution_scope = resolution_scope,
         .home = home,
         .defining = defining,
         .registration_provenance = registration_provenance,
     }, check);
 }
-/// `scheduleWord` for a source word from the unit's binding cache, which has
-/// no home, pin, or effect: the body runs at its caller's site, resolving
-/// against its defining scope. A trusted word with a recognition takes the
-/// full path instead.
-fn enterCachedWord(self: *Unit, cached: *const BindingCache.Entry) MachineError!void {
-    self.active_word = cached.trace_word;
-    const caller = self.current.?.site;
-    return enterBody(self, env.quotationHeader(cached.spec.binding.word), cached.trace_word, .{
-        .scope = caller.scope,
-        .resolution_scope = cached.defining_scope,
-        .home = caller.home,
-        .defining = caller.defining,
-        .registration_provenance = caller.registration_provenance,
-    }, null);
-}
-/// Suspends the caller and makes `body` the running evaluation at `site`,
-/// under its effect check if it has one.
-fn enterBody(self: *Unit, body: *Header, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
+/// Suspends the caller and makes `executable` the running evaluation at
+/// `site`, under its effect check if it has one. The callee's owner is secured
+/// before the caller can retire: in tail position the caller's executable may
+/// hold the callee's last reference.
+fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
-    var effect_tail = self.replaceTailEffectCandidate(body);
+    executable.owner.retain();
+    var entered = false;
+    defer if (!entered) executable.owner.release(self.releases);
+    var effect_tail = self.replaceTailEffectCandidate(executable.code);
     const application_tail = self.tailApplicationIndex();
     _ = self.suspendCurrent() catch return error.OutOfMemory;
     if (check) |*effect_check| {
         const check_index: EffectCheckIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
-        effect_check.activateSource(body, check_index, self.effect_check_index);
+        effect_check.activateSource(executable.code, check_index, self.effect_check_index);
         var continuation = OwnedFrame.init(.{ .effect_check = effect_check.* });
         defer continuation.deinit(self.releases, self.allocator);
         try self.appendFrame(&continuation);
         self.effect_check_index = check_index;
         effect_tail = check_index;
     }
-    heap.incRef(body);
+    entered = true;
     self.current = .{
-        .code = body,
+        .code = executable.code,
+        .program = .{ .bound = executable },
         .position = .{ .source = 0 },
         .site = site,
         .traced_word = word,
@@ -8208,6 +7571,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
             };
             if (comptime root_execution_metrics_enabled)
                 self.root_execution_metrics.application_resumes += 1;
+            var application_bound = continuation.bound;
             const next = continuation.resume_fn(
                 self,
                 continuation.context,
@@ -8217,6 +7581,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                 if (continuation.traced_word != no_word) {
                     self.setFailureTraceParent(continuation.traced_word);
                 }
+                application_bound.deinit(self.releases);
                 continuation.deinit_fn(self.releases, self.allocator, continuation.context);
                 return err;
             };
@@ -8231,11 +7596,13 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                         .seeded = application.seeded,
                         .provenance = application.provenance,
                         .plan = continuation.plan,
+                        .bound = application_bound,
                     }, launch, continuation.traced_word);
                     return true;
                 },
                 .suspend_inline => |suspension| {
                     const installed = self.workDriver() orelse {
+                        application_bound.deinit(self.releases);
                         continuation.deinit_fn(
                             self.releases,
                             self.allocator,
@@ -8246,6 +7613,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                     if (launch != .in_place or
                         @intFromPtr(suspension) != @intFromPtr(installed.context))
                     {
+                        application_bound.deinit(self.releases);
                         continuation.deinit_fn(
                             self.releases,
                             self.allocator,
@@ -8264,13 +7632,16 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
                         .plan = continuation.plan,
+                        .bound = application_bound,
                     } });
                     application_selection = .{};
+                    application_bound = .{};
                     defer suspended.deinit(self.releases, self.allocator);
                     try self.appendFrame(&suspended);
                     return true;
                 },
             };
+            application_bound.deinit(self.releases);
             continuation.deinit_fn(self.releases, self.allocator, continuation.context);
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until
@@ -8319,6 +7690,12 @@ fn resumeFrames(self: *Unit) MachineError!bool {
             return true;
         },
         .boundary => {
+            if (self.frames.items[self.frames.items.len - 1].boundary.mode == .module) {
+                // The image stays in its frame until it is sealed: binding the
+                // group may load modules, which run above the frame.
+                try startModuleSeal(self);
+                return true;
+            }
             const boundary = self.popFrame(.boundary);
             std.debug.assert(@backingInt(self.boundary_index.?) == self.frames.items.len);
             self.boundary_index = boundary.previous_boundary;
@@ -8330,10 +7707,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                     try finishAttempt(self, boundary.stack_base);
                     return true;
                 },
-                .module => {
-                    try finishModule(self, boundary);
-                    if (self.hasWorkDriver()) return true;
-                },
+                .module => unreachable,
             }
         },
     };
@@ -8648,32 +8022,273 @@ const ChildSeedDriver = struct {
     }
 };
 
-/// Finishes one construction boundary. A module body defines words and
-/// keeps no state, so a residual operand window is refused before anything
-/// is published; an empty one freezes the image and publishes it under the
-/// name `@defm` validated before the body ran.
-fn finishModule(self: *Unit, boundary: Boundary) MachineError!void {
-    var image = boundary.mode.module.image;
-    defer image.deinit();
-    const name = image.moduleName();
-    const provenance = image.provenance();
-    const observed = self.stack.items.len - boundary.stack_base;
-    if (observed != 0) return self.failFmt(
-        .domain,
-        "@defm body left {d} value{s} on its stack; a module body defines words and keeps no state",
-        .{ observed, if (observed == 1) "" else "s" },
-    );
-    var sealed = heap.Owned(modules.SealedImage).init(try image.seal(
-        self.moduleRecognition(provenance),
-    ));
-    errdefer sealed.deinit(self.releases, self.allocator);
-    const driver = try self.allocator.create(ModuleCompletionDriver);
-    // The cursor owns the sealed image from here; nothing can fail after.
-    driver.* = .{
-        .cursor = .init(self.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
+/// Begins sealing the module whose construction boundary is the top frame. A
+/// module body defines words and keeps no state, so a residual operand window
+/// is refused before anything is bound. Otherwise every staged body binds
+/// against the complete group, and only once all of them have bound is any
+/// sealed: a module load in between restarts the seal against a view that
+/// holds the loaded module. A placeholder evaluation at the image's site is the
+/// caller such a load suspends and returns to.
+fn startModuleSeal(self: *Unit) MachineError!void {
+    const frame = &self.frames.items[self.frames.items.len - 1].boundary;
+    const observed = self.stack.items.len - frame.stack_base;
+    if (observed != 0) {
+        const boundary = self.popFrame(.boundary);
+        self.boundary_index = boundary.previous_boundary;
+        self.stack_base = boundary.previous_base;
+        self.active_word = boundary.word;
+        boundary.deinit();
+        return self.failFmt(
+            .domain,
+            "@defm body left {d} value{s} on its stack; a module body defines words and keeps no state",
+            .{ observed, if (observed == 1) "" else "s" },
+        );
+    }
+    self.active_word = frame.word;
+    const image = &frame.mode.module.image;
+    const home = image.executionHome(self.module_access);
+    const placeholder = try list.fromValuesGeneric(self.allocator, &.{});
+    self.current = .{
+        .code = placeholder.list,
+        .program = .incremental,
+        .position = .{ .source = 0 },
+        .site = .image(home, self.module_access, false),
+        .traced_word = no_word,
     };
-    self.adoptDriver(driver);
+    var context = self.resolutionContext(self.inherited.registry.view());
+    context.group = .{
+        .image_scope = home.scope(self.module_access).cellId(),
+        .module = image.moduleName(),
+        .directory = null,
+    };
+    try self.startDriver(ModuleSealDriver{
+        .context = .init(context),
+        .phase = .init(.{ .group = image.groupCursor() }),
+        .pending = .init(.init(self.allocator)),
+    });
 }
+
+/// What a word in a sealing group resolves to, against directories that can no
+/// longer change: the group's own for a word written in its image, then core.
+/// Words written anywhere else are not admitted.
+const FrozenGroup = struct {
+    environment: *env.Env,
+    image_scope: ?env.ScopeId,
+    directory: ?*const env.NameMap,
+
+    fn resolve(context: *const anyopaque, word: value.Symbol) ?idioms.FrozenHit {
+        const self: *const FrozenGroup = @ptrCast(@alignCast(context));
+        const binding: intern.BindingName = @fromBackingInt(word.name);
+        const own = switch (env.wordTarget(word.slot)) {
+            .local => return null,
+            .unlinked => false,
+            .root => |id| own: {
+                if (id == self.environment.coreScopeId()) break :own false;
+                if (self.image_scope != null and id == self.image_scope.?) break :own true;
+                return null;
+            },
+        };
+        if (own) if (self.directory) |directory| {
+            var cursor = directory.rawLookup(binding);
+            if (poll_api.drive(?env.Entry, &cursor, .{})) |entry| switch (entry) {
+                .definition => |definition| return .{ .definition = definition, .in_core = false },
+                .alias => return null,
+            };
+        };
+        var cursor = self.environment.coreLookup(binding);
+        const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse return null;
+        return switch (entry) {
+            .definition => |definition| if (definition.visibility == .public) .{ .definition = definition, .in_core = true } else null,
+            .alias => null,
+        };
+    }
+};
+
+/// Records recognition for a standard-library group's trusted definitions,
+/// against bodies that are bound and directories that are sealed.
+fn recognizeGroup(evaluator: *Unit, image: *modules.OwnedImage) void {
+    const home = image.executionHome(evaluator.module_access);
+    const frozen: FrozenGroup = .{
+        .environment = evaluator.environment,
+        .image_scope = home.scope(evaluator.module_access).cellId(),
+        .directory = image.groupDirectory(),
+    };
+    const lookup: idioms.FrozenLookup = .{ .context = &frozen, .resolve_fn = FrozenGroup.resolve };
+    for (idioms.direct_names) |spelling| {
+        // A dotted spelling names one module's word; a plain one, any group's.
+        const local = if (std.mem.lastIndexOfScalar(u8, spelling, '.')) |dot| local: {
+            if (!std.mem.eql(u8, spelling[0..dot], intern.get(intern.moduleId(image.moduleName())))) continue;
+            break :local spelling[dot + 1 ..];
+        } else spelling;
+        const id = intern.intern(local) catch continue;
+        var cursor = image.groupDirectory().rawLookup(@fromBackingInt(id));
+        const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse continue;
+        const definition = switch (entry) {
+            .definition => |definition| definition,
+            .alias => continue,
+        };
+        if (definition.body != .source) continue;
+        definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
+    }
+}
+
+/// Records recognition for core's trusted definitions as core freezes.
+pub fn recognizeCore(environment: env.Env, spelling: []const u8, definition: *env.Definition) void {
+    var held = environment;
+    const frozen: FrozenGroup = .{ .environment = &held, .image_scope = null, .directory = null };
+    const lookup: idioms.FrozenLookup = .{ .context = &frozen, .resolve_fn = FrozenGroup.resolve };
+    definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
+}
+
+/// One bound body awaiting the group's seal.
+const PendingSeal = struct {
+    definition: *env.Definition,
+    parts: env.Executable.Parts,
+};
+
+/// The bound parts of a group not yet sealed. Discarding them leaves every
+/// definition reserved, so a restarted seal binds the whole group again.
+const PendingSeals = struct {
+    allocator: std.mem.Allocator,
+    items: poll_api.ChunkStack(PendingSeal),
+
+    fn init(allocator: std.mem.Allocator) PendingSeals {
+        return .{ .allocator = allocator, .items = .init(allocator) };
+    }
+
+    pub fn deinit(self: *PendingSeals, releases: *heap.ReleaseDomain) void {
+        while (self.items.pop()) |pending| pending.parts.discard(releases, self.allocator);
+        self.items.deinit();
+    }
+};
+
+const ModuleSealDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    context: heap.Owned(binder.Context),
+    phase: heap.Owned(Phase),
+    pending: heap.Owned(PendingSeals),
+
+    const Phase = union(enum) {
+        group: modules.GroupCursor,
+        bind: struct {
+            entries: env.NameMap.RawEntryCursor,
+            current: ?struct { definition: *env.Definition, cursor: binder.BindingCursor } = null,
+        },
+        seal,
+
+        pub fn deinit(self: *Phase) void {
+            switch (self.*) {
+                .group => |*cursor| cursor.deinit(),
+                .bind => |*bind| if (bind.current) |*current| current.cursor.deinit(),
+                .seal => {},
+            }
+            self.* = undefined;
+        }
+    };
+
+    fn image(evaluator: *Unit) *modules.OwnedImage {
+        return &evaluator.frames.items[evaluator.frames.items.len - 1].boundary.mode.module.image;
+    }
+
+    pub fn advance(evaluator: *Unit, self: *ModuleSealDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        while (work.spend()) switch (self.phase.borrowMut().*) {
+            .group => |*cursor| switch (cursor.advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Duplicate => return evaluator.failFmt(
+                    .domain,
+                    "the name `{s}` is introduced more than once in this module",
+                    .{intern.get(intern.bindingId(cursor.duplicate.?))},
+                ),
+            }) {
+                .pending => {},
+                .complete => {
+                    const owned = image(evaluator);
+                    self.context.borrowMut().group.?.directory = owned.groupDirectory();
+                    cursor.deinit();
+                    self.phase.borrowMut().* = .{ .bind = .{ .entries = owned.groupEntries() } };
+                },
+            },
+            .bind => |*bind| {
+                if (bind.current) |*current| {
+                    const progress = try current.cursor.advance(self.context.borrowMut(), work);
+                    const result = switch (progress) {
+                        .pending => continue,
+                        .complete => |result| result,
+                    };
+                    const definition = current.definition;
+                    switch (result) {
+                        .bound => |parts| {
+                            current.cursor.deinit();
+                            bind.current = null;
+                            self.pending.borrowMut().items.push(.{ .definition = definition, .parts = parts }) catch |err| {
+                                parts.discard(evaluator.releases, evaluator.allocator);
+                                return err;
+                            };
+                        },
+                        .failed => |failure| {
+                            const code = definition.reservedBody();
+                            const word = heap.valuesConst(code)[failure.index].symbol;
+                            evaluator.retireDriver(self);
+                            evaluator.missOrLoad(word, failure.miss, .load_only) catch |err| {
+                                if (err == error.Ecl) evaluator.setFailureSite(code, failure.index);
+                                return err;
+                            };
+                            return .detached;
+                        },
+                    }
+                    continue;
+                }
+                switch (bind.entries.advance()) {
+                    .pending => {},
+                    .item => |entry| switch (entry.value) {
+                        .definition => |definition| if (definition.body == .reserved) {
+                            bind.current = .{
+                                .definition = definition,
+                                .cursor = try binder.BindingCursor.init(
+                                    evaluator.allocator,
+                                    evaluator.releases,
+                                    definition.reservedBody(),
+                                ),
+                            };
+                        },
+                        .alias => {},
+                    },
+                    .complete => self.phase.borrowMut().* = .seal,
+                }
+            },
+            .seal => {
+                // Every body bound against one view; seal them together.
+                if (self.pending.borrowMut().items.pop()) |pending| {
+                    pending.definition.seal(evaluator.releases, pending.parts);
+                    continue;
+                }
+                const owned = image(evaluator);
+                const provenance = owned.provenance();
+                const name = owned.moduleName();
+                if (provenance == .standard_library) recognizeGroup(evaluator, owned);
+                evaluator.retireDriver(self);
+                releaseCurrent(evaluator);
+                const boundary = evaluator.popFrame(.boundary);
+                evaluator.boundary_index = boundary.previous_boundary;
+                evaluator.stack_base = boundary.previous_base;
+                evaluator.active_word = boundary.word;
+                var built = boundary.mode.module.image;
+                var sealed = heap.Owned(modules.SealedImage).init(built.seal());
+                errdefer sealed.deinit(evaluator.releases, evaluator.allocator);
+                const driver = try evaluator.allocator.create(ModuleCompletionDriver);
+                // The cursor owns the sealed image from here; nothing can fail after.
+                driver.* = .{
+                    .cursor = .init(evaluator.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
+                };
+                evaluator.adoptDriver(driver);
+                return .detached;
+            },
+        };
+        return .stepped;
+    }
+};
 
 /// Publishes a sealed image through the registry as resumable work.
 const ModuleCompletionDriver = struct {
@@ -9046,6 +8661,6 @@ const FailureDriver = struct {
     }
 };
 fn releaseCurrent(self: *Unit) void {
-    if (self.current) |current| self.releases.releaseHeader(current.code);
+    if (self.current) |current| current.release(self.releases);
     self.current = null;
 }

@@ -22,6 +22,16 @@ pub fn Publisher(comptime T: type) type {
             /// Returns true when this reader made the publisher quiescent.
             /// The caller may then detach retired records under its writer
             /// lock, but must reclaim them after releasing that lock.
+            /// A second lease on the same snapshot. Sound because this lease
+            /// keeps the publisher non-quiescent, so nothing it observes can be
+            /// reclaimed before the clone is announced.
+            pub fn clone(self: *const Lease) Lease {
+                std.debug.assert(self.active);
+                const old = @constCast(self.publisher).readers.fetchAdd(1, .seq_cst);
+                std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+                return .{ .publisher = self.publisher, .snapshot = self.snapshot };
+            }
+
             pub fn deinit(self: *Lease) bool {
                 std.debug.assert(self.active);
                 self.active = false;

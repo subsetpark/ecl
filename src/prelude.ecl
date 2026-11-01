@@ -194,7 +194,7 @@
 (msg -- :
  "Raise a user-kind error whose message is the supplied value: `{kind user msg msg}`. Defined in
   ecl.")
-(wrap (kind user msg) swap compose dict.from-flat raise) `fail def
+(wrap (kind user msg) swap compose dict.core.from-flat raise) `fail def
 
 ### def from-digits
 (digits base -- value :

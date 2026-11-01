@@ -1,5 +1,7 @@
 ### module pkg.fetch
 # Network source policy, expressed only in the maintained application.
+# The native `git` module exists only in the installed layout, so its words
+# are looked up where they run rather than bound when this module is built.
 []
 (
  ### def hash
@@ -42,7 +44,7 @@
  (resource exchange -- snapshot :
   "Join the native invocation before returning its commit and archive.")
  (|resource exchange|
-  exchange git.output port.endpoint collect
+  exchange `git.output execute port.endpoint collect
   exchange port.result swap pair
   exchange port.close resource port.close) `collect-exchange defp
 
@@ -54,7 +56,7 @@
   `ca-file "ECL_GIT_CA_FILE" pkg.project.environment put
   `scratch pkg.project.temporary put
   `export-bytes 67108864 put
-  git.snapshot [] port.open swap
+  `git.snapshot execute [] port.open swap
   (|resource request| resource resource git.fetch request port.begin collect-exchange) call) `git
  def
 

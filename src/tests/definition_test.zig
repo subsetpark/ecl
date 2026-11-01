@@ -4,7 +4,6 @@ const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
-const env = @import("../env.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 
@@ -33,14 +32,13 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), text) != null);
 }
 
-test "plain call sites observe rebinding and core shadowing" {
+test "bound call sites keep their targets across rebinding and core shadowing" {
     try support.expectStack(
         "1 `cached-value set (cached-value) `probe def " ++
-            "probe probe 2 `cached-value set probe " ++
-            "3 `cached-value set probe " ++
+            "probe probe 2 `cached-value set probe cached-value " ++
             "(4 dup +) `core-probe def core-probe core-probe " ++
-            "(10) `dup def core-probe",
-        "1 1 2 3 8 8 14",
+            "(10) `dup def core-probe dup",
+        "1 1 1 2 8 8 8 10",
     );
 }
 
@@ -49,7 +47,7 @@ test "plain call sites remain correct after observation pool and cache churn" {
         "1 `outside set (outside) `probe def probe probe probe " ++
             "3 (" ++ support.repeated("outside pop ", 32) ++ ") times " ++
             "2 `outside set probe",
-        "1 1 1 2",
+        "1 1 1 1",
     );
 }
 
@@ -400,21 +398,12 @@ test "long annotation traversal and reflection observe cancellation" {
     defer runtime_inputs10.deinit();
     var reflection_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs10.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer reflection_runtime.deinit();
-    const long_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    defer cleanup.releaseValue(long_body);
-    const codepoints = try allocator.alloc(u32, 70_000);
-    defer allocator.free(codepoints);
-    @memset(codepoints, 'd');
-    const long_doc = try list.fromCodepoints(allocator, codepoints);
-    defer cleanup.releaseValue(long_doc);
-    const long_id = try intern.intern("long-doc");
-    try reflection_runtime.define(
-        try intern.namespaceName(long_id),
-        .{ .word = .{
-            .body = env.quotation(long_body.list).?,
-            .doc = env.documentation(long_doc.list).?,
-        } },
-    );
+    const long_doc = try allocator.alloc(u8, 70_000);
+    defer allocator.free(long_doc);
+    @memset(long_doc, 'd');
+    const long_definition = try std.fmt.allocPrint(allocator, "(: \"{s}\") (1) `long-doc def", .{long_doc});
+    defer allocator.free(long_definition);
+    try expectOk(&reflection_runtime, long_definition);
     reflection_runtime.requestCancellation();
     try expectErrorContains(&reflection_runtime, "`long-doc see", "unit cancelled");
     try std.testing.expect(reflection_runtime.lastPolls() >= 1);
