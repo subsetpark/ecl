@@ -712,16 +712,6 @@ fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
     };
 }
 
-/// The non-reused publication identity every registry edit advances. A
-/// binding reused across applications is keyed by it, so any publication
-/// anywhere conservatively invalidates reuse.
-var publication_epoch: std.atomic.Value(u64) = .init(1);
-
-/// The publication identity current now, for keying a reusable binding.
-pub fn currentPublication() u64 {
-    return publication_epoch.load(.acquire);
-}
-
 /// One immutable snapshot of the registry: its module names, its aliases, and
 /// for the Session's public registry the top-level name directory. A binding
 /// captures one snapshot and resolves every name against it across scheduler
@@ -1725,6 +1715,11 @@ const RegistryState = struct {
     /// written in it keep their meaning for the Session's life.
     history: ?*ModuleImage = null,
     loading: std.atomic.Value(?*LoadingNode) = .init(null),
+    /// The Session's publication counter, owned by its main registry and
+    /// borrowed by each source-private one. Every edit to any registry of
+    /// the Session advances it; it holds no snapshot and only keys reuse.
+    publications: std.atomic.Value(u64) = .init(1),
+    clock: *std.atomic.Value(u64),
 };
 
 pub const Registry = enum(usize) {
@@ -1736,14 +1731,26 @@ pub const Registry = enum(usize) {
         return @ptrFromInt(@backingInt(self.*));
     }
 
+    /// A Session's main registry, which owns the Session's publication counter.
     pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Registry {
-        const owner_allocator = host.allocator();
-        const backing = try owner_allocator.create(RegistryState);
-        backing.* = .{
-            .host = host,
-            .directories = .init(null),
-        };
+        const backing = try host.allocator().create(RegistryState);
+        // SAFETY: the counter lives in this backing; it is pointed at next.
+        backing.* = .{ .host = host, .directories = .init(null), .clock = undefined };
+        backing.clock = &backing.publications;
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
+    }
+
+    /// A source-private registry of the Session `main` belongs to. It shares
+    /// `main`'s publication counter and must be torn down before `main`.
+    pub fn initPrivate(host: *const heap.HostCleanup, main: *const Registry) error{OutOfMemory}!Registry {
+        const backing = try host.allocator().create(RegistryState);
+        backing.* = .{ .host = host, .directories = .init(null), .clock = main.privateState().clock };
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
+    }
+
+    /// The Session's publication identity now, for keying a reusable binding.
+    pub fn currentPublication(self: *const Registry) u64 {
+        return self.privateState().clock.load(.acquire);
     }
 
     /// Mint the capability seal owned by a test-mode Session. Its backing
@@ -2511,7 +2518,7 @@ pub const Registry = enum(usize) {
                         const outcome = self.apply(build.target);
                         build.candidate.previous = @constCast(build.directory.directory);
                         self.registry.privateState().directories.publish(build.candidate);
-                        _ = publication_epoch.fetchAdd(1, .acq_rel);
+                        _ = self.registry.privateState().clock.fetchAdd(1, .acq_rel);
                         self.registry.unlock();
                         var published = build.*;
                         self.state = .complete;
@@ -2881,7 +2888,7 @@ pub const Registry = enum(usize) {
 
     /// Captures the current snapshot as one coherent view.
     pub fn view(self: *const Registry) View {
-        const publication = currentPublication();
+        const publication = self.currentPublication();
         return .{ .directory = self.acquireDirectory(), .publication = publication };
     }
 

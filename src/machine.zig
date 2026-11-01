@@ -1603,8 +1603,11 @@ const LookupReuse = struct {
     };
     entries: [capacity]?Entry = @splat(null),
 
+    /// By name alone: scope slots are numbered process-wide, so hashing them
+    /// would make which entries collide, and so what a unit allocates,
+    /// depend on unrelated Sessions.
     fn index(word: value.Symbol) usize {
-        return @intCast((@as(u64, word.name) *% 0x9E3779B97F4A7C15 ^ word.slot) % capacity);
+        return @intCast((@as(u64, word.name) *% 0x9E3779B97F4A7C15 >> 32) % capacity);
     }
 
     fn find(self: *const LookupReuse, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance) ?*env.Definition {
@@ -1649,11 +1652,12 @@ const BindingReuse = struct {
         publication: u64,
         provenance: u64,
     };
+    /// Searched by exact identity and replaced in rotation, never placed by
+    /// address: which quotations share a slot must not depend on the heap's
+    /// layout, or the unit's allocations would differ from run to run.
     entries: [capacity]?Entry = @splat(null),
-
-    fn index(code: *Header) usize {
-        return (@intFromPtr(code) >> 4) % capacity;
-    }
+    next: u8 = 0,
+    last: u8 = 0,
 
     fn provenanceKey(provenance: modules.RegistrationProvenance) u64 {
         return switch (provenance) {
@@ -1665,16 +1669,28 @@ const BindingReuse = struct {
     }
 
     fn find(
-        self: *const BindingReuse,
+        self: *BindingReuse,
         code: *Header,
         publication: u64,
         provenance: modules.RegistrationProvenance,
     ) ?*env.AnonymousCode {
-        const entry = self.entries[index(code)] orelse return null;
-        if (entry.code.executable.code != code or entry.publication != publication or
-            entry.provenance != provenanceKey(provenance)) return null;
-        entry.code.retain();
-        return entry.code;
+        const key = provenanceKey(provenance);
+        const matches = struct {
+            fn at(entry: ?Entry, wanted: *Header, at_publication: u64, at_provenance: u64) bool {
+                const held = entry orelse return false;
+                return held.code.executable.code == wanted and held.publication == at_publication and
+                    held.provenance == at_provenance;
+            }
+        }.at;
+        // A loop applies the same quotation again; try the last hit first.
+        const found: u8 = if (matches(self.entries[self.last], code, publication, key)) self.last else search: {
+            for (self.entries, 0..) |entry, slot| if (matches(entry, code, publication, key)) break :search @intCast(slot);
+            return null;
+        };
+        self.last = found;
+        const held = self.entries[found].?.code;
+        held.retain();
+        return held;
     }
 
     fn remember(
@@ -1684,10 +1700,12 @@ const BindingReuse = struct {
         publication: u64,
         provenance: modules.RegistrationProvenance,
     ) void {
-        const slot = &self.entries[index(code.executable.code)];
+        const slot = &self.entries[self.next];
         if (slot.*) |old| old.code.release(releases);
         code.retain();
         slot.* = .{ .code = code, .publication = publication, .provenance = provenanceKey(provenance) };
+        self.last = self.next;
+        self.next = @intCast((@as(usize, self.next) + 1) % capacity);
     }
 
     fn deinit(self: *BindingReuse, releases: *heap.ReleaseDomain) void {
@@ -5890,7 +5908,7 @@ pub const Unit = struct {
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
         if (self.inherited.phase != .bootstrap) {
-            if (self.lookups.find(word, modules.currentPublication(), self.current.?.site.registration_provenance)) |definition|
+            if (self.lookups.find(word, self.inherited.registry.currentPublication(), self.current.?.site.registration_provenance)) |definition|
                 return invokeDefinition(self, definition, word.name);
         }
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
@@ -5933,7 +5951,7 @@ pub const Unit = struct {
     /// bindings or the unit's reuse cache.
     fn reusableExecutable(self: *Unit, code: *Header) ?*env.AnonymousCode {
         if (self.inherited.phase == .bootstrap) return null;
-        return self.reuse.find(code, modules.currentPublication(), self.current.?.site.registration_provenance);
+        return self.reuse.find(code, self.inherited.registry.currentPublication(), self.current.?.site.registration_provenance);
     }
 
     /// An executable the running application already bound for `code`,
@@ -8333,14 +8351,14 @@ const ModuleSealDriver = struct {
                     .pending => {},
                     .item => |entry| switch (entry.value) {
                         .definition => |definition| if (definition.body == .reserved) {
-                            bind.current = .{
-                                .definition = definition,
-                                .cursor = try binder.BindingCursor.init(
-                                    evaluator.allocator,
-                                    evaluator.releases,
-                                    definition.reservedBody(),
-                                ),
-                            };
+                            // Built before assignment: assigning `try` in place
+                            // would mark `current` present before a failure.
+                            const cursor = try binder.BindingCursor.init(
+                                evaluator.allocator,
+                                evaluator.releases,
+                                definition.reservedBody(),
+                            );
+                            bind.current = .{ .definition = definition, .cursor = cursor };
                         },
                         .alias => {},
                     },

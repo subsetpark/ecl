@@ -419,7 +419,7 @@ pub const Session = enum(usize) {
                     error.Invalid => return error.InvalidHostConfig,
                 };
                 errdefer map.deinit();
-                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), map, host.initial_cwd);
+                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), &registry, map, host.initial_cwd);
             }
             break :discovery null;
         };

@@ -693,8 +693,11 @@ retirement step; a discarded candidate takes the same path. Copying on every
 top-level definition makes a definition cost the size of the session's
 directory, accepted because definition is not the hot path.
 
-Every publication also advances one process-wide publication counter. The
-counter is never reused and holds no snapshot; it only keys reusable bindings.
+Every publication also advances the Session's publication counter, which its
+main registry owns and each source-private registry shares. The counter is
+never reused and holds no snapshot; it only keys reusable bindings. It is
+per Session so that one Session's publications never change what another's
+units reuse, and so what a unit allocates is a function of its own run.
 
 ### Applications bind at their first run
 
@@ -709,7 +712,9 @@ quotations in its application frame, two slots, so a predicate and a body each
 bind once and every later element reuses them. A unit keeps a small cache of
 anonymous executables, each owning its exact quotation, keyed by that
 quotation's identity, the publication counter, and the applying site's
-registration provenance; any publication anywhere invalidates every entry.
+registration provenance; any publication in the Session invalidates every
+entry. The cache is searched by identity and replaced in a fixed rotation,
+never placed by address, so its hits do not depend on heap layout.
 Equal quotations from different roots are distinct values and never share an
 entry. The bootstrap unit skips the cache because core's directory changes
 without a publication. Nested quotations are not bound early for either reuse.

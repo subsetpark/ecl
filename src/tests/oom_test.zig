@@ -616,8 +616,11 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[21 22] (+ pop) `oom-stateful @defm " ++
             "[] ([21] (1 +) `oom-leftover @defm) @attempt pop " ++
             // Calls, failures inside calls, and reloads each have their own
-            // allocation-failure paths through registration.
-            "[] ((1) `bump def (missing) `boom def (7) `peek def) `oom-calls @defm " ++
+            // allocation-failure paths through registration. A body that names
+            // an undefined word fails its group's seal; an explicit lookup
+            // fails only when it runs.
+            "[] ([] ((missing) `f def) `oom-unbound @defm) @attempt pop " ++
+            "[] ((1) `bump def (`missing execute) `boom def (7) `peek def) `oom-calls @defm " ++
             "oom-calls.bump pop [] (oom-calls.boom) @attempt pop " ++
             "oom-calls.peek 7 match? pop " ++
             // Namespaced registration plus branded qualification and ordinary

@@ -93,8 +93,10 @@ test "loader: map validation and snapshot construction clean up every allocation
         fn run(allocator: std.mem.Allocator, filename: []const u8, cwd: []const u8) !void {
             var owner = @import("../heap.zig").HostOwner.init(allocator);
             defer owner.cleanup().drain();
+            var main = try @import("../modules.zig").Registry.init(owner.cleanup());
+            defer main.deinit();
             const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true);
-            const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), map, cwd) catch |err| {
+            const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), &main, map, cwd) catch |err| {
                 map.deinit();
                 return err;
             };
