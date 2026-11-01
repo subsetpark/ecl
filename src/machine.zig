@@ -5890,7 +5890,7 @@ pub const Unit = struct {
             .unresolved => |chain| self.undefinedWordIn(word.name, chain),
             .unknown_module_prefix, .unregistered_module => self.undefinedWordIn(word.name, .qualified),
             .retired => self.failRetiredWord(word.name),
-            .alias_cycle => self.failFmt(.domain, "the alias `{s}` names never reach a definition", .{intern.get(word.name)}),
+            .alias_cycle => self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)}),
         };
     }
 

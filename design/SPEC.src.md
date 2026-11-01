@@ -80,10 +80,10 @@ interpretation.
 
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
-name. Word occurrences retain where their names are to be looked up, while lookup
-remains late within a unit: each retains its name's slot in the root it was
-written in and resolves the binding at execution time, against the bindings its
-unit observes.
+name. Word occurrences retain the root their names are resolved in. A
+quotation is bound before it runs: each of its top-level words is resolved
+once, in its own root, and the bound code keeps those targets whatever is
+defined later.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration publishes an
@@ -369,46 +369,59 @@ elements in order.
 
 Ordinary word evaluation is one observable operation:
 
-1. Read the occurrence's name slot.
-2. Take the slot's current binding.
-3. Establish the binding's activation context.
-4. Evaluate the binding's executable body.
+1. Take the definition the occurrence was bound to.
+2. Establish the definition's activation context.
+3. Evaluate the definition's executable body.
 
 Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-Lookup is late within a unit. A word occurrence selects only a name slot (see
-Bindings and scope). Each execution reads the slot's binding as the executing
-unit observes it; the occurrence retains no binding, body, value, or module
-generation. A unit observes the session bindings that existed when it was
-created, together with the definitions it makes itself, and never a session
-definition made by another unit after its creation. Only top-level units
-define (definition is `` `domain `` inside combinator applications, `@attempt`, and
-tasks), so each REPL line, script, and loaded file sees every earlier
-definition, and replacing a binding affects existing code at its next execution
-in the defining unit and in every unit created afterwards. A task keeps the
-session bindings that existed when it was spawned; global definitions are never
-a channel between running units. Because no definition can occur inside a
-combinator application, the session bindings a combinator call observes do not
-change while it runs. Core is frozen, so it needs no such rule. A module image
-is immutable once registered; before that only its construction body defines
-in it, and the body starts no tasks that could observe it mid-construction.
-Qualified words and words dispatched by `execute` look up the current
-registration at each execution, so a module registered during a call is seen by
-its later applications. A
-module image is immutable
-after construction; replacing an image in a registration does not retarget
-words belonging to the former image. Executing a word whose root has retired is
-a `` `domain `` error, never a fallback to another root.
+**Binding.** Before a quotation is applied, each of its top-level unquoted
+words is resolved in the root that occurrence was written in (see Bindings
+and scope), against one coherent view of the current definitions and module
+registrations. A quotation executes nothing unless every one of its top-level
+words binds: an unresolved word fails the application at that word before any
+of its forms has run. Nested quotations and quoted words are data and bind
+only when they are themselves applied. A combinator binds a quotation at its
+first application and reuses that binding for the rest of its invocation;
+separate quotations, such as a predicate and a body, bind separately, and a
+quotation that is never applied is never bound.
 
-The reader links each symbol occurrence to the slot for its name in the root
-the source is read into: the session, the module image under construction, or
-core for the prelude. Moving, copying, concatenating, or splicing values
-preserves each occurrence's own slot, so one quotation may contain symbols
-from several roots, and a quotation has no single resolution root. A symbol
-that `qualify`, `symbol`, `intern`, or native code builds links to the slot
-for its name in the root of the activation that built it, so a quotation
+**Definitions bind when they are defined.** A top-level definition binds its
+body as `def` runs. Its own name, written in the root it is published into,
+calls the definition itself; every other word must already resolve, so a
+top-level body cannot refer forward to a later definition. A module's
+definitions and imports are staged by its construction body and bound together
+when the module is sealed, so words in one module may refer forward and recurse
+mutually. A staged definition cannot run before its module is sealed; a
+construction body that calls one finds nothing by that name.
+
+**Top-level source is incremental.** A file, a REPL line, or the prelude is
+evaluated form by form, and each top-level word is resolved when it is
+reached, so ``(1) `foo def foo`` defines `foo` and then calls it. This applies
+to the top level only; quotations still bind whole before they run.
+
+**Bound code keeps its targets.** Replacing a definition or a module
+registration reaches code bound afterwards. Code already bound — an earlier
+definition, a running executable, a quotation a combinator has already
+applied — keeps the definition it was bound to. There is no historical view:
+a unit, a task, and an `@attempt` bind against the definitions current when
+they bind, so a task binds its body when it first runs, not when it is
+spawned. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
+and `see` — resolve the supplied symbol in its own root against the current
+definitions each time they run. A module image that bound code or a word
+names keeps its meaning for the rest of the Session after its registration is
+replaced. Executing a word written in an image that was never published and
+has since been discarded is a `` `domain `` error.
+
+The reader links each symbol occurrence to the root the source is read into:
+the session, the module image under construction, or core for the prelude.
+Moving, copying, concatenating, or splicing values preserves each
+occurrence's own root, so one quotation may contain symbols from several
+roots, and a quotation has no single resolution root. A symbol that
+`qualify`, `symbol`, `intern`, or native code builds links to the root of the
+activation that built it, so a quotation
 assembled from strings resolves where it was assembled rather than where it
 is later called. A symbol the implementation builds for itself (an error-dict
 key, a trace entry) carries no link and means core's binding wherever it
@@ -636,24 +649,22 @@ screen and out of reach.
 
 ## Bindings and scope
 
-### Roots and name slots
+### Roots and names
 
 Definitions live in *roots*. There are exactly three kinds:
 
 ```text
 core           frozen; primitives and the prelude
 session        → core
-module image   → core; frozen after construction
+module image   → core; sealed at the end of construction
 ```
 
-A root holds one *name slot* per name that has been written in it or defined
-in it. A slot yields the root's own binding for that name when there is one,
-and otherwise core's binding for that name; with neither it is an
-`` `undefined-word `` error at execution. Defining a name in a root fills its slot
-and removing the name empties it, so every occurrence linked to the slot
-observes the change at its next execution in a unit that can observe it (see
-Core evaluation). A word read before its name is
-defined links to an empty slot that a later definition fills.
+A word resolves in the root it was written in: the root's own definition for
+its name when there is one, and otherwise core's; with neither it is an
+`` `undefined-word `` error when the word is bound (see Core evaluation). Names are
+introduced and replaced, never removed. Which definition a name selects is
+decided when code is bound, so a word read before its name is defined finds
+that definition once it exists only if it is bound afterwards.
 
 Session-authored code may therefore shadow core definitions. A module image
 sees its own public and private bindings followed by core and never sees the
@@ -678,10 +689,10 @@ name is `` `domain ``, as is `alias` with one as either the alias or its target.
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
 Resolution and module home are independent parts of an activation. A word's
-slot determines where its spelling is looked up. Module home
+root determines where its spelling is looked up. Module home
 determines privacy and registration-owned authority. Homeless helpers preserve
 their caller's module home; dispatch into a module changes home according to
-the module rules without changing the slots carried by caller-supplied
+the module rules without changing the roots carried by caller-supplied
 words.
 
 ### Binding model
@@ -709,8 +720,8 @@ representations but expose the same binding model.
   assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
-  complete binding snapshot: omitting an effect or docstring clears the
-  old one. Code holding the old body keeps running it safely.
+  complete definition: omitting an effect or docstring clears the old one.
+  Code bound to the old definition keeps it.
 - `see` prints the resolved binding's combined annotation, when present,
   followed by its body through the standard source formatter. It omits the
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
@@ -976,7 +987,7 @@ that name.
   not. Definition names and aliases remain one unqualified segment. Qualified
   executable names split at their final dot, so `core.utils.f` always means
   module `core.utils`, binding `f`. The exact name `core` is reserved for the
-  core qualifier (see Roots and name slots): registering a module or an alias under it
+  core qualifier (see Roots and names): registering a module or an alias under it
   is `` `domain ``, while `core.utils` stays an ordinary module name. Host
   and native factories apply the reader's single scalar-level symbol-segment
   grammar; ASCII or Unicode whitespace, delimiters, malformed UTF-8, and other
@@ -1034,7 +1045,7 @@ that name.
   Private registrations also carry an integer `` `source `` identifier local to the
   Session, distinguishing equal names across files. Descriptors contain no body,
   generation handle, state handle, or executable capability.
-- `descriptor @test` validates and late-binds the descriptor against the
+- `descriptor @test` validates and looks up the descriptor against the
   current canonical registration and its source when specified. A present test
   runs in a fresh isolated Unit under that generation's private home. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
@@ -1085,8 +1096,8 @@ that name.
   A session `def` shadows a name *for session code*. Adopting new behavior
   inside a prelude word is redefining that word: the replacement is a session
   definition, so it resolves in the session and shadows the prelude one for
-  session callers. Late binding is unaffected. The lookup still happens at call
-  time; what is fixed is which chain it happens in. A quotation literal written
+  session callers it binds afterwards; what is fixed is which root each word
+  resolves in. A quotation literal written
   inside a body is sealed the way the body's own references are: it resolves in
   the scope its text was written in, whoever ends up applying it. `all?` is
   `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, but a
@@ -1097,13 +1108,12 @@ that name.
   (pop pop 99) `swap def  1 2 over              -- 1 2 1
   ```
 
-  Splicing or rearranging quotations preserves the
-  annotations on their existing word occurrences. Only a word created without
-  reader context is unannotated and resolves dynamically in its invoking
-  activation. Re-registering a module publishes a new image under the module
-  name, so a fresh call through the name runs the new code. Already-executed
-  code is not re-pointed. Applying a word whose scoped image is no longer
-  available is `` `domain ``. Seed values passed to unit constructors are not part
+  Splicing or rearranging quotations preserves the roots of their existing
+  word occurrences. A word the implementation builds for itself carries no
+  root and resolves in core. Re-registering a module publishes a new image
+  under the module name, so code bound afterwards runs the new code. Bound
+  code is not re-pointed, and words written in the old image go on resolving
+  there. Seed values passed to unit constructors are not part
   of the construction body. Runtime-built captures retain their existing
   word scopes.
 - `@defm` is parameterized by the seed operand — ``values (body) `name @defm`` —
@@ -1155,12 +1165,11 @@ that name.
   stack fails with `` `domain `` and publishes nothing. State that must outlive a
   word lives in a task and is reached through its mailbox (see
   [Mailboxes](#mailboxes)).
-- **A generation lives as long as something can reach it.** The registry's
-  current directory holds every published module; resolution retains the
-  generation it finds before releasing the directory it found it in, and a
-  dispatched call keeps its generation for its whole run. Reload does not
-  wait for old generation pins: an already-dispatched call finishes under the
-  generation it resolved.
+- **Every published generation lasts the Session.** Reload publishes a new
+  generation under the name; code bound to the old one, and words written in
+  it, keep their meaning. Memory therefore grows with reload history within a
+  Session; how soon an unreachable generation is reclaimed is not part of the
+  language.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
 - A registration is never removed during a Session; reload replaces it.
@@ -1171,28 +1180,27 @@ that name.
   symbols, then publishes those attributes under their own names in the current
   environment — which inside a module body means the image, publicly, on the
   same terms `def` binds there. It validates every symbol and resolves every
-  public attribute against one pinned module generation before publishing the
-  first binding. A missing or private attribute is `` `undefined-word `` and
+  public attribute against one module generation before publishing the
+  first name. A missing or private attribute is `` `undefined-word `` and
   publishes none of the request; malformed operand and name domains are
-  `` `type `` and `` `domain ``, respectively. Each binding is a late-bound forwarding
-  definition whose effect and documentation are copied from the original.
-  An attribute that a standard-library module binds to a host builtin is
-  bound directly instead: no other module can register a standard-library
-  name, so resolving the attribute once finds what every call would. A
-  failure inside the builtin names the attribute's qualified name, as a
-  forwarding call would; no forwarding frame appears in a trace.
-  Naming a binding that already exists replaces only that binding; importing
-  selected names never splices an entire module or emits shadow notices.
-  `importp` is the private form: the same request publishes module-private
-  forwarding words, so the importing module uses them without re-exporting
-  them.
+  `` `type `` and `` `domain ``, respectively. Each imported name is an alias,
+  `x` for `m.x`: every later binding or lookup of `x` follows it to the
+  definition `m.x` selects then, so an import never captures the definition it
+  validated, and reflection reports that definition's metadata. A public
+  import in a module re-exports the alias, which chains: `a.x` names `m.x`.
+  Aliases that never reach a definition are `` `domain `` when bound.
+  At top level, naming a binding that already exists replaces only that
+  binding; in a module body an imported name, like a defined one, may be
+  introduced once. Importing selected names never splices an entire module.
+  `importp` is the private form: the importing module uses the names without
+  re-exporting them.
   Dotted words split at their final dot and give qualified access with
   no import. `qualify` validates a module-name symbol, which may be `` `core ``,
   and an unqualified binding-name symbol and constructs the corresponding
   executable word;
-  `execute` applies that word through ordinary late-bound dispatch, preserving
-  its module home, private lookup, annotations, tracing, native/builtin path,
-  and cancellation. `alias` registers a short registry
+  `execute` resolves that word when it runs, in the root the symbol carries,
+  and invokes it as bound code would, preserving its module home, private
+  lookup, annotations, tracing, native/builtin path, and cancellation. `alias` registers a short registry
   name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
@@ -1200,7 +1208,7 @@ that name.
   splits at its final dot into a module name and a public binding name. The
   module name selects a canonical registration directly or through an alias,
   except that the reserved module segment `core` selects the core scope (see
-  Roots and name slots) and never consults the registry.
+  Roots and names) and never consults the registry.
   A missing registration or public binding raises `` `undefined-word ``.
   Filesystem search, embedded resources, module maps, native loading, and
   eager or on-demand acquisition are host facilities outside the language

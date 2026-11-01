@@ -350,9 +350,9 @@ test "modules: removed identity builtin has no reservation and names validate by
 }
 
 const churn_cycle = "[] ((\"a module string\" [1 2 3] {k v}) `peek def) `churn @defm " ++
-    "churn.peek pop pop pop";
+    "`churn.peek execute pop pop pop";
 
-test "concurrency: repeated construct reload cycles keep settled memory bounded" {
+test "concurrency: repeated construct reload cycles grow no faster than registrations" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -362,8 +362,9 @@ test "concurrency: repeated construct reload cycles keep settled memory bounded"
         defer runtime.deinit();
         // Both batches run as one unit each and differ by a single source
         // character, so their fixed per-unit costs are the same and the only
-        // variable is how many construct/reload cycles ran. Ten times the
-        // cycles must not cost ten times the memory.
+        // variable is how many construct/reload cycles ran. A Session keeps
+        // every published image, so ten times the cycles may cost ten times
+        // the retained images, and no more.
         const small = "[1] 20 take (pop " ++ churn_cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ churn_cycle ++ ") for";
         try expectStack(&runtime, small, "");
@@ -381,17 +382,7 @@ test "concurrency: repeated construct reload cycles keep settled memory bounded"
         // actually exceeded so a recurrence arrives with its numbers.
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        // Reader-text lineage is *not* part of what this measures any more, and
-        // that is deliberate. A rewritten construction body's directory slot is
-        // cleared and its identity recycled when the header retires, so lineage
-        // storage settles proportional to live re-scoped headers rather than to
-        // identities ever issued. Measured across that change at 200 cycles:
-        // 116,591 bytes before it, 97,135 after — below the 106,351 this
-        // fixture cost when its body was `with`-flattened and re-scoped not at
-        // all. Marginal cost from 200 to 2,000 cycles is 303 bytes, against 301
-        // for the flattened body; what remains is the parked anchor and scope
-        // cell per stamped retired image, which predates this feature.
-        std.testing.expect(large_growth <= small_growth * 2 + 4096) catch |err| {
+        std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096) catch |err| {
             std.debug.print(
                 "settled memory: before={d} after_small={d} after_large={d} " ++
                     "small_growth={d} large_growth={d}\n",

@@ -359,14 +359,16 @@ test "native: media pipeline drains output and diagnostics concurrently under pr
 test "native: input finish preserves an accepted writer through its final byte" {
     // Repeat root readiness handoffs while the other pool workers are idle.
     // A root completion must not compete with their queue notifications.
+    // The loop body names what it set earlier in the same body, which binding
+    // cannot resolve before the body runs, so it looks each one up explicitly.
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "0 (dup 32 <) (portprobe.reset " ++
-        "portprobe.factory [] port.open `p set p portprobe.echo [] port.begin `x set " ++
-        "x portprobe.input port.endpoint `w set x portprobe.output port.endpoint `r set " ++
-        "w wrap ([1] 32 take fd.write) @spawn `a set r 8 fd.read `prefix set w port.finish " ++
-        "prefix (dup len 32 <) (r 8 fd.read cat) while [1] 32 take match? " ++
-        "r 8 fd.read len a task.await `ok at pop " ++
-        "w wrap ([] fd.write) @attempt `err at `kind at " ++
-        "x port.await x port.close p port.close portprobe.cleaned " ++
+        "portprobe.factory [] port.open `p set `p execute portprobe.echo [] port.begin `x set " ++
+        "`x execute portprobe.input port.endpoint `w set `x execute portprobe.output port.endpoint `r set " ++
+        "`w execute wrap ([1] 32 take fd.write) @spawn `a set `r execute 8 fd.read `prefix set `w execute port.finish " ++
+        "`prefix execute (dup len 32 <) (r 8 fd.read cat) while [1] 32 take match? " ++
+        "`r execute 8 fd.read len `a execute task.await `ok at pop " ++
+        "`w execute wrap ([] fd.write) @attempt `err at `kind at " ++
+        "`x execute port.await `x execute port.close `p execute port.close portprobe.cleaned " ++
         "4 pack [1 0 io 1] match? `contract error.new assert 1 +) while", "32");
 }
 

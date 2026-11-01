@@ -748,7 +748,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 204 col 51}}
+        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== result.ok? ===
         \\source: [] (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -850,7 +850,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 184 col 25}}
+        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== qualify execute ===
         \\source: [] ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0

@@ -1209,7 +1209,7 @@ test "e2e: reflection acceptance" {
         .exit_code = 0,
         .stdout_contains = &.{
             "(s 2 +)",
-            "f -> f def public (-- n)",
+            "f -> m.f def public generation 1 (-- n)",
         },
         .stdout_excludes = &.{" s "},
         .stderr = "",
@@ -1466,7 +1466,7 @@ test "e2e: M6 combinators parse and contract payloads" {
     defer rebound.deinit();
     try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
-    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set k *) each" });
+    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set) each" });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,

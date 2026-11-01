@@ -10,7 +10,7 @@ RegistryName.
 BindingName.
 > This model is normative for registry names, aliases, generations, and
 > publication, including the construction of the images they publish;
-> abstract definitions and visibility; and call contexts and generation pins.
+> abstract definitions and visibility; and call contexts.
 > Modules are pure code: a registration carries no operand stack and no
 > state of its own, and a generation is nothing but an image published under
 > a name.
@@ -26,12 +26,11 @@ BindingName.
 > either the top-level evaluator or identifies the exact active call
 > performing a registry mutation.
 >
-> A qualified call resolves a registry name and public binding and pins the
-> name's current image in one atomic action. Resolution before replacement
-> retains the selected image; resolution afterward observes only the
-> replacement. Explicit qualification
-> always performs this fresh registry dispatch, including when it names the
-> caller's own module.
+> A qualified call selects a registry name's current image and a public
+> binding in it in one atomic action. Selection happens when the code holding
+> the qualified word is bound, so bound code keeps the image it selected;
+> selection afterward observes only the replacement. Explicit lookup performs
+> a fresh selection each time it runs.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
 ---
 canonical? module-name or alias? module-name.
@@ -70,8 +69,8 @@ where
 > values.
 >
 > Retirement is monotonic: replacement retires the former current
-> image and no retired image becomes current again. Active calls retain their
-> selected images.
+> image and no retired image becomes current again. A retired image stays
+> published, so code bound to it and words written in it keep their meaning.
 Call.
 Image.
 Definition.
@@ -252,8 +251,8 @@ where
 
 > `Begin scoped call` resolves the name stored in a word occurrence against the
 > image stored in that occurrence. A quotation or word occurrence owns this
-> scope but does not cache a definition. The image must still be current or
-> held by another active call. Private definitions are available to
+> scope but does not cache a definition. The image must have been published;
+> a retired image still answers. Private definitions are available to
 > same-image scoped resolution without becoming publicly invocable.
 Calls ~> Begin scoped call @ caller: Call,
                              occurrence: WordOccurrence,
@@ -264,10 +263,7 @@ Calls ~> Begin scoped call @ caller: Call,
 some image: Image,
      image = occurrence-image occurrence,
      constructed? image,
-     (image-published? image and ~image-retired? image) or
-       #(each owner: Call,
-              call-active? owner and call-image owner = image |
-           owner) > 0,
+     image-published? image,
      binding-present? image binding-name,
      definition: Definition,
      definition = definition-at image binding-name,
@@ -286,8 +282,7 @@ some image: Image,
 
 where
 
-> `Complete call` releases the call's image pin after its invocation has
-> completed. Calls are split into begin and complete actions only to express
+> `Complete call` ends the call after its invocation has completed. Calls are split into begin and complete actions only to express
 > publication concurrency; the prose-level invocation remains one language
 > operation.
 Calls ~> Complete call @ completed: Call,

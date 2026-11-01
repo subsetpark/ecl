@@ -681,3 +681,138 @@ test "reuse: a result never overwrites a value still observed" {
         .{ .name = "owned put", .source = "5 range 2 99 put", .expected = "[0 1 99 3 4]" },
     });
 }
+
+// Construction-time binding. A quotation's words carry the root they were
+// written in; binding resolves its top-level unquoted words there once, and
+// the executable it produces never retargets.
+
+test "binding: top-level source defines then uses, and a definition body cannot forward-reference" {
+    try support.expectStack("(1) `foo def foo", "1");
+    try support.expectErrors(&.{
+        .{ .name = "forward reference", .source = "(later) `early def", .kind = "undefined-word", .word = "later" },
+    });
+}
+
+test "binding: existing code keeps its targets while later binding sees replacements" {
+    try support.expectStacks(&.{
+        .{ .name = "plain", .source = "(1) `foo def (foo) `bar def (2) `foo def bar foo", .expected = "1 2" },
+        .{
+            .name = "qualified",
+            .source = "[] ((1) `x def) `a @defm (a.x) `old def [] ((2) `x def) `a @defm old a.x",
+            .expected = "1 2",
+        },
+        // A nested quotation is data until it is applied, so it binds against
+        // whatever is current when it runs.
+        .{ .name = "nested data", .source = "(1) `x def ((x)) `later def (2) `x def later call", .expected = "2" },
+        // Any publication invalidates a reused anonymous binding.
+        .{ .name = "reuse", .source = "(x) `q set (1) `x def q call (2) `x def q call", .expected = "1 2" },
+    });
+}
+
+test "binding: one quotation value bound twice stays unchanged and independent" {
+    try support.expectStacks(&.{
+        .{
+            .name = "shared body",
+            .source = "(pop pop 42) dup `derive-epsilon def `derive-empty def 1 2 derive-epsilon 3 4 derive-empty",
+            .expected = "42 42",
+        },
+        .{
+            .name = "independent targets",
+            .source = "(1) `x def (x) dup `p def (2) `x def `q def p q",
+            .expected = "1 2",
+        },
+    });
+}
+
+test "binding: a quotation that cannot bind runs none of its forms" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "\"warm\" io.print");
+    try expectErrorContains(&runtime, "(\"ran\" io.print missing) call", "word missing");
+    try std.testing.expectEqualStrings("warm\n", output.written());
+    // Unexecuted nested data is not rejected for naming nothing.
+    try expectOk(&runtime, "((missing)) `f def f len 1 = {kind user} assert");
+    try expectErrorContains(&runtime, "f call", "word missing");
+}
+
+test "binding: words resolve in the root they were written in" {
+    try support.expectStacks(&.{
+        // A caller's quotation keeps its own meaning inside a module wrapper.
+        .{
+            .name = "wrapper",
+            .source = "[] ((|q| q call) `apply def) `w @defm (5) `five def (five) w.apply",
+            .expected = "5",
+        },
+        // Equal quotations from different roots bind differently, and reuse
+        // never conflates them.
+        .{
+            .name = "equal data",
+            .source = "[] ((7) `k defp ((k)) `q def) `m @defm (1) `k def " ++
+                "m.q (k) match? [1 2] (pop m.q call (k) call +) each",
+            .expected = "1 [8 8]",
+        },
+        // `execute` and reflection resolve the supplied symbol in its own root;
+        // equality and printing ignore that root.
+        .{
+            .name = "explicit lookup",
+            .source = "[] (( -- n ) (7) `k defp (`k) `sym def) `m @defm (1) `k def " ++
+                "m.sym execute k m.sym effect `k effect m.sym `k match? m.sym",
+            .expected = "7 1 (-- n) () 1 k",
+        },
+    });
+}
+
+test "binding: imports are name aliases followed at every binding" {
+    try support.expectStacks(&.{
+        .{
+            .name = "alias",
+            .source = "[] ((1) `x def) `a @defm `a (x) import (x) `via def [] ((2) `x def) `a @defm via x",
+            .expected = "1 2",
+        },
+        .{
+            .name = "re-export",
+            .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm b.x [] ((2) `x def) `a @defm b.x",
+            .expected = "1 2",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "alias cycle",
+            .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm [] (`b (x) import) `a @defm b.x",
+            .kind = "domain",
+            .message_contains = "never reach a definition",
+        },
+    });
+}
+
+test "binding: a module binds as one group when it is sealed" {
+    try support.expectStacks(&.{
+        .{
+            .name = "forward and mutual",
+            .source = "[] (( n -- b ) (dup 0 = (pop 1) (1 - odd?) if) `even? def " ++
+                "( n -- b ) (dup 0 = (pop 0) (1 - even?) if) `odd? def) `parity @defm 4 parity.even? 3 parity.even?",
+            .expected = "1 0",
+        },
+        .{
+            .name = "self-qualified",
+            .source = "[] (( -- n ) (self-named.base 1 +) `next def ( -- n ) (41) `base def) `self-named @defm self-named.next",
+            .expected = "42",
+        },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "duplicate definition", .source = "[] ((1) `x def (2) `x def) `twice @defm", .kind = "domain", .message_contains = "more than once" },
+        .{
+            .name = "definition and import",
+            .source = "[] ((1) `x def) `src @defm [] ((1) `x def `src (x) import) `clash @defm",
+            .kind = "domain",
+            .message_contains = "more than once",
+        },
+        // Staged definitions cannot run before the module is sealed.
+        .{ .name = "staged", .source = "[] ((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
+        .{ .name = "failed seal publishes nothing", .source = "[] ([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
+    });
+}
