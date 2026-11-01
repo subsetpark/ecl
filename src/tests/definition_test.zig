@@ -33,15 +33,14 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), text) != null);
 }
 
-test "plain call sites observe rebinding removal and core shadowing" {
+test "plain call sites observe rebinding and core shadowing" {
     try support.expectStack(
         "1 `cached-value set (cached-value) `probe def " ++
             "probe probe 2 `cached-value set probe " ++
-            "`cached-value unset [] (probe) @attempt `err at `kind at " ++
             "3 `cached-value set probe " ++
             "(4 dup +) `core-probe def core-probe core-probe " ++
-            "(10) `dup def core-probe `dup undef core-probe",
-        "1 1 2 undefined-word 3 8 8 14 8",
+            "(10) `dup def core-probe",
+        "1 1 2 3 8 8 14",
     );
 }
 
@@ -85,7 +84,7 @@ test "every primitive exposes meaningful reflective documentation" {
         "if",         "while",       "times",        "cond",           "each",           "zip-with",
         "for",        "fold",        "scan",         "stencil",        "unfold",         "infra",
         "def",        "set",         "defp",         "setp",           "test",           "tests",
-        "@test",      "unset",       "undef",        "doc",            "which",          "see",
+        "@test",      "effect",      "exports",      "doc",            "which",          "see",
         "@defm",      "import",      "alias",        "words",          "load",           "@spawn",
         "task.await", "task.cancel", "task.pending", "task.await-any", "task.await-for", "@each",
         "+",          "-",           "*",            "/",              "div",            "mod",
@@ -288,34 +287,6 @@ test "redefinition and set replace behavior and clear metadata" {
     try expectErrorContains(&runtime, "`set-target doc", "kind domain");
 }
 
-test "unset and undef equivalently remove only the current scope binding" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-
-    try expectOk(&runtime, "1 `removed-by-unset set `removed-by-unset unset");
-    try expectErrorContains(&runtime, "removed-by-unset", "kind undefined-word");
-    try expectOk(&runtime, "2 `removed-by-undef set `removed-by-undef undef");
-    try expectErrorContains(&runtime, "removed-by-undef", "kind undefined-word");
-
-    // Missing direct bindings are idempotent no-ops. In particular, neither
-    // spelling can mutate the immutable core environment.
-    try expectOk(&runtime, "`never-bound unset `never-bound undef");
-    try expectOk(&runtime, "9 `dup set `dup undef 4 dup");
-    var display = try runtime.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("4 4", display.bytes());
-
-    // A removed name can be published again, and module construction applies
-    // the same operation to public and private bindings.
-    try expectOk(&runtime, "3 `again set `again unset 5 `again set again");
-    try expectOk(&runtime, "[] (1 `public set 2 `private setp `public unset `private undef " ++
-        "(-- n) (7) `kept def) `unbound @defm unbound.kept");
-    try expectErrorContains(&runtime, "unbound.public", "kind undefined-word");
-    try expectErrorContains(&runtime, "unbound.private", "kind undefined-word");
-}
-
 test "recognized malformed annotations are domain errors" {
     try support.expectErrors(&.{
         .{ .name = "duplicate separator", .source = "(a -- b -- c) (1) `x def", .kind = "domain", .word = "def" },
@@ -359,8 +330,9 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "alias core", .source = "[] () `m @defm `core `m alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "[] ((-- x) (1) `-- def) `m @defm", .kind = "domain", .word = "def" },
         .{ .name = "private value", .source = "[] (1 `: setp) `m @defm", .kind = "domain", .word = "defp" },
-        .{ .name = "unset separator", .source = "`-- unset", .kind = "domain", .word = "undef" },
-        .{ .name = "undef qualified", .source = "`m.x undef", .kind = "domain", .word = "undef" },
+        .{ .name = "unset is not a word", .source = "`x unset", .kind = "undefined-word", .word = "unset" },
+        .{ .name = "undef is not a word", .source = "`x undef", .kind = "undefined-word", .word = "undef" },
+        .{ .name = "undefm is not a word", .source = "`m undefm", .kind = "undefined-word", .word = "undefm" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });
     try support.expectStack("`-- `: (-- :) `x:y", "-- : (-- :) x:y");

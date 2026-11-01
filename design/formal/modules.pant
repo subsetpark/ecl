@@ -28,8 +28,8 @@ BindingName.
 >
 > A qualified call resolves a registry name and public binding and pins the
 > name's current image in one atomic action. Resolution before replacement
-> or removal retains the selected image; resolution afterward observes only
-> the replacement or the absence of the registration. Explicit qualification
+> retains the selected image; resolution afterward observes only the
+> replacement. Explicit qualification
 > always performs this fresh registry dispatch, including when it names the
 > caller's own module.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
@@ -57,8 +57,8 @@ where
 
 > The model has one kind of module object: an immutable image, published
 > under exactly one canonical name as one generation. Reload publishes a new
-> image under the same name and retires the previous one; removal retires the
-> current image and drops its names. A name is live while it maps to a
+> image under the same name and retires the previous one. No action removes a
+> registration. A name is live while it maps to a
 > published, non-retired image, which is that name's current generation. A
 > live canonical name has zero or more direct aliases.
 >
@@ -69,7 +69,7 @@ where
 > Domain atoms are possibilities rather than initially existing language
 > values.
 >
-> Retirement is monotonic: replacement or removal retires the former current
+> Retirement is monotonic: replacement retires the former current
 > image and no retired image becomes current again. Active calls retain their
 > selected images.
 Call.
@@ -224,7 +224,7 @@ where
 
 > `Add alias` resolves either kind of occupied target name and stores a direct
 > reference to its current image; semantic alias chains do not exist. The
-> alias follows the canonical name through reload and removal. Canonical and
+> alias follows the canonical name through reload. Canonical and
 > alias names form one disjoint namespace, and an occupied name cannot be
 > repointed. The supplied invocation context is the top-level evaluator or the
 > exact call performing the mutation.
@@ -247,33 +247,6 @@ Registry ~> Add alias @ invoker: InvocationContext,
     image-published?' image = image-published? image and
     image-retired?' image = image-retired? image and
     image-name' image = image-name image).
-
-where
-
-> `Remove` resolves a canonical name or alias to its current image, then
-> atomically retires that image and removes its canonical name and every
-> alias. Removal does not end already active calls, whose pins remain valid.
-> A later registration of the same spelling is a fresh generation that shares
-> nothing with the removed one. The supplied invocation context is the
-> top-level evaluator or the exact call performing the mutation.
-Registry ~> Remove @ invoker: InvocationContext,
-                     module-name: RegistryName,
-                     canonical? module-name or alias? module-name.
----
-(some image: Image,
-     image = image-of module-name |
-  (all registry-name: RegistryName |
-    canonical?' registry-name =
-      (canonical? registry-name and image-of registry-name != image) and
-    alias?' registry-name =
-      (alias? registry-name and image-of registry-name != image) and
-    image-of' registry-name = image-of registry-name) and
-
-  (all other-image: Image |
-    image-published?' other-image = image-published? other-image and
-    image-retired?' other-image =
-      (image-retired? other-image or other-image = image) and
-    image-name' other-image = image-name other-image)).
 
 where
 

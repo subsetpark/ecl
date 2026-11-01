@@ -55,15 +55,6 @@ fn expectErrorContains(
     for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
 }
 
-fn unpublish(scope: *env.Scope, name: intern.NamespaceName) env.BindError!bool {
-    var cursor = scope.unpublishWordCursor(name);
-    defer cursor.deinit();
-    while (true) switch (try cursor.advance()) {
-        .pending => {},
-        .complete => |removed| return removed,
-    };
-}
-
 fn resolveDirect(environment: anytype, id: u32) ?env.BindingLease {
     var cursor = environment.directLookupCursor(id);
     defer cursor.deinit();
@@ -273,39 +264,6 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     defer rendered.deinit();
     try std.testing.expect(interned != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "kind cancelled") != null);
-}
-
-test "env: rebinding keeps a name and removing it hides it from enumeration" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    var environment = env.Environment.init(std.testing.allocator, releases);
-    defer env.testing.deinitEnvironment(&environment);
-    var scope = env.Scope.moduleRoot(std.testing.allocator, &environment);
-    defer env.testing.deinitScope(&scope, releases);
-    const first = try intern.internNamespace("first-env-name");
-    const second = try intern.internNamespace("second-env-name");
-    const binding = try TestBinding.init(std.testing.allocator);
-    defer binding.release(releases);
-    const effect = try TestEffect.init(std.testing.allocator);
-    defer effect.release(releases);
-    _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
-    _ = try scope.publisher().module.publish(second, binding.module(effect.effect, .public));
-    _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
-    try std.testing.expect(try unpublish(&scope, first));
-    try std.testing.expect(!(try unpublish(&scope, first)));
-    const names = try namesOwned(&environment, std.testing.allocator);
-    defer std.testing.allocator.free(names);
-    std.mem.sort(u32, names, {}, std.sort.asc(u32));
-    var expected = [_]u32{intern.namespaceId(second)};
-    std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
-    try std.testing.expectEqualSlices(u32, &expected, names);
-    try scope.publisher().module.freeze(.none, null);
-    try std.testing.expectError(
-        error.Frozen,
-        scope.publisher().module.publish(first, binding.module(effect.effect, .public)),
-    );
-    try std.testing.expectError(error.Frozen, unpublish(&scope, second));
 }
 
 test "module: long definition names stay within the cancellation bound" {
@@ -734,11 +692,10 @@ test "environment and registry retirement stays bounded after a delayed reader d
         _ = try scope.publisher().top.publish(binding_name, binding.top());
 
         // A lookup cursor reads the slot when it advances, so one opened before
-        // a removal and re-publication observes the re-published binding.
+        // a re-publication observes the re-published binding.
         var delayed_removed = environment.sessionView().directLookupCursor(
             intern.namespaceId(binding_name),
         );
-        try std.testing.expect(try unpublish(&scope, binding_name));
         _ = try scope.publisher().top.publish(binding_name, binding.top());
         const delayed_binding = while (true) switch (delayed_removed.advance()) {
             .pending => {},
@@ -776,7 +733,6 @@ test "environment and registry retirement stays bounded after a delayed reader d
 
         for (0..128) |index| {
             _ = try scope.publisher().top.publish(binding_name, binding.top());
-            try std.testing.expect(try unpublish(&scope, binding_name));
             _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
             try modules.testing.alias(
@@ -789,12 +745,11 @@ test "environment and registry retirement stays bounded after a delayed reader d
         host.cleanup().drain();
         const warmed_live_bytes = counting.total_requested_bytes;
 
-        // Rebinding, removal/re-creation of one name, re-registration, and
-        // alias replacement only: this batch states a bound, while creating
-        // distinct names would grow live state instead.
+        // Rebinding of one name, re-registration, and alias replacement
+        // only: this batch states a bound, while creating distinct names would
+        // grow live state instead.
         for (0..2048) |index| {
             _ = try scope.publisher().top.publish(binding_name, binding.top());
-            try std.testing.expect(try unpublish(&scope, binding_name));
             _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
             try modules.testing.alias(
@@ -1101,39 +1056,6 @@ test "registry: old generation leases survive reload and reclaim after release" 
     try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
 }
 
-test "registry: a removed module outlives its directory only through its leases" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    defer host.cleanup().drain();
-    var environment = try env.Env.init(&host);
-    defer {
-        host.cleanup().drain();
-        environment.deinit();
-    }
-    var registry = try modules.Registry.init(host.cleanup());
-    defer registry.deinit();
-    // Enough entries that the directory copies and retirements walk more than
-    // one slot, so a release missed on either path would surface as a leak
-    // or a dangling lease under the testing allocator.
-    var names: [8]intern.ModuleName = undefined;
-    for (&names, 0..) |*name, index| {
-        var spelling: [32]u8 = undefined;
-        name.* = try intern.internModuleName(try std.fmt.bufPrint(&spelling, "chain-entry-{d}", .{index}));
-        try commitEmptyModule(&registry, name.*);
-    }
-    var kept = modules.testing.acquire(&registry, names[3]).?;
-    defer kept.deinit();
-    try modules.testing.remove(&registry, names[3]);
-    try modules.testing.remove(&registry, names[5]);
-    for (0..64) |_| _ = host.domain().advance(1);
-    // The name is gone from the current directory, but the generation the
-    // lease holds is intact until the lease goes.
-    try std.testing.expectEqual(@as(?modules.GenerationLease, null), modules.testing.acquire(&registry, names[3]));
-    try std.testing.expectEqual(names[3], kept.name());
-    try std.testing.expectEqual(@as(u64, 1), kept.generationNumber());
-    var still = modules.testing.acquire(&registry, names[4]).?;
-    still.deinit();
-}
-
 test "registry: generation cursors independently pin their snapshot" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
@@ -1332,13 +1254,11 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     // `dict` has not loaded yet: the refusal cannot depend on that.
     try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "`dict undefm", &.{reserved});
     try expectOk(&runtime, "{a 1} `a dict.has? {kind user msg \"dict did not load\"} assert");
     // Loaded, it is refused the same way, and an alias cannot claim the name.
     try expectErrorContains(&runtime, "[] () `dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
     try expectErrorContains(&runtime, "[] () `m @defm `dict `m alias", &.{reserved});
-    try expectErrorContains(&runtime, "`dict undefm", &.{reserved});
     try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
@@ -1361,7 +1281,6 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     // inline; neither runs it as standard-library code.
     try expectOk(&runtime, "[] result.ok (`d `dict alias []) result.and-then `err at `kind at `domain match? " ++
         "{kind user msg \"alias escaped\"} assert");
-    try expectErrorContains(&runtime, "[] result.ok (`dict undefm) () result.either", &.{reserved});
     try expectErrorContains(&runtime, "[] result.ok ([] () `dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
 }

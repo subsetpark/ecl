@@ -1197,8 +1197,7 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `importp`, `load`, `undefm` — they publish or retire without
-  taking a quotation.
+- `import`, `importp`, `load` — they publish without taking a quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
@@ -1288,14 +1287,14 @@ skipping the session and every module image, so a shadowed core definition
 remains reachable: after ``(2 *) `dup def``, `core.dup` is still the primitive.
 Only public core bindings resolve this way; a missing or private name is
 `` `undefined-word `` with `` `scope `core ``. `` `core `dup qualify `` constructs the same
-word. `import`, `alias`, and `undefm` observe registrations only and do not
-accept `core`.
+word. `import` and `alias` observe registrations only and do not accept
+`core`.
 
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
-first use. `@defm` and `undefm` with a standard-library module
-name are `` `domain ``, as is `alias` with one as either the alias or its target. A
+first use. `@defm` with a standard-library module
+name is `` `domain ``, as is `alias` with one as either the alias or its target. A
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
 Resolution and module home are independent parts of an activation. A word's
@@ -1340,12 +1339,12 @@ representations but expose the same binding model.
   `` `m exports `` returns module `m`'s public word names as sorted symbols
   (`` `core exports `` lists core's), and `stdlib` returns the embedded
   standard-library module names.
-- `` `name unset `` and `` `name undef `` are exact aliases. They remove a binding
-  only from the current root and otherwise do nothing. Removing a shadow
-  reveals core's binding for the name; it never mutates core. The name must be
-  unqualified and non-reserved, under the same namespace validation as `def`.
+- Names are introduced and replaced, never removed. No word removes a
+  definition or a module registration during a Session: a shadowed core word
+  stays reachable as `core.name`, and a new Session starts with no top-level
+  definitions.
 - Definitions happen only at root level. `def`, `defp`, `set`, `setp`,
-  `unset`, `undef`, `import`, and `importp` write the current root, which is the session
+  `import`, and `importp` write the current root, which is the session
   for top-level code, the image for a module's construction body, and the
   module's own image inside a module word. A word body without a module home
   writes the root of the activation that called it. Inside a combinator
@@ -1619,7 +1618,7 @@ that name.
 
 ##### Action
 
-> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts and generation pins. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call resolves a registry name and public binding and pins the name's current image in one atomic action. Resolution before replacement or removal retains the selected image; resolution afterward observes only the replacement or the absence of the registration. Explicit qualification always performs this fresh registry dispatch, including when it names the caller's own module.
+> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts and generation pins. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call resolves a registry name and public binding and pins the name's current image in one atomic action. Resolution before replacement retains the selected image; resolution afterward observes only the replacement. Explicit qualification always performs this fresh registry dispatch, including when it names the caller's own module.
 
 **`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
 
@@ -1633,7 +1632,7 @@ that name.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one; removal retires the current image and drops its names. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement or removal retires the former current image and no retired image becomes current again. Active calls retain their selected images.
+> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. Active calls retain their selected images.
 
 `Call`.
 
@@ -1751,7 +1750,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Action
 
-> `Add alias` resolves either kind of occupied target name and stores a direct reference to its current image; semantic alias chains do not exist. The alias follows the canonical name through reload and removal. Canonical and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Add alias` resolves either kind of occupied target name and stores a direct reference to its current image; semantic alias chains do not exist. The alias follows the canonical name through reload. Canonical and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
 **`Registry`** ↝ Add alias *invoker*: `InvocationContext`, *alias-name*: `RegistryName`, *target-name*: `RegistryName`, ¬**canonical?** *alias-name*, ¬**alias?** *alias-name*, (**canonical?** *target-name* ∨ **alias?** *target-name*).
 
@@ -1760,18 +1759,6 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 ¬**canonical?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **image-of**′ *alias-name* = **image-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ (∀ *image*: `Image` · **image-published?**′ *image* = **image-published?** *image* ∧ **image-retired?**′ *image* = **image-retired?** *image* ∧ **image-name**′ *image* = **image-name** *image*).
 
 #### Chapter 5
-
-##### Action
-
-> `Remove` resolves a canonical name or alias to its current image, then atomically retires that image and removes its canonical name and every alias. Removal does not end already active calls, whose pins remain valid. A later registration of the same spelling is a fresh generation that shares nothing with the removed one. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
-
-**`Registry`** ↝ Remove *invoker*: `InvocationContext`, *module-name*: `RegistryName`, (**canonical?** *module-name* ∨ **alias?** *module-name*).
-
----
-
-∃ *image*: `Image`, *image* = **image-of** *module-name* · (∀ *registry-name*: `RegistryName` · **canonical?**′ *registry-name* = (**canonical?** *registry-name* ∧ **image-of** *registry-name* ≠ *image*) ∧ **alias?**′ *registry-name* = (**alias?** *registry-name* ∧ **image-of** *registry-name* ≠ *image*) ∧ **image-of**′ *registry-name* = **image-of** *registry-name*) ∧ (∀ *other-image*: `Image` · **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ *other-image* = *image*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
-
-#### Chapter 6
 
 ##### Action
 
@@ -1784,7 +1771,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 ∃ *image*: `Image`, *definition*: `Definition`, *callee*: `Call`, *image* = **occurrence-image** *occurrence*, **constructed?** *image*, (**image-published?** *image* ∧ ¬**image-retired?** *image* ∨ #(each *owner*: `Call`, **call-active?** *owner* ∧ **call-image** *owner* = *image* · *owner*) > 0), **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image*
 *binding-name*, (**public?** *definition* ∨ **call-image** *caller* = **definition-image** *definition*), ¬**call-created?** *callee* · **call-created?**′ *callee* ∧ **call-active?**′ *callee* ∧ **call-image**′ *callee* = *image* ∧ **call-definition**′ *callee* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *callee* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
-#### Chapter 7
+#### Chapter 6
 
 ##### Action
 
@@ -1970,14 +1957,12 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 - **A generation lives as long as something can reach it.** The registry's
   current directory holds every published module; resolution retains the
   generation it finds before releasing the directory it found it in, and a
-  dispatched call keeps its generation for its whole run. Removal and reload
-  do not wait for old generation pins: an already-dispatched call finishes
-  under the generation it resolved, and a later registration of the same
-  spelling is a fresh generation that shares nothing with the removed one.
+  dispatched call keeps its generation for its whole run. Reload does not
+  wait for old generation pins: an already-dispatched call finishes under the
+  generation it resolved.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
-- `undefm` accepts a canonical name or alias. An unregistered name is
-  `` `undefined-word ``. An already-dispatched call may finish after removal.
+- A registration is never removed during a Session; reload replaces it.
 - Modules are process-local: there is no persistence across process restart,
   and the native ABI exposes no module capability, so an `.eclmod` word
   cannot observe an internal module home.

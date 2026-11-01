@@ -635,9 +635,8 @@ An environment is its root's slot table: one slot per name the root has bound
 or a word in it has linked, made on first need and kept until the root
 retires. A binding cell is stable, while its immutable payload snapshot may be
 replaced. A name's first binding gives its slot a cell and every later binding
-replaces that cell's payload, so the cell's identity never changes. Removal
-publishes a payload that binds nothing and clears the slot's bound flag.
-Binding and removal are constant-time under the root's writer lock.
+replaces that cell's payload, so the cell's identity never changes. Names are
+never removed. Binding is constant-time under the root's writer lock.
 Enumeration and lookup by name read the table without a lock; enumeration is
 not a snapshot, and may report names bound while it runs. Executing a word
 reads its slot and loads the payload the executing unit observes. A
@@ -669,8 +668,7 @@ A binding payload is one closed choice:
 
 Effect metadata, documentation, visibility, source slices, and module-local
 diagnostic identity travel in the same snapshot. A snapshot records the
-binding version that published it, and a removal is published as a snapshot
-with no binding. Publication makes a fully built snapshot visible at a version
+binding version that published it. Publication makes a fully built snapshot visible at a version
 newer than every live pin, and a pin taken afterwards observes it.
 
 Authority to publish into a root comes only from the root, as an opaque
@@ -759,7 +757,7 @@ carries state out of its body.
 The registry is a chain of immutable directory snapshots. Each snapshot maps
 canonical names to images and short names to canonical names, and owns one
 reference to every image it maps. Every mutation — registration, reload,
-removal, alias — is one bounded cursor: snapshot the current directory,
+alias — is one bounded cursor: snapshot the current directory,
 validate against it, copy it with the edit applied while retaining each entry
 copied, and publish the copy under the writer lock if the snapshot is still
 current; otherwise discard the copy and start over. A superseded snapshot
@@ -769,7 +767,7 @@ candidate takes the same path. Reload therefore copies the directory rather
 than swapping a cell in place. That is the cost accepted for having no mutable
 per-name storage whose lifetime would have to be managed across snapshots.
 
-Replacement and removal mark the generation they displace as superseded under
+Replacement marks the generation it displaces as superseded under
 the same lock. Old code keeps running: a Unit retains each generation it
 dispatches through, and a call that already resolved finishes under the
 generation it resolved. This resembles Erlang's distinction between old and
@@ -1698,7 +1696,7 @@ the core environment. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,
 so a stray file cannot silently replace shipped code, and their names are
 reserved like `core`: only embedded loading registers them, so user code can
-neither replace, alias, nor remove one. That exemption belongs to embedded
+neither replace nor alias one. That exemption belongs to embedded
 code, not to its dynamic extent: a quotation a stdlib word applies runs with
 ordinary provenance. A qualified stdlib name therefore
 resolves to the same module from every scope, which is what lets prelude and

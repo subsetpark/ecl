@@ -22,7 +22,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "*Unit constructor.* The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.\n\nThe name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``values (body) `name @defm``. See Modules." },
         .{ .name = "@defm!", .primitive = defmSeedless, .effect = "body module-name --", .doc = "*Unit constructor.* `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too." },
-        .{ .name = "undefm", .primitive = undefmWord, .effect = "module-name --", .doc = "Remove the module currently registered under a canonical name or unqualified alias, resolved exactly as ordinary registry lookup resolves it. An unregistered name is `` `undefined-word ``. Removal strips every alias targeting the module in the same publish; an already-dispatched call finishes under the generation it resolved. See [Modules](SPEC.md#modules)." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the canonical registration name selected by the current module activation. The same image registered under different names reports the name through which it was called; an alias reports its target's canonical name. `` `domain `` at top level or through an escaped quotation whose image has no invoking registration." },
         .{ .name = "import", .primitive = importAs(.public), .effect = "module-name q --", .doc = "Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported binding dispatches through the module, preserves the original's effect and documentation, and may replace an existing local binding. `see` renders a forwarding binding as its one-word quotation, and a directly bound standard-library builtin as `<primitive>`." },
@@ -87,13 +86,6 @@ const DefmDriver = struct {
         return .stepped;
     }
 };
-/// Removal completes the lifecycle. A canonical or alias name is resolved
-/// through the registry and drives the owner-issued close protocol.
-fn undefmWord(evaluator: *Unit) MachineError!void {
-    const name = try evaluator.popSymbol();
-    try evaluator.startDriver(UndefmDriver{ .validation = .init(name) });
-}
-
 /// Returns the canonical registration selected by the active execution home.
 /// The name belongs to the home rather than the image: one image can be
 /// registered more than once, and an alias still reaches its target's
@@ -130,42 +122,6 @@ const FileDriver = struct {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
-    }
-};
-
-const UndefmDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    validation: intern.ModuleNameCursor,
-    cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
-    pub fn advance(evaluator: *Unit, self: *UndefmDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        while (work.spend()) {
-            if (self.cursor == null) switch (self.validation.advance()) {
-                .pending => continue,
-                .complete => |maybe_name| {
-                    const name = maybe_name orelse return evaluator.fail(
-                        .domain,
-                        "undefm requires a valid module name",
-                    );
-                    try evaluator.refuseReservedModule(name, evaluator.current.?.site.registration_provenance);
-                    const registry = evaluator.publicationRegistry(name, evaluator.current.?.site.registration_provenance);
-                    self.cursor = .init(registry.removalCursor(name));
-                    continue;
-                },
-            };
-            switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.MissingModule => return evaluator.undefinedNameIn(
-                    intern.moduleId(self.cursor.?.borrow().request),
-                    .qualified,
-                ),
-            }) {
-                .pending => {},
-                .complete => return .completed,
-            }
-        }
-        return .stepped;
     }
 };
 

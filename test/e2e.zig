@@ -1222,31 +1222,6 @@ test "e2e: a construction body already knows the name it is built under" {
     try named.expect(.{ .exit_code = 0, .stdout = "named\n", .stderr = "" });
 }
 
-test "e2e: module removal acceptance" {
-    const module = "[] ((7) `peek def) `core.c @defm ";
-    var by_name = try run(&.{
-        build_options.ecl_exe,
-        "-e",
-        module ++ "`short `core.c alias `short undefm " ++
-            "[] (core.c.peek) @attempt `err at `kind at io.pp [] (short.peek) @attempt `err at `kind at io.pp " ++
-            module ++ "core.c.peek io.pp",
-    });
-    defer by_name.deinit();
-    try by_name.expect(.{
-        .exit_code = 0,
-        .stdout = "undefined-word\nundefined-word\n7\n",
-        .stderr = "",
-    });
-
-    var by_canonical_name = try run(&.{
-        build_options.ecl_exe,
-        "-e",
-        module ++ "`core.c undefm [] (core.c.peek) @attempt `err at `kind at io.pp",
-    });
-    defer by_canonical_name.deinit();
-    try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "undefined-word\n", .stderr = "" });
-}
-
 test "e2e: optional module annotation acceptance" {
     var result = try run(&.{ build_options.ecl_exe, "test/acceptance/optional-module-annotations.ecl" });
     defer result.deinit();

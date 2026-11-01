@@ -977,40 +977,6 @@ pub const Environment = struct {
         return poll.driveFallible(*BindingCell, &cursor, .{});
     }
 
-    pub const UnbindProgress = poll.Progress(bool);
-    /// Removes a name in one step under `writer`. The slot keeps its cell,
-    /// which still holds the last payload until the name is bound again or the
-    /// root retires: dispatch borrows cells without references, so one is
-    /// never freed while its root lives.
-    pub const UnbindCursor = struct {
-        environment: *Environment,
-        id: intern.NamespaceName,
-
-        fn init(environment: *Environment, id: intern.NamespaceName) UnbindCursor {
-            return .{ .environment = environment, .id = id };
-        }
-        pub fn deinit(self: *UnbindCursor) void {
-            self.* = undefined;
-        }
-        pub fn advance(self: *UnbindCursor) BindError!UnbindProgress {
-            const environment = self.environment;
-            environment.lockBlocking();
-            defer environment.unlock();
-            if (environment.frozen.load(.acquire)) return error.Frozen;
-            const slot = environment.slots.get(@backingInt(self.id)) orelse return .{ .complete = false };
-            if (!slot.bound.load(.acquire)) return .{ .complete = false };
-            // Removal is published like a binding, so a unit pinned before it
-            // keeps observing the name.
-            try slot.cell.load(.acquire).?.replace(environment.allocator, null, environment.versioned);
-            slot.bound.store(false, .release);
-            return .{ .complete = true };
-        }
-    };
-
-    fn unbindCursor(self: *Environment, name: intern.NamespaceName) UnbindCursor {
-        return .init(self, name);
-    }
-
     /// The mutation authority for a module image's own environment. An image
     /// owns this environment outright, so it publishes and freezes directly
     /// rather than routing through the scope it also owns.
@@ -1264,43 +1230,6 @@ pub const Scope = struct {
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     };
-
-    pub const UnpublishCursor = union(enum) {
-        absent,
-        environment: Environment.UnbindCursor,
-
-        pub fn deinit(self: *UnpublishCursor) void {
-            switch (self.*) {
-                .absent => {},
-                .environment => |*cursor| cursor.deinit(),
-            }
-            self.* = undefined;
-        }
-        pub fn advance(self: *UnpublishCursor) BindError!Environment.UnbindProgress {
-            return switch (self.*) {
-                .absent => |*state| absent: {
-                    state.* = {};
-                    break :absent .{ .complete = false };
-                },
-                .environment => |*cursor| cursor.advance(),
-            };
-        }
-    };
-
-    /// Removes only this scope's direct binding. An absent local binding is a
-    /// successful no-op; core bindings are observation-only from here and
-    /// become visible again once a local shadow is removed.
-    pub fn unpublishWordCursor(
-        self: *Scope,
-        name: intern.NamespaceName,
-    ) UnpublishCursor {
-        const target = switch (self.storage) {
-            .session => |environment| environment,
-            .core_build => |environment| environment,
-            .module_root => |environment| environment,
-        };
-        return .{ .environment = target.unbindCursor(name) };
-    }
 
     /// Publishes one word definition, whichever publication this scope
     /// accepts. Callers were switching on `publisher()` themselves and
@@ -2515,61 +2444,4 @@ test "env: issued scope ids leave their reserved high bits clear" {
         try std.testing.expect(raw > previous);
         previous = raw;
     }
-}
-
-test "env: a slot keeps one cell per name across binding, removal, and rebinding" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    var container = try Env.init(&host);
-    defer container.deinit();
-    const backing = container.privateState();
-    const list_api = @import("list.zig");
-
-    const one = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
-    defer releases.releaseValue(one);
-    const two = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 2 }});
-    defer releases.releaseValue(two);
-    const core_body = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 3 }});
-    defer releases.releaseValue(core_body);
-
-    const root = try container.newScopeCell(null, null);
-    const late = try intern.internNamespace("slot-late");
-    const early = try intern.internNamespace("slot-early");
-    const shared = try intern.internNamespace("slot-shared");
-
-    // Linked before any binding: unbound, with no core fallback.
-    const early_id = try container.linkSlot(root, &backing.session, intern.namespaceId(early));
-    const early_slot = container.slot(early_id).?;
-    try std.testing.expect(early_slot.current() == null);
-    try container.define(early, .{ .word = .{ .body = quotation(one.list).? } });
-    const first_cell = early_slot.current().?;
-
-    // Removal clears the slot without dropping its cell; rebinding reuses it.
-    var unbind = backing.session.unbindCursor(early);
-    defer unbind.deinit();
-    try std.testing.expect(try poll.driveFallible(bool, &unbind, .{}));
-    try std.testing.expect(early_slot.current() == null);
-    try container.define(early, .{ .word = .{ .body = quotation(two.list).? } });
-    try std.testing.expectEqual(first_cell, early_slot.current().?);
-    var lease = first_cell.load(null).?;
-    defer lease.deinit();
-    try std.testing.expectEqual(@as(i64, 2), list_api.atUnchecked(.{ .list = quotationHeader(lease.spec().binding.word) }, 0).int);
-
-    // Linked after a binding: adopts the environment's cell.
-    try container.define(late, .{ .word = .{ .body = quotation(one.list).? } });
-    const late_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(late))).?;
-    try std.testing.expect(late_slot.current() != null);
-    try std.testing.expectEqual(late_slot.id.load(.monotonic), @backingInt(try container.linkSlot(root, &backing.session, intern.namespaceId(late))));
-
-    // Core is the fallback until the root shadows the name, and again after.
-    _ = try backing.core.bind(shared, BindingSpec.fromTop(.{ .word = .{ .body = quotation(core_body.list).? } }));
-    const shared_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(shared))).?;
-    const core_cell = shared_slot.current().?;
-    try container.define(shared, .{ .word = .{ .body = quotation(one.list).? } });
-    try std.testing.expect(shared_slot.current().? != core_cell);
-    var remove_shadow = backing.session.unbindCursor(shared);
-    defer remove_shadow.deinit();
-    _ = try poll.driveFallible(bool, &remove_shadow, .{});
-    try std.testing.expectEqual(core_cell, shared_slot.current().?);
 }

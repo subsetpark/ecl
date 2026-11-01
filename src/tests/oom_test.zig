@@ -528,7 +528,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-primitives.ecl",
         "(3 4 +) `oom-sum def oom-sum pop " ++
             "1 2 stack pop pop pop " ++
-            "1 `oom-unset set `oom-unset unset 2 `oom-unset set `oom-unset undef " ++
+            "1 `oom-rebind set 2 `oom-rebind set " ++
             "[] (1 0 div) @attempt pop [] (5 6 +) @attempt pop " ++
             "[] ({kind custom data {detail 7}} raise) @attempt pop " ++
             "[3 4] (+) with call pop 2 3 (+) (*) (-) tri2 pop pop pop " ++
@@ -624,11 +624,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // late-bound execution each have Session-only allocation paths.
             "[] ((33) `dynamic def) `oom.namespaced @defm " ++
             "`oom.namespaced `dynamic qualify execute pop " ++
-            "3 (dup) first execute pop pop " ++
-            // Removal closes, quiesces, and retires through the same bounded
-            // work, so its allocation-failure paths belong in the sweep too.
-            "[] (([1 2]) `peek def) `oom-removed @defm " ++
-            "oom-removed.peek pop `oom-removed undefm",
+            "3 (dup) first execute pop pop",
     );
     try runOk(
         &runtime,

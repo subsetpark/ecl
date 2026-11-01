@@ -122,13 +122,6 @@
  "*Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing.")
 (() swap if) `unless def
 
-### def unset
-(name -- :
- "Remove a direct binding from the current scope, or do nothing when that scope does not bind the
-  name. An exact alias of `undef`; removing a local shadow may reveal a parent or core binding.
-  Defined in ecl.")
-(undef) `unset def
-
 ### def when
 (bool then -- ... :
  "*Inline.* Call the quotation when the condition is the boolean 1; otherwise do nothing.")

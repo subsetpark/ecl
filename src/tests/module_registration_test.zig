@@ -279,7 +279,7 @@ test "module loader: observation and dispatch require the requested registration
     try std.testing.expectEqualStrings("[42]\n", output.written());
 }
 
-test "module registration: reuse reload removal and delayed calls reclaim boundedly" {
+test "module registration: reuse reload and delayed calls reclaim boundedly" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -300,11 +300,10 @@ test "module registration: reuse reload removal and delayed calls reclaim bounde
             "[] ((1) `bump def) `reuse-right @defm " ++
             "[] (reuse-left.bump) @spawn " ++
             "[] ((1) `bump def) `reuse-left @defm " ++
-            "task.await pop [] (reuse-right.bump) @spawn task.await pop " ++
-            "`reuse-left undefm `reuse-right undefm";
+            "task.await pop [] (reuse-right.bump) @spawn task.await pop";
         // Both batches are one unit each and differ only in the cycle count,
         // so their fixed per-unit costs cancel and the only variable is how
-        // many define/reload/remove cycles ran. Ten times the
+        // many define/reload cycles ran. Ten times the
         // cycles must not cost ten times the settled memory.
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ cycle ++ ") for";
@@ -408,12 +407,6 @@ test "module values: an escaped quotation names the image it was written in" {
     // new image. Once nothing holds the old one, applying it says so rather
     // than silently changing meaning.
     try expectErrorContains(&runtime, "held call", &.{ "kind domain", "retired" });
-
-    // Removal ends it the same way.
-    try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `going @defm going.q `escaped set");
-    try expectStack(&runtime, "escaped call", "1");
-    try expectOk(&runtime, "`going undefm");
-    try expectErrorContains(&runtime, "escaped call", &.{ "kind domain", "retired" });
 }
 
 test "module values: an escaped locals body rejects a retired scope through its words" {

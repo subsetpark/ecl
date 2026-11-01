@@ -577,8 +577,7 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `importp`, `load`, `undefm` — they publish or retire without
-  taking a quotation.
+- `import`, `importp`, `load` — they publish without taking a quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
@@ -668,14 +667,14 @@ skipping the session and every module image, so a shadowed core definition
 remains reachable: after ``(2 *) `dup def``, `core.dup` is still the primitive.
 Only public core bindings resolve this way; a missing or private name is
 `` `undefined-word `` with `` `scope `core ``. `` `core `dup qualify `` constructs the same
-word. `import`, `alias`, and `undefm` observe registrations only and do not
-accept `core`.
+word. `import` and `alias` observe registrations only and do not accept
+`core`.
 
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
 every scope, whether or not it has loaded; an implementation may load it on
-first use. `@defm` and `undefm` with a standard-library module
-name are `` `domain ``, as is `alias` with one as either the alias or its target. A
+first use. `@defm` with a standard-library module
+name is `` `domain ``, as is `alias` with one as either the alias or its target. A
 dotted name below one, such as `dict.extra`, is an ordinary module name.
 
 Resolution and module home are independent parts of an activation. A word's
@@ -720,12 +719,12 @@ representations but expose the same binding model.
   `` `m exports `` returns module `m`'s public word names as sorted symbols
   (`` `core exports `` lists core's), and `stdlib` returns the embedded
   standard-library module names.
-- `` `name unset `` and `` `name undef `` are exact aliases. They remove a binding
-  only from the current root and otherwise do nothing. Removing a shadow
-  reveals core's binding for the name; it never mutates core. The name must be
-  unqualified and non-reserved, under the same namespace validation as `def`.
+- Names are introduced and replaced, never removed. No word removes a
+  definition or a module registration during a Session: a shadowed core word
+  stays reachable as `core.name`, and a new Session starts with no top-level
+  definitions.
 - Definitions happen only at root level. `def`, `defp`, `set`, `setp`,
-  `unset`, `undef`, `import`, and `importp` write the current root, which is the session
+  `import`, and `importp` write the current root, which is the session
   for top-level code, the image for a module's construction body, and the
   module's own image inside a module word. A word body without a module home
   writes the root of the activation that called it. Inside a combinator
@@ -1159,14 +1158,12 @@ that name.
 - **A generation lives as long as something can reach it.** The registry's
   current directory holds every published module; resolution retains the
   generation it finds before releasing the directory it found it in, and a
-  dispatched call keeps its generation for its whole run. Removal and reload
-  do not wait for old generation pins: an already-dispatched call finishes
-  under the generation it resolved, and a later registration of the same
-  spelling is a fresh generation that shares nothing with the removed one.
+  dispatched call keeps its generation for its whole run. Reload does not
+  wait for old generation pins: an already-dispatched call finishes under the
+  generation it resolved.
 - Failed registration changes nothing: the previous generation, if any,
   stays current.
-- `undefm` accepts a canonical name or alias. An unregistered name is
-  `` `undefined-word ``. An already-dispatched call may finish after removal.
+- A registration is never removed during a Session; reload replaces it.
 - Modules are process-local: there is no persistence across process restart,
   and the native ABI exposes no module capability, so an `.eclmod` word
   cannot observe an internal module home.

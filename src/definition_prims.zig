@@ -32,7 +32,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "def", .primitive = bind(.def), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Bind a quotation to a public word, with optional effect and documentation metadata. See [Definition annotations](SPEC.md#definition-annotations) for the annotation forms and validation; see [Modules](SPEC.md#modules) for module-context requirements." },
         .{ .name = "defp", .primitive = bind(.defp), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Bind a private module word, with optional effect and documentation metadata. A top-level `defp` is an error." },
         .{ .name = "test", .primitive = bind(.test_declaration), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names." },
-        .{ .name = "undef", .primitive = unbind, .effect = "name --", .doc = "Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `unset`; removing a local shadow may reveal a parent or core binding." },
         .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``." },
         .{ .name = "effect", .primitive = declaredEffect, .effect = "name -- annotation", .doc = "Return the declared stack effect of a resolved binding as an annotation such as `(x y -- z)`, or `()` when it declares none." },
         .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition." },
@@ -86,69 +85,6 @@ fn define(evaluator: *Unit, mode: Mode) MachineError!void {
         } } else .{ .validate_name = .init(name) }),
     });
 }
-
-fn unbind(evaluator: *Unit) MachineError!void {
-    try evaluator.require(1);
-    const scope = try evaluator.definitionScope();
-    const name = try evaluator.popSymbol();
-    try evaluator.startDriver(UnbindDriver{
-        .scope = scope,
-        .state = .init(.{ .validate_name = .init(name) }),
-    });
-}
-
-const UnbindDriver = struct {
-    scope: *env.Scope,
-    state: heap.Owned(State),
-
-    const State = union(enum) {
-        validate_name: intern.NamespaceCursor,
-        unpublishing: heap.Owned(env.Scope.UnpublishCursor),
-
-        pub fn deinit(
-            self: *State,
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-        ) void {
-            switch (self.*) {
-                .validate_name => {},
-                .unpublishing => |*cursor| cursor.deinit(releases, allocator),
-            }
-        }
-    };
-
-    pub fn advance(evaluator: *Unit, self: *UnbindDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const work = evaluator.workBudget();
-        while (work.spend()) switch (self.state.borrowMut().*) {
-            .validate_name => |*validation| switch (validation.advance()) {
-                .pending => {},
-                .complete => |maybe_name| {
-                    const name = maybe_name orelse return evaluator.fail(
-                        .domain,
-                        "unset/undef requires an unqualified, non-reserved name",
-                    );
-                    self.state.borrowMut().* = .{ .unpublishing = .init(
-                        self.scope.unpublishWordCursor(name),
-                    ) };
-                },
-            },
-            .unpublishing => |*cursor| switch (cursor.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Frozen => return evaluator.fail(
-                    .domain,
-                    "module environments are immutable after registration",
-                ),
-            }) {
-                .pending => {},
-                .complete => return .completed,
-            },
-        };
-        return .stepped;
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
 const DefineDriver = struct {
     mode: Mode,

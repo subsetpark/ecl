@@ -1373,10 +1373,6 @@ pub const CommitError = error{
     /// The exact name `core` is the core qualifier, never a registration.
     ReservedName,
 };
-pub const RemovalError = error{
-    OutOfMemory,
-    MissingModule,
-};
 pub const AliasError = error{
     OutOfMemory,
     NameConflict,
@@ -2025,10 +2021,9 @@ pub const Registry = enum(usize) {
     };
 
     pub const CommitProgress = union(enum) { pending, complete: u64 };
-    pub const RemovalProgress = poll.Progress(void);
     pub const AliasProgress = poll.Progress(void);
 
-    const EditKind = enum { register, remove, alias };
+    const EditKind = enum { register, alias };
 
     /// The one registry mutation. Snapshot the current directory, validate the
     /// request against it, build a successor with the edit applied, and publish
@@ -2048,24 +2043,21 @@ pub const Registry = enum(usize) {
             const Self = @This();
             pub const Error = switch (kind) {
                 .register => CommitError,
-                .remove => RemovalError,
                 .alias => AliasError,
             };
             pub const Progress = switch (kind) {
                 .register => CommitProgress,
-                .remove => RemovalProgress,
                 .alias => AliasProgress,
             };
             const Request = switch (kind) {
                 .register => SealedImage,
-                .remove => intern.ModuleName,
                 .alias => struct { short: intern.BindingName, target: intern.ModuleName },
             };
             const ModuleLookup = Directory.ModuleMap.RawLookupCursor;
             const AliasLookup = Directory.AliasMap.RawLookupCursor;
 
             /// What validation establishes: the canonical name the edit is
-            /// about and, for a reload or a removal, the entry it replaces.
+            /// about and, for a reload, the entry it replaces.
             const Target = struct {
                 canonical: intern.ModuleName,
                 prior: ?*ModuleImage,
@@ -2076,11 +2068,6 @@ pub const Registry = enum(usize) {
                     alias_free: AliasLookup,
                     /// The generation a reload replaces, if any.
                     prior: ModuleLookup,
-                },
-                .remove => union(enum) {
-                    /// A short spelling resolves through the alias map.
-                    resolve_alias: AliasLookup,
-                    existing: struct { canonical: intern.ModuleName, lookup: ModuleLookup },
                 },
                 .alias => union(enum) {
                     /// The short form must not be a module name.
@@ -2162,7 +2149,6 @@ pub const Registry = enum(usize) {
             fn requestedName(self: *const Self) intern.ModuleName {
                 return switch (kind) {
                     .register => self.request.borrow().name,
-                    .remove => self.request,
                     .alias => self.request.target,
                 };
             }
@@ -2223,7 +2209,7 @@ pub const Registry = enum(usize) {
                             .pending => {},
                             .item => |entry| {
                                 const replaced = switch (kind) {
-                                    .register, .remove => entry.key == state.build.target.canonical,
+                                    .register => entry.key == state.build.target.canonical,
                                     .alias => false,
                                 };
                                 if (!replaced) {
@@ -2249,10 +2235,7 @@ pub const Registry = enum(usize) {
                         switch (state.entries.advance()) {
                             .pending => {},
                             .item => |entry| {
-                                // Removal takes every alias of the module with it.
-                                const dropped = kind == .remove and entry.value == state.build.target.canonical;
-                                if (!dropped)
-                                    state.insertion = state.build.candidate.aliases.putCursor(entry.key, entry.value);
+                                state.insertion = state.build.candidate.aliases.putCursor(entry.key, entry.value);
                             },
                             .complete => self.enterPutAlias(state.build),
                         }
@@ -2290,7 +2273,6 @@ pub const Registry = enum(usize) {
                         return error.ReservedName,
                     .alias => if (intern.isReservedRegistryBytes(intern.get(intern.bindingId(self.request.short))))
                         return error.ReservedName,
-                    .remove => {},
                 }
                 var directory = self.registry.acquireDirectory();
                 const old = directory.directory orelse {
@@ -2299,7 +2281,7 @@ pub const Registry = enum(usize) {
                             self.beginBuild(directory, .{ .canonical = self.requestedName(), .prior = null });
                             return .pending;
                         },
-                        .remove, .alias => {
+                        .alias => {
                             directory.deinit();
                             return error.MissingModule;
                         },
@@ -2310,10 +2292,6 @@ pub const Registry = enum(usize) {
                         .{ .alias_free = old.aliases.rawLookup(short) }
                     else
                         .{ .prior = old.modules.rawLookup(self.requestedName()) },
-                    .remove => if (intern.moduleBindingName(self.request)) |short|
-                        .{ .resolve_alias = old.aliases.rawLookup(short) }
-                    else
-                        .{ .existing = .{ .canonical = self.request, .lookup = old.modules.rawLookup(self.request) } },
                     .alias => .{ .short_free = old.modules.rawLookup(intern.moduleNameFromBinding(self.request.short)) },
                 };
                 self.state = .{ .validate = .{ .directory = directory, .step = step } };
@@ -2339,22 +2317,6 @@ pub const Registry = enum(usize) {
                                 state.directory,
                                 .{ .canonical = self.requestedName(), .prior = prior },
                             ),
-                        },
-                    },
-                    .remove => switch (state.step) {
-                        .resolve_alias => |*lookup| switch (lookup.advance()) {
-                            .pending => {},
-                            .complete => |canonical| {
-                                const name = canonical orelse self.request;
-                                state.step = .{ .existing = .{ .canonical = name, .lookup = old.modules.rawLookup(name) } };
-                            },
-                        },
-                        .existing => |*existing| switch (existing.lookup.advance()) {
-                            .pending => {},
-                            .complete => |found| {
-                                const prior = found orelse return error.MissingModule;
-                                self.beginBuild(state.directory, .{ .canonical = existing.canonical, .prior = prior });
-                            },
                         },
                     },
                     .alias => switch (state.step) {
@@ -2445,12 +2407,12 @@ pub const Registry = enum(usize) {
 
             /// The edit's effect on the images themselves, applied under the
             /// writer lock just before the candidate becomes current: a
-            /// replaced or removed generation is marked superseded, which is
+            /// replaced generation is marked superseded, which is
             /// what evicts qualified call-site cache entries that still hold
             /// it, and a published image learns its generation number.
             fn apply(self: *Self, target: Target) switch (kind) {
                 .register => u64,
-                .remove, .alias => void,
+                .alias => void,
             } {
                 switch (kind) {
                     .register => {
@@ -2459,7 +2421,6 @@ pub const Registry = enum(usize) {
                         if (target.prior) |prior| prior.superseded.store(true, .release);
                         return image.generation;
                     },
-                    .remove => target.prior.?.superseded.store(true, .release),
                     .alias => {},
                 }
             }
@@ -2467,14 +2428,10 @@ pub const Registry = enum(usize) {
     }
 
     pub const RegistrationCursor = EditCursor(.register);
-    pub const RemovalCursor = EditCursor(.remove);
     pub const AliasCursor = EditCursor(.alias);
 
     pub fn registrationCursor(self: *Registry, image: SealedImage) RegistrationCursor {
         return .{ .registry = self, .request = image };
-    }
-    pub fn removalCursor(self: *Registry, requested: intern.ModuleName) RemovalCursor {
-        return .{ .registry = self, .request = requested };
     }
     pub fn aliasCursor(self: *Registry, short: intern.BindingName, target: intern.ModuleName) AliasCursor {
         return .{ .registry = self, .request = .{ .short = short, .target = target } };
@@ -2725,12 +2682,6 @@ pub const testing = if (builtin.is_test) struct {
             .pending => {},
             .complete => |generation| return generation,
         };
-    }
-
-    pub fn remove(registry: *Registry, name: intern.ModuleName) RemovalError!void {
-        var cursor = registry.removalCursor(name);
-        defer cursor.deinit();
-        return poll.driveVoidFallible(&cursor, .{});
     }
 
     pub fn alias(

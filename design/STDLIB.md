@@ -797,12 +797,6 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Declare a 
 # => list
 ```
 
-### undef
-`( name -- )` — Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `unset`; removing a local shadow may reveal a parent or core binding.
-
-### undefm
-`( module-name -- )` — Remove the module currently registered under a canonical name or unqualified alias, resolved exactly as ordinary registry lookup resolves it. An unregistered name is `` `undefined-word ``. Removal strips every alias targeting the module in the same publish; an already-dispatched call finishes under the generation it resolved. See [Modules](SPEC.md#modules).
-
 ### unfold
 `( state predicate step -- state list )` — *Isolated*. Before every step, apply the predicate under contract `( state -- bool )`. When it returns 0, return the current state and all generated items. When it returns 1, apply the step under contract `( state -- state item )`, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`.
 
@@ -815,9 +809,6 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Declare a 
 
 ### unless
 `( bool else -- ... )` — *Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing.
-
-### unset
-`( name -- )` — Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `undef`; removing a local shadow may reveal a parent or core binding. Defined in ecl.
 
 ### update
 `( collection selector quotation -- collection )` — Apply an isolated `( value -- value )` quotation at the selected positions. A list collection's selector pervades with the same nested shape as `at` and is processed left to right, so repeated indices observe earlier updates. A dictionary selector is one whole-value key. The entire selector is validated before the quotation is first applied; an empty selector returns the list unchanged without applying it.

@@ -295,28 +295,6 @@ test "module: privacy module-body contract top-level private and qualified trace
     try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (missing recursive.f recursive.f recursive.f)"});
 }
 
-test "modules: removal strips aliases and leaves no half-removed entry" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    try expectOk(&runtime, "[] ((1) `x def) `a @defm [] ((2) `x def) `b @defm " ++
-        "`short `a alias `a (x) import short.x a.x x");
-    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
-    try expectOk(&runtime, "`a undefm");
-    // The canonical name and every alias targeting it go in one publish.
-    try expectErrorContains(&runtime, "a.x", &.{"kind undefined-word"});
-    try expectErrorContains(&runtime, "short.x", &.{"kind undefined-word"});
-    try expectErrorContains(&runtime, "`short (x) import", &.{"kind undefined-word"});
-    // Enumeration never shows a half-removed entry, and unrelated modules
-    // and their aliases are untouched.
-    try expectOk(&runtime, "`other `b alias other.x b.x");
-    // Re-aliasing a removed name is a missing-module error as before.
-    try expectErrorContains(&runtime, "`again `a alias", &.{"kind undefined-word"});
-}
-
 test "module: qualified import replacement and alias collisions" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
@@ -350,13 +328,11 @@ test "module: qualified call sites heal generations and bypass aliases" {
             "[] ((2) `v def) `cache-heal @defm probe " ++
             "[] ((10) `v def) `alias-a @defm [] ((20) `v def) `alias-b @defm " ++
             "`short `alias-a alias (short.v) `alias-probe def alias-probe " ++
-            "`short `alias-b alias alias-probe " ++
-            "[] ((3) `v def) `removed-cache @defm (removed-cache.v) `removed-probe def " ++
-            "removed-probe `removed-cache undefm [] (removed-probe) @attempt `err at `kind at",
+            "`short `alias-b alias alias-probe",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("1 2 10 20 3 undefined-word", display.bytes());
+    try std.testing.expectEqualStrings("1 2 10 20", display.bytes());
 }
 
 test "module: provisional tasks keep rollback generations alive until quiescence" {
