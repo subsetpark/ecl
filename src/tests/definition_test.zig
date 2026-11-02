@@ -715,6 +715,20 @@ test "binding: existing code keeps its targets while later binding sees replacem
                 "[1 2] q each",
             .expected = "[1 1]",
         },
+        // A quotation built at run time is new each time, so it binds from
+        // words the unit already resolved; a publication still reaches it.
+        .{
+            .name = "built quotation sees replacements",
+            .source = "(1) `x def (x) () compose call (x) () compose call (2) `x def (x) () compose call",
+            .expected = "1 1 2",
+        },
+        .{
+            .name = "built quotation repeats a counted word",
+            .source = "(1) `x def (x x +) () compose call (x x x + +) () compose call",
+            .expected = "2 3",
+        },
+        .{ .name = "typed list applied", .source = "[1 2] call [3 4] call", .expected = "1 2 3 4" },
+        .{ .name = "cleave over literals", .source = "1 2 (+) (*) bi2 1 2 (+) (*) (-) tri2", .expected = "3 2 3 2 -1" },
         .{
             .name = "invocation keeps a reused binding",
             .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++

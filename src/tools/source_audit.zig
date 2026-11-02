@@ -784,22 +784,18 @@ fn auditFilesystemAuthority() bool {
     return failed;
 }
 
-/// A definition's construction state and a bound body's target table are the
-/// construction boundary: only `env.zig` may read or change a definition's
-/// `typestate`, so execution, publication, and reflection see sealed code
-/// through `Definition.code`; and only the binder, which mints a bound body,
-/// and `env.zig`, which seals one, may name `bound_targets`. Zig fields cannot
-/// be private, so this confinement is the audit's.
+/// A reservation and a sealed definition share storage, and the types keep
+/// them apart: only `Reservation` reads the reserved member of
+/// `Definition.body_state` and only `Definition` the sealed one. Zig fields
+/// cannot be private, so naming that field outside `env.zig` would bypass
+/// both handles; this confinement is the audit's.
 fn auditConstructionTypestate() bool {
     var failed = false;
-    const typestate = [_][]const []const u8{&.{ ".", "typestate" }};
-    const bound_targets = [_][]const []const u8{&.{ ".", "bound_targets" }};
+    const body_state = [_][]const []const u8{&.{ ".", "body_state" }};
     for (source_groups) |group| {
         for (group.files, group.sources) |name, text| {
             if (std.mem.eql(u8, name, "env.zig")) continue;
-            failed = auditTokens(name, text, &typestate) or failed;
-            if (std.mem.eql(u8, name, "binder.zig")) continue;
-            failed = auditTokens(name, text, &bound_targets) or failed;
+            failed = auditTokens(name, text, &body_state) or failed;
         }
     }
     return failed;

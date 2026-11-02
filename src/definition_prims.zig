@@ -142,7 +142,7 @@ const DefineDriver = struct {
         /// with the definition itself standing for a call of its own name.
         binding: struct {
             binding_name: intern.BindingName,
-            definition: *env.Definition,
+            reservation: *env.Reservation,
             context: heap.Owned(binder.Context),
             cursor: heap.Owned(binder.BindingCursor),
         },
@@ -175,10 +175,7 @@ const DefineDriver = struct {
                 .binding => |*binding| {
                     binding.cursor.deinit(releases, allocator);
                     binding.context.deinit(releases, allocator);
-                    switch (binding.definition.lifetime) {
-                        .counted => binding.definition.release(releases),
-                        .static => binding.definition.retireStatic(releases),
-                    }
+                    binding.reservation.discard(releases);
                 },
                 .publishing_session => |*cursor| cursor.deinit(releases, allocator),
                 .validate_name, .source, .publishing_test, .published => {},
@@ -449,7 +446,7 @@ const DefineDriver = struct {
                     .session, .core_build => {},
                 }
                 const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
-                const definition = try env.Definition.reserve(
+                const reservation = try env.Definition.reserve(
                     evaluator.allocator,
                     if (root == .session) .counted else .static,
                     env.quotationHeader(body),
@@ -464,7 +461,7 @@ const DefineDriver = struct {
                 context.self_reference = .{
                     .root = if (root == .session) evaluator.environment.sessionScopeId() else evaluator.environment.coreScopeId(),
                     .name = intern.bindingId(publication.binding_name),
-                    .definition = definition,
+                    .reservation = reservation,
                 };
                 const cursor = binder.BindingCursor.init(
                     evaluator.allocator,
@@ -472,15 +469,12 @@ const DefineDriver = struct {
                     env.quotationHeader(body),
                 ) catch |err| {
                     context.deinit();
-                    switch (definition.lifetime) {
-                        .counted => definition.release(evaluator.releases),
-                        .static => definition.retireStatic(evaluator.releases),
-                    }
+                    reservation.discard(evaluator.releases);
                     return err;
                 };
                 self.state.borrowMut().* = .{ .binding = .{
                     .binding_name = publication.binding_name,
-                    .definition = definition,
+                    .reservation = reservation,
                     .context = .init(context),
                     .cursor = .init(cursor),
                 } };
@@ -493,12 +487,12 @@ const DefineDriver = struct {
                 };
                 switch (result) {
                     .bound => |bound| {
-                        const definition = binding.definition;
+                        const reservation = binding.reservation;
                         const name = binding.binding_name;
                         binding.cursor.deinit(evaluator.releases, evaluator.allocator);
                         binding.context.deinit(evaluator.releases, evaluator.allocator);
-                        definition.stage(evaluator.releases, bound);
-                        definition.seal(evaluator.releases);
+                        reservation.stage(evaluator.releases, bound);
+                        const definition = reservation.seal(evaluator.releases);
                         switch (self.scope.storage) {
                             .session => {
                                 // The registry cursor takes the definition's
@@ -778,7 +772,7 @@ const WhichDriver = struct {
             1 => try self.add(.{ .bytes = " -> " }),
             2 => try self.add(.{ .trace_word = resolved.trace_word }),
             3 => try self.add(.{ .bytes = " " }),
-            4 => try self.add(.{ .bytes = switch (resolved.definition.code().*) {
+            4 => try self.add(.{ .bytes = switch (resolved.definition.code()) {
                 .source => "def",
                 .builtin => "primitive",
                 .native => "native",
@@ -792,12 +786,12 @@ const WhichDriver = struct {
             9 => if (resolved.definition.effect != null) try self.add(.{ .bytes = " " }),
             10 => if (resolved.definition.effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            11 => switch (resolved.definition.code().*) {
+            11 => switch (resolved.definition.code()) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             12 => {
-                const requirements = switch (resolved.definition.code().*) {
+                const requirements = switch (resolved.definition.code()) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
@@ -993,7 +987,7 @@ const SeeDriver = struct {
                 try self.add(.{ .value = .{ .list = effect.header() } }),
             1 => if (resolved.definition.doc != null or resolved.definition.effect != null)
                 try self.add(.{ .bytes = " " }),
-            2 => switch (resolved.definition.code().*) {
+            2 => switch (resolved.definition.code()) {
                 .source => if (resolved.definition.source) |source|
                     try self.add(.{ .bytes = source.bytes() })
                 else
@@ -1001,20 +995,20 @@ const SeeDriver = struct {
                 .builtin => try self.add(.{ .bytes = "<primitive>" }),
                 .native => try self.add(.{ .bytes = "<native:" }),
             },
-            3 => switch (resolved.definition.code().*) {
+            3 => switch (resolved.definition.code()) {
                 .native => try self.add(.{ .trace_word = resolved.trace_word }),
                 else => {},
             },
-            4 => switch (resolved.definition.code().*) {
+            4 => switch (resolved.definition.code()) {
                 .native => try self.add(.{ .bytes = ">" }),
                 else => {},
             },
-            5 => switch (resolved.definition.code().*) {
+            5 => switch (resolved.definition.code()) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             6 => {
-                const requirements = switch (resolved.definition.code().*) {
+                const requirements = switch (resolved.definition.code()) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };

@@ -220,22 +220,21 @@ pub const Lifetime = enum { static, counted };
 /// names and lands nested definitions there.
 pub const DefinitionRoot = enum { core, session, image };
 
-/// One immutable target. Construction reserves the identity before its body
-/// is bound, so a body may call itself (and a module group's members one
-/// another); sealing installs the bound executable. A reserved definition is
-/// reachable only through its construction owner and is never executed or
-/// published.
-///
-/// The construction state is `typestate`, which only this file touches (the
-/// source audit owns that confinement, since Zig fields cannot be private).
-/// Everything else reads a sealed definition through `code`, so no consumer
-/// handles a reserved body.
+/// One immutable, sealed target. Construction reserves a definition's storage
+/// before its body is bound, so a body may call itself (and a module group's
+/// members one another), but hands out only a `Reservation` for it: a
+/// `*Definition` exists only once sealing has installed the bound body. So
+/// every holder of a `*Definition` holds sealed code, and execution,
+/// publication, and reflection read it through `code` with no reserved case.
 pub const Definition = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     refs: std.atomic.Value(u32) = .init(1),
     allocator: std.mem.Allocator,
     lifetime: Lifetime,
-    typestate: Typestate,
+    /// Which member is active is the handle's type: a `Reservation` reads
+    /// `reserved`, a `Definition` reads `sealed`. Safe builds check the
+    /// active member; only this file names the field.
+    body_state: BodyState,
     /// The distinct counted definitions the sealed body calls, held once each
     /// for the definition's lifetime. Null when it calls none.
     dependencies: ?*DependencyTable = null,
@@ -252,7 +251,7 @@ pub const Definition = struct {
 
     /// What a sealed definition runs.
     pub const Code = union(enum) {
-        source: Executable,
+        source: Executable.Storage,
         builtin: PrimitiveImpl,
         native: NativeCallable,
     };
@@ -263,13 +262,13 @@ pub const Definition = struct {
         native: NativeCallable,
     };
 
-    const Typestate = union(enum) {
+    const BodyState = union {
         reserved: Reserved,
         sealed: Code,
     };
 
-    /// The construction owner's view of a reserved definition: the quotation
-    /// awaiting binding and, once bound, the body awaiting the seal.
+    /// The quotation awaiting binding and, once bound, the body awaiting
+    /// the seal.
     const Reserved = struct {
         quotation: *value.ListHandle,
         bound: ?Bound = null,
@@ -302,24 +301,23 @@ pub const Definition = struct {
         return result;
     }
 
-    /// Reserves the identity of a definition whose body will be bound and
-    /// sealed by its construction owner. `body` is retained here; the caller
-    /// keeps its own.
+    /// Reserves a definition whose body its construction owner will bind and
+    /// seal. `body` is retained here; the caller keeps its own.
     pub fn reserve(
         allocator: std.mem.Allocator,
         lifetime: Lifetime,
         body: *value.ListHandle,
         metadata: Metadata,
-    ) error{OutOfMemory}!*Definition {
+    ) error{OutOfMemory}!*Reservation {
         const result = try allocate(allocator, lifetime, .{ .reserved = .{ .quotation = body } }, metadata);
         heap.incRef(body);
-        return result;
+        return Reservation.of(result);
     }
 
     fn allocate(
         allocator: std.mem.Allocator,
         lifetime: Lifetime,
-        typestate: Typestate,
+        body_state: BodyState,
         metadata: Metadata,
     ) error{OutOfMemory}!*Definition {
         const result = try allocator.create(Definition);
@@ -329,7 +327,7 @@ pub const Definition = struct {
         result.* = .{
             .allocator = allocator,
             .lifetime = lifetime,
-            .typestate = typestate,
+            .body_state = body_state,
             .visibility = metadata.visibility,
             .origin = metadata.origin,
             .effect = metadata.effect,
@@ -341,74 +339,28 @@ pub const Definition = struct {
         return result;
     }
 
-    /// What a sealed definition runs. Execution, publication, and reflection
-    /// reach only sealed definitions; a reserved one is held by its
-    /// construction owner alone.
-    pub inline fn code(self: *const Definition) *const Code {
-        return switch (self.typestate) {
-            .sealed => |*sealed| sealed,
-            .reserved => unreachable,
+    /// What the definition runs.
+    pub inline fn code(self: *const Definition) Run {
+        return switch (self.body_state.sealed) {
+            .source => |*storage| .{ .source = Executable.of(storage) },
+            .builtin => |primitive| .{ .builtin = primitive },
+            .native => |callable| .{ .native = callable },
         };
     }
 
-    /// Whether the construction owner has yet to seal this definition.
-    pub fn isReserved(self: *const Definition) bool {
-        return self.typestate == .reserved;
-    }
-
-    /// The quotation a reserved definition awaits binding for.
-    pub fn reservedQuotation(self: *const Definition) *value.ListHandle {
-        return self.typestate.reserved.quotation;
-    }
-
-    /// Hands a reserved definition its bound body, replacing one staged by an
-    /// earlier attempt. The definition owns the body until it is sealed or
-    /// retired.
-    pub fn stage(self: *Definition, releases: *heap.ReleaseDomain, bound: Bound) void {
-        const reserved = &self.typestate.reserved;
-        if (reserved.bound) |previous| previous.discard(releases, self.allocator);
-        reserved.bound = bound;
-    }
-
-    /// Seals a reserved definition with its staged body, after which the
-    /// definition holds the body's dependencies and executes it.
-    pub fn seal(self: *Definition, releases: *heap.ReleaseDomain) void {
-        const reserved = self.typestate.reserved;
-        const bound = reserved.bound.?;
-        self.dependencies = bound.dependencies;
-        self.typestate = .{ .sealed = .{ .source = .{
-            .code = bound.code,
-            .targets = bound.bound_targets,
-            .owner = switch (self.lifetime) {
-                .static => .static,
-                .counted => .{ .definition = self },
-            },
-        } } };
-        releases.releaseHeader(reserved.quotation);
-    }
-
-    /// Seals a reserved definition whose body executes no words: a literal
-    /// table entry. Fails, leaving it reserved, when the body has a word that
-    /// would need binding.
-    pub fn sealLiteral(self: *Definition, releases: *heap.ReleaseDomain) error{UnboundWord}!void {
-        const body = self.typestate.reserved.quotation;
-        if (body.kind() == .generic_spine) for (heap.valuesConst(body)) |form| {
-            if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null)
-                return error.UnboundWord;
-        };
-        heap.incRef(body);
-        self.stage(releases, .{ .code = body, .bound_targets = &.{}, .dependencies = null });
-        self.seal(releases);
-    }
+    /// A sealed definition's code as its consumers see it: a source body is
+    /// an executable handle.
+    pub const Run = union(enum) {
+        source: *const Executable,
+        builtin: PrimitiveImpl,
+        native: NativeCallable,
+    };
 
     /// The source quotation a definition's body is shown as.
     pub fn quotationBody(self: *const Definition) ?*value.ListHandle {
-        return switch (self.typestate) {
-            .reserved => |reserved| reserved.quotation,
-            .sealed => |sealed| switch (sealed) {
-                .source => |executable| executable.code,
-                .builtin, .native => null,
-            },
+        return switch (self.code()) {
+            .source => |executable| executable.code(),
+            .builtin, .native => null,
         };
     }
 
@@ -445,20 +397,19 @@ pub const Definition = struct {
         allocator: std.mem.Allocator,
         self: *Definition,
     ) bool {
-        switch (self.typestate) {
-            .reserved => |reserved| {
-                if (reserved.bound) |bound| bound.discard(releases, allocator);
-                releases.releaseHeader(reserved.quotation);
-            },
-            .sealed => |sealed| switch (sealed) {
-                .source => |executable| executable.free(releases, allocator),
-                .builtin => {},
-                .native => |callable| callable.instance.releasePin(),
-            },
+        switch (self.body_state.sealed) {
+            .source => |storage| storage.free(releases, allocator),
+            .builtin => {},
+            .native => |callable| callable.instance.releasePin(),
         }
         // A self-call is never a dependency, so this cannot reach the
         // definition it retires.
         if (self.dependencies) |dependencies| dependencies.retire(releases);
+        self.freeMetadata(releases, allocator);
+        return true;
+    }
+
+    fn freeMetadata(self: *Definition, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         if (self.effect) |effect| effect.retire(releases);
         if (self.doc) |doc| releases.releaseHeader(documentationHeader(doc));
         if (self.source) |source| {
@@ -466,9 +417,130 @@ pub const Definition = struct {
             owned.deinit();
         }
         allocator.destroy(self);
-        return true;
     }
 };
+
+/// A definition under construction: the only handle its construction owner
+/// holds until sealing. Binding may name it as a target, and it carries the
+/// definition's metadata, but it cannot be executed, published, or
+/// reflected, since none of those accept it. Sealing consumes it and returns
+/// the `*Definition`; a construction that fails discards it instead.
+pub const Reservation = opaque {
+    fn of(definition: *Definition) *Reservation {
+        return @ptrCast(definition);
+    }
+
+    fn storage(self: *Reservation) *Definition {
+        return @ptrCast(@alignCast(self));
+    }
+
+    fn storageConst(self: *const Reservation) *const Definition {
+        return @ptrCast(@alignCast(self));
+    }
+
+    pub fn visibility(self: *const Reservation) Visibility {
+        return self.storageConst().visibility;
+    }
+
+    /// The quotation the reservation awaits binding for.
+    pub fn quotation(self: *const Reservation) *value.ListHandle {
+        return self.storageConst().body_state.reserved.quotation;
+    }
+
+    /// Hands the reservation its bound body, replacing one staged by an
+    /// earlier attempt. It owns the body until sealed or discarded.
+    pub fn stage(self: *Reservation, releases: *heap.ReleaseDomain, bound: Bound) void {
+        const definition = self.storage();
+        const reserved = &definition.body_state.reserved;
+        if (reserved.bound) |previous| previous.discard(releases, definition.allocator);
+        reserved.bound = bound;
+    }
+
+    /// Installs the staged body and returns the sealed definition, which then
+    /// holds the body's dependencies.
+    pub fn seal(self: *Reservation, releases: *heap.ReleaseDomain) *Definition {
+        const definition = self.storage();
+        const reserved = definition.body_state.reserved;
+        const bound = reserved.bound.?;
+        definition.dependencies = bound.dependencies;
+        // Every reservation a target slot names is sealed with this one, by
+        // the same construction, before anything can run the body.
+        const targets: []?*Definition = if (bound.targets.len == 0)
+            &.{}
+        else
+            @as([*]?*Definition, @ptrCast(bound.targets.ptr))[0..bound.targets.len];
+        definition.body_state = .{ .sealed = .{ .source = .{
+            .code = bound.code,
+            .targets = targets,
+            .owner = switch (definition.lifetime) {
+                .static => .static,
+                .counted => .{ .definition = definition },
+            },
+        } } };
+        releases.releaseHeader(reserved.quotation);
+        return definition;
+    }
+
+    /// Seals a reservation whose body executes no words: a literal table
+    /// entry. Fails, leaving it reserved, when a word would need binding.
+    pub fn sealLiteral(self: *Reservation, releases: *heap.ReleaseDomain) error{UnboundWord}!*Definition {
+        const body = self.quotation();
+        if (body.kind() == .generic_spine) for (heap.valuesConst(body)[0..@intCast(body.length())]) |form| {
+            if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null)
+                return error.UnboundWord;
+        };
+        heap.incRef(body);
+        self.stage(releases, .{ .code = body, .targets = &.{}, .dependencies = null });
+        return self.seal(releases);
+    }
+
+    /// Releases a reservation that will never be sealed. Its owner held its
+    /// only reference, and everything it owns releases in constant work.
+    pub fn discard(self: *Reservation, releases: *heap.ReleaseDomain) void {
+        const definition = self.storage();
+        const reserved = definition.body_state.reserved;
+        if (reserved.bound) |bound| bound.discard(releases, definition.allocator);
+        releases.releaseHeader(reserved.quotation);
+        definition.freeMetadata(releases, definition.allocator);
+    }
+};
+
+/// What binding resolved a word to.
+pub const Target = union(enum) {
+    definition: *Definition,
+    /// A definition of the construction in progress, sealed with the body
+    /// that names it.
+    reserved: *Reservation,
+
+    /// The target-table slot naming this target in a bound body.
+    pub fn slot(self: Target) *const Slot {
+        return switch (self) {
+            .definition => |definition| @ptrCast(definition),
+            .reserved => |reservation| @ptrCast(reservation),
+        };
+    }
+};
+
+/// One entry of a bound body's target table: a target that is named but not
+/// yet callable, because its owner may still be under construction.
+pub const Slot = opaque {};
+
+/// A counted definition as a set key: its identity, never dereferenced
+/// through the key.
+pub const DefinitionKey = enum(usize) {
+    _,
+
+    pub fn of(target: *Definition) DefinitionKey {
+        return @fromBackingInt(@intFromPtr(target));
+    }
+
+    pub fn definition(self: DefinitionKey) *Definition {
+        return @ptrFromInt(@backingInt(self));
+    }
+};
+
+/// The set binding notes a body's distinct counted targets in.
+pub const DependencySet = poll.FixedMap(DefinitionKey, void);
 
 /// The distinct counted definitions one sealed owner's code calls, one
 /// reference each. Its capacity is exact: binding counts the distinct targets
@@ -554,17 +626,18 @@ pub const Owner = union(enum) {
 };
 
 /// A body binding produced and no owner has sealed yet: the retained code, its
-/// target table, and the table holding its dependencies. Only the binder
-/// creates one and only sealing consumes one (the source audit confines
-/// `bound_targets` to those two files); discarding it is constant work.
+/// target table, and the table holding its dependencies. Its targets are
+/// slots, which name but cannot call, so an unsealed body exposes nothing
+/// executable; sealing turns it into an `Executable`. Discarding it is
+/// constant work.
 pub const Bound = struct {
     code: *value.ListHandle,
-    bound_targets: []?*Definition,
+    targets: []?*const Slot,
     dependencies: ?*DependencyTable,
 
     pub fn discard(self: Bound, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         if (self.dependencies) |dependencies| dependencies.retire(releases);
-        if (self.bound_targets.len != 0) allocator.free(self.bound_targets);
+        if (self.targets.len != 0) allocator.free(self.targets);
         releases.releaseHeader(self.code);
     }
 };
@@ -576,20 +649,44 @@ pub const Bound = struct {
 /// executable words has an empty table. Dispatch borrows targets; the owner
 /// holds the counted ones through its dependency table, so dispatch adds no
 /// ownership operation of its own.
-pub const Executable = struct {
-    code: *value.ListHandle,
-    targets: []?*Definition,
-    owner: Owner,
+///
+/// Opaque: its storage is embedded in its owner and reached only through
+/// this handle, so nothing outside sealing can make one.
+pub const Executable = opaque {
+    const Storage = struct {
+        code: *value.ListHandle,
+        targets: []?*Definition,
+        owner: Owner,
 
-    /// The definition bound at `index`, or null when the form there is data.
-    pub fn target(self: *const Executable, index: u32) ?*Definition {
-        if (self.targets.len == 0) return null;
-        return self.targets[index];
+        fn free(self: Storage, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+            if (self.targets.len != 0) allocator.free(self.targets);
+            releases.releaseHeader(self.code);
+        }
+    };
+
+    fn of(held: *const Storage) *const Executable {
+        return @ptrCast(held);
     }
 
-    fn free(self: Executable, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        if (self.targets.len != 0) allocator.free(self.targets);
-        releases.releaseHeader(self.code);
+    inline fn storage(self: *const Executable) *const Storage {
+        return @ptrCast(@alignCast(self));
+    }
+
+    /// The quotation it runs, which keeps its literals and provenance.
+    pub inline fn code(self: *const Executable) *value.ListHandle {
+        return self.storage().code;
+    }
+
+    /// What an activation running it must hold.
+    pub inline fn owner(self: *const Executable) Owner {
+        return self.storage().owner;
+    }
+
+    /// The definition bound at `index`, or null when the form there is data.
+    pub inline fn target(self: *const Executable, index: u32) ?*Definition {
+        const targets = self.storage().targets;
+        if (targets.len == 0) return null;
+        return targets[index];
     }
 };
 
@@ -597,19 +694,28 @@ pub const Executable = struct {
 pub const AnonymousCode = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     refs: std.atomic.Value(u32) = .init(1),
-    executable: Executable,
+    storage: Executable.Storage,
     dependencies: ?*DependencyTable,
 
     /// Seals a bound body as an anonymous executable with one reference. On
-    /// failure the caller still owns `bound`.
+    /// failure the caller still owns `bound`. An anonymous body names only
+    /// sealed definitions, since no construction is in progress for it.
     pub fn create(allocator: std.mem.Allocator, bound: Bound) error{OutOfMemory}!*AnonymousCode {
         const result = try allocator.create(AnonymousCode);
+        const targets: []?*Definition = if (bound.targets.len == 0)
+            &.{}
+        else
+            @as([*]?*Definition, @ptrCast(bound.targets.ptr))[0..bound.targets.len];
         result.* = .{
-            .executable = .{ .code = bound.code, .targets = bound.bound_targets, .owner = .static },
+            .storage = .{ .code = bound.code, .targets = targets, .owner = .static },
             .dependencies = bound.dependencies,
         };
-        result.executable.owner = .{ .anonymous = result };
+        result.storage.owner = .{ .anonymous = result };
         return result;
+    }
+
+    pub fn executable(self: *const AnonymousCode) *const Executable {
+        return Executable.of(&self.storage);
     }
 
     pub fn retain(self: *AnonymousCode) void {
@@ -631,7 +737,7 @@ pub const AnonymousCode = struct {
         self: *AnonymousCode,
     ) bool {
         if (self.dependencies) |dependencies| dependencies.retire(releases);
-        self.executable.free(releases, allocator);
+        self.storage.free(releases, allocator);
         allocator.destroy(self);
         return true;
     }
@@ -669,6 +775,19 @@ pub const Alias = struct {
 /// A directory of names. Session and image directories are immutable once
 /// readers can reach them; core's is filled only while it is being built.
 pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
+
+/// A name in a module group under construction: a reservation the group will
+/// seal, a definition sealed at creation, or an alias. Only the construction
+/// owner reads this directory; sealing builds the published `NameMap` from
+/// it, so a published directory never holds a reservation.
+pub const GroupEntry = union(enum) {
+    reserved: *Reservation,
+    definition: *Definition,
+    alias: Alias,
+};
+
+/// A module group's construction directory.
+pub const GroupMap = poll.FixedMap(intern.BindingName, GroupEntry);
 
 const ScopeAllocation = enum { embedded, heap };
 
@@ -1499,7 +1618,7 @@ pub const BuildingEnv = enum(usize) {
             var lookup = state.core.rawLookup(name);
             const entry = poll.drive(?Entry, &lookup, .{}) orelse continue;
             switch (entry) {
-                .definition => |definition| if (definition.code().* == .source) recognize(environment, spelling, definition),
+                .definition => |definition| if (definition.code() == .source) recognize(environment, spelling, definition),
                 .alias => {},
             }
         }

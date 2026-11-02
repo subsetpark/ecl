@@ -1209,7 +1209,7 @@ const Eval = struct {
     inline fn release(self: Eval, releases: *heap.ReleaseDomain) void {
         switch (self.program) {
             .incremental, .unbound => releases.releaseHeader(self.code),
-            .bound => |executable| executable.owner.release(releases),
+            .bound => |executable| executable.owner().release(releases),
             .borrowed => {},
         }
     }
@@ -1218,7 +1218,7 @@ const Eval = struct {
     fn retainCopy(self: Eval) void {
         switch (self.program) {
             .incremental, .unbound => heap.incRef(self.code),
-            .bound => |executable| executable.owner.retain(),
+            .bound => |executable| executable.owner().retain(),
             .borrowed => {},
         }
     }
@@ -1230,7 +1230,7 @@ const Eval = struct {
             .incremental, .unbound => return self.code,
             .bound => |executable| {
                 heap.incRef(self.code);
-                executable.owner.release(releases);
+                executable.owner().release(releases);
                 return self.code;
             },
             .borrowed => {
@@ -1569,7 +1569,7 @@ const ApplicationReuse = struct {
     slots: [2]?*env.AnonymousCode = .{ null, null },
 
     fn find(self: *const ApplicationReuse, code: *Header) ?*env.AnonymousCode {
-        for (self.slots) |slot| if (slot) |held| if (held.executable.code == code) return held;
+        for (self.slots) |slot| if (slot) |held| if (held.executable().code() == code) return held;
         return null;
     }
 
@@ -1678,7 +1678,7 @@ const BindingReuse = struct {
         const matches = struct {
             fn at(entry: ?Entry, wanted: *Header, at_publication: u64, at_provenance: u64) bool {
                 const held = entry orelse return false;
-                return held.code.executable.code == wanted and held.publication == at_publication and
+                return held.code.executable().code() == wanted and held.publication == at_publication and
                     held.provenance == at_provenance;
             }
         }.at;
@@ -5688,7 +5688,7 @@ pub const Unit = struct {
         // An executable this invocation already bound for the quotation is
         // reused; otherwise the application binds when it first runs.
         const program: Program = if (application.bound.find(application.quotation)) |code| reused: {
-            break :reused .{ .borrowed = &code.executable };
+            break :reused .{ .borrowed = code.executable() };
         } else unbound: {
             heap.incRef(application.quotation);
             break :unbound .unbound;
@@ -5933,11 +5933,19 @@ pub const Unit = struct {
         }
         if (self.reusableExecutable(current.code)) |code| {
             self.releases.releaseHeader(current.code);
-            current.program = .{ .bound = &code.executable };
+            current.program = .{ .bound = code.executable() };
             // The invocation must own what it runs, exactly as after a fresh
             // binding: a publication before its next application must not
             // send that application back to the binder.
             self.rememberInApplication(code);
+            return;
+        }
+        if (try self.bindFromLookups(current.code)) |code| {
+            self.releases.releaseHeader(current.code);
+            current.program = .{ .bound = code.executable() };
+            // Cached like any binding: a literal quotation applied again
+            // then reuses this executable rather than rebinding each time.
+            self.rememberExecutable(code, self.inherited.registry.currentPublication());
             return;
         }
         var context = self.resolutionContext(self.inherited.registry.view());
@@ -5949,6 +5957,54 @@ pub const Unit = struct {
             .context = .init(context),
             .cursor = .init(cursor),
         });
+    }
+
+    /// Binds a short quotation inline when the unit has already resolved
+    /// every word it executes, in this publication and under this
+    /// provenance: a quotation built at run time, such as by `compose`, is new
+    /// every time, so only its words can be reused. Null sends it to the full
+    /// binder.
+    fn bindFromLookups(self: *Unit, code: *Header) error{OutOfMemory}!?*env.AnonymousCode {
+        if (self.inherited.phase == .bootstrap) return null;
+        const length: usize = @intCast(code.length());
+        if (length > binder.reused_binding_limit) return null;
+        const work = self.workBudget();
+        if (work.remaining < length) return null;
+        const Cache = struct {
+            lookups: *const LookupReuse,
+            publication: u64,
+            provenance: modules.RegistrationProvenance,
+            pub fn find(cache: @This(), word: value.Symbol) ?*env.Definition {
+                return cache.lookups.find(word, cache.publication, cache.provenance);
+            }
+        };
+        const bound = try binder.bindReused(self.allocator, code, Cache{
+            .lookups = &self.lookups,
+            .publication = self.inherited.registry.currentPublication(),
+            .provenance = self.current.?.site.registration_provenance,
+        }) orelse return null;
+        _ = work.take(length);
+        return env.AnonymousCode.create(self.allocator, bound) catch |err| {
+            bound.discard(self.releases, self.allocator);
+            return err;
+        };
+    }
+
+    /// Records what a completed binding resolved its first words to, so a
+    /// later quotation built from the same words binds inline. Bounded by the
+    /// inline limit, not the body.
+    fn rememberLookups(self: *Unit, executable: *const env.Executable, publication: u64) void {
+        if (self.inherited.phase == .bootstrap) return;
+        // Only a generic spine holds words; a typed list is all data.
+        if (executable.code().kind() != .generic_spine) return;
+        const forms = heap.valuesConst(executable.code())[0..@intCast(executable.code().length())];
+        const provenance = self.current.?.site.registration_provenance;
+        const limit = @min(forms.len, binder.reused_binding_limit);
+        for (forms[0..limit], 0..) |form, index| {
+            const word = binder.executableWord(form) orelse continue;
+            const definition = executable.target(@intCast(index)) orelse continue;
+            self.lookups.remember(self.releases, word, publication, provenance, definition);
+        }
     }
 
     /// A retained executable for `code`, from the running application's own
@@ -5963,7 +6019,7 @@ pub const Unit = struct {
     fn applicationExecutable(self: *Unit, code: *Header) ?*const env.Executable {
         const index = self.current.?.application_tail orelse return null;
         return switch (self.frames.items[@backingInt(index)]) {
-            .application => |*application| if (application.bound.find(code)) |found| &found.executable else null,
+            .application => |*application| if (application.bound.find(code)) |found| found.executable() else null,
             else => null,
         };
     }
@@ -6855,10 +6911,11 @@ const BindingDriver = struct {
                 };
                 evaluator.retireDriver(self);
                 const current = &evaluator.current.?;
-                std.debug.assert(current.program == .unbound and current.code == code.executable.code);
+                std.debug.assert(current.program == .unbound and current.code == code.executable().code());
                 evaluator.releases.releaseHeader(current.code);
-                current.program = .{ .bound = &code.executable };
+                current.program = .{ .bound = code.executable() };
                 evaluator.rememberExecutable(code, publication);
+                evaluator.rememberLookups(code.executable(), publication);
                 return .detached;
             },
             .failed => |failure| {
@@ -7082,7 +7139,7 @@ pub const ExplicitLookup = struct {
         self.* = undefined;
     }
 
-    pub fn advance(self: *ExplicitLookup) binder.Progress {
+    pub fn advance(self: *ExplicitLookup) binder.Resolver.Progress {
         return self.resolver.advance(&self.context);
     }
 };
@@ -7157,7 +7214,7 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) MachineError!void {
     // A homeless builtin has no effect boundary and no recognition: the
     // common case, run directly.
-    if (definition.home == null) switch (definition.code().*) {
+    if (definition.home == null) switch (definition.code()) {
         .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
         else => {},
     };
@@ -7168,13 +7225,13 @@ fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) Machine
     const cross_home = home != null and home != self.current.?.home();
     const checked = cross_home and origin != .standard_library;
     const cross_home_effect = if (checked) definition.effect else null;
-    switch (definition.code().*) {
-        .source => |*executable| {
+    switch (definition.code()) {
+        .source => |executable| {
             // A trusted definition's recognition was decided when its group
             // sealed; one that recognized nothing runs as any source word does.
             const trusted = origin == .core or origin == .standard_library;
             if (trusted) if (definition.direct_idiom) |idiom| {
-                switch (try idioms.applyTrusted(self, .{ .body = executable.code, .idiom = idiom })) {
+                switch (try idioms.applyTrusted(self, .{ .body = executable.code(), .idiom = idiom })) {
                     .applied => return,
                     .declined => {},
                     .offered => |request| {
@@ -7248,7 +7305,7 @@ const DirectWordFallback = struct {
     pub fn run(evaluator: *Unit, self: *DirectWordFallback) MachineError!void {
         return scheduleWord(
             evaluator,
-            &self.definition.code().source,
+            self.definition.code().source,
             self.word,
             modules.definitionHome(self.definition),
             if (self.effect) |*owned| owned.borrow().effect else null,
@@ -7602,15 +7659,15 @@ fn scheduleWord(
 /// hold the callee's last reference.
 fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
-    executable.owner.retain();
+    executable.owner().retain();
     var entered = false;
-    defer if (!entered) executable.owner.release(self.releases);
-    var effect_tail = self.replaceTailEffectCandidate(executable.code);
+    defer if (!entered) executable.owner().release(self.releases);
+    var effect_tail = self.replaceTailEffectCandidate(executable.code());
     const application_tail = self.tailApplicationIndex();
     _ = self.suspendCurrent() catch return error.OutOfMemory;
     if (check) |*effect_check| {
         const check_index: EffectCheckIndex = @fromBackingInt(@intCast(@as(u32, @intCast(self.frames.items.len))));
-        effect_check.activateSource(executable.code, check_index, self.effect_check_index);
+        effect_check.activateSource(executable.code(), check_index, self.effect_check_index);
         var continuation = OwnedFrame.init(.{ .effect_check = effect_check.* });
         defer continuation.deinit(self.releases, self.allocator);
         try self.appendFrame(&continuation);
@@ -7619,7 +7676,7 @@ fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceW
     }
     entered = true;
     self.current = .{
-        .code = executable.code,
+        .code = executable.code(),
         .program = .{ .bound = executable },
         .position = .{ .source = 0 },
         .site = site,
@@ -8225,7 +8282,7 @@ fn recognizeGroup(evaluator: *Unit, image: *modules.OwnedImage) void {
     const frozen: FrozenGroup = .{
         .environment = evaluator.environment,
         .image_scope = home.scope(evaluator.module_access).cellId(),
-        .directory = image.groupDirectory(),
+        .directory = image.sealedDirectory(),
     };
     const lookup: idioms.FrozenLookup = .{ .context = &frozen, .resolve_fn = FrozenGroup.resolve };
     for (idioms.direct_names) |spelling| {
@@ -8235,13 +8292,13 @@ fn recognizeGroup(evaluator: *Unit, image: *modules.OwnedImage) void {
             break :local spelling[dot + 1 ..];
         } else spelling;
         const id = intern.intern(local) catch continue;
-        var cursor = image.groupDirectory().rawLookup(@fromBackingInt(id));
+        var cursor = image.sealedDirectory().rawLookup(@fromBackingInt(id));
         const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse continue;
         const definition = switch (entry) {
             .definition => |definition| definition,
             .alias => continue,
         };
-        if (definition.code().* != .source) continue;
+        if (definition.code() != .source) continue;
         definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
     }
 }
@@ -8267,16 +8324,16 @@ const ModuleSealDriver = struct {
     const Phase = union(enum) {
         group: modules.GroupCursor,
         bind: struct {
-            entries: env.NameMap.RawEntryCursor,
-            current: ?struct { definition: *env.Definition, cursor: binder.BindingCursor } = null,
+            entries: env.GroupMap.RawEntryCursor,
+            current: ?struct { reservation: *env.Reservation, cursor: binder.BindingCursor } = null,
         },
-        seal: env.NameMap.RawEntryCursor,
+        seal: modules.SealCursor,
 
         pub fn deinit(self: *Phase) void {
             switch (self.*) {
                 .group => |*cursor| cursor.deinit(),
                 .bind => |*bind| if (bind.current) |*current| current.cursor.deinit(),
-                .seal => {},
+                .seal => |*cursor| cursor.deinit(),
             }
             self.* = undefined;
         }
@@ -8313,15 +8370,15 @@ const ModuleSealDriver = struct {
                         .pending => continue,
                         .complete => |result| result,
                     };
-                    const definition = current.definition;
+                    const reservation = current.reservation;
                     switch (result) {
                         .bound => |bound| {
                             current.cursor.deinit();
                             bind.current = null;
-                            definition.stage(evaluator.releases, bound);
+                            reservation.stage(evaluator.releases, bound);
                         },
                         .failed => |failure| {
-                            const code = definition.reservedQuotation();
+                            const code = reservation.quotation();
                             const word = heap.valuesConst(code)[failure.index].symbol;
                             evaluator.retireDriver(self);
                             evaluator.missOrLoad(word, failure.miss, .load_only) catch |err| {
@@ -8336,28 +8393,28 @@ const ModuleSealDriver = struct {
                 switch (bind.entries.advance()) {
                     .pending => {},
                     .item => |entry| switch (entry.value) {
-                        .definition => |definition| if (definition.isReserved()) {
+                        .reserved => |reservation| {
                             // Built before assignment: assigning `try` in place
                             // would mark `current` present before a failure.
                             const cursor = try binder.BindingCursor.init(
                                 evaluator.allocator,
                                 evaluator.releases,
-                                definition.reservedQuotation(),
+                                reservation.quotation(),
                             );
-                            bind.current = .{ .definition = definition, .cursor = cursor };
+                            bind.current = .{ .reservation = reservation, .cursor = cursor };
                         },
-                        .alias => {},
+                        .definition, .alias => {},
                     },
-                    .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).groupEntries() },
+                    .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).sealCursor() },
                 }
             },
             // Every body bound against one view; seal them together.
-            .seal => |*entries| switch (entries.advance()) {
+            .seal => |*cursor| switch (cursor.advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // Every body was bound, never sealed as a literal.
+                error.UnboundWord => unreachable,
+            }) {
                 .pending => {},
-                .item => |entry| switch (entry.value) {
-                    .definition => |definition| if (definition.isReserved()) definition.seal(evaluator.releases),
-                    .alias => {},
-                },
                 .complete => {
                     const owned = image(evaluator);
                     const provenance = owned.provenance();

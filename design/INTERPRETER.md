@@ -633,12 +633,19 @@ members call one another; sealing installs the bound body as its executable. A
 reserved definition is reachable only from its construction owner, so it can be
 neither executed nor published.
 
-The boundary is three types. A definition's construction state is private to
-`env`, which alone reserves, stages a bound body, and seals; every other
-consumer reads a sealed definition's code and so never handles a reserved one.
-A bound body is minted only by the binder and consumed only by sealing. An
-`Executable` is minted only by sealing. Zig fields cannot be private, so the
-source audit owns the first two confinements.
+The boundary is three handles. Reserving yields a `Reservation`, which binding
+may name as a target and which carries the definition's metadata, but which
+no execution, publication, or reflection path accepts. Sealing consumes it
+and yields the `*Definition`, so every holder of a definition holds sealed
+code. A bound body's target table holds opaque slots, which name targets
+without making them callable; sealing reinterprets them as definitions, which
+is sound because a construction seals every reservation its bodies name before
+any of them can run. An `Executable` is an opaque handle over storage embedded
+in its owner, minted only by sealing. The reservation and the definition share
+storage, so the source audit confines the one field holding both states to
+`env`. A module group binds against its own construction directory, whose
+entries may be reservations; sealing builds the published directory from it
+one entry per step, so a published directory never holds a reservation.
 
 Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
@@ -673,9 +680,10 @@ entry; `core.` names core alone. A name alias is followed through the same
 resolver, as the module holding it would resolve it; Brent's algorithm detects
 a cycle without bounding the length of an acyclic chain. Binding is bounded
 work charged to the unit. It borrows targets while it runs, since its captured
-view keeps them alive, and notes each distinct counted one in a set whose
-capacity the body's length fixes, so the set never grows. Only after the walk
-does it take references, into an exact-size table, one per step. The table
+view keeps them alive, and notes each distinct counted one in a fixed map whose
+capacity the forms still to bind fix, so it never grows; clearing and probing
+it are cursors charged one slot per step. Only after the walk does it take
+references, into an exact-size table, one per step. The table
 retires as its own owner, one reference per retirement step, so abandoning a
 binding, discarding an unsealed body, or retiring a definition is constant
 work. A word that names an unregistered module suspends binding while the module
@@ -733,7 +741,14 @@ registration provenance; any publication in the Session invalidates every
 entry. The cache is searched by identity and replaced in a fixed rotation,
 never placed by address, so its hits do not depend on heap layout.
 Equal quotations from different roots are distinct values and never share an
-entry. The bootstrap unit skips the cache because core's directory changes
+entry. A quotation built at run time, as `compose` builds one, is new every
+time, so it can never hit that cache; what repeats is its words. A short
+quotation, up to a constant number of forms so the step is bounded, therefore
+binds inline from the unit's explicit-lookup cache when every word it executes
+is there for the current publication and provenance. That is exactly what the
+full binder would compute, since an anonymous binding has no construction in
+progress; any miss sends it to the full binder, whose completion records the
+words it resolved. The bootstrap unit skips the cache because core's directory changes
 without a publication. Nested quotations are not bound early for either reuse.
 
 ### An execution site correlates its contexts
