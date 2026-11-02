@@ -2561,25 +2561,24 @@ pub const Registry = enum(usize) {
             /// The successor directory: the snapshot's maps with this edit's
             /// one entry changed. Bounded by the maps' depth.
             fn buildCandidate(self: *Self, snapshot: ?*const Directory, target: Target) error{OutOfMemory}!*Directory {
-                const map_allocator = self.registry.allocator();
                 const releases = self.registry.releaseDomain();
                 const old: Directory = if (snapshot) |current| current.* else .{};
                 var modules = switch (kind) {
-                    .register => try old.modules.put(map_allocator, releases, target.canonical, self.request.borrow()),
+                    .register => try old.modules.put(releases, target.canonical, self.request.borrow()),
                     .alias, .define => old.modules.retain(),
                 };
                 errdefer modules.release(releases);
                 var aliases = switch (kind) {
-                    .alias => try old.aliases.put(map_allocator, releases, self.request.short, target.canonical),
+                    .alias => try old.aliases.put(releases, self.request.short, target.canonical),
                     .register, .define => old.aliases.retain(),
                 };
                 errdefer aliases.release(releases);
                 var names = switch (kind) {
-                    .define => try old.names.put(map_allocator, releases, self.request.name, self.request.entry),
+                    .define => try old.names.put(releases, self.request.name, self.request.entry),
                     .register, .alias => old.names.retain(),
                 };
                 errdefer names.release(releases);
-                const candidate = try map_allocator.create(Directory);
+                const candidate = try releases.allocator.create(Directory);
                 candidate.* = .{ .modules = modules, .aliases = aliases, .names = names };
                 return candidate;
             }

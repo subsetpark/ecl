@@ -888,16 +888,16 @@ pub fn PersistentMap(comptime K: type, comptime V: type, comptime Value: type) t
         /// A new version with `key` bound to `value`, taking its own reference
         /// to `value`; this version is unchanged. Bounded: copies at most
         /// `max_depth` nodes of at most `fanout` slots. On failure nothing is
-        /// retained.
+        /// retained. Nodes are allocated from the release domain's allocator, the
+        /// one that frees them on retirement.
         pub fn put(
             self: *const Self,
-            allocator: std.mem.Allocator,
             releases: *heap.ReleaseDomain,
             key: K,
             value: V,
         ) error{OutOfMemory}!Self {
             var added = false;
-            const root = try putIn(allocator, releases, self.root, 0, .{ .key = key, .value = value }, &added);
+            const root = try putIn(releases, self.root, 0, .{ .key = key, .value = value }, &added);
             return .{ .root = root, .count = self.count + @intFromBool(added) };
         }
 
@@ -933,7 +933,6 @@ pub fn PersistentMap(comptime K: type, comptime V: type, comptime Value: type) t
         }
 
         fn putIn(
-            allocator: std.mem.Allocator,
             releases: *heap.ReleaseDomain,
             node: ?*const Node,
             depth: usize,
@@ -942,34 +941,34 @@ pub fn PersistentMap(comptime K: type, comptime V: type, comptime Value: type) t
         ) error{OutOfMemory}!*Node {
             const bit = @as(u32, 1) << position(entry.key, depth);
             const existing = node orelse {
-                const created = try copyWith(allocator, null, bit, .{ .entry = entry }, false);
+                const created = try copyWith(releases.allocator, null, bit, .{ .entry = entry }, false);
                 Value.retain(entry.value);
                 added.* = true;
                 return created;
             };
             if (existing.occupied & bit == 0) {
-                const created = try copyWith(allocator, existing, bit, .{ .entry = entry }, false);
+                const created = try copyWith(releases.allocator, existing, bit, .{ .entry = entry }, false);
                 Value.retain(entry.value);
                 added.* = true;
                 return created;
             }
             const slot = existing.slotsConst()[slotIndex(existing.occupied, bit)];
             if (existing.branches & bit != 0) {
-                const child = try putIn(allocator, releases, slot.child, depth + 1, entry, added);
-                return copyWith(allocator, existing, bit, .{ .child = child }, true) catch |err| {
+                const child = try putIn(releases, slot.child, depth + 1, entry, added);
+                return copyWith(releases.allocator, existing, bit, .{ .child = child }, true) catch |err| {
                     child.release(releases);
                     return err;
                 };
             }
             if (slot.entry.key == entry.key) {
-                const created = try copyWith(allocator, existing, bit, .{ .entry = entry }, false);
+                const created = try copyWith(releases.allocator, existing, bit, .{ .entry = entry }, false);
                 Value.retain(entry.value);
                 return created;
             }
             // Two keys share this position: part them one level down.
-            const child = try pair(allocator, releases, depth + 1, slot.entry, entry);
+            const child = try pair(releases, depth + 1, slot.entry, entry);
             added.* = true;
-            return copyWith(allocator, existing, bit, .{ .child = child }, true) catch |err| {
+            return copyWith(releases.allocator, existing, bit, .{ .child = child }, true) catch |err| {
                 child.release(releases);
                 return err;
             };
@@ -979,7 +978,6 @@ pub fn PersistentMap(comptime K: type, comptime V: type, comptime Value: type) t
         /// new `entry`, at the first depth their positions differ. Distinct
         /// 32-bit keys differ by `max_depth`.
         fn pair(
-            allocator: std.mem.Allocator,
             releases: *heap.ReleaseDomain,
             depth: usize,
             kept: Entry,
@@ -989,15 +987,15 @@ pub fn PersistentMap(comptime K: type, comptime V: type, comptime Value: type) t
             const kept_bit = @as(u32, 1) << position(kept.key, depth);
             const entry_bit = @as(u32, 1) << position(entry.key, depth);
             if (kept_bit == entry_bit) {
-                const child = try pair(allocator, releases, depth + 1, kept, entry);
-                const node = Node.create(allocator, kept_bit, kept_bit) catch |err| {
+                const child = try pair(releases, depth + 1, kept, entry);
+                const node = Node.create(releases.allocator, kept_bit, kept_bit) catch |err| {
                     child.release(releases);
                     return err;
                 };
                 node.slots()[0] = .{ .child = child };
                 return node;
             }
-            const node = try Node.create(allocator, kept_bit | entry_bit, 0);
+            const node = try Node.create(releases.allocator, kept_bit | entry_bit, 0);
             const slots = node.slots();
             const kept_first = kept_bit < entry_bit;
             slots[if (kept_first) 0 else 1] = .{ .entry = kept };
@@ -1135,7 +1133,7 @@ test "PersistentMap: every version keeps its contents and releases every referen
     for (0..saved * 40) |step| {
         const index = random.uintLessThan(usize, keys.len);
         const cell = &cells[random.uintLessThan(usize, cells.len)];
-        const next = try current.put(allocator, &releases, @fromBackingInt(@intCast(keys[index])), cell);
+        const next = try current.put(&releases, @fromBackingInt(@intCast(keys[index])), cell);
         current.release(&releases);
         current = next;
         oracle[index] = cell;
@@ -1163,13 +1161,13 @@ test "PersistentMap: a failed put retains nothing and leaves its version whole" 
     while (true) : (fail_index += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         const allocator = failing.allocator();
-        var releases = heap.ReleaseDomain.init(std.testing.allocator);
+        var releases = heap.ReleaseDomain.init(allocator);
         var map: T.Map = .{};
         var oracle: [keys.len]?*T.Cell = @splat(null);
         var failed = false;
         for (puts, 0..) |index, step| {
             const cell = &cells[step];
-            const next = map.put(allocator, &releases, @fromBackingInt(@intCast(keys[index])), cell) catch {
+            const next = map.put(&releases, @fromBackingInt(@intCast(keys[index])), cell) catch {
                 failed = true;
                 break;
             };
