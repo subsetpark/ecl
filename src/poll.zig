@@ -730,3 +730,457 @@ pub fn ChunkList(comptime T: type) type {
         }
     };
 }
+
+/// An immutable map from a 32-bit name to `V`, shared between versions. `put`
+/// returns a new version that copies only the nodes on its key's path, at most
+/// `max_depth`, and shares every other node with the version it was made
+/// from; so an edit is bounded work however large the map grows. A key is
+/// its own hash: names are unique 32-bit identities, so two keys always part
+/// within `max_depth` levels and no node holds colliding keys.
+///
+/// A version owns one reference to its root, and a node one to each child
+/// and, through `Value`, to each value it holds. A node is immutable once it
+/// is reachable; releasing a version's last reference to a node retires it
+/// through the release domain, which releases at most `fanout` children and
+/// values in one step.
+///
+/// `Value` supplies `retain(V)` and `release(V, *heap.ReleaseDomain)`.
+pub fn PersistentMap(comptime K: type, comptime V: type, comptime Value: type) type {
+    comptime {
+        if (@typeInfo(K) != .@"enum" or @typeInfo(K).@"enum".tag_type != u32)
+            @compileError("PersistentMap keys are 32-bit name identities");
+    }
+    return struct {
+        const Self = @This();
+        pub const Entry = struct { key: K, value: V };
+
+        const chunk_bits = 5;
+        const fanout = 1 << chunk_bits;
+        pub const max_depth = (32 + chunk_bits - 1) / chunk_bits;
+
+        root: ?*Node = null,
+        count: usize = 0,
+
+        const Slot = union { entry: Entry, child: *Node };
+
+        const Node = struct {
+            retirement: heap.ReleaseDomain.Retirement = .{},
+            refs: std.atomic.Value(u32) = .init(1),
+            /// The positions, of `fanout`, that hold a slot.
+            occupied: u32,
+            /// Of the occupied positions, those whose slot is a child node.
+            branches: u32,
+
+            fn len(self: *const Node) usize {
+                return @popCount(self.occupied);
+            }
+
+            fn slots(self: *Node) []Slot {
+                const base: [*]u8 = @ptrCast(self);
+                const first: [*]Slot = @ptrCast(@alignCast(base + slots_offset));
+                return first[0..self.len()];
+            }
+
+            fn slotsConst(self: *const Node) []const Slot {
+                return @constCast(self).slots();
+            }
+
+            const slots_offset = std.mem.alignForward(usize, @sizeOf(Node), @alignOf(Slot));
+            const alignment: std.mem.Alignment = .of(if (@alignOf(Node) > @alignOf(Slot)) Node else Slot);
+
+            fn bytes(slot_count: usize) usize {
+                return slots_offset + slot_count * @sizeOf(Slot);
+            }
+
+            /// A node with `occupied` and `branches` whose slots the caller
+            /// fills before anything can reach it.
+            fn create(allocator: std.mem.Allocator, occupied: u32, branches: u32) error{OutOfMemory}!*Node {
+                const memory = try allocator.alignedAlloc(u8, alignment, bytes(@popCount(occupied)));
+                const node: *Node = @ptrCast(@alignCast(memory.ptr));
+                node.* = .{ .occupied = occupied, .branches = branches };
+                return node;
+            }
+
+            fn destroy(self: *Node, allocator: std.mem.Allocator) void {
+                const base: [*]align(alignment.toByteUnits()) u8 = @ptrCast(@alignCast(self));
+                allocator.free(base[0..bytes(self.len())]);
+            }
+
+            fn retain(self: *Node) void {
+                const old = self.refs.fetchAdd(1, .monotonic);
+                std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+            }
+
+            fn release(self: *Node, releases: *heap.ReleaseDomain) void {
+                const old = self.refs.fetchSub(1, .release);
+                std.debug.assert(old != 0);
+                if (old != 1) return;
+                _ = self.refs.load(.acquire);
+                releases.retire(self, &self.retirement);
+            }
+
+            /// Constant work: at most `fanout` children and values.
+            pub fn advanceRetirement(
+                releases: *heap.ReleaseDomain,
+                allocator: std.mem.Allocator,
+                self: *Node,
+            ) bool {
+                for (self.slots(), 0..) |slot, index| {
+                    if (self.isBranchAt(index)) slot.child.release(releases) else Value.release(slot.entry.value, releases);
+                }
+                self.destroy(allocator);
+                return true;
+            }
+
+            /// Whether the `index`th occupied slot is a child.
+            fn isBranchAt(self: *const Node, index: usize) bool {
+                return self.branches & nthSetBit(self.occupied, index) != 0;
+            }
+
+            /// A second reference to every slot, for a copy that shares them.
+            fn retainSlot(self: *const Node, index: usize) void {
+                const slot = self.slotsConst()[index];
+                if (self.isBranchAt(index)) slot.child.retain() else Value.retain(slot.entry.value);
+            }
+        };
+
+        fn nthSetBit(mask: u32, index: usize) u32 {
+            var remaining = mask;
+            for (0..index) |_| remaining &= remaining - 1;
+            return remaining & (~remaining +% 1);
+        }
+
+        fn position(key: K, depth: usize) u5 {
+            return @truncate(@backingInt(key) >> @intCast(depth * chunk_bits));
+        }
+
+        fn slotIndex(occupied: u32, bit: u32) usize {
+            return @popCount(occupied & (bit - 1));
+        }
+
+        /// The value at `key`, borrowed while this version is held.
+        pub fn find(self: *const Self, key: K) ?V {
+            var node = self.root orelse return null;
+            var depth: usize = 0;
+            while (true) : (depth += 1) {
+                const bit = @as(u32, 1) << position(key, depth);
+                if (node.occupied & bit == 0) return null;
+                const slot = node.slotsConst()[slotIndex(node.occupied, bit)];
+                if (node.branches & bit != 0) {
+                    node = slot.child;
+                    continue;
+                }
+                return if (slot.entry.key == key) slot.entry.value else null;
+            }
+        }
+
+        /// A second reference to this version.
+        pub fn retain(self: *const Self) Self {
+            if (self.root) |root| root.retain();
+            return self.*;
+        }
+
+        pub fn release(self: *Self, releases: *heap.ReleaseDomain) void {
+            if (self.root) |root| root.release(releases);
+            self.* = .{};
+        }
+
+        /// A new version with `key` bound to `value`, taking its own reference
+        /// to `value`; this version is unchanged. Bounded: copies at most
+        /// `max_depth` nodes of at most `fanout` slots. On failure nothing is
+        /// retained.
+        pub fn put(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            releases: *heap.ReleaseDomain,
+            key: K,
+            value: V,
+        ) error{OutOfMemory}!Self {
+            var added = false;
+            const root = try putIn(allocator, releases, self.root, 0, .{ .key = key, .value = value }, &added);
+            return .{ .root = root, .count = self.count + @intFromBool(added) };
+        }
+
+        /// A copy of `node` with the slot at `bit` set to `replacement`, sharing
+        /// every other slot. `replacement` is already owned by the caller.
+        fn copyWith(
+            allocator: std.mem.Allocator,
+            node: ?*const Node,
+            bit: u32,
+            replacement: Slot,
+            replacement_is_branch: bool,
+        ) error{OutOfMemory}!*Node {
+            const old_occupied: u32 = if (node) |old| old.occupied else 0;
+            const old_branches: u32 = if (node) |old| old.branches else 0;
+            const occupied = old_occupied | bit;
+            const branches = if (replacement_is_branch) old_branches | bit else old_branches & ~bit;
+            const copy = try Node.create(allocator, occupied, branches);
+            const target = slotIndex(occupied, bit);
+            const slots = copy.slots();
+            var from: usize = 0;
+            for (slots, 0..) |*slot, index| {
+                if (index == target) {
+                    slot.* = replacement;
+                    if (old_occupied & bit != 0) from += 1;
+                    continue;
+                }
+                const old = node.?;
+                slot.* = old.slotsConst()[from];
+                old.retainSlot(from);
+                from += 1;
+            }
+            return copy;
+        }
+
+        fn putIn(
+            allocator: std.mem.Allocator,
+            releases: *heap.ReleaseDomain,
+            node: ?*const Node,
+            depth: usize,
+            entry: Entry,
+            added: *bool,
+        ) error{OutOfMemory}!*Node {
+            const bit = @as(u32, 1) << position(entry.key, depth);
+            const existing = node orelse {
+                const created = try copyWith(allocator, null, bit, .{ .entry = entry }, false);
+                Value.retain(entry.value);
+                added.* = true;
+                return created;
+            };
+            if (existing.occupied & bit == 0) {
+                const created = try copyWith(allocator, existing, bit, .{ .entry = entry }, false);
+                Value.retain(entry.value);
+                added.* = true;
+                return created;
+            }
+            const slot = existing.slotsConst()[slotIndex(existing.occupied, bit)];
+            if (existing.branches & bit != 0) {
+                const child = try putIn(allocator, releases, slot.child, depth + 1, entry, added);
+                return copyWith(allocator, existing, bit, .{ .child = child }, true) catch |err| {
+                    child.release(releases);
+                    return err;
+                };
+            }
+            if (slot.entry.key == entry.key) {
+                const created = try copyWith(allocator, existing, bit, .{ .entry = entry }, false);
+                Value.retain(entry.value);
+                return created;
+            }
+            // Two keys share this position: part them one level down.
+            const child = try pair(allocator, releases, depth + 1, slot.entry, entry);
+            added.* = true;
+            return copyWith(allocator, existing, bit, .{ .child = child }, true) catch |err| {
+                child.release(releases);
+                return err;
+            };
+        }
+
+        /// A node holding `kept`, which another node already holds, and the
+        /// new `entry`, at the first depth their positions differ. Distinct
+        /// 32-bit keys differ by `max_depth`.
+        fn pair(
+            allocator: std.mem.Allocator,
+            releases: *heap.ReleaseDomain,
+            depth: usize,
+            kept: Entry,
+            entry: Entry,
+        ) error{OutOfMemory}!*Node {
+            std.debug.assert(depth < max_depth);
+            const kept_bit = @as(u32, 1) << position(kept.key, depth);
+            const entry_bit = @as(u32, 1) << position(entry.key, depth);
+            if (kept_bit == entry_bit) {
+                const child = try pair(allocator, releases, depth + 1, kept, entry);
+                const node = Node.create(allocator, kept_bit, kept_bit) catch |err| {
+                    child.release(releases);
+                    return err;
+                };
+                node.slots()[0] = .{ .child = child };
+                return node;
+            }
+            const node = try Node.create(allocator, kept_bit | entry_bit, 0);
+            const slots = node.slots();
+            const kept_first = kept_bit < entry_bit;
+            slots[if (kept_first) 0 else 1] = .{ .entry = kept };
+            slots[if (kept_first) 1 else 0] = .{ .entry = entry };
+            Value.retain(kept.value);
+            Value.retain(entry.value);
+            return node;
+        }
+
+        pub const RawEntryProgress = StreamProgress(Entry);
+        /// Every entry of one version, one per step; the caller holds the
+        /// version for the cursor's life.
+        pub const RawEntryCursor = struct {
+            stack: [max_depth]Frame,
+            depth: usize,
+
+            const Frame = struct { node: *const Node, index: usize };
+
+            pub fn advance(self: *RawEntryCursor) RawEntryProgress {
+                while (self.depth != 0) {
+                    const frame = &self.stack[self.depth - 1];
+                    const slots = frame.node.slotsConst();
+                    if (frame.index == slots.len) {
+                        self.depth -= 1;
+                        continue;
+                    }
+                    const index = frame.index;
+                    frame.index += 1;
+                    if (frame.node.isBranchAt(index)) {
+                        self.stack[self.depth] = .{ .node = slots[index].child, .index = 0 };
+                        self.depth += 1;
+                        continue;
+                    }
+                    return .{ .item = slots[index].entry };
+                }
+                return .complete;
+            }
+        };
+
+        pub fn rawEntries(self: *const Self) RawEntryCursor {
+            // SAFETY: only frames below `depth` are read, and each is written
+            // before `depth` reaches past it.
+            var cursor: RawEntryCursor = .{ .stack = undefined, .depth = 0 };
+            if (self.root) |root| {
+                cursor.stack[0] = .{ .node = root, .index = 0 };
+                cursor.depth = 1;
+            }
+            return cursor;
+        }
+
+        pub const RawLookupProgress = Progress(?V);
+        /// `find` behind the polling shape lookups share; completes on its
+        /// first step.
+        pub const RawLookupCursor = struct {
+            map: *const Self,
+            key: K,
+
+            pub fn advance(self: *RawLookupCursor) RawLookupProgress {
+                return .{ .complete = self.map.find(self.key) };
+            }
+        };
+
+        pub fn rawLookup(self: *const Self, key: K) RawLookupCursor {
+            return .{ .map = self, .key = key };
+        }
+    };
+}
+
+const PersistentMapTest = struct {
+    const Key = enum(u32) { _ };
+    /// A counted value: the map's references to it are what `refs` counts.
+    const Cell = struct { refs: usize = 0 };
+    const Map = PersistentMap(Key, *Cell, struct {
+        pub fn retain(cell: *Cell) void {
+            cell.refs += 1;
+        }
+        pub fn release(cell: *Cell, _: *heap.ReleaseDomain) void {
+            cell.refs -= 1;
+        }
+    });
+
+    fn drain(releases: *heap.ReleaseDomain) void {
+        while (!releases.advance(64)) {}
+    }
+
+    /// Each key maps to exactly what the oracle says, and enumeration yields
+    /// exactly the oracle's entries.
+    fn expectMatches(map: *const Map, keys: []const u32, oracle: []const ?*Cell) !void {
+        for (keys, 0..) |key, index| try std.testing.expect(std.mem.indexOfScalar(u32, keys, key).? == index);
+        var expected_count: usize = 0;
+        for (keys, oracle) |key, expected| {
+            try std.testing.expectEqual(expected, map.find(@fromBackingInt(@intCast(key))));
+            if (expected != null) expected_count += 1;
+        }
+        try std.testing.expectEqual(expected_count, map.count);
+        var seen: usize = 0;
+        var entries = map.rawEntries();
+        while (true) switch (entries.advance()) {
+            .pending => {},
+            .item => |entry| {
+                seen += 1;
+                const index = std.mem.indexOfScalar(u32, keys, @backingInt(entry.key)).?;
+                try std.testing.expectEqual(oracle[index].?, entry.value);
+            },
+            .complete => break,
+        };
+        try std.testing.expectEqual(expected_count, seen);
+    }
+};
+
+test "PersistentMap: every version keeps its contents and releases every reference" {
+    const T = PersistentMapTest;
+    const allocator = std.testing.allocator;
+    var releases = heap.ReleaseDomain.init(allocator);
+    var prng = std.Random.DefaultPrng.init(0x169);
+    const random = prng.random();
+
+    var cells: [64]T.Cell = @splat(.{});
+
+    // Dense small names, as interning issues them, plus keys that agree in
+    // every chunk but the last, so pairs nest to the deepest level.
+    var keys: [96]u32 = undefined;
+    for (keys[0..48], 0..) |*key, index| key.* = @intCast(index);
+    for (keys[48..80], 0..) |*key, index| key.* = @as(u32, @intCast(index + 1)) << 26 | 7;
+    for (80..keys.len) |index| {
+        keys[index] = random.int(u32);
+        while (std.mem.indexOfScalar(u32, keys[0..index], keys[index]) != null) keys[index] = random.int(u32);
+    }
+
+    const saved = 10;
+    var versions: [saved]T.Map = undefined;
+    var oracles: [saved][keys.len]?*T.Cell = undefined;
+    var oracle: [keys.len]?*T.Cell = @splat(null);
+    var current: T.Map = .{};
+    for (0..saved * 40) |step| {
+        const index = random.uintLessThan(usize, keys.len);
+        const cell = &cells[random.uintLessThan(usize, cells.len)];
+        const next = try current.put(allocator, &releases, @fromBackingInt(@intCast(keys[index])), cell);
+        current.release(&releases);
+        current = next;
+        oracle[index] = cell;
+        if (step % 40 == 0) {
+            versions[step / 40] = current.retain();
+            oracles[step / 40] = oracle;
+        }
+    }
+    try T.expectMatches(&current, &keys, &oracle);
+    for (&versions, &oracles) |*version, *expected| try T.expectMatches(version, &keys, expected);
+
+    for (&versions) |*version| version.release(&releases);
+    current.release(&releases);
+    T.drain(&releases);
+    for (cells) |cell| try std.testing.expectEqual(@as(usize, 0), cell.refs);
+}
+
+test "PersistentMap: a failed put retains nothing and leaves its version whole" {
+    const T = PersistentMapTest;
+    var cells: [8]T.Cell = @splat(.{});
+    const keys = [_]u32{ 1, 1 << 5 | 1, 1 << 10 | 1 << 5 | 1, 2 << 5 | 1, 2, 1 << 30 | 1 };
+    const puts = [_]usize{ 0, 1, 2, 3, 4, 5, 0 };
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        var releases = heap.ReleaseDomain.init(std.testing.allocator);
+        var map: T.Map = .{};
+        var oracle: [keys.len]?*T.Cell = @splat(null);
+        var failed = false;
+        for (puts, 0..) |index, step| {
+            const cell = &cells[step];
+            const next = map.put(allocator, &releases, @fromBackingInt(@intCast(keys[index])), cell) catch {
+                failed = true;
+                break;
+            };
+            map.release(&releases);
+            map = next;
+            oracle[index] = cell;
+        }
+        try T.expectMatches(&map, &keys, &oracle);
+        map.release(&releases);
+        T.drain(&releases);
+        for (cells) |cell| try std.testing.expectEqual(@as(usize, 0), cell.refs);
+        if (!failed) break;
+    }
+}

@@ -760,60 +760,50 @@ fn publicNameCursorFor(image: *ModuleImage) ModulePublicNameCursor {
 /// turns, so it never mixes publication states. A directory owns one
 /// reference to every image and counted definition it maps; a retired
 /// directory releases them as bounded work before it frees itself.
+/// One registry snapshot. Each map is persistent: an edit shares every node
+/// it does not change with the snapshot it was made from, so a successor
+/// costs the depth of the edited map, not its size.
 const Directory = struct {
-    const ModuleMap = poll.FixedMap(intern.ModuleName, *ModuleImage);
-    const AliasMap = poll.FixedMap(intern.BindingName, intern.ModuleName);
+    const ModuleMap = poll.PersistentMap(intern.ModuleName, *ModuleImage, struct {
+        pub fn retain(image: *ModuleImage) void {
+            image.retain();
+        }
+        pub fn release(image: *ModuleImage, releases: *heap.ReleaseDomain) void {
+            _ = releases;
+            image.release();
+        }
+    });
+    const AliasMap = poll.PersistentMap(intern.BindingName, intern.ModuleName, struct {
+        pub fn retain(_: intern.ModuleName) void {}
+        pub fn release(_: intern.ModuleName, _: *heap.ReleaseDomain) void {}
+    });
+    const NameMap = poll.PersistentMap(intern.BindingName, env.Entry, struct {
+        pub fn retain(entry: env.Entry) void {
+            entry.retain();
+        }
+        pub fn release(entry: env.Entry, releases: *heap.ReleaseDomain) void {
+            entry.release(releases);
+        }
+    });
 
-    modules: ModuleMap,
-    aliases: AliasMap,
-    names: env.NameMap,
-    previous: ?*Directory,
+    modules: ModuleMap = .{},
+    aliases: AliasMap = .{},
+    names: NameMap = .{},
+    previous: ?*Directory = null,
     retirement: heap.ReleaseDomain.Retirement = .{},
-    /// The entry walk a retirement is partway through.
-    releasing: union(enum) {
-        start,
-        modules: ModuleMap.RawEntryCursor,
-        names: env.NameMap.RawEntryCursor,
-    } = .start,
 
-    /// Releases one entry per step, then frees the maps and hands the next
-    /// older directory to the release domain. A discarded edit candidate
-    /// takes the same path with no `previous`, so abandoning a registry edit
-    /// never releases a user-sized map in one call.
+    /// Releases one reference to each map's root, whose nodes retire as
+    /// their own owners once no snapshot shares them, then hands the next
+    /// older directory to the release domain. Constant work.
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         self: *Directory,
     ) bool {
-        switch (self.releasing) {
-            .start => {
-                self.releasing = .{ .modules = self.modules.rawEntries() };
-                return false;
-            },
-            .modules => |*entries| switch (entries.advance()) {
-                .pending => return false,
-                .item => |entry| {
-                    entry.value.release();
-                    return false;
-                },
-                .complete => {
-                    self.releasing = .{ .names = self.names.rawEntries() };
-                    return false;
-                },
-            },
-            .names => |*entries| switch (entries.advance()) {
-                .pending => return false,
-                .item => |entry| {
-                    entry.value.release(releases);
-                    return false;
-                },
-                .complete => {},
-            },
-        }
         const previous = self.previous;
-        self.modules.deinit();
-        self.aliases.deinit();
-        self.names.deinit();
+        self.modules.release(releases);
+        self.aliases.release(releases);
+        self.names.release(releases);
         allocator.destroy(self);
         if (previous) |next| releases.retire(next, &next.retirement);
         return true;
@@ -825,21 +815,9 @@ const Directory = struct {
         var cursor = first;
         while (cursor) |directory| {
             cursor = directory.previous;
-            var entries = directory.modules.rawEntries();
-            while (true) switch (entries.advance()) {
-                .pending => {},
-                .item => |entry| entry.value.release(),
-                .complete => break,
-            };
-            var names = directory.names.rawEntries();
-            while (true) switch (names.advance()) {
-                .pending => {},
-                .item => |entry| entry.value.release(releases),
-                .complete => break,
-            };
-            directory.modules.deinit();
-            directory.aliases.deinit();
-            directory.names.deinit();
+            directory.modules.release(releases);
+            directory.aliases.release(releases);
+            directory.names.release(releases);
             allocator.destroy(directory);
         }
     }
@@ -867,6 +845,9 @@ const DirectoryLease = struct {
     }
 };
 
+/// The session's top-level names in one snapshot, one per step.
+pub const SessionNameCursor = Directory.NameMap.RawEntryCursor;
+
 /// One captured registry snapshot: what a binding or explicit lookup resolves
 /// session names and qualified module names against. Holding it retains the
 /// snapshot, not the definitions bound through it.
@@ -885,10 +866,11 @@ pub const View = struct {
         return .{ .directory = self.directory.clone(), .publication = self.publication };
     }
 
-    /// One session top-level name in this snapshot.
-    pub fn sessionLookup(self: *const View, name: intern.BindingName) ?env.NameMap.RawLookupCursor {
+    /// One session top-level name in this snapshot, borrowed while the view
+    /// is held. Constant work.
+    pub fn sessionFind(self: *const View, name: intern.BindingName) ?env.Entry {
         const current = self.directory.directory orelse return null;
-        return current.names.rawLookup(name);
+        return current.names.find(name);
     }
 
     /// The image a module name or module alias selects in this snapshot.
@@ -897,7 +879,7 @@ pub const View = struct {
     }
 
     /// The session's top-level names in this snapshot.
-    pub fn sessionEntries(self: *const View) ?env.NameMap.RawEntryCursor {
+    pub fn sessionEntries(self: *const View) ?SessionNameCursor {
         const current = self.directory.directory orelse return null;
         return current.names.rawEntries();
     }
@@ -2401,14 +2383,14 @@ pub const Registry = enum(usize) {
     /// otherwise discard the candidate and start over. A racing edit of any
     /// kind is therefore observed as exactly one restart, never as a
     /// half-applied entry or a lost update. Registration, aliasing, and a
-    /// top-level definition differ only in validation and in which entries
-    /// change, so each is this cursor specialized at compile time.
+    /// top-level definition differ only in validation and in which entry
+    /// changes, so each is this cursor specialized at compile time.
     ///
-    /// The candidate owns one reference per image and counted definition it
-    /// copies, taken as the copy proceeds. Both outcomes retire it through
-    /// `Directory.advanceRetirement`: publication chains it in front of the
-    /// snapshot, and discard retires it alone, so neither path releases a
-    /// user-sized map in one step.
+    /// Validation and the build are each one bounded step: lookups and a
+    /// persistent map's edit cost its depth, and the candidate shares every
+    /// unchanged node with the snapshot. Both outcomes retire the candidate
+    /// through `Directory.advanceRetirement`: publication chains it in front
+    /// of the snapshot, and discard retires it alone.
     fn EditCursor(comptime kind: EditKind) type {
         return struct {
             const Self = @This();
@@ -2429,43 +2411,12 @@ pub const Registry = enum(usize) {
                 // is released; the published directory takes its own.
                 .define => struct { name: intern.BindingName, entry: env.Entry },
             };
-            const ModuleLookup = Directory.ModuleMap.RawLookupCursor;
-            const AliasLookup = Directory.AliasMap.RawLookupCursor;
 
             /// What validation establishes: the canonical name the edit is
             /// about and, for a reload, the entry it replaces.
             const Target = struct {
                 canonical: intern.ModuleName,
                 prior: ?*ModuleImage,
-            };
-            const Validation = switch (kind) {
-                .register => union(enum) {
-                    /// The short form must not already be an alias.
-                    alias_free: AliasLookup,
-                    /// The generation a reload replaces, if any.
-                    prior: ModuleLookup,
-                },
-                .alias => union(enum) {
-                    /// The short form must not be a module name.
-                    short_free: ModuleLookup,
-                    target_module: ModuleLookup,
-                    target_alias: AliasLookup,
-                    /// An alias that already names its target is a no-op.
-                    same_alias: struct { canonical: intern.ModuleName, lookup: AliasLookup },
-                },
-                .define => void,
-            };
-            const Maps = struct {
-                modules: ?Directory.ModuleMap = null,
-                aliases: ?Directory.AliasMap = null,
-                names: ?env.NameMap = null,
-
-                fn deinit(self: *Maps) void {
-                    if (self.modules) |*map| map.deinit();
-                    if (self.aliases) |*map| map.deinit();
-                    if (self.names) |*map| map.deinit();
-                    self.* = .{};
-                }
             };
             const Build = struct {
                 directory: DirectoryLease,
@@ -2474,45 +2425,8 @@ pub const Registry = enum(usize) {
             };
             const State = union(enum) {
                 snapshot,
-                validate: struct { directory: DirectoryLease, step: Validation },
-                init_maps: struct {
-                    directory: DirectoryLease,
-                    target: Target,
-                    maps: Maps,
-                    phase: enum { modules, aliases, names },
-                    cursor: ?InitCursor = null,
-                },
-                copy_modules: struct {
-                    build: Build,
-                    entries: Directory.ModuleMap.RawEntryCursor,
-                    insertion: ?Directory.ModuleMap.PutCursor = null,
-                },
-                put_module: struct { build: Build, cursor: Directory.ModuleMap.PutCursor },
-                copy_aliases: struct {
-                    build: Build,
-                    entries: Directory.AliasMap.RawEntryCursor,
-                    insertion: ?Directory.AliasMap.PutCursor = null,
-                },
-                put_alias: struct { build: Build, cursor: Directory.AliasMap.PutCursor },
-                copy_names: struct {
-                    build: Build,
-                    entries: env.NameMap.RawEntryCursor,
-                    insertion: ?env.NameMap.PutCursor = null,
-                },
-                put_name: struct { build: Build, cursor: env.NameMap.PutCursor },
                 commit: Build,
                 complete,
-            };
-            const InitCursor = union(enum) {
-                modules: Directory.ModuleMap.InitCursor,
-                aliases: Directory.AliasMap.InitCursor,
-                names: env.NameMap.InitCursor,
-
-                fn deinit(self: *InitCursor) void {
-                    switch (self.*) {
-                        inline else => |*cursor| cursor.deinit(),
-                    }
-                }
             };
 
             registry: *Registry,
@@ -2527,18 +2441,6 @@ pub const Registry = enum(usize) {
                 }
                 switch (self.state) {
                     .snapshot, .complete => {},
-                    .validate => |*state| state.directory.deinit(),
-                    .init_maps => |*state| {
-                        if (state.cursor) |*cursor| cursor.deinit();
-                        state.maps.deinit();
-                        state.directory.deinit();
-                    },
-                    .copy_modules => |*state| self.discard(&state.build),
-                    .put_module => |*state| self.discard(&state.build),
-                    .copy_aliases => |*state| self.discard(&state.build),
-                    .put_alias => |*state| self.discard(&state.build),
-                    .copy_names => |*state| self.discard(&state.build),
-                    .put_name => |*state| self.discard(&state.build),
                     .commit => |*build| self.discard(build),
                 }
                 self.* = undefined;
@@ -2561,79 +2463,6 @@ pub const Registry = enum(usize) {
             pub fn advance(self: *Self) Error!Progress {
                 switch (self.state) {
                     .snapshot => return self.beginSnapshot(),
-                    .validate => |*state| return self.validate(state),
-                    .init_maps => |*state| try self.advanceInit(state),
-                    .copy_modules => |*state| {
-                        if (state.insertion) |*insertion| switch (insertion.advance()) {
-                            .pending => return .pending,
-                            .complete => {
-                                state.insertion = null;
-                                return .pending;
-                            },
-                        };
-                        switch (state.entries.advance()) {
-                            .pending => {},
-                            .item => |entry| {
-                                const replaced = switch (kind) {
-                                    .register => entry.key == state.build.target.canonical,
-                                    .alias, .define => false,
-                                };
-                                if (!replaced) {
-                                    entry.value.retain();
-                                    state.insertion = state.build.candidate.modules.putCursor(entry.key, entry.value);
-                                }
-                            },
-                            .complete => self.enterPutModule(state.build),
-                        }
-                    },
-                    .put_module => |*state| switch (state.cursor.advance()) {
-                        .pending => {},
-                        .complete => self.enterCopyAliases(state.build),
-                    },
-                    .copy_aliases => |*state| {
-                        if (state.insertion) |*insertion| switch (insertion.advance()) {
-                            .pending => return .pending,
-                            .complete => {
-                                state.insertion = null;
-                                return .pending;
-                            },
-                        };
-                        switch (state.entries.advance()) {
-                            .pending => {},
-                            .item => |entry| {
-                                state.insertion = state.build.candidate.aliases.putCursor(entry.key, entry.value);
-                            },
-                            .complete => self.enterPutAlias(state.build),
-                        }
-                    },
-                    .put_alias => |*state| switch (state.cursor.advance()) {
-                        .pending => {},
-                        .complete => self.enterCopyNames(state.build),
-                    },
-                    .copy_names => |*state| {
-                        if (state.insertion) |*insertion| switch (insertion.advance()) {
-                            .pending => return .pending,
-                            .complete => {
-                                state.insertion = null;
-                                return .pending;
-                            },
-                        };
-                        switch (state.entries.advance()) {
-                            .pending => {},
-                            .item => |entry| {
-                                const replaced = kind == .define and entry.key == self.request.name;
-                                if (!replaced) {
-                                    entry.value.retain();
-                                    state.insertion = state.build.candidate.names.putCursor(entry.key, entry.value);
-                                }
-                            },
-                            .complete => self.enterPutName(state.build),
-                        }
-                    },
-                    .put_name => |*state| switch (state.cursor.advance()) {
-                        .pending => {},
-                        .complete => self.state = .{ .commit = state.build },
-                    },
                     .commit => |*build| {
                         self.registry.lockBlocking();
                         if (!self.registry.privateState().directories.isCurrent(build.directory.directory)) {
@@ -2658,7 +2487,6 @@ pub const Registry = enum(usize) {
                     },
                     .complete => unreachable,
                 }
-                return .pending;
             }
 
             fn beginSnapshot(self: *Self) Error!Progress {
@@ -2670,231 +2498,90 @@ pub const Registry = enum(usize) {
                     .define => {},
                 }
                 var directory = self.registry.acquireDirectory();
-                const old = directory.directory orelse {
-                    switch (kind) {
-                        .register => {
-                            self.beginBuild(directory, .{ .canonical = self.requestedName(), .prior = null });
-                            return .pending;
-                        },
-                        .define => {
-                            // SAFETY: a top-level definition edits no module
-                            // entry, so its target's canonical name is never read.
-                            self.beginBuild(directory, .{ .canonical = undefined, .prior = null });
-                            return .pending;
-                        },
-                        .alias => {
-                            directory.deinit();
-                            return error.MissingModule;
-                        },
-                    }
+                const validated = self.validate(directory.directory) catch |err| {
+                    directory.deinit();
+                    return err;
                 };
-                const step: Validation = switch (kind) {
-                    .register => if (intern.moduleBindingName(self.requestedName())) |short|
-                        .{ .alias_free = old.aliases.rawLookup(short) }
-                    else
-                        .{ .prior = old.modules.rawLookup(self.requestedName()) },
-                    .alias => .{ .short_free = old.modules.rawLookup(intern.moduleNameFromBinding(self.request.short)) },
-                    .define => {
-                        // SAFETY: as above; a definition edits no module entry.
-                        self.beginBuild(directory, .{ .canonical = undefined, .prior = null });
-                        return .pending;
+                const target: Target = switch (kind) {
+                    .alias => validated orelse {
+                        // An alias that already names its target changes nothing.
+                        directory.deinit();
+                        self.state = .complete;
+                        return .complete;
                     },
+                    .register, .define => validated,
                 };
-                self.state = .{ .validate = .{ .directory = directory, .step = step } };
+                const candidate = self.buildCandidate(directory.directory, target) catch |err| {
+                    directory.deinit();
+                    return err;
+                };
+                self.state = .{ .commit = .{ .directory = directory, .target = target, .candidate = candidate } };
                 return .pending;
             }
 
-            /// A refusal leaves the lease in place for `deinit`; no caller
-            /// advances a cursor past an error.
-            fn validate(self: *Self, state: *@FieldType(State, "validate")) Error!Progress {
-                const old = state.directory.directory.?;
+            /// The edit's target; for an alias, null when it changes nothing.
+            const Validated = switch (kind) {
+                .alias => ?Target,
+                .register, .define => Target,
+            };
+
+            fn validate(self: *const Self, snapshot: ?*const Directory) Error!Validated {
                 switch (kind) {
-                    .register => switch (state.step) {
-                        .alias_free => |*lookup| switch (lookup.advance()) {
-                            .pending => {},
-                            .complete => |existing| {
-                                if (existing != null) return error.NameConflict;
-                                state.step = .{ .prior = old.modules.rawLookup(self.requestedName()) };
-                            },
-                        },
-                        .prior => |*lookup| switch (lookup.advance()) {
-                            .pending => {},
-                            .complete => |prior| self.beginBuild(
-                                state.directory,
-                                .{ .canonical = self.requestedName(), .prior = prior },
-                            ),
-                        },
+                    .define => {
+                        // SAFETY: a top-level definition edits no module
+                        // entry, so its target's canonical name is never read.
+                        return .{ .canonical = undefined, .prior = null };
                     },
-                    .alias => switch (state.step) {
-                        .short_free => |*lookup| switch (lookup.advance()) {
-                            .pending => {},
-                            .complete => |found| {
-                                if (found != null) return error.NameConflict;
-                                state.step = .{ .target_module = old.modules.rawLookup(self.request.target) };
-                            },
-                        },
-                        .target_module => |*lookup| switch (lookup.advance()) {
-                            .pending => {},
-                            .complete => |found| {
-                                if (found != null) {
-                                    state.step = .{ .same_alias = .{
-                                        .canonical = self.request.target,
-                                        .lookup = old.aliases.rawLookup(self.request.short),
-                                    } };
-                                } else if (intern.moduleBindingName(self.request.target)) |short| {
-                                    state.step = .{ .target_alias = old.aliases.rawLookup(short) };
-                                } else return error.MissingModule;
-                            },
-                        },
-                        .target_alias => |*lookup| switch (lookup.advance()) {
-                            .pending => {},
-                            .complete => |canonical| {
-                                const target = canonical orelse return error.MissingModule;
-                                state.step = .{ .same_alias = .{
-                                    .canonical = target,
-                                    .lookup = old.aliases.rawLookup(self.request.short),
-                                } };
-                            },
-                        },
-                        .same_alias => |*same| switch (same.lookup.advance()) {
-                            .pending => {},
-                            .complete => |existing| {
-                                if (existing != null and existing.? == same.canonical) {
-                                    var directory = state.directory;
-                                    self.state = .complete;
-                                    directory.deinit();
-                                    return .complete;
-                                }
-                                self.beginBuild(state.directory, .{ .canonical = same.canonical, .prior = null });
-                            },
-                        },
+                    .register => {
+                        const name = self.requestedName();
+                        const old = snapshot orelse return .{ .canonical = name, .prior = null };
+                        if (intern.moduleBindingName(name)) |short| {
+                            if (old.aliases.find(short) != null) return error.NameConflict;
+                        }
+                        return .{ .canonical = name, .prior = old.modules.find(name) };
                     },
-                    .define => unreachable,
+                    .alias => {
+                        const old = snapshot orelse return error.MissingModule;
+                        if (old.modules.find(intern.moduleNameFromBinding(self.request.short)) != null)
+                            return error.NameConflict;
+                        const canonical = if (old.modules.find(self.request.target) != null)
+                            self.request.target
+                        else if (intern.moduleBindingName(self.request.target)) |short|
+                            old.aliases.find(short) orelse return error.MissingModule
+                        else
+                            return error.MissingModule;
+                        if (old.aliases.find(self.request.short)) |existing| {
+                            if (existing == canonical) return null;
+                        }
+                        return .{ .canonical = canonical, .prior = null };
+                    },
                 }
-                return .pending;
             }
 
-            fn beginBuild(self: *Self, directory: DirectoryLease, target: Target) void {
-                self.state = .{ .init_maps = .{
-                    .directory = directory,
-                    .target = target,
-                    .maps = .{},
-                    .phase = .modules,
-                } };
-            }
-
-            fn advanceInit(self: *Self, state: *@FieldType(State, "init_maps")) error{OutOfMemory}!void {
-                const old = state.directory.directory;
+            /// The successor directory: the snapshot's maps with this edit's
+            /// one entry changed. Bounded by the maps' depth.
+            fn buildCandidate(self: *Self, snapshot: ?*const Directory, target: Target) error{OutOfMemory}!*Directory {
                 const map_allocator = self.registry.allocator();
-                if (state.cursor == null) state.cursor = switch (state.phase) {
-                    .modules => .{ .modules = Directory.ModuleMap.initCursor(
-                        map_allocator,
-                        (if (old) |current| current.modules.count() else 0) + @intFromBool(kind == .register),
-                    ) },
-                    .aliases => .{ .aliases = Directory.AliasMap.initCursor(
-                        map_allocator,
-                        (if (old) |current| current.aliases.count() else 0) + @intFromBool(kind == .alias),
-                    ) },
-                    .names => .{ .names = env.NameMap.initCursor(
-                        map_allocator,
-                        (if (old) |current| current.names.count() else 0) + @intFromBool(kind == .define),
-                    ) },
+                const releases = self.registry.releaseDomain();
+                const old: Directory = if (snapshot) |current| current.* else .{};
+                var modules = switch (kind) {
+                    .register => try old.modules.put(map_allocator, releases, target.canonical, self.request.borrow()),
+                    .alias, .define => old.modules.retain(),
                 };
-                switch (state.cursor.?) {
-                    .modules => |*cursor| switch (try cursor.advance()) {
-                        .pending => return,
-                        .complete => |map| {
-                            state.maps.modules = map;
-                            state.phase = .aliases;
-                        },
-                    },
-                    .aliases => |*cursor| switch (try cursor.advance()) {
-                        .pending => return,
-                        .complete => |map| {
-                            state.maps.aliases = map;
-                            state.phase = .names;
-                        },
-                    },
-                    .names => |*cursor| switch (try cursor.advance()) {
-                        .pending => return,
-                        .complete => |map| {
-                            state.maps.names = map;
-                            state.cursor = null;
-                            return self.finishInit(state);
-                        },
-                    },
-                }
-                state.cursor = null;
-            }
-
-            fn finishInit(self: *Self, state: *@FieldType(State, "init_maps")) error{OutOfMemory}!void {
-                const candidate = try self.registry.allocator().create(Directory);
-                candidate.* = .{
-                    .modules = state.maps.modules.?,
-                    .aliases = state.maps.aliases.?,
-                    .names = state.maps.names.?,
-                    .previous = null,
+                errdefer modules.release(releases);
+                var aliases = switch (kind) {
+                    .alias => try old.aliases.put(map_allocator, releases, self.request.short, target.canonical),
+                    .register, .define => old.aliases.retain(),
                 };
-                state.maps = .{};
-                const build = Build{
-                    .directory = state.directory,
-                    .target = state.target,
-                    .candidate = candidate,
+                errdefer aliases.release(releases);
+                var names = switch (kind) {
+                    .define => try old.names.put(map_allocator, releases, self.request.name, self.request.entry),
+                    .register, .alias => old.names.retain(),
                 };
-                if (build.directory.directory) |old| {
-                    self.state = .{ .copy_modules = .{
-                        .build = build,
-                        .entries = old.modules.rawEntries(),
-                    } };
-                } else self.enterPutModule(build);
-            }
-
-            fn enterPutModule(self: *Self, build: Build) void {
-                if (kind == .register) {
-                    const image = self.request.borrow();
-                    image.retain();
-                    self.state = .{ .put_module = .{
-                        .build = build,
-                        .cursor = build.candidate.modules.putCursor(build.target.canonical, image),
-                    } };
-                } else self.enterCopyAliases(build);
-            }
-
-            fn enterCopyAliases(self: *Self, build: Build) void {
-                if (build.directory.directory) |old| {
-                    self.state = .{ .copy_aliases = .{
-                        .build = build,
-                        .entries = old.aliases.rawEntries(),
-                    } };
-                } else self.enterPutAlias(build);
-            }
-
-            fn enterPutAlias(self: *Self, build: Build) void {
-                if (kind == .alias) {
-                    self.state = .{ .put_alias = .{
-                        .build = build,
-                        .cursor = build.candidate.aliases.putCursor(self.request.short, build.target.canonical),
-                    } };
-                } else self.enterCopyNames(build);
-            }
-
-            fn enterCopyNames(self: *Self, build: Build) void {
-                if (build.directory.directory) |old| {
-                    self.state = .{ .copy_names = .{
-                        .build = build,
-                        .entries = old.names.rawEntries(),
-                    } };
-                } else self.enterPutName(build);
-            }
-
-            fn enterPutName(self: *Self, build: Build) void {
-                if (kind == .define) {
-                    self.request.entry.retain();
-                    self.state = .{ .put_name = .{
-                        .build = build,
-                        .cursor = build.candidate.names.putCursor(self.request.name, self.request.entry),
-                    } };
-                } else self.state = .{ .commit = build };
+                errdefer names.release(releases);
+                const candidate = try map_allocator.create(Directory);
+                candidate.* = .{ .modules = modules, .aliases = aliases, .names = names };
+                return candidate;
             }
 
             /// The edit's effect on the images themselves, applied under the

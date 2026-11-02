@@ -42,17 +42,39 @@ pub const VisibleNameProgress = poll.StreamProgress(u32);
 pub const VisibleNameCursor = struct {
     environment: *env.Env,
     root: VisibleNameRoot,
-    own: ?env.NameMap.RawEntryCursor,
+    own: ?OwnNames,
     core: ?env.NameMap.RawEntryCursor = null,
     complete: bool = false,
+
+    /// A root's own names: the session's persistent directory, or an image's.
+    const OwnNames = union(enum) {
+        session: modules.SessionNameCursor,
+        image: env.NameMap.RawEntryCursor,
+
+        fn advance(self: *OwnNames) poll.StreamProgress(Entry) {
+            return switch (self.*) {
+                .session => |*cursor| switch (cursor.advance()) {
+                    .pending => .pending,
+                    .complete => .complete,
+                    .item => |entry| .{ .item = .{ .key = entry.key, .value = entry.value } },
+                },
+                .image => |*cursor| switch (cursor.advance()) {
+                    .pending => .pending,
+                    .complete => .complete,
+                    .item => |entry| .{ .item = .{ .key = entry.key, .value = entry.value } },
+                },
+            };
+        }
+    };
+    const Entry = struct { key: intern.BindingName, value: env.Entry };
 
     pub fn init(root: VisibleNameRoot, environment: *env.Env) VisibleNameCursor {
         return .{
             .environment = environment,
             .root = root,
             .own = switch (root) {
-                .session => |*view| view.sessionEntries(),
-                .image => |image| image.entries,
+                .session => |*view| if (view.sessionEntries()) |cursor| .{ .session = cursor } else null,
+                .image => |image| if (image.entries) |cursor| .{ .image = cursor } else null,
                 .core => null,
             },
         };
