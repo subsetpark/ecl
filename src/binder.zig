@@ -81,9 +81,6 @@ pub const Outcome = union(enum) {
 };
 pub const Progress = poll.Progress(Outcome);
 
-/// Aliases are followed at most this many times; a longer chain is a cycle.
-const max_alias_hops = 64;
-
 /// Resolves one word occurrence.
 pub const Resolver = struct {
     name: u32,
@@ -99,7 +96,24 @@ pub const Resolver = struct {
     /// The provenance of the image whose directory held the alias being
     /// followed: an alias resolves as its own module would resolve it.
     owner_provenance: ?modules.RegistrationProvenance = null,
-    hops: u8 = 0,
+    /// Whether the occurrence or alias being resolved belongs to the group
+    /// under construction. Only then does the group's own module name mean
+    /// the group; anything else names the registered module.
+    group_owned: bool = false,
+    /// Brent's cycle detection over alias hops: a hop that repeats the saved
+    /// one proves a cycle, and the saved hop moves forward at each power of
+    /// two. An acyclic chain of any length still resolves.
+    saved_hop: ?Hop = null,
+    hops: u64 = 0,
+    hop_power: u64 = 1,
+
+    /// Everything the next hop's result depends on.
+    const Hop = struct {
+        module: intern.ModuleName,
+        binding: intern.BindingName,
+        provenance: modules.RegistrationProvenance,
+        group_owned: bool,
+    };
 
     const Root = union(enum) {
         core,
@@ -154,9 +168,14 @@ pub const Resolver = struct {
                 .retired => .retired,
             },
         };
+        const group_owned = switch (root) {
+            .image => |cell| if (context.group) |group| group.image_scope == cell.id else false,
+            else => false,
+        };
         return .{
             .name = word.name,
             .root = root,
+            .group_owned = group_owned,
             .work = .{ .dot = intern.lastDotCursor(intern.get(word.name)) },
         };
     }
@@ -254,10 +273,21 @@ pub const Resolver = struct {
             .alias => |alias| {
                 if (require_public and alias.visibility != .public)
                     return self.miss(.{ .unresolved = .qualified });
-                if (self.hops == max_alias_hops) return self.miss(.alias_cycle);
-                self.hops += 1;
                 self.prefix = alias.module;
                 self.export_name = alias.binding;
+                const hop: Hop = .{
+                    .module = alias.module,
+                    .binding = alias.binding,
+                    .provenance = self.provenance(context),
+                    .group_owned = self.group_owned,
+                };
+                if (self.saved_hop) |saved| if (std.meta.eql(saved, hop)) return self.miss(.alias_cycle);
+                self.hops += 1;
+                if (self.hops == self.hop_power) {
+                    self.saved_hop = hop;
+                    self.hop_power *|= 2;
+                    self.hops = 0;
+                }
                 return self.beginAcquire(context);
             },
         }
@@ -274,7 +304,7 @@ pub const Resolver = struct {
         if (self.generation) |*lease| lease.deinit();
         self.generation = null;
         self.work.deinit();
-        if (context.group) |group| if (group.module == self.prefix.?) {
+        if (context.group) |group| if (self.group_owned and group.module == self.prefix.?) {
             const export_name = self.export_name orelse return self.miss(.{ .unresolved = .qualified });
             self.work = .{ .lookup = group.directory.?.rawLookup(export_name) };
             self.phase = .group_export;
@@ -390,6 +420,7 @@ pub const Resolver = struct {
                 .complete => |maybe_entry| {
                     const entry = maybe_entry orelse return self.miss(.{ .unresolved = .qualified });
                     self.owner_provenance = self.generation.?.provenance();
+                    self.group_owned = false;
                     return self.follow(context, entry, true);
                 },
             },
@@ -420,7 +451,10 @@ pub const Resolver = struct {
                             self.miss(.{ .unresolved = self.plainChain() })
                         else
                             self.finish(.{ .resolved = definition }),
-                        .alias => self.follow(context, entry, true),
+                        .alias => alias: {
+                            self.group_owned = false;
+                            break :alias self.follow(context, entry, true);
+                        },
                     };
                 },
             },

@@ -706,6 +706,21 @@ test "binding: existing code keeps its targets while later binding sees replacem
         .{ .name = "nested data", .source = "(1) `x def ((x)) `later def (2) `x def later call", .expected = "2" },
         // Any publication invalidates a reused anonymous binding.
         .{ .name = "reuse", .source = "(x) `q set (1) `x def q call (2) `x def q call", .expected = "1 2" },
+        // A combinator binds its quotation once per invocation, whether that
+        // binding came fresh or from the unit's reuse cache: a publication
+        // during the iteration reaches neither later element.
+        .{
+            .name = "invocation keeps its binding",
+            .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
+                "[1 2] q each",
+            .expected = "[1 1]",
+        },
+        .{
+            .name = "invocation keeps a reused binding",
+            .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
+                "0 q call [1 2] q each",
+            .expected = "1 [1 1]",
+        },
     });
 }
 
@@ -778,6 +793,8 @@ test "binding: imports are name aliases followed at every binding" {
             .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm b.x [] ((2) `x def) `a @defm b.x",
             .expected = "1 2",
         },
+        // Chain length is not evidence of a cycle.
+        .{ .name = "long acyclic chain", .source = comptime aliasChain(100), .expected = "7" },
     });
     try support.expectErrors(&.{
         .{
@@ -802,6 +819,14 @@ test "binding: a module binds as one group when it is sealed" {
             .source = "[] (( -- n ) (self-named.base 1 +) `next def ( -- n ) (41) `base def) `self-named @defm self-named.next",
             .expected = "42",
         },
+        // A quotation injected into a replacement body was written in the
+        // session, so its qualified name means the registered module, never
+        // the group being sealed under that name.
+        .{
+            .name = "injected qualified word",
+            .source = "[] ((1) `x def) `m @defm [(m.x)] ((2) `x def `y def) `m @defm m.y m.x",
+            .expected = "1 2",
+        },
     });
     try support.expectErrors(&.{
         .{ .name = "duplicate definition", .source = "[] ((1) `x def (2) `x def) `twice @defm", .kind = "domain", .message_contains = "more than once" },
@@ -815,4 +840,13 @@ test "binding: a module binds as one group when it is sealed" {
         .{ .name = "staged", .source = "[] ((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
         .{ .name = "failed seal publishes nothing", .source = "[] ([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
     });
+}
+
+/// A chain of `depth` modules, each re-exporting the previous one's `x`, from
+/// `a0` up to `a<depth>`, followed by a call through the last.
+fn aliasChain(comptime depth: usize) []const u8 {
+    @setEvalBranchQuota(100_000);
+    comptime var source: []const u8 = "[] ((7) `x def) `a0 @defm ";
+    inline for (1..depth + 1) |i| source = source ++ std.fmt.comptimePrint("[] (`a{d} (x) import) `a{d} @defm ", .{ i - 1, i });
+    return source ++ std.fmt.comptimePrint("a{d}.x", .{depth});
 }

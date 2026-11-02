@@ -5934,6 +5934,10 @@ pub const Unit = struct {
         if (self.reusableExecutable(current.code)) |code| {
             self.releases.releaseHeader(current.code);
             current.program = .{ .bound = &code.executable };
+            // The invocation must own what it runs, exactly as after a fresh
+            // binding: a publication before its next application must not
+            // send that application back to the binder.
+            self.rememberInApplication(code);
             return;
         }
         var context = self.resolutionContext(self.inherited.registry.view());
@@ -5967,14 +5971,19 @@ pub const Unit = struct {
     /// Records a fresh binding where later applications of the same
     /// quotation will find it.
     fn rememberExecutable(self: *Unit, code: *env.AnonymousCode, publication: u64) void {
-        if (self.current.?.application_tail) |index| {
-            switch (self.frames.items[@backingInt(index)]) {
-                .application => |*application| application.bound.remember(code),
-                else => {},
-            }
-        }
+        self.rememberInApplication(code);
         if (self.inherited.phase == .bootstrap) return;
         self.reuse.remember(self.releases, code, publication, self.current.?.site.registration_provenance);
+    }
+
+    /// Gives the running application its own reference to `code`, so every
+    /// later application of the same quotation in this invocation runs it.
+    fn rememberInApplication(self: *Unit, code: *env.AnonymousCode) void {
+        const index = self.current.?.application_tail orelse return;
+        switch (self.frames.items[@backingInt(index)]) {
+            .application => |*application| application.bound.remember(code),
+            else => {},
+        }
     }
 
     /// The failure for a word that did not bind and will not after a load.
