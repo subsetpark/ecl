@@ -5765,19 +5765,46 @@ pub const Unit = struct {
         };
     }
 
-    /// What a plain word resolves to now, for idiom recognition. Only a static
-    /// definition outlives the lookup, and recognition only ever declines, so
-    /// anything else is simply not a match.
+    /// What a plain word resolves to now, for idiom recognition: the unit's
+    /// remembered resolution when it has one, otherwise a fresh lookup that
+    /// is not remembered. Only a static definition outlives the lookup, and
+    /// recognition only ever declines, so anything else is simply not a
+    /// match.
     pub fn peekWord(self: *Unit, word: value.Symbol) ?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        const definition = self.reusedResolution(word) orelse self.resolveFresh(word, false) orelse return null;
+        return peeked(definition, word);
+    }
+
+    /// `peekWord`, remembering what a fresh lookup resolves, so a word a
+    /// recognized phrase consumes instead of dispatching is looked up once
+    /// per publication rather than on every recognition.
+    pub fn resolveForRecognition(self: *Unit, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
+        if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        const definition = self.reusedResolution(word) orelse (try self.resolveFresh(word, true)) orelse return null;
+        return peeked(definition, word);
+    }
+
+    /// Resolves `word` against the current view in one call, remembering the
+    /// result when `remember` is set.
+    fn resolveFresh(
+        self: *Unit,
+        word: value.Symbol,
+        comptime remember: bool,
+    ) if (remember) error{OutOfMemory}!?*env.Definition else ?*env.Definition {
         var context = self.resolutionContext(self.inherited.registry.view());
         defer context.deinit();
         var resolver = binder.Resolver.init(&context, word);
         defer resolver.deinit();
-        const definition = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
-            .resolved => |found| found,
+        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+            .resolved => |definition| definition,
             .missed => return null,
         };
+        if (remember) try self.rememberResolution(word, context.view.publication, context.provenance, found);
+        return found;
+    }
+
+    fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {
         if (definition.lifetime != .static) return null;
         const home = modules.definitionHome(definition);
         return .{
