@@ -167,7 +167,6 @@ pub fn ResolverIn(comptime mode: Mode) type {
             group_image_lookup,
             core_atom,
             core_lookup,
-            session_lookup,
             image_lookup,
             complete,
         };
@@ -269,10 +268,8 @@ pub fn ResolverIn(comptime mode: Mode) type {
                 .retired => return self.miss(.retired),
                 .core => return self.beginCore(context, binding),
                 .session => {
-                    const lookup = context.view.sessionLookup(binding) orelse return self.beginCore(context, binding);
-                    self.work = .{ .lookup = lookup };
-                    self.phase = .session_lookup;
-                    return .pending;
+                    const entry = context.view.sessionFind(binding) orelse return self.beginCore(context, binding);
+                    return self.follow(context, entry, false);
                 },
                 .image => |cell| {
                     if (self.groupOwned()) {
@@ -533,11 +530,11 @@ pub fn ResolverIn(comptime mode: Mode) type {
                         };
                     },
                 },
-                .session_lookup, .image_lookup => switch (self.work.lookup.advance()) {
+                .image_lookup => switch (self.work.lookup.advance()) {
                     .pending => .pending,
                     .complete => |maybe_entry| {
                         if (maybe_entry) |entry| {
-                            if (self.phase == .image_lookup) self.owner_provenance = self.provenance(context);
+                            self.owner_provenance = self.provenance(context);
                             return self.follow(context, entry, false);
                         }
                         return self.beginCore(context, @fromBackingInt(self.name));

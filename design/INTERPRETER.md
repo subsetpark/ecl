@@ -700,16 +700,20 @@ so it never assembles targets from two publication states. Core's directory is
 fixed when core freezes and an image's when the image is sealed, so neither
 needs capturing.
 
-Every mutation — a top-level definition, an import, a registration, a reload,
-an alias — is one bounded cursor: snapshot the current directory, validate
-against it, copy it with the edit applied while retaining each entry copied,
-and publish the copy under the writer lock if the snapshot is still current;
-otherwise discard the copy and start over. Concurrent writers therefore cannot
-lose each other's updates. A superseded snapshot stays chained behind its
-successor until its last reader leaves, then releases its entries one per
-retirement step; a discarded candidate takes the same path. Copying on every
-top-level definition makes a definition cost the size of the session's
-directory, accepted because definition is not the hot path.
+An alias that already names its requested target changes nothing: it completes
+without building or publishing a successor and without advancing the
+publication counter. Every other mutation — a top-level definition, an import,
+a registration, a reload, an alias — is one bounded cursor: snapshot the current directory, validate
+against it, build a successor with the edit applied, and publish it under the
+writer lock if the snapshot is still current; otherwise discard it and start
+over. Concurrent writers therefore cannot lose each other's updates. The
+directory's maps are persistent tries keyed by name identity: a successor
+copies only the nodes on the edited name's path and shares the rest with its
+snapshot, so an edit costs the trie's bounded depth, not the session's size. A
+superseded snapshot stays chained behind its successor until its last reader
+leaves; it then releases its roots, and each node no other snapshot shares
+retires as its own owner, one per step. A discarded candidate takes the same
+path.
 
 Every publication also advances the Session's publication counter, which its
 main registry owns and each source-private registry shares. The counter is
