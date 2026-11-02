@@ -460,7 +460,7 @@ pub const FrozenHit = struct {
 };
 
 pub fn recognizeTrusted(lookup: FrozenLookup, name: []const u8, definition: *const env.Definition) ?env.DirectIdiom {
-    const phrase: Value = .{ .list = definition.body.source.code };
+    const phrase: Value = .{ .list = definition.code().source.code };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
         if (entry.following.len != 0) continue;
@@ -526,14 +526,15 @@ fn liveWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind, primitiv
     const resolved = evaluator.peekWord(word) orelse return null;
     if (resolved.origin != .core and resolved.origin != .standard_library) return null;
     const definition = resolved.definition;
+    const code = definition.code();
     switch (binding) {
-        .builtin => if (definition.body != .builtin or (primitive != null and definition.body.builtin != primitive.?)) return null,
-        .source => if (definition.body != .source) return null,
+        .builtin => if (code.* != .builtin or (primitive != null and code.builtin != primitive.?)) return null,
+        .source => if (code.* != .source) return null,
     }
     return .{
         .trace_word = resolved.trace_word,
         .idiom = definition.direct_idiom,
-        .body = if (definition.body == .source) definition.body.source.code else null,
+        .body = if (code.* == .source) code.source.code else null,
     };
 }
 
@@ -602,10 +603,11 @@ fn frozenBindingMatches(
 ) bool {
     const hit = lookup.resolve(word) orelse return false;
     const definition = hit.definition;
+    const code = definition.code();
     const binding_matches = switch (binding) {
-        .builtin => definition.body == .builtin and
-            (primitive == null or definition.body.builtin == primitive.?),
-        .source => definition.body == .source,
+        .builtin => code.* == .builtin and
+            (primitive == null or code.builtin == primitive.?),
+        .source => code.* == .source,
     };
     const origin_matches = switch (origin) {
         .trusted => true,

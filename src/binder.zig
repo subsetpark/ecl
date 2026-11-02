@@ -475,19 +475,30 @@ pub const Resolver = struct {
 
 /// Binds one quotation: every top-level unquoted occurrence in a single pass,
 /// before any of it executes. Nested quotations and quoted words stay data.
+///
+/// Targets are borrowed while binding runs: the context's view keeps every
+/// definition it resolves alive. A counted target is noted once in a transient
+/// set whose capacity the body's length bounds, so it never grows or rehashes;
+/// only when the walk completes does the cursor create the exact-size
+/// dependency table and take one reference per distinct target, one per step.
+/// Until then the cursor owns no references, and afterwards it owns them only
+/// through that table, which retires as its own owner: abandoning a cursor at
+/// any point is constant work.
 pub const BindingCursor = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    /// Retained by the cursor until the parts take it.
+    /// Retained by the cursor until the bound body takes it.
     code: *value.ListHandle,
     targets: []?*env.Definition,
-    dependencies: poll.ChunkStack(*env.Definition),
-    dependency_count: usize = 0,
     index: u32 = 0,
     resolver: ?Resolver = null,
-    collected: ?[]*env.Definition = null,
-    collect_index: usize = 0,
     any_target: bool = false,
+    /// Open-addressed set of the distinct counted targets, made on the first
+    /// one; its capacity is a power of two at least twice the body's length.
+    seen: []?*env.Definition = &.{},
+    distinct: usize = 0,
+    dependencies: ?*env.DependencyTable = null,
+    scan: usize = 0,
 
     pub const Failure = struct {
         index: u32,
@@ -495,7 +506,7 @@ pub const BindingCursor = struct {
         miss: Miss,
     };
     pub const Result = union(enum) {
-        bound: env.Executable.Parts,
+        bound: env.Bound,
         failed: Failure,
     };
     pub const BindProgress = poll.Progress(Result);
@@ -517,33 +528,39 @@ pub const BindingCursor = struct {
             .releases = releases,
             .code = code,
             .targets = targets,
-            .dependencies = .init(allocator),
         };
     }
 
     pub fn deinit(self: *BindingCursor) void {
         if (self.resolver) |*resolver| resolver.deinit();
-        while (self.dependencies.pop()) |dependency| dependency.release(self.releases);
-        self.dependencies.deinit();
-        if (self.collected) |collected| {
-            for (collected[0..self.collect_index]) |dependency| dependency.release(self.releases);
-            self.allocator.free(collected);
-        }
+        if (self.seen.len != 0) self.allocator.free(self.seen);
+        if (self.dependencies) |dependencies| dependencies.retire(self.releases);
         if (self.targets.len != 0) self.allocator.free(self.targets);
         self.releases.releaseHeader(self.code);
         self.* = undefined;
     }
 
+    fn slot(seen: []const ?*env.Definition, definition: *env.Definition) usize {
+        const hash = (@as(u64, @intFromPtr(definition)) >> 4) *% 0x9E3779B97F4A7C15;
+        return @intCast(hash >> 32 & (seen.len - 1));
+    }
+
     fn record(self: *BindingCursor, context: *const Context, definition: *env.Definition) error{OutOfMemory}!void {
         self.targets[self.index] = definition;
         self.any_target = true;
-        const is_self = if (context.self_reference) |reference| reference.definition == definition else false;
-        if (definition.lifetime == .counted and !is_self) {
-            try self.dependencies.reserve(1);
-            definition.retain();
-            self.dependencies.pushReserved(definition);
-            self.dependency_count += 1;
+        if (definition.lifetime != .counted) return;
+        if (context.self_reference) |reference| if (reference.definition == definition) return;
+        if (self.seen.len == 0) {
+            const capacity = std.math.ceilPowerOfTwo(usize, self.targets.len * 2) catch return error.OutOfMemory;
+            self.seen = try self.allocator.alloc(?*env.Definition, capacity);
+            @memset(self.seen, null);
         }
+        var at = slot(self.seen, definition);
+        while (self.seen[at]) |held| : (at = (at + 1) & (self.seen.len - 1)) {
+            if (held == definition) return;
+        }
+        self.seen[at] = definition;
+        self.distinct += 1;
     }
 
     pub fn advance(self: *BindingCursor, context: *const Context, work: *poll.WorkBudget) error{OutOfMemory}!BindProgress {
@@ -580,30 +597,35 @@ pub const BindingCursor = struct {
                 self.index += 1;
                 continue;
             }
-            // Materialize the dependency list at its exact size, one per step.
-            if (self.collected == null) {
-                self.collected = try self.allocator.alloc(*env.Definition, self.dependency_count);
-                continue;
+            // Hold each distinct counted target once, in an exact-size table.
+            if (self.distinct != 0) {
+                if (self.dependencies == null) {
+                    self.dependencies = try env.DependencyTable.create(self.allocator, self.distinct);
+                    continue;
+                }
+                if (self.scan < self.seen.len) {
+                    if (self.seen[self.scan]) |definition| self.dependencies.?.hold(definition);
+                    self.scan += 1;
+                    continue;
+                }
             }
-            if (self.dependencies.pop()) |dependency| {
-                self.collected.?[self.collect_index] = dependency;
-                self.collect_index += 1;
-                continue;
+            if (self.seen.len != 0) {
+                self.allocator.free(self.seen);
+                self.seen = &.{};
             }
             const targets: []?*env.Definition = if (self.any_target) self.targets else empty: {
                 if (self.targets.len != 0) self.allocator.free(self.targets);
                 break :empty &.{};
             };
-            const parts: env.Executable.Parts = .{
+            const bound: env.Bound = .{
                 .code = self.code,
-                .targets = targets,
-                .dependencies = self.collected.?,
+                .bound_targets = targets,
+                .dependencies = self.dependencies,
             };
             self.targets = &.{};
-            self.collected = null;
-            self.collect_index = 0;
+            self.dependencies = null;
             heap.incRef(self.code);
-            return .{ .complete = .{ .bound = parts } };
+            return .{ .complete = .{ .bound = bound } };
         }
         return .pending;
     }

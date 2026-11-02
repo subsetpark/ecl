@@ -6848,9 +6848,9 @@ const BindingDriver = struct {
         };
         const publication = self.context.borrow().view.publication;
         switch (result) {
-            .bound => |parts| {
-                const code = env.AnonymousCode.create(evaluator.allocator, parts) catch |err| {
-                    parts.discard(evaluator.releases, evaluator.allocator);
+            .bound => |bound| {
+                const code = env.AnonymousCode.create(evaluator.allocator, bound) catch |err| {
+                    bound.discard(evaluator.releases, evaluator.allocator);
                     return err;
                 };
                 evaluator.retireDriver(self);
@@ -7157,7 +7157,7 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) MachineError!void {
     // A homeless builtin has no effect boundary and no recognition: the
     // common case, run directly.
-    if (definition.home == null) switch (definition.body) {
+    if (definition.home == null) switch (definition.code().*) {
         .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
         else => {},
     };
@@ -7168,7 +7168,7 @@ fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) Machine
     const cross_home = home != null and home != self.current.?.home();
     const checked = cross_home and origin != .standard_library;
     const cross_home_effect = if (checked) definition.effect else null;
-    switch (definition.body) {
+    switch (definition.code().*) {
         .source => |*executable| {
             // A trusted definition's recognition was decided when its group
             // sealed; one that recognized nothing runs as any source word does.
@@ -7203,7 +7203,6 @@ fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) Machine
             }
             try native_call.begin(self, callable);
         },
-        .reserved => unreachable,
     }
 }
 
@@ -7249,7 +7248,7 @@ const DirectWordFallback = struct {
     pub fn run(evaluator: *Unit, self: *DirectWordFallback) MachineError!void {
         return scheduleWord(
             evaluator,
-            &self.definition.body.source,
+            &self.definition.code().source,
             self.word,
             modules.definitionHome(self.definition),
             if (self.effect) |*owned| owned.borrow().effect else null,
@@ -8180,7 +8179,6 @@ fn startModuleSeal(self: *Unit) MachineError!void {
     try self.startDriver(ModuleSealDriver{
         .context = .init(context),
         .phase = .init(.{ .group = image.groupCursor() }),
-        .pending = .init(.init(self.allocator)),
     });
 }
 
@@ -8243,7 +8241,7 @@ fn recognizeGroup(evaluator: *Unit, image: *modules.OwnedImage) void {
             .definition => |definition| definition,
             .alias => continue,
         };
-        if (definition.body != .source) continue;
+        if (definition.code().* != .source) continue;
         definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
     }
 }
@@ -8256,33 +8254,15 @@ pub fn recognizeCore(environment: env.Env, spelling: []const u8, definition: *en
     definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
 }
 
-/// One bound body awaiting the group's seal.
-const PendingSeal = struct {
-    definition: *env.Definition,
-    parts: env.Executable.Parts,
-};
-
-/// The bound parts of a group not yet sealed. Discarding them leaves every
-/// definition reserved, so a restarted seal binds the whole group again.
-const PendingSeals = struct {
-    allocator: std.mem.Allocator,
-    items: poll_api.ChunkStack(PendingSeal),
-
-    fn init(allocator: std.mem.Allocator) PendingSeals {
-        return .{ .allocator = allocator, .items = .init(allocator) };
-    }
-
-    pub fn deinit(self: *PendingSeals, releases: *heap.ReleaseDomain) void {
-        while (self.items.pop()) |pending| pending.parts.discard(releases, self.allocator);
-        self.items.deinit();
-    }
-};
-
+/// Binds a module group's reserved bodies against one view, then seals them
+/// together. Each bound body is staged on its own reserved definition, which
+/// the image under construction owns: a failure or a restart leaves nothing
+/// for this driver to release, and image rollback retires each definition in
+/// constant work.
 const ModuleSealDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     context: heap.Owned(binder.Context),
     phase: heap.Owned(Phase),
-    pending: heap.Owned(PendingSeals),
 
     const Phase = union(enum) {
         group: modules.GroupCursor,
@@ -8290,7 +8270,7 @@ const ModuleSealDriver = struct {
             entries: env.NameMap.RawEntryCursor,
             current: ?struct { definition: *env.Definition, cursor: binder.BindingCursor } = null,
         },
-        seal,
+        seal: env.NameMap.RawEntryCursor,
 
         pub fn deinit(self: *Phase) void {
             switch (self.*) {
@@ -8335,16 +8315,13 @@ const ModuleSealDriver = struct {
                     };
                     const definition = current.definition;
                     switch (result) {
-                        .bound => |parts| {
+                        .bound => |bound| {
                             current.cursor.deinit();
                             bind.current = null;
-                            self.pending.borrowMut().items.push(.{ .definition = definition, .parts = parts }) catch |err| {
-                                parts.discard(evaluator.releases, evaluator.allocator);
-                                return err;
-                            };
+                            definition.stage(evaluator.releases, bound);
                         },
                         .failed => |failure| {
-                            const code = definition.reservedBody();
+                            const code = definition.reservedQuotation();
                             const word = heap.valuesConst(code)[failure.index].symbol;
                             evaluator.retireDriver(self);
                             evaluator.missOrLoad(word, failure.miss, .load_only) catch |err| {
@@ -8359,47 +8336,50 @@ const ModuleSealDriver = struct {
                 switch (bind.entries.advance()) {
                     .pending => {},
                     .item => |entry| switch (entry.value) {
-                        .definition => |definition| if (definition.body == .reserved) {
+                        .definition => |definition| if (definition.isReserved()) {
                             // Built before assignment: assigning `try` in place
                             // would mark `current` present before a failure.
                             const cursor = try binder.BindingCursor.init(
                                 evaluator.allocator,
                                 evaluator.releases,
-                                definition.reservedBody(),
+                                definition.reservedQuotation(),
                             );
                             bind.current = .{ .definition = definition, .cursor = cursor };
                         },
                         .alias => {},
                     },
-                    .complete => self.phase.borrowMut().* = .seal,
+                    .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).groupEntries() },
                 }
             },
-            .seal => {
-                // Every body bound against one view; seal them together.
-                if (self.pending.borrowMut().items.pop()) |pending| {
-                    pending.definition.seal(evaluator.releases, pending.parts);
-                    continue;
-                }
-                const owned = image(evaluator);
-                const provenance = owned.provenance();
-                const name = owned.moduleName();
-                if (provenance == .standard_library) recognizeGroup(evaluator, owned);
-                evaluator.retireDriver(self);
-                releaseCurrent(evaluator);
-                const boundary = evaluator.popFrame(.boundary);
-                evaluator.boundary_index = boundary.previous_boundary;
-                evaluator.stack_base = boundary.previous_base;
-                evaluator.active_word = boundary.word;
-                var built = boundary.mode.module.image;
-                var sealed = heap.Owned(modules.SealedImage).init(built.seal());
-                errdefer sealed.deinit(evaluator.releases, evaluator.allocator);
-                const driver = try evaluator.allocator.create(ModuleCompletionDriver);
-                // The cursor owns the sealed image from here; nothing can fail after.
-                driver.* = .{
-                    .cursor = .init(evaluator.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
-                };
-                evaluator.adoptDriver(driver);
-                return .detached;
+            // Every body bound against one view; seal them together.
+            .seal => |*entries| switch (entries.advance()) {
+                .pending => {},
+                .item => |entry| switch (entry.value) {
+                    .definition => |definition| if (definition.isReserved()) definition.seal(evaluator.releases),
+                    .alias => {},
+                },
+                .complete => {
+                    const owned = image(evaluator);
+                    const provenance = owned.provenance();
+                    const name = owned.moduleName();
+                    if (provenance == .standard_library) recognizeGroup(evaluator, owned);
+                    evaluator.retireDriver(self);
+                    releaseCurrent(evaluator);
+                    const boundary = evaluator.popFrame(.boundary);
+                    evaluator.boundary_index = boundary.previous_boundary;
+                    evaluator.stack_base = boundary.previous_base;
+                    evaluator.active_word = boundary.word;
+                    var built = boundary.mode.module.image;
+                    var sealed = heap.Owned(modules.SealedImage).init(built.seal());
+                    errdefer sealed.deinit(evaluator.releases, evaluator.allocator);
+                    const driver = try evaluator.allocator.create(ModuleCompletionDriver);
+                    // The cursor owns the sealed image from here; nothing can fail after.
+                    driver.* = .{
+                        .cursor = .init(evaluator.publicationRegistry(name, provenance).registrationCursor(sealed.take())),
+                    };
+                    evaluator.adoptDriver(driver);
+                    return .detached;
+                },
             },
         };
         return .stepped;

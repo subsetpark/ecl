@@ -1380,7 +1380,7 @@ pub const OwnedImage = enum(usize) {
         const origin: env.BindingOrigin = .{ .module_local = .{ .trace_word = name } };
         const handle: *anyopaque = @ptrCast(image);
         const created = switch (publication) {
-            .word => |word| try env.Definition.create(image.allocator, .static, .{ .reserved = env.quotationHeader(word.body) }, .{
+            .word => |word| try env.Definition.reserve(image.allocator, .static, env.quotationHeader(word.body), .{
                 .visibility = word.visibility,
                 .origin = origin,
                 .effect = word.effect,
@@ -1461,15 +1461,7 @@ pub const OwnedImage = enum(usize) {
             .pending => {},
             .complete => break,
             .item => |entry| switch (entry.value) {
-                .definition => |definition| if (definition.body == .reserved) {
-                    const code = definition.body.reserved;
-                    if (code.kind() == .generic_spine) for (heap.valuesConst(code)) |form| {
-                        if (form == .symbol and !env.isQuoted(form.symbol.slot) and env.localOperand(form.symbol.slot) == null)
-                            return error.UnboundWord;
-                    };
-                    heap.incRef(code);
-                    definition.seal(image.releases, .{ .code = code, .targets = &.{}, .dependencies = &.{} });
-                },
+                .definition => |definition| if (definition.isReserved()) try definition.sealLiteral(image.releases),
                 .alias => {},
             },
         };

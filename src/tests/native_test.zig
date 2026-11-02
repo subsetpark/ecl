@@ -1418,10 +1418,10 @@ test "native: the static transport publishes a linked descriptor through the sam
         .complete => |resolved| break resolved.?,
     };
     const binding = entry.definition;
-    try std.testing.expect(binding.body == .native);
+    try std.testing.expect(binding.code().* == .native);
     try std.testing.expectEqual(@as(u32, 1), binding.effect.?.inputs);
     try std.testing.expectEqual(@as(u32, 1), binding.effect.?.outputs);
-    try std.testing.expectEqual(@as(usize, 3), binding.body.native.instance.requirements().len);
+    try std.testing.expectEqual(@as(usize, 3), binding.code().native.instance.requirements().len);
     const document = env.documentationHeader(binding.doc.?);
     try std.testing.expectEqual(@as(u64, "Increment an integer.".len), document.length());
     for ("Increment an integer.", 0..) |byte, index|

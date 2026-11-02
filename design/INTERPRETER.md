@@ -629,9 +629,16 @@ callback, or a validated native callable — together with its effect,
 documentation, visibility, source slice, and module-local name. Nothing about
 it changes once it is sealed. Construction reserves a definition before its
 body is bound, which is what lets a body call itself and a module group's
-members call one another; sealing replaces the reserved body with its
-executable. A reserved definition is reachable only from its construction
-owner, so it can be neither executed nor published.
+members call one another; sealing installs the bound body as its executable. A
+reserved definition is reachable only from its construction owner, so it can be
+neither executed nor published.
+
+The boundary is three types. A definition's construction state is private to
+`env`, which alone reserves, stages a bound body, and seals; every other
+consumer reads a sealed definition's code and so never handles a reserved one.
+A bound body is minted only by the binder and consumed only by sealing. An
+`Executable` is minted only by sealing. Zig fields cannot be private, so the
+source audit owns the first two confinements.
 
 Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
@@ -647,10 +654,13 @@ their image, and memory grows with reload history.
 
 An `Executable` is a quotation plus a target table: for each top-level
 unquoted word, the definition it was bound to. Values, quoted symbols, and
-lowered locals operations have no target. The executable holds one reference
-to each counted target it names, so dispatch borrows targets and adds no
-ownership operation; a definition's call of itself is never one of those
-references, so a recursive body is not a cycle. An evaluation running an
+lowered locals operations have no target. The executable's owner holds a
+dependency table with one reference to each distinct counted target, however
+many times the body calls it, so dispatch borrows targets and adds no
+ownership operation. Only top-level session definitions are counted: a module
+group's calls among its members, like core's, need no reference, because the
+image holding them lives until Session teardown. A definition's call of itself
+is never a dependency, so a recursive body is not a cycle. An evaluation running an
 executable holds the executable's owner: the counted definition whose body it
 is, or the anonymous owner of an application's executable. A static owner needs
 no hold. A tail call secures the callee's owner before it retires the caller,
@@ -660,10 +670,15 @@ A `BindingCursor` binds one quotation against one captured publication view. A
 `Resolver` resolves each word: by its link to a root, then the root's directory
 and core, or, for a dotted spelling, a module registration and its public
 entry; `core.` names core alone. A name alias is followed through the same
-resolver, as the module holding it would resolve it, with a bound on the chain
-that reports a cycle. Binding is bounded work charged to the unit, and its
-partial table owns what it has retained, so failure and cancellation release
-it. A word that names an unregistered module suspends binding while the module
+resolver, as the module holding it would resolve it; Brent's algorithm detects
+a cycle without bounding the length of an acyclic chain. Binding is bounded
+work charged to the unit. It borrows targets while it runs, since its captured
+view keeps them alive, and notes each distinct counted one in a set whose
+capacity the body's length fixes, so the set never grows. Only after the walk
+does it take references, into an exact-size table, one per step. The table
+retires as its own owner, one reference per retirement step, so abandoning a
+binding, discarding an unsealed body, or retiring a definition is constant
+work. A word that names an unregistered module suspends binding while the module
 loads and restarts it against a view that holds the module; any other miss
 fails at that word before the quotation has run.
 
@@ -707,9 +722,11 @@ definition made by one form is visible to the next. A quotation application
 starts unbound, and the machine binds it before taking its first form. A bound
 evaluation follows its executable's targets.
 
-A combinator invocation keeps the executables it has bound for its
-quotations in its application frame, two slots, so a predicate and a body each
-bind once and every later element reuses them. A unit keeps a small cache of
+A combinator invocation keeps the executables it runs for its quotations in
+its application frame, two slots, so a predicate and a body each bind once and
+every later element reuses them; an executable taken from the unit's cache is
+kept there exactly as a fresh one is, so a publication mid-iteration changes
+neither. A unit keeps a small cache of
 anonymous executables, each owning its exact quotation, keyed by that
 quotation's identity, the publication counter, and the applying site's
 registration provenance; any publication in the Session invalidates every
@@ -749,10 +766,13 @@ cannot run a definition it has made. When the body completes, the module is
 sealed as one group: the staged names become the image's directory, a name
 staged twice fails construction, and every reserved body binds against that
 directory and one captured view. A word written in the image resolves in the
-group, and a qualified name naming the module being sealed resolves there too,
-since no registry entry exists for it yet. Only when every body has bound are
-they sealed, so a module load in the middle restarts the group against a view
-holding the loaded module and never leaves half a group sealed. The image
+group, and so does a qualified name naming the module being sealed, when the
+group owns the occurrence or the alias that reached it: no registry entry
+exists for the group yet. A quotation injected from elsewhere was not written
+in the group, so its qualified names reach the registered module. Each bound
+body is staged on its own reserved definition, and only when every body has
+bound are they sealed, so a module load in the middle restarts the group
+against a view holding the loaded module and never leaves half a group sealed. The image
 stays in its construction frame throughout, and the frame's unwind discards it
 on failure. A construction body that leaves values on its stack is refused
 before sealing, so no image carries state out of its body.

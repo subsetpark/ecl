@@ -449,10 +449,10 @@ const DefineDriver = struct {
                     .session, .core_build => {},
                 }
                 const root: env.DefinitionRoot = if (self.scope.storage == .session) .session else .core;
-                const definition = try env.Definition.create(
+                const definition = try env.Definition.reserve(
                     evaluator.allocator,
                     if (root == .session) .counted else .static,
-                    .{ .reserved = env.quotationHeader(body) },
+                    env.quotationHeader(body),
                     .{
                         .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
@@ -492,12 +492,13 @@ const DefineDriver = struct {
                     .complete => |result| result,
                 };
                 switch (result) {
-                    .bound => |parts| {
+                    .bound => |bound| {
                         const definition = binding.definition;
                         const name = binding.binding_name;
                         binding.cursor.deinit(evaluator.releases, evaluator.allocator);
                         binding.context.deinit(evaluator.releases, evaluator.allocator);
-                        definition.seal(evaluator.releases, parts);
+                        definition.stage(evaluator.releases, bound);
+                        definition.seal(evaluator.releases);
                         switch (self.scope.storage) {
                             .session => {
                                 // The registry cursor takes the definition's
@@ -777,8 +778,8 @@ const WhichDriver = struct {
             1 => try self.add(.{ .bytes = " -> " }),
             2 => try self.add(.{ .trace_word = resolved.trace_word }),
             3 => try self.add(.{ .bytes = " " }),
-            4 => try self.add(.{ .bytes = switch (resolved.definition.body) {
-                .source, .reserved => "def",
+            4 => try self.add(.{ .bytes = switch (resolved.definition.code().*) {
+                .source => "def",
                 .builtin => "primitive",
                 .native => "native",
             } }),
@@ -791,12 +792,12 @@ const WhichDriver = struct {
             9 => if (resolved.definition.effect != null) try self.add(.{ .bytes = " " }),
             10 => if (resolved.definition.effect) |effect|
                 try self.add(.{ .value = .{ .list = effect.header() } }),
-            11 => switch (resolved.definition.body) {
+            11 => switch (resolved.definition.code().*) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             12 => {
-                const requirements = switch (resolved.definition.body) {
+                const requirements = switch (resolved.definition.code().*) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
@@ -992,28 +993,28 @@ const SeeDriver = struct {
                 try self.add(.{ .value = .{ .list = effect.header() } }),
             1 => if (resolved.definition.doc != null or resolved.definition.effect != null)
                 try self.add(.{ .bytes = " " }),
-            2 => switch (resolved.definition.body) {
-                .source, .reserved => if (resolved.definition.source) |source|
+            2 => switch (resolved.definition.code().*) {
+                .source => if (resolved.definition.source) |source|
                     try self.add(.{ .bytes = source.bytes() })
                 else
                     try self.add(.{ .value = .{ .list = resolved.definition.quotationBody().? } }),
                 .builtin => try self.add(.{ .bytes = "<primitive>" }),
                 .native => try self.add(.{ .bytes = "<native:" }),
             },
-            3 => switch (resolved.definition.body) {
+            3 => switch (resolved.definition.code().*) {
                 .native => try self.add(.{ .trace_word = resolved.trace_word }),
                 else => {},
             },
-            4 => switch (resolved.definition.body) {
+            4 => switch (resolved.definition.code().*) {
                 .native => try self.add(.{ .bytes = ">" }),
                 else => {},
             },
-            5 => switch (resolved.definition.body) {
+            5 => switch (resolved.definition.code().*) {
                 .native => try self.add(.{ .bytes = " requires " }),
                 else => {},
             },
             6 => {
-                const requirements = switch (resolved.definition.body) {
+                const requirements = switch (resolved.definition.code().*) {
                     .native => |callable| callable.instance.requirements(),
                     else => &.{},
                 };
