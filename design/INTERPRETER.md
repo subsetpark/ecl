@@ -11,9 +11,9 @@ implementation choice and a public contract appear to conflict. Recorded
 performance measurements belong in [PERFORMANCE.md](PERFORMANCE.md).
 
 The interpreter executes the same quotation values that ecl programs
-manipulate as data. Before a quotation runs it is bound: each of its words is
-resolved once and the quotation is sealed with a table of the definitions they
-name. There is no bytecode, native-code, or JIT-compiled tier. The rest of the
+manipulate as data. Each word resolves when it is reached, against the
+definitions current then; a unit remembers what it resolved until the next
+publication. There is no bytecode, native-code, or JIT-compiled tier. The rest of the
 architecture makes that model safe under replacement, array specialization,
 concurrency, cancellation, and live module reload.
 
@@ -46,9 +46,8 @@ frame machine ───────► environment and module resolution
 ```
 
 Each box is a cooperating runtime boundary. Reading creates ordinary runtime
-values; a definition binds its body when it is made, while top-level source
-and quotations applied at run time resolve each word as it is reached; a
-primitive may install a
+values; a definition is validated when it is made, and every word resolves as
+it is reached; a primitive may install a
 resumable driver; and a driver may yield to the scheduler many times before
 producing a value. The `Session` owns every component for the whole journey.
 
@@ -328,13 +327,13 @@ and the tokenizer state derived from exactly those bytes. The line editor asks
 that state whether a unit is complete and stays independent of quote, string,
 character, and comment recognition.
 
-### Quotations are bound before they run
+### Words resolve when they run
 
 The root program and every quotation are lists. Evaluation has three cases:
 
 - a non-symbol value is appended to the operand stack;
-- a symbol occurrence invokes the definition it was bound to, or, in code that
-  is not bound, the definition it resolves to now; and
+- a symbol occurrence invokes the definition it resolves to when it is
+  reached; and
 - applying a quotation evaluates its elements by the same rule.
 
 A symbol is one representation whichever position it occupies: its interned
@@ -351,16 +350,13 @@ occurrences, since a symbol inside a nested list or dict is the symbol it
 spells. A symbol list is always a generic spine, since no leaf holds a link.
 
 Program construction produces ordinary values and never triggers compilation.
-Concatenating quotations produces another ordinary list. Binding happens at the
-boundary where a quotation is first applied or a definition is made, and
-produces an executable beside the quotation rather than replacing it: the
-quotation keeps its literals and source provenance, and a target table gives
-each executable word the definition it names. Dispatch then follows a fixed
-target. This keeps the language's reflective center and its single value
-representation, and moves resolution out of the dispatch loop without the
-invalidation machinery a mutable code cache would need, since a bound
-executable never changes. ecl still concentrates its optimization budget on
-the array operations that dominate useful data work.
+Concatenating quotations produces another ordinary list, runnable as built:
+nothing binds it, and nothing sits beside it. Dispatch resolves each word when
+it is reached, through a resolution the unit remembers for one publication, so
+the language keeps its reflective center and its single value representation
+and a replacement needs no invalidation beyond that publication. ecl still
+concentrates its optimization budget on the array operations that dominate
+useful data work.
 
 ### Locals syntax lowers once, at read time
 
@@ -375,9 +371,9 @@ This keeps the machine point-free and local lifetime visible: the lowered
 prefix moves inputs into locals, indexed reads retrieve them, and a final
 operation drops the region. The three backend names are reserved from every
 publication, so they can only mean their core primitives. A lowered operation
-carries its count or index in its link with a locals flag, so binding leaves it
-untargeted and dispatch runs it directly; one written as ordinary text binds
-like any word. The reader preserves source spans for the produced forms,
+carries its count or index in its link with a locals flag, so dispatch runs it
+directly without resolving it; one written as ordinary text resolves like any
+word. The reader preserves source spans for the produced forms,
 keeping diagnostics anchored to the user's source.
 
 A binder's failure belongs to whoever wrote it, which the lowered operation
@@ -592,10 +588,10 @@ requires at compile time so no port can become one that cannot be moved.
 ## 4. Words, environments, and modules
 
 Values answer “what data is this?” The binding system answers “which
-definition does this word occurrence denote?” It answers once, when the code
-holding the occurrence is bound, and never again for that code. Knowing where a
-name resolves is fixed by the occurrence; selecting which definition it denotes
-is decided by binding.
+definition does this word occurrence denote?” It answers each time the
+occurrence is reached. Knowing where a name resolves is fixed by the
+occurrence; selecting which definition it denotes is decided against the
+current definitions.
 
 ### The word occurrence carries its root
 
@@ -622,81 +618,68 @@ context.
 Scope ids are issued monotonically and never reused, because a word holds a
 bare id and no reference. Core and the session each have one id for the life of
 the `Env`; an image's id names its cell, which goes empty when an unpublished
-image is discarded, so binding a word written there is a definite failure
+image is discarded, so resolving a word written there is a definite failure
 rather than a fallback.
 
-### Definitions are immutable targets
+### Definitions are immutable
 
-A `Definition` is one closed choice — a bound source body, an in-tree builtin
+A `Definition` is one closed choice — a source body, an in-tree builtin
 callback, or a validated native callable — together with its effect,
 documentation, visibility, source slice, and module-local name. Nothing about
-it changes once it is sealed. Construction reserves a definition before its
-body is bound, which is what lets a body call itself and a module group's
-members call one another; sealing installs the bound body as its executable. A
-reserved definition is reachable only from its construction owner, so it can be
-neither executed nor published.
+it changes once it is sealed; replacing a name publishes a different
+definition. Construction reserves a definition before its body is validated,
+which is what lets a body name itself and a module group's members name one
+another; sealing installs the body. A reserved definition is reachable only
+from its construction owner, so it can be neither executed nor published.
 
 Construction is a typed boundary. A reserved definition can be named by
-binding but is accepted by no execution, publication, or reflection path; only
-sealing yields a definition, so every holder of a definition holds sealed code,
-and executable code exists only once sealed. A body bound for a construction
-can name only that construction's own members, and the construction seals every
-member before any body runs. A module group binds against a construction directory
-of its own, so a published directory never holds an unsealed entry.
+validation but is accepted by no execution, publication, or reflection path;
+only sealing yields a definition, so every holder of a definition holds sealed
+code. A module group validates against a construction directory of its own,
+so a published directory never holds an unsealed entry.
 
 Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
-until teardown, so code bound to a replaced image and words written in it keep
-their meaning. A top-level session definition is counted, because replacement
-removes it from the directory while bound callers, running activations, and
-units' resolutions may still hold it. Counted definitions are the only kind
+until teardown, so words written in a replaced image keep their meaning. A
+top-level session definition is counted, because replacement removes it from
+the directory while running activations and units' resolutions may still hold
+it. An activation running a body holds its definition, and a tail call secures
+the callee before it retires the caller. Counted definitions are the only kind
 reclaimed during a Session; the retention of published images is a deliberate
 exception, accepted to avoid an ownership protocol for quotations that escape
 their image, and memory grows with reload history.
 
-### Binding seals an executable
+### Validation checks a body once; dispatch resolves every time
 
-An `Executable` is a quotation plus a target table: for each top-level
-unquoted word, the definition it was bound to. Values, quoted symbols, and
-lowered locals operations have no target. The executable's owner holds a
-dependency table with one reference to each distinct counted target, however
-many times the body calls it, so dispatch borrows targets and adds no
-ownership operation. Only top-level session definitions are counted: a module
-group's calls among its members, like core's, need no reference, because the
-image holding them lives until Session teardown. A definition's call of itself
-is never a dependency, so a recursive body is not a cycle. An evaluation running an
-executable holds the executable's owner, the counted definition whose body it
-is. A static owner needs no hold. A tail call secures the callee's owner before it retires the caller,
-whose executable may hold the callee's last reference.
+The resolver resolves one word: by its link to a root, then the root's
+directory and core, or, for a dotted spelling, a module registration and its
+public entry; `core.` names core alone. A name alias is followed through the
+same resolver, as the module holding it would resolve it; Brent's algorithm
+detects a cycle without bounding the length of an acyclic chain.
 
-Binding takes one quotation against one captured publication view. The
-resolver resolves each word: by its link to a root, then the root's directory
-and core, or, for a dotted spelling, a module registration and its public
-entry; `core.` names core alone. A name alias is followed through the same
-resolver, as the module holding it would resolve it; Brent's algorithm detects
-a cycle without bounding the length of an acyclic chain. Binding is bounded
-work charged to the unit. It borrows targets while it runs, since its captured
-view keeps them alive; deduplicating them is bounded work, and only after the
-walk does it take one reference to each distinct counted target. Those
-references retire as their own owner, one per step, so abandoning a binding,
-discarding an unsealed body, or retiring a definition is constant work. A word
-naming a module that is not registered binds to no target and resolves by
-explicit lookup when reached, which loads the module then: binding never
-loads a module, so a body pays only for the modules it calls. Any other miss
-fails at that word before the quotation has run.
+A construction validates each body with it, against one captured publication
+view, so a misspelled word fails the definition rather than its call. A
+construction's own members, and a definition's own name, resolve during
+validation before anything is published. Validation records nothing and holds
+nothing, so abandoning it is constant work. A word naming a module that is not
+registered passes and resolves when it is reached, loading the module then:
+validation never loads a module, so a body pays only for the modules it calls.
 
-Explicit lookups use the same resolver one word at a time against the current
-view: incremental top-level source, `execute`, and reflection. Each therefore
-sees the definitions current when it runs, resolved in the root the symbol
-carries.
+Every evaluation — top-level source, a definition's body, a quotation applied
+at run time — resolves each word when it is reached, so a definition made by
+one form is visible to the next and a replacement reaches the next dispatch of
+the word anywhere, even partway through a body or an iteration. Nothing checks
+a quotation applied at run time before it runs; an unresolved word fails where
+it is reached. Explicit lookups — `execute` and reflection — use the same
+resolver against the current view.
 
 ### One snapshot is the publication view
 
 The registry's directory snapshot is the Session's publication view. It maps
 module names to images, short names to module names, and the session's
-top-level names to definitions or aliases. A binding captures one snapshot and
-resolves every session and qualified name against it across scheduler turns,
-so it never assembles targets from two publication states. Core's directory is
+top-level names to definitions or aliases. A validation captures one snapshot
+and resolves every session and qualified name against it across scheduler
+turns, so it never checks a body against two publication states. Core's directory is
 fixed when core freezes and an image's when the image is sealed, so neither
 needs capturing.
 
@@ -717,30 +700,24 @@ path.
 
 Every publication also advances the Session's publication counter, which its
 main registry owns and each source-private registry shares. The counter is
-never reused and holds no snapshot; it only keys reusable bindings. It is
+never reused and holds no snapshot; it only keys units' resolutions. It is
 per Session so that one Session's publications never change what another's
 units reuse, and so what a unit allocates is a function of its own run.
 
-### Run-time code resolves as it runs
+### A unit remembers what it resolved
 
-An evaluation is either bound, following its executable's targets, or not
-bound: top-level source and every quotation applied at run time. Code that is
-not bound resolves each word when it is reached, so a definition made by one
-form is visible to the next and a redefinition reaches the next dispatch of
-the word, even partway through a quotation or an iteration. Nothing checks a
-quotation before it runs; an unresolved word fails where it is reached.
-
-A unit keeps what its unbound code resolved, keyed by word and the applying
-site's registration provenance, for one publication: any publication in the
-Session empties it before its next use, which is what makes a redefinition
-visible. It is a direct-mapped table grown by doubling to a fixed bound, so a
-lookup is one probe and every maintenance step is bounded. Each entry holds
-its definition, so a definition it hands out outlives the dispatch that
-retains it. Repeating a word costs that probe; a quotation built at run time,
-as `compose` builds one, costs nothing more than a literal one, since nothing
-binds it. An iteration's applications borrow the quotation the combinator
-holds for the whole invocation. The bootstrap unit keeps no resolutions,
-because core's directory changes without a publication.
+A unit keeps what its code resolved, keyed by word and the applying site's
+registration provenance, for one publication: any publication in the Session
+empties it before its next use, which is what makes a replacement visible. It
+uses open addressing, is kept at most half full, and grows by doubling to a
+fixed bound beyond which it starts over, so a lookup expects one probe and
+every maintenance step is bounded. Each entry holds its definition, so a
+definition it hands out outlives the dispatch that retains it. Repeating a
+word costs that probe, in a definition's body as anywhere; a quotation built
+at run time, as `compose` builds one, costs nothing more than a literal one,
+since nothing binds it. An iteration's applications borrow the quotation the
+combinator holds for the whole invocation. The bootstrap unit keeps no
+resolutions, because core's directory changes without a publication.
 
 ### An execution site correlates its contexts
 
@@ -770,23 +747,22 @@ publishes it. While its construction body runs, `def`, `defp`, `import`, and
 `importp` stage names in the image; nothing staged is visible, so the body
 cannot run a definition it has made. When the body completes, the module is
 sealed as one group: the staged names become the image's directory, a name
-staged twice fails construction, and every reserved body binds against that
-directory and one captured view. A word written in the image resolves in the
+staged twice fails construction, and every reserved body is validated against
+that directory and one captured view. A word written in the image resolves in the
 group, and so does a qualified name naming the module being sealed, when the
 group owns the occurrence or the alias that reached it: no registry entry
 exists for the group yet. A quotation injected from elsewhere was not written
-in the group, so its qualified names reach the registered module. Each bound
-body is staged on its own reserved definition, and only when every body has
-bound are they sealed, so a module load in the middle restarts the group
-against a view holding the loaded module and never leaves half a group sealed. The image
+in the group, so its qualified names reach the registered module. Every body
+is validated before any is sealed, so a failure never leaves half a group
+sealed. The image
 stays in its construction frame throughout, and the frame's unwind discards it
 on failure. A construction body that leaves values on its stack is refused
 before sealing, so no image carries state out of its body.
 
 Registration publishes the sealed image and adds it to the registry's history,
 which holds one reference to every image the registry ever published. Old code
-keeps running: code bound to a replaced generation keeps its targets, and a
-word written in it keeps resolving there. This resembles Erlang's distinction
+keeps running: a word written in a replaced generation keeps resolving there,
+while a qualified name reaches the generation registered when it runs. This resembles Erlang's distinction
 between old and current module code and read-copy-update's separation of
 publication from reclamation.
 
@@ -865,8 +841,8 @@ with a 144-byte ceiling.
 
 ### Loading resumes a lookup
 
-Binding never loads. A word naming an unregistered module suspends an explicit
-lookup, including a bound word reached with no target, or a primitive while
+Validation never loads. A word naming an unregistered module suspends the
+lookup that reaches it, or a primitive, while
 the loader searches the embedded standard-library manifest, the module map,
 source paths, or native artifacts according to `ENVIRONMENT.md`. The
 continuation says how to resume: dispatch the exact word again, replay a
@@ -937,9 +913,8 @@ Each pass through the loop performs the first applicable action:
 4. honor a requested process exit;
 5. resume a saved frame when no quotation is current;
 6. check fuel and cancellation at a safe point;
-7. bind an evaluation whose application has not bound yet;
-8. return from a completed quotation; or
-9. fetch and dispatch one form.
+7. return from a completed quotation; or
+8. fetch and dispatch one form.
 
 That ordering is part of the machine's design. A driver completes before the
 parent evaluation resumes; cancellation is observed at bounded safe points;
@@ -947,10 +922,10 @@ and frame resumption cannot accidentally dispatch past work installed by the
 continuation.
 
 Dispatch itself has two cases. Non-word forms transfer a retained value to the
-operand stack. A bound word invokes its target: it schedules a source body,
-invokes a builtin, or starts a native call. In incremental top-level source a
-word first resolves through the explicit-lookup driver and then takes the same
-invocation path.
+operand stack. A word the unit has resolved in the current publication invokes
+its definition: it schedules a source body, invokes a builtin, or starts a
+native call. Any other word first resolves through the explicit-lookup driver
+and then takes the same invocation path.
 
 ### Tail position reuses control
 
@@ -1193,8 +1168,9 @@ wrong literal shape, or any other mismatch selects the generic frame-machine
 path.
 
 A trusted definition, in the core or in a shipped standard-library image, is
-recognized once, when its group is sealed. Its body is bound and its directory
-is sealed, so whether the body matches an entry is a property of the definition
+recognized once, when its group is sealed. Its words resolve in core or its
+sealed image, neither of which changes, so whether the body matches an entry
+is a property of the definition
 rather than of any call. The outcome is recorded on the definition; a call
 decides only whether its operands admit the entry and otherwise runs the body.
 The seal looks up only the names the table can recognize, so its work does not
@@ -1654,10 +1630,10 @@ outside those locks.
 Readers pair every immutable pointer with evidence that its allocation remains
 alive:
 
-- a directory or generation lease, or a binding cursor's captured view;
+- a directory or generation lease, or a validation's captured view;
 - a module generation pin, taken on an image before its directory is read;
-- an evaluation's hold on its executable's owner, or an executable's
-  references to its counted targets; or
+- an evaluation's hold on its definition, or a unit's resolutions, each of
+  which holds the definition it names; or
 - a source slice that retains its backing allocation.
 
 Observation capabilities return metadata or pinned cursors. They do not expose
@@ -1696,8 +1672,8 @@ as ordinary ecl definitions and modules.
 
 `prelude.ecl` is embedded and evaluated during Session construction to populate
 core. It runs through the ordinary incremental evaluator in a root whose
-storage is the core-building authority, so each definition binds as it is
-made against the core built so far and the prelude needs no forward
+storage is the core-building authority, so each definition is validated as it
+is made against the core built so far and the prelude needs no forward
 references; core is then recognized and frozen before any ordinary unit
 starts. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,

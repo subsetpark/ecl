@@ -471,13 +471,6 @@ const ModuleImage = struct {
     /// the slots before `group_sealed` have moved.
     group: ?env.GroupMap = null,
     group_sealed: usize = 0,
-    /// How many reservations the group has staged; each is the member at
-    /// its staging position.
-    member_count: usize = 0,
-    /// The group's members by index, filled as the group directory is
-    /// built, for sealing to resolve the bodies' reserved targets. Freed with
-    /// the construction directory.
-    members: env.ReservationTable = .{},
     /// The sealed directory; null until the group is sealed.
     names: ?env.NameMap = null,
     scope: env.Scope,
@@ -557,12 +550,6 @@ const ModuleImage = struct {
         std.debug.assert(self.group == null and self.names == null);
         try self.staging.push(.{ .name = name, .entry = entry });
         self.staged_count += 1;
-        if (entry == .reserved) self.member_count += 1;
-    }
-
-    fn freeMembers(self: *ModuleImage) void {
-        if (self.members.items.len != 0) self.allocator.free(self.members.items);
-        self.members = .{};
     }
 
     /// Whether a word written in this image may resolve against its
@@ -609,7 +596,6 @@ const ModuleImage = struct {
                     group.deinit();
                     self.group = null;
                 }
-                self.freeMembers();
                 if (self.names) |*names| {
                     self.retirement_state = .{ .names = names.rawEntries() };
                     return false;
@@ -648,7 +634,7 @@ const ModuleImage = struct {
 
     fn retireGroupEntry(entry: env.GroupEntry, releases: *heap.ReleaseDomain) void {
         switch (entry) {
-            .reserved => |member| member.reservation.discard(releases),
+            .reserved => |reservation| reservation.discard(releases),
             .definition => |definition| definition.retireStatic(releases),
             .alias => {},
         }
@@ -848,7 +834,7 @@ const DirectoryLease = struct {
 /// The session's top-level names in one snapshot, one per step.
 pub const SessionNameCursor = Directory.NameMap.RawEntryCursor;
 
-/// One captured registry snapshot: what a binding or explicit lookup resolves
+/// One captured registry snapshot: what a validation or explicit lookup resolves
 /// session names and qualified module names against. Holding it retains the
 /// snapshot, not the definitions bound through it.
 pub const View = struct {
@@ -1404,18 +1390,15 @@ pub const OwnedImage = enum(usize) {
         const origin: env.BindingOrigin = .{ .module_local = .{ .trace_word = name } };
         const handle: *anyopaque = @ptrCast(image);
         const created: env.GroupEntry = switch (publication) {
-            .word => |word| .{ .reserved = .{
-                .reservation = try env.Definition.reserve(image.allocator, .static, env.quotationHeader(word.body), .{
-                    .visibility = word.visibility,
-                    .origin = origin,
-                    .effect = word.effect,
-                    .doc = word.doc,
-                    .source = word.source,
-                    .root = .image,
-                    .home = handle,
-                }),
-                .index = .of(image.member_count),
-            } },
+            .word => |word| .{ .reserved = try env.Definition.reserve(image.allocator, .static, env.quotationHeader(word.body), .{
+                .visibility = word.visibility,
+                .origin = origin,
+                .effect = word.effect,
+                .doc = word.doc,
+                .source = word.source,
+                .root = .image,
+                .home = handle,
+            }) },
             .native => |native| .{ .definition = try env.Definition.create(image.allocator, .static, .{ .native = native.callable }, .{
                 .visibility = native.visibility,
                 .origin = origin,
@@ -1447,12 +1430,12 @@ pub const OwnedImage = enum(usize) {
     pub fn groupCursor(self: *const OwnedImage) GroupCursor {
         return .{ .image = self.borrow() };
     }
-    /// The group's construction directory, for binding its own bodies.
+    /// The group's construction directory, for validating its own bodies.
     /// Valid once the group cursor has completed and until sealing.
     pub fn groupDirectory(self: *const OwnedImage) *const env.GroupMap {
         return &self.borrow().group.?;
     }
-    /// The group's entries, for binding each reservation in turn.
+    /// The group's entries, for validating each reservation in turn.
     pub fn groupEntries(self: *const OwnedImage) env.GroupMap.RawEntryCursor {
         return self.borrow().group.?.rawEntries();
     }
@@ -1463,7 +1446,7 @@ pub const OwnedImage = enum(usize) {
     /// Seals every reservation of a group whose bodies are bound and moves
     /// each entry into the published directory.
     pub fn sealCursor(self: *const OwnedImage) SealCursor {
-        return .{ .image = self.borrow(), .mode = .bound };
+        return .{ .image = self.borrow(), .mode = .validated };
     }
     pub fn testDeclarationCursor(
         self: *const OwnedImage,
@@ -1549,11 +1532,7 @@ pub const GroupCursor = struct {
     pub fn advance(self: *GroupCursor) Error!poll.Progress(void) {
         const image = self.image;
         if (image.group == null) {
-            if (self.init == null) {
-                if (image.member_count != 0 and image.members.items.len == 0)
-                    image.members = .{ .items = try image.allocator.alloc(*env.Reservation, image.member_count) };
-                self.init = env.GroupMap.initCursor(image.allocator, image.staged_count);
-            }
+            if (self.init == null) self.init = env.GroupMap.initCursor(image.allocator, image.staged_count);
             const cursor = &self.init.?;
             switch (try cursor.advance()) {
                 .pending => {},
@@ -1582,11 +1561,6 @@ pub const GroupCursor = struct {
                         self.duplicate = staged.name;
                         return error.Duplicate;
                     }
-                    if (staged.entry == .reserved) {
-                        const member = staged.entry.reserved;
-                        image.members.items[@backingInt(member.index)] = member.reservation;
-                        member.reservation.join(&image.members);
-                    }
                     self.put = image.group.?.putCursor(staged.name, staged.entry);
                 },
             }
@@ -1601,15 +1575,16 @@ pub const GroupCursor = struct {
 
 /// Seals a group and builds its published directory from its construction
 /// directory in bounded steps: the directory is allocated first, so a failed
-/// allocation moves nothing, and then each slot's entry is sealed and moved.
+/// allocation moves nothing, and then each slot's entry is sealed and moved,
+/// one per step.
 /// Every entry has one owner throughout: the construction directory for the
 /// slots not yet moved, the cursor for the one being inserted, and the
 /// published directory after.
 pub const SealCursor = struct {
     image: *ModuleImage,
-    /// A bound group seals its staged bodies; a literal group's bodies
-    /// execute no words and are sealed as they stand.
-    mode: enum { bound, literal },
+    /// A validated group seals its bodies as they stand; a literal group's
+    /// bodies were never validated, so each must execute no words.
+    mode: enum { validated, literal },
     init: ?env.NameMap.InitCursor = null,
     put: ?env.NameMap.PutCursor = null,
 
@@ -1646,7 +1621,6 @@ pub const SealCursor = struct {
             group.deinit();
             image.group = null;
             image.group_sealed = 0;
-            image.freeMembers();
             return .complete;
         }
         const slot = group.slotEntry(image.group_sealed) orelse {
@@ -1654,14 +1628,10 @@ pub const SealCursor = struct {
             return .pending;
         };
         const published: env.Entry = switch (slot.value) {
-            .reserved => |member| .{
+            .reserved => |reservation| .{
                 .definition = switch (self.mode) {
-                    // One target per step; the slot moves once it is sealed.
-                    .bound => switch (member.reservation.advanceSeal(image.releases)) {
-                        .pending => return .pending,
-                        .complete => |definition| definition,
-                    },
-                    .literal => try member.reservation.sealLiteral(image.releases),
+                    .validated => reservation.seal(),
+                    .literal => try reservation.sealLiteral(),
                 },
             },
             .definition => |definition| .{ .definition = definition },
@@ -1858,7 +1828,7 @@ pub const Registry = enum(usize) {
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
-    /// The Session's publication identity now, for keying a reusable binding.
+    /// The Session's publication identity now, for keying units' resolutions.
     pub fn currentPublication(self: *const Registry) u64 {
         return self.privateState().clock.load(.acquire);
     }

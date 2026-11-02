@@ -1139,30 +1139,19 @@ pub fn stringValue(
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 /// How an evaluation's words reach their targets.
+/// How an evaluation holds the code it runs. Every evaluation resolves each
+/// word when it is reached, against the definitions current then.
 const Program = union(enum) {
-    /// Code that is not bound: top-level source, or a quotation applied at
-    /// run time. Each word resolves when it is reached, against the
-    /// definitions current then, so a definition made by one form is visible
-    /// to the next. The evaluation owns one reference to its code.
-    incremental,
-    /// Code that is not bound, owned by the enclosing application frame for
-    /// its whole invocation. The frame sits beneath this evaluation and
-    /// outlives it, so the evaluation borrows the code.
-    incremental_borrowed,
-    /// A sealed executable. Its code is borrowed from the executable, which
+    /// The evaluation owns one reference to its code: top-level source, or a
+    /// quotation applied at run time.
+    owned,
+    /// The enclosing application frame owns the code for its whole
+    /// invocation. The frame sits beneath this evaluation and outlives it, so
+    /// the evaluation borrows the code.
+    borrowed,
+    /// A definition's body. Its code is borrowed from the definition, which
     /// the evaluation keeps alive by holding the executable's owner.
-    bound: *const env.Executable,
-    /// A sealed executable the enclosing application frame owns for its
-    /// whole invocation. The frame sits beneath this evaluation and outlives
-    /// it, so the evaluation borrows the executable and its code.
-    borrowed: *const env.Executable,
-
-    fn executable(self: Program) ?*const env.Executable {
-        return switch (self) {
-            .bound, .borrowed => |sealed| sealed,
-            .incremental, .incremental_borrowed => null,
-        };
-    }
+    definition: *const env.Executable,
 };
 
 const Eval = struct {
@@ -1209,18 +1198,18 @@ const Eval = struct {
     /// Releases what this evaluation owns.
     inline fn release(self: Eval, releases: *heap.ReleaseDomain) void {
         switch (self.program) {
-            .incremental => releases.releaseHeader(self.code),
-            .bound => |executable| executable.owner().release(releases),
-            .borrowed, .incremental_borrowed => {},
+            .owned => releases.releaseHeader(self.code),
+            .definition => |executable| executable.owner().release(releases),
+            .borrowed => {},
         }
     }
 
     /// Takes one more reference for a copy of this evaluation.
     fn retainCopy(self: Eval) void {
         switch (self.program) {
-            .incremental => heap.incRef(self.code),
-            .bound => |executable| executable.owner().retain(),
-            .borrowed, .incremental_borrowed => {},
+            .owned => heap.incRef(self.code),
+            .definition => |executable| executable.owner().retain(),
+            .borrowed => {},
         }
     }
 
@@ -1228,13 +1217,13 @@ const Eval = struct {
     /// holder that keeps only the quotation.
     fn intoCode(self: Eval, releases: *heap.ReleaseDomain) *Header {
         switch (self.program) {
-            .incremental => return self.code,
-            .bound => |executable| {
+            .owned => return self.code,
+            .definition => |executable| {
                 heap.incRef(self.code);
                 executable.owner().release(releases);
                 return self.code;
             },
-            .borrowed, .incremental_borrowed => {
+            .borrowed => {
                 heap.incRef(self.code);
                 return self.code;
             },
@@ -4536,7 +4525,7 @@ pub const Unit = struct {
                         .push => try evaluator.pushBorrowed(.{ .list = root_header }),
                         .call, .session => |source| {
                             heap.incRef(root_header);
-                            try evaluator.callProgramOwned(root_header, .incremental);
+                            try evaluator.callProgramOwned(root_header, .owned);
                             if (source) |context| {
                                 evaluator.current.?.site.registration_provenance = .{ .source = context };
                             } else if (self.completion.borrow() == .call) {
@@ -4573,7 +4562,7 @@ pub const Unit = struct {
                             };
                             evaluator.current = .{
                                 .code = root_header,
-                                .program = .incremental,
+                                .program = .owned,
                                 .position = .{ .source = 0 },
                                 .site = site,
                                 .traced_word = no_word,
@@ -5441,12 +5430,12 @@ pub const Unit = struct {
     /// Consumes a quotation header and applies it inline. Its words resolve
     /// as they are reached.
     pub fn callOwned(self: *Unit, quotation: *Header) error{OutOfMemory}!void {
-        return self.callProgramOwned(quotation, .incremental);
+        return self.callProgramOwned(quotation, .owned);
     }
 
     /// Runs `quotation` inline with the caller, resolving one form at a time.
     pub fn callProgramOwned(self: *Unit, quotation: *Header, program: Program) error{OutOfMemory}!void {
-        std.debug.assert(program == .incremental);
+        std.debug.assert(program == .owned);
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
         if (application_tail) |application_index| {
@@ -5634,7 +5623,7 @@ pub const Unit = struct {
         // whole invocation, so each application borrows it.
         self.current = .{
             .code = application.quotation,
-            .program = .incremental_borrowed,
+            .program = .borrowed,
             .position = .{ .source = 0 },
             // An isolated body runs in its caller's scope but is not a root,
             // so nothing it calls may define there.
@@ -5756,7 +5745,7 @@ pub const Unit = struct {
         );
         self.current = .{
             .code = body_header,
-            .program = .incremental,
+            .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
@@ -5974,7 +5963,7 @@ pub const Unit = struct {
         );
         self.current = .{
             .code = body,
-            .program = .incremental,
+            .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
@@ -6189,7 +6178,7 @@ pub const InitialStack = union(enum) {
 /// Starts a unit on code that resolves one form at a time: top-level source,
 /// or a task's body.
 pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
-    const program: Program = .incremental;
+    const program: Program = .owned;
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.terminal == .evaluating);
     std.debug.assert(unit.current == null);
@@ -6444,22 +6433,15 @@ fn loop(self: *Unit) MachineError!RunStatus {
         self.active_index = index;
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
-        // A bound word follows its fixed target. In unbound code, a word this
-        // unit has resolved in the current publication runs directly; a
-        // quoted or lowered occurrence is a form, as is everything else, and
-        // an unresolved word resolves when dispatched.
-        const dispatched = if (current.program.executable()) |executable| bound: {
-            if (executable.target(index)) |target| {
-                const name = heap.valuesConst(current.code)[index].symbol.name;
-                break :bound invokeDefinition(self, target, name);
-            }
-            break :bound dispatch(self, formAt(current.code, index));
-        } else unbound: {
+        // A word this unit has resolved in the current publication runs
+        // directly; a quoted or lowered occurrence is a form, as is
+        // everything else, and an unresolved word resolves when dispatched.
+        const dispatched = resolved: {
             const form = formAt(current.code, index);
             if (form == .symbol and form.symbol.slot & (env.quote_flag | env.local_operand_flag) == 0)
                 if (self.reusedResolution(form.symbol)) |definition|
-                    break :unbound invokeDefinition(self, definition, form.symbol.name);
-            break :unbound dispatch(self, form);
+                    break :resolved invokeDefinition(self, definition, form.symbol.name);
+            break :resolved dispatch(self, form);
         };
         dispatched catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -7422,7 +7404,7 @@ fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceW
     entered = true;
     self.current = .{
         .code = executable.code(),
-        .program = .{ .bound = executable },
+        .program = .{ .definition = executable },
         .position = .{ .source = 0 },
         .site = site,
         .traced_word = word,
@@ -7959,7 +7941,7 @@ fn startModuleSeal(self: *Unit) MachineError!void {
     const placeholder = try list.fromValuesGeneric(self.allocator, &.{});
     self.current = .{
         .code = placeholder.list,
-        .program = .incremental,
+        .program = .owned,
         .position = .{ .source = 0 },
         .site = .image(home, self.module_access, false),
         .traced_word = no_word,
@@ -8060,16 +8042,16 @@ const ModuleSealDriver = struct {
 
     const Phase = union(enum) {
         group: modules.GroupCursor,
-        bind: struct {
+        validate: struct {
             entries: env.GroupMap.RawEntryCursor,
-            current: ?struct { reservation: *env.Reservation, cursor: binder.BindingCursor } = null,
+            current: ?struct { reservation: *env.Reservation, cursor: binder.ValidationCursor } = null,
         },
         seal: modules.SealCursor,
 
         pub fn deinit(self: *Phase) void {
             switch (self.*) {
                 .group => |*cursor| cursor.deinit(),
-                .bind => |*bind| if (bind.current) |*current| current.cursor.deinit(),
+                .validate => |*validate| if (validate.current) |*current| current.cursor.deinit(),
                 .seal => |*cursor| cursor.deinit(),
             }
             self.* = undefined;
@@ -8097,22 +8079,20 @@ const ModuleSealDriver = struct {
                     const owned = image(evaluator);
                     self.context.borrowMut().group.?.directory = owned.groupDirectory();
                     cursor.deinit();
-                    self.phase.borrowMut().* = .{ .bind = .{ .entries = owned.groupEntries() } };
+                    self.phase.borrowMut().* = .{ .validate = .{ .entries = owned.groupEntries() } };
                 },
             },
-            .bind => |*bind| {
-                if (bind.current) |*current| {
-                    const progress = try current.cursor.advance(self.context.borrowMut(), work);
-                    const result = switch (progress) {
+            .validate => |*validate| {
+                if (validate.current) |*current| {
+                    const result = switch (current.cursor.advance(self.context.borrowMut(), work)) {
                         .pending => continue,
                         .complete => |result| result,
                     };
                     const reservation = current.reservation;
                     switch (result) {
-                        .bound => |bound| {
+                        .valid => {
                             current.cursor.deinit();
-                            bind.current = null;
-                            reservation.stage(evaluator.releases, bound);
+                            validate.current = null;
                         },
                         .failed => |failure| {
                             const code = reservation.quotation();
@@ -8125,28 +8105,22 @@ const ModuleSealDriver = struct {
                     }
                     continue;
                 }
-                switch (bind.entries.advance()) {
+                switch (validate.entries.advance()) {
                     .pending => {},
                     .item => |entry| switch (entry.value) {
-                        .reserved => |member| {
-                            // Built before assignment: assigning `try` in place
-                            // would mark `current` present before a failure.
-                            const cursor = try binder.BindingCursor.init(
-                                evaluator.allocator,
-                                evaluator.releases,
-                                member.reservation.quotation(),
-                            );
-                            bind.current = .{ .reservation = member.reservation, .cursor = cursor };
+                        .reserved => |reservation| validate.current = .{
+                            .reservation = reservation,
+                            .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
                         },
                         .definition, .alias => {},
                     },
                     .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).sealCursor() },
                 }
             },
-            // Every body bound against one view; seal them together.
+            // Every body validated against one view; seal them together.
             .seal => |*cursor| switch (cursor.advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                // Every body was bound, never sealed as a literal.
+                // Every body was validated, never sealed as a literal.
                 error.UnboundWord => unreachable,
             }) {
                 .pending => {},

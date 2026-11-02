@@ -437,7 +437,7 @@ test "errors: archived contract locations remain attached after later sources" {
     try expectLocation(allocator, data, "\"early.ecl\"", 4, 3);
 }
 
-test "machine_test: redefinition reaches later binding and leaves existing callers fixed" {
+test "machine_test: redefinition reaches existing callers" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -449,13 +449,13 @@ test "machine_test: redefinition reaches later binding and leaves existing calle
         "(1 +) `step def (step) `caller def 2 caller",
     )) == .ok);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
-    // `caller` was bound to the first `step`; a later definition reaches only
-    // code bound after it.
+    // `caller` resolves `step` each time it runs, so it reaches the
+    // replacement.
     try std.testing.expect((try runtime.runUnit(
         "<test>",
         "pop (10 +) `step def 2 caller 2 step",
     )) == .ok);
-    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 12), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 12), runtime.stackItems()[1].int);
     try std.testing.expect((try runtime.runUnit(
         "<test>",

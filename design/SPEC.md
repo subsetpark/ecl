@@ -81,10 +81,9 @@ interpretation.
 
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
-name. Word occurrences retain the root their names are resolved in. A
-quotation is bound before it runs: each of its top-level words is resolved
-once, in its own root, and the bound code keeps those targets whatever is
-defined later.
+name. Word occurrences retain the root their names are resolved in. Each word
+is resolved in its own root when it is reached, so a replacement reaches every
+later call, including calls from code defined before it.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration publishes an
@@ -654,7 +653,7 @@ elements in order.
 
 Ordinary word evaluation is one observable operation:
 
-1. Take the definition the occurrence was bound to.
+1. Resolve the occurrence to its current definition.
 2. Establish the definition's activation context.
 3. Evaluate the definition's executable body.
 
@@ -662,45 +661,47 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-**Resolution.** A word is resolved in the root that occurrence was written in
-(see Bindings and scope), against the current definitions and module
-registrations. Definitions bind their bodies when they are made (below).
-Everything else resolves each top-level word when it is reached: top-level
-source, and every quotation applied at run time, by `call`, a combinator,
-`@attempt`, or as a task's body. Such a quotation is not checked before it
-runs: an unresolved word fails at that word, after the forms before it have
-run. Nested quotations and quoted words are data and resolve only when they
-are themselves applied. Binding never loads a module: a qualified word in a
-definition naming a module that is not registered binds without a target and
-resolves when it is first reached, loading the module then, so an unknown
-module or a name it does not export fails there, as an undefined word.
+**Resolution.** Every word is resolved when it is reached, in the root that
+occurrence was written in (see Bindings and scope), against the current
+definitions and module registrations. This holds alike for top-level source,
+for definition bodies, and for every quotation applied at run time, by
+`call`, a combinator, `@attempt`, or as a task's body. A quotation applied at
+run time is not checked before it runs: an unresolved word fails at that
+word, after the forms before it have run. Nested quotations and quoted words
+are data and resolve only when they are themselves applied.
 
-**Definitions bind when they are defined.** A top-level definition binds its
-body as `def` runs. Its own name, written in the root it is published into,
-calls the definition itself; every other word must already resolve, or name
-a module not yet registered, so a top-level body cannot refer forward to a
-later definition. A module's
-definitions and imports are staged by its construction body and bound together
-when the module is sealed, so words in one module may refer forward and recurse
-mutually. A staged definition cannot run before its module is sealed; a
-construction body that calls one finds nothing by that name.
+**Definitions are validated when they are defined.** A top-level definition
+checks its body as `def` runs. Its own name, written in the root it is
+published into, calls the definition itself; every other top-level word of
+the body must already resolve, or name a module not yet registered, so a
+top-level body cannot refer forward to a later definition and a misspelled
+word fails the definition. Validation records nothing: the body resolves each
+word again whenever it runs. A module's definitions and imports are staged by
+its construction body and validated together when the module is sealed, so
+words in one module may refer forward and recurse mutually. A staged
+definition cannot run before its module is sealed; a construction body that
+calls one finds nothing by that name. Validation never loads a module: a
+qualified word naming a module that is not registered passes, and resolves
+when it is first reached, loading the module then, so an unknown module or a
+name it does not export fails there, as an undefined word.
 
 **Top-level source is incremental.** A file, a REPL line, or the prelude is
 evaluated form by form, and each top-level word is resolved when it is
 reached, so ``(1) `foo def foo`` defines `foo` and then calls it.
 
-**Definitions keep their targets; run-time code sees replacements.**
-Replacing a definition or a module registration reaches definitions bound
-afterwards and every word that run-time code reaches afterwards, including
-the remaining forms of a quotation already running and the later elements of
-an iteration already under way. A definition already made keeps the
-definitions its body was bound to. There is no historical view: a unit, a
-task, and an `@attempt` see the definitions current as each word is reached.
+**Replacements reach running code.** Replacing a definition or a module
+registration reaches every word dispatched afterwards: in definitions made
+earlier, in the remaining forms of a quotation already running, and in the
+later elements of an iteration already under way. A body running when a word
+it calls is replaced may run the old definition for earlier calls and the new
+one for later ones. There is no historical view: a unit, a task, and an
+`@attempt` see the definitions current as each word is reached.
 Explicit operations on names — `execute`, `doc`, `effect`, `which`,
 and `see` — resolve the supplied symbol in its own root against the current
-definitions each time they run. A module image that bound code or a word
-names keeps its meaning for the rest of the Session after its registration is
-replaced. Executing a word written in an image that was never published and
+definitions each time they run. A word written in a module image resolves in
+that image, so code written in an image keeps reaching that image's
+definitions after its registration is replaced, while a qualified name
+reaches the registration current when it runs. Executing a word written in an image that was never published and
 has since been discarded is a `` `domain `` error.
 
 The reader links each symbol occurrence to the root the source is read into:
@@ -1279,10 +1280,11 @@ module image   → core; sealed at the end of construction
 
 A word resolves in the root it was written in: the root's own definition for
 its name when there is one, and otherwise core's; with neither it is an
-`` `undefined-word `` error when the word is bound (see Core evaluation). Names are
-introduced and replaced, never removed. Which definition a name selects is
-decided when code is bound, so a word read before its name is defined finds
-that definition once it exists only if it is bound afterwards.
+`` `undefined-word `` error when the word is reached, or when a definition
+naming it is validated (see Core evaluation). Names are introduced and
+replaced, never removed. Which definition a name selects is decided each time
+the word runs, so a word read before its name is defined finds that
+definition once it exists.
 
 Session-authored code may therefore shadow core definitions. A module image
 sees its own public and private bindings followed by core and never sees the
@@ -1339,7 +1341,8 @@ representations but expose the same binding model.
   values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete definition: omitting an effect or docstring clears the old one.
-  Code bound to the old definition keeps it.
+  Every later call reaches the new definition, including calls from code
+  defined before it.
 - `see` prints the resolved binding's combined annotation, when present,
   followed by its body through the standard source formatter. It omits the
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
@@ -1891,8 +1894,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   A session `def` shadows a name *for session code*. Adopting new behavior
   inside a prelude word is redefining that word: the replacement is a session
   definition, so it resolves in the session and shadows the prelude one for
-  session callers it binds afterwards; what is fixed is which root each word
-  resolves in. A quotation literal written
+  session callers from then on; what is fixed is which root each word resolves
+  in. A quotation literal written
   inside a body is sealed the way the body's own references are: it resolves in
   the scope its text was written in, whoever ends up applying it. `all?` is
   `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, but a

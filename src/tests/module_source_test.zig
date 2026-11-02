@@ -319,7 +319,7 @@ test "module: qualified import replacement and alias collisions" {
     try expectErrorContains(&runtime, "`dotted.name `a alias", &.{"kind domain"});
 }
 
-test "module: bound qualified calls keep their targets across reload and alias changes" {
+test "module: qualified calls follow reloads and alias changes" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -337,9 +337,9 @@ test "module: bound qualified calls keep their targets across reload and alias c
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    // A bound qualified call keeps the definition it was bound to: neither a
-    // reload nor a repointed alias retargets it.
-    try std.testing.expectEqualStrings("1 1 10 10", display.bytes());
+    // A qualified call resolves each time it runs: a reload and a repointed
+    // alias both reach it.
+    try std.testing.expectEqualStrings("1 2 10 20", display.bytes());
 }
 
 test "module: provisional tasks keep rollback generations alive until quiescence" {

@@ -32,22 +32,22 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), text) != null);
 }
 
-test "bound call sites keep their targets across rebinding and core shadowing" {
+test "call sites resolve against the current definitions, core shadowing included" {
     try support.expectStack(
         "1 `cached-value set (cached-value) `probe def " ++
             "probe probe 2 `cached-value set probe cached-value " ++
             "(4 dup +) `core-probe def core-probe core-probe " ++
             "(10) `dup def core-probe dup",
-        "1 1 1 2 8 8 8 10",
+        "1 1 2 2 8 8 14 10",
     );
 }
 
-test "plain call sites remain correct after observation pool and cache churn" {
+test "call sites stay correct across resolution churn" {
     try support.expectStack(
         "1 `outside set (outside) `probe def probe probe probe " ++
             "3 (" ++ support.repeated("outside pop ", 32) ++ ") times " ++
             "2 `outside set probe",
-        "1 1 1 1",
+        "1 1 1 2",
     );
 }
 
@@ -693,16 +693,16 @@ test "binding: top-level source defines then uses, and a definition body cannot 
     });
 }
 
-test "binding: definitions keep their targets while run-time code sees replacements" {
+test "binding: every word resolves against the definitions current when it runs" {
     try support.expectStacks(&.{
-        .{ .name = "plain", .source = "(1) `foo def (foo) `bar def (2) `foo def bar foo", .expected = "1 2" },
+        .{ .name = "plain", .source = "(1) `foo def (foo) `bar def (2) `foo def bar foo", .expected = "2 2" },
         .{
             .name = "qualified",
             .source = "[] ((1) `x def) `a @defm (a.x) `old def [] ((2) `x def) `a @defm old a.x",
-            .expected = "1 2",
+            .expected = "2 2",
         },
-        // A nested quotation is data until it is applied, so it binds against
-        // whatever is current when it runs.
+        // A nested quotation is data until it is applied, and then resolves
+        // like any other code.
         .{ .name = "nested data", .source = "(1) `x def ((x)) `later def (2) `x def later call", .expected = "2" },
         // A quotation applied at run time resolves each word when it is
         // reached, so a publication reaches its next application.
@@ -715,8 +715,8 @@ test "binding: definitions keep their targets while run-time code sees replaceme
                 "[1 2] q each",
             .expected = "[2 2]",
         },
-        // A quotation built at run time is new each time, so it binds from
-        // words the unit already resolved; a publication still reaches it.
+        // A quotation built at run time resolves its words like a literal
+        // one; a publication reaches it.
         .{
             .name = "built quotation sees replacements",
             .source = "(1) `x def (x) () compose call (x) () compose call (2) `x def (x) () compose call",
@@ -738,7 +738,7 @@ test "binding: definitions keep their targets while run-time code sees replaceme
     });
 }
 
-test "binding: one quotation value bound twice stays unchanged and independent" {
+test "binding: one quotation value defined twice stays unchanged" {
     try support.expectStacks(&.{
         .{
             .name = "shared body",
@@ -746,9 +746,9 @@ test "binding: one quotation value bound twice stays unchanged and independent" 
             .expected = "42 42",
         },
         .{
-            .name = "independent targets",
+            .name = "shared code resolves alike",
             .source = "(1) `x def (x) dup `p def (2) `x def `q def p q",
-            .expected = "1 2",
+            .expected = "2 2",
         },
     });
 }
@@ -801,7 +801,7 @@ test "binding: imports are name aliases followed at every binding" {
         .{
             .name = "alias",
             .source = "[] ((1) `x def) `a @defm `a (x) import (x) `via def [] ((2) `x def) `a @defm via x",
-            .expected = "1 2",
+            .expected = "2 2",
         },
         .{
             .name = "re-export",
@@ -821,7 +821,7 @@ test "binding: imports are name aliases followed at every binding" {
     });
 }
 
-test "binding: a module binds as one group when it is sealed" {
+test "binding: a module validates as one group when it is sealed" {
     try support.expectStacks(&.{
         .{
             .name = "forward and mutual",
@@ -834,13 +834,11 @@ test "binding: a module binds as one group when it is sealed" {
             .source = "[] (( -- n ) (self-named.base 1 +) `next def ( -- n ) (41) `base def) `self-named @defm self-named.next",
             .expected = "42",
         },
-        // A quotation injected into a replacement body was written in the
-        // session, so its qualified name means the registered module, never
-        // the group being sealed under that name.
+        // Once registered, the replacement is what a qualified word reaches.
         .{
             .name = "injected qualified word",
             .source = "[] ((1) `x def) `m @defm [(m.x)] ((2) `x def `y def) `m @defm m.y m.x",
-            .expected = "1 2",
+            .expected = "2 2",
         },
     });
     try support.expectErrors(&.{
@@ -854,6 +852,15 @@ test "binding: a module binds as one group when it is sealed" {
         // Staged definitions cannot run before the module is sealed.
         .{ .name = "staged", .source = "[] ((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
         .{ .name = "failed seal publishes nothing", .source = "[] ([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
+        // A quotation injected into a replacement body was written in the
+        // session, so sealing validates its qualified name against the
+        // registered module, never the group being sealed under that name.
+        .{
+            .name = "injected qualified word validates against the registered module",
+            .source = "[] ((1) `x def) `m @defm [(m.z)] ((2) `z def `y def) `m @defm",
+            .kind = "undefined-word",
+            .word = "m.z",
+        },
     });
 }
 
