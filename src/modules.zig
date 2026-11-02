@@ -2562,7 +2562,16 @@ pub const Registry = enum(usize) {
             /// one entry changed. Bounded by the maps' depth.
             fn buildCandidate(self: *Self, snapshot: ?*const Directory, target: Target) error{OutOfMemory}!*Directory {
                 const releases = self.registry.releaseDomain();
-                const old: Directory = if (snapshot) |current| current.* else .{};
+                // Read the maps alone: `previous` is rewritten under the writer
+                // lock when readers quiesce, so copying the whole snapshot
+                // would race with that detach.
+                const empty: Directory = .{};
+                const source = snapshot orelse &empty;
+                const old = .{
+                    .modules = source.modules,
+                    .aliases = source.aliases,
+                    .names = source.names,
+                };
                 var modules = switch (kind) {
                     .register => try old.modules.put(releases, target.canonical, self.request.borrow()),
                     .alias, .define => old.modules.retain(),

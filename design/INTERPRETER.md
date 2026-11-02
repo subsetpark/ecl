@@ -700,8 +700,10 @@ so it never assembles targets from two publication states. Core's directory is
 fixed when core freezes and an image's when the image is sealed, so neither
 needs capturing.
 
-Every mutation — a top-level definition, an import, a registration, a reload,
-an alias — is one bounded cursor: snapshot the current directory, validate
+An alias that already names its requested target changes nothing: it completes
+without building or publishing a successor and without advancing the
+publication counter. Every other mutation — a top-level definition, an import,
+a registration, a reload, an alias — is one bounded cursor: snapshot the current directory, validate
 against it, build a successor with the edit applied, and publish it under the
 writer lock if the snapshot is still current; otherwise discard it and start
 over. Concurrent writers therefore cannot lose each other's updates. The
