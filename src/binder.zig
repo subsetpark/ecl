@@ -76,6 +76,15 @@ pub const Miss = union(enum) {
     alias_cycle,
 };
 
+/// A miss that fails a binding. A qualified word whose module is not
+/// registered is not one: it binds to no target and resolves when it is
+/// reached, loading its module then, so binding never loads a module.
+pub const Unbound = union(enum) {
+    unresolved: LookupChain,
+    retired,
+    alias_cycle,
+};
+
 /// Whether a resolution serves an explicit lookup, which can only reach
 /// sealed definitions, or a binding, which may also reach a reservation of
 /// the construction in progress.
@@ -607,7 +616,7 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
         pub const Failure = struct {
             index: u32,
             word: u32,
-            miss: Miss,
+            miss: Unbound,
         };
         pub const Result = union(enum) {
             bound: Body,
@@ -684,11 +693,21 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
                         switch (outcome) {
                             .resolved => |target| self.record(target),
                             .missed => |reason| {
+                                const unbound: Unbound = switch (reason) {
+                                    .unknown_module_prefix, .unregistered_module => {
+                                        self.targets[self.index] = no_target;
+                                        self.index += 1;
+                                        continue;
+                                    },
+                                    .unresolved => |chain| .{ .unresolved = chain },
+                                    .retired => .retired,
+                                    .alias_cycle => .alias_cycle,
+                                };
                                 const word = heap.valuesConst(self.code)[self.index].symbol.name;
                                 return .{ .complete = .{ .failed = .{
                                     .index = self.index,
                                     .word = word,
-                                    .miss = reason,
+                                    .miss = unbound,
                                 } } };
                             },
                         }

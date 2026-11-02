@@ -148,6 +148,93 @@ test "stdlib: qualified reference auto-loads an unregistered module" {
     });
 }
 
+test "stdlib: a body names a word of an unregistered module without loading it" {
+    // Binding a body does not load a module it names; the word resolves,
+    // loading the module, when the body first reaches it. So a misspelled
+    // export or module is reported by the call, not by the definition.
+    try support.expectStacks(&.{
+        .{
+            .name = "a definition naming a missing export still defines",
+            .source = "(result.nope) `f def 7",
+            .expected = "7",
+        },
+        .{
+            .name = "a definition naming an unknown module still defines",
+            .source = "(nosuch-module.word) `f def 7",
+            .expected = "7",
+        },
+        .{
+            .name = "a module naming a missing export still seals",
+            .source = "((result.nope) `f def) `m @defm! 7",
+            .expected = "7",
+        },
+        .{
+            .name = "a definition resolves its word at first call",
+            .source = "([1 2] result.ok) `f def f",
+            .expected = "{ok [1 2]}",
+        },
+        .{
+            .name = "a module word resolves its word at first call",
+            .source = "(([3] result.ok) `f def) `m @defm! m.f m.f",
+            .expected = "{ok [3]} {ok [3]}",
+        },
+        .{
+            .name = "a prefix not yet interned names a module that has not loaded",
+            .source = "(\"a,b\" [] csv.parse) `f def f flip",
+            .expected = "((\"a\" \"b\"))",
+        },
+        .{
+            .name = "an applied quotation binds without loading",
+            .source = "5 0 (result.nope) (1 +) if",
+            .expected = "6",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "the call reports the missing export",
+            .source = "(result.nope) `f def f",
+            .kind = "undefined-word",
+            .word = "result.nope",
+        },
+        .{
+            .name = "the call reports the unknown module",
+            .source = "(nosuch-module.word) `f def f",
+            .kind = "undefined-word",
+            .word = "nosuch-module.word",
+        },
+        .{
+            .name = "a module word's call reports the missing export",
+            .source = "((result.nope) `f def) `m @defm! m.f",
+            .kind = "undefined-word",
+            .word = "result.nope",
+        },
+        .{
+            // A registered module's missing export is still a binding miss.
+            .name = "a loaded module's missing export fails the definition",
+            .source = "[1] result.ok pop (result.nope) `f def 7",
+            .kind = "undefined-word",
+            .word = "result.nope",
+        },
+    });
+}
+
+test "stdlib: concurrent first calls of a body's unloaded standard-library word converge" {
+    for ([_]usize{ 1, 8 }) |workers| {
+        var heap: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&heap);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
+        defer runtime.deinit();
+        try expectDisplay(
+            &runtime,
+            "(wrap result.ok) `f def [1 2 3 4 5 6 7 8] [] (f) @each",
+            "({ok [1]} {ok [2]} {ok [3]} {ok [4]} " ++
+                "{ok [5]} {ok [6]} {ok [7]} {ok [8]})",
+        );
+    }
+}
+
 test "stdlib: dynamic qualified execution auto-loads every embedded transport" {
     try support.expectStacks(&.{
         .{
