@@ -5940,16 +5940,17 @@ pub const Unit = struct {
             self.rememberInApplication(code);
             return;
         }
-        if (try self.bindFromLookups(current.code)) |code| {
+        if (try self.bindFromLookups(current.code)) |inline_binding| {
             self.releases.releaseHeader(current.code);
-            current.program = .{ .bound = code.executable() };
-            // Cached like any binding: a literal quotation applied again
-            // then reuses this executable rather than rebinding each time.
-            self.rememberExecutable(code, self.inherited.registry.currentPublication());
+            current.program = .{ .bound = inline_binding.code.executable() };
+            // Cached like any binding, under the publication its targets were
+            // selected in: a literal quotation applied again then reuses this
+            // executable rather than rebinding each time.
+            self.rememberExecutable(inline_binding.code, inline_binding.publication);
             return;
         }
         var context = self.resolutionContext(self.inherited.registry.view());
-        const cursor = binder.BindingCursor.init(self.allocator, self.releases, current.code) catch |err| {
+        const cursor = binder.AnonymousBindingCursor.init(self.allocator, self.releases, current.code) catch |err| {
             context.deinit();
             return err;
         };
@@ -5964,7 +5965,7 @@ pub const Unit = struct {
     /// provenance: a quotation built at run time, such as by `compose`, is new
     /// every time, so only its words can be reused. Null sends it to the full
     /// binder.
-    fn bindFromLookups(self: *Unit, code: *Header) error{OutOfMemory}!?*env.AnonymousCode {
+    fn bindFromLookups(self: *Unit, code: *Header) error{OutOfMemory}!?InlineBinding {
         if (self.inherited.phase == .bootstrap) return null;
         const length: usize = @intCast(code.length());
         if (length > binder.reused_binding_limit) return null;
@@ -5978,17 +5979,27 @@ pub const Unit = struct {
                 return cache.lookups.find(word, cache.publication, cache.provenance);
             }
         };
-        const bound = try binder.bindReused(self.allocator, code, Cache{
+        // Read once: every target is selected in this publication, and the
+        // executable is cached under it.
+        const publication = self.inherited.registry.currentPublication();
+        const body = try binder.bindReused(self.allocator, code, Cache{
             .lookups = &self.lookups,
-            .publication = self.inherited.registry.currentPublication(),
+            .publication = publication,
             .provenance = self.current.?.site.registration_provenance,
         }) orelse return null;
         _ = work.take(length);
-        return env.AnonymousCode.create(self.allocator, bound) catch |err| {
-            bound.discard(self.releases, self.allocator);
+        const anonymous = env.AnonymousCode.create(self.allocator, body) catch |err| {
+            body.discard(self.releases, self.allocator);
             return err;
         };
+        return .{ .code = anonymous, .publication = publication };
     }
+
+    const InlineBinding = struct {
+        code: *env.AnonymousCode,
+        /// The publication its targets were selected in.
+        publication: u64,
+    };
 
     /// Records what a completed binding resolved its first words to, so a
     /// later quotation built from the same words binds inline. Bounded by the
@@ -6890,7 +6901,7 @@ const LookupDispatchDriver = struct {
 /// loads the module that may make it resolvable and binds again.
 const BindingDriver = struct {
     context: heap.Owned(binder.Context),
-    cursor: heap.Owned(binder.BindingCursor),
+    cursor: heap.Owned(binder.AnonymousBindingCursor),
 
     pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;

@@ -637,10 +637,13 @@ The boundary is three handles. Reserving yields a `Reservation`, which binding
 may name as a target and which carries the definition's metadata, but which
 no execution, publication, or reflection path accepts. Sealing consumes it
 and yields the `*Definition`, so every holder of a definition holds sealed
-code. A bound body's target table holds opaque slots, which name targets
-without making them callable; sealing reinterprets them as definitions, which
-is sound because a construction seals every reservation its bodies name before
-any of them can run. An `Executable` is an opaque handle over storage embedded
+code. A body bound for a construction holds opaque slots, which name targets
+without making them callable; only staging into a reservation accepts it, and
+sealing reinterprets the slots as definitions, which is sound because a
+construction seals every reservation its bodies name before any of them can
+run. A body bound for an anonymous application resolves as an explicit lookup
+does, so its table holds only sealed definitions and needs no reinterpretation.
+An `Executable` is an opaque handle over storage embedded
 in its owner, minted only by sealing. The reservation and the definition share
 storage, so the source audit confines the one field holding both states to
 `env`. A module group binds against its own construction directory, whose

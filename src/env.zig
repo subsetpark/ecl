@@ -626,21 +626,32 @@ pub const Owner = union(enum) {
 };
 
 /// A body binding produced and no owner has sealed yet: the retained code, its
-/// target table, and the table holding its dependencies. Its targets are
-/// slots, which name but cannot call, so an unsealed body exposes nothing
-/// executable; sealing turns it into an `Executable`. Discarding it is
+/// target table, and the table holding its dependencies. Discarding it is
 /// constant work.
-pub const Bound = struct {
-    code: *value.ListHandle,
-    targets: []?*const Slot,
-    dependencies: ?*DependencyTable,
+fn BodyIn(comptime TargetRef: type) type {
+    return struct {
+        code: *value.ListHandle,
+        targets: []?TargetRef,
+        dependencies: ?*DependencyTable,
 
-    pub fn discard(self: Bound, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        if (self.dependencies) |dependencies| dependencies.retire(releases);
-        if (self.targets.len != 0) allocator.free(self.targets);
-        releases.releaseHeader(self.code);
-    }
-};
+        pub fn discard(self: @This(), releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+            if (self.dependencies) |dependencies| dependencies.retire(releases);
+            if (self.targets.len != 0) allocator.free(self.targets);
+            releases.releaseHeader(self.code);
+        }
+    };
+}
+
+/// A body bound for a construction. Its targets are slots, which name but
+/// cannot call, because a slot may name a reservation of that construction;
+/// only `Reservation.stage` accepts it, and only sealing the construction
+/// turns its slots into callable targets.
+pub const Bound = BodyIn(*const Slot);
+
+/// A body bound for an anonymous application. No construction is in progress
+/// for it, so every target is a sealed definition, and nothing here can name
+/// a reservation.
+pub const AnonymousBody = BodyIn(*Definition);
 
 /// A sealed quotation, minted only by sealing. Its code keeps the literals and
 /// source provenance; the target table gives each top-level unquoted word the
@@ -697,18 +708,13 @@ pub const AnonymousCode = struct {
     storage: Executable.Storage,
     dependencies: ?*DependencyTable,
 
-    /// Seals a bound body as an anonymous executable with one reference. On
-    /// failure the caller still owns `bound`. An anonymous body names only
-    /// sealed definitions, since no construction is in progress for it.
-    pub fn create(allocator: std.mem.Allocator, bound: Bound) error{OutOfMemory}!*AnonymousCode {
+    /// Makes an anonymous executable with one reference from `body`. On
+    /// failure the caller still owns `body`.
+    pub fn create(allocator: std.mem.Allocator, body: AnonymousBody) error{OutOfMemory}!*AnonymousCode {
         const result = try allocator.create(AnonymousCode);
-        const targets: []?*Definition = if (bound.targets.len == 0)
-            &.{}
-        else
-            @as([*]?*Definition, @ptrCast(bound.targets.ptr))[0..bound.targets.len];
         result.* = .{
-            .storage = .{ .code = bound.code, .targets = targets, .owner = .static },
-            .dependencies = bound.dependencies,
+            .storage = .{ .code = body.code, .targets = body.targets, .owner = .static },
+            .dependencies = body.dependencies,
         };
         result.storage.owner = .{ .anonymous = result };
         return result;
