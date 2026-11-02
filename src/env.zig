@@ -785,7 +785,20 @@ pub const AnonymousCode = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     refs: std.atomic.Value(u32) = .init(1),
     storage: Executable.Storage,
-    dependencies: ?*DependencyTable,
+    held: Held,
+
+    /// The most forms a body bound in one allocation may have. A constant, so
+    /// creating or retiring such a body is bounded work.
+    pub const inline_limit = 16;
+
+    const Held = union(enum) {
+        /// Bound in full: the target table and dependency table are separate
+        /// allocations, and the dependencies retire as their own owner.
+        table: ?*DependencyTable,
+        /// Bound inline: the targets and then the dependencies follow this
+        /// header in its one allocation, at most `inline_limit` of each.
+        trailing: struct { targets: u32, dependencies: u32 },
+    };
 
     /// Makes an anonymous executable with one reference from `body`. On
     /// failure the caller still owns `body`.
@@ -793,10 +806,46 @@ pub const AnonymousCode = struct {
         const result = try allocator.create(AnonymousCode);
         result.* = .{
             .storage = .{ .code = body.code, .targets = body.targets, .owner = .static },
-            .dependencies = body.dependencies,
+            .held = .{ .table = body.dependencies },
         };
         result.storage.owner = .{ .anonymous = result };
         return result;
+    }
+
+    /// Makes an anonymous executable with one reference in a single
+    /// allocation, copying `targets` and taking its own reference to `code`
+    /// and to each of `dependencies`, which are distinct counted definitions.
+    /// On failure nothing is retained.
+    pub fn createInline(
+        allocator: std.mem.Allocator,
+        code: *value.ListHandle,
+        targets: []const ?*Definition,
+        dependencies: []const *Definition,
+    ) error{OutOfMemory}!*AnonymousCode {
+        std.debug.assert(targets.len <= inline_limit and dependencies.len <= inline_limit);
+        const bytes = try allocator.alignedAlloc(u8, .of(AnonymousCode), inlineSize(targets.len, dependencies.len));
+        const result: *AnonymousCode = @ptrCast(bytes.ptr);
+        const trailing: [*]?*Definition = @ptrCast(@alignCast(bytes.ptr + @sizeOf(AnonymousCode)));
+        @memcpy(trailing[0..targets.len], targets);
+        const held: [*]*Definition = @ptrCast(trailing + targets.len);
+        for (dependencies, held[0..dependencies.len]) |definition, *slot| {
+            definition.retain();
+            slot.* = definition;
+        }
+        heap.incRef(code);
+        result.* = .{
+            .storage = .{ .code = code, .targets = trailing[0..targets.len], .owner = .static },
+            .held = .{ .trailing = .{ .targets = @intCast(targets.len), .dependencies = @intCast(dependencies.len) } },
+        };
+        result.storage.owner = .{ .anonymous = result };
+        return result;
+    }
+
+    fn inlineSize(targets: usize, dependencies: usize) usize {
+        // The header's size is a multiple of its alignment, so the pointer
+        // arrays after it are aligned.
+        comptime std.debug.assert(@sizeOf(AnonymousCode) % @alignOf(?*Definition) == 0);
+        return @sizeOf(AnonymousCode) + (targets + dependencies) * @sizeOf(?*Definition);
     }
 
     pub fn executable(self: *const AnonymousCode) *const Executable {
@@ -816,14 +865,28 @@ pub const AnonymousCode = struct {
         releases.retire(self, &self.retirement);
     }
 
+    /// Constant work: a full binding's dependencies retire as their own
+    /// owner, and an inline binding holds at most `inline_limit`.
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         self: *AnonymousCode,
     ) bool {
-        if (self.dependencies) |dependencies| dependencies.retire(releases);
-        self.storage.free(releases, allocator);
-        allocator.destroy(self);
+        switch (self.held) {
+            .table => |dependencies| {
+                if (dependencies) |table| table.retire(releases);
+                self.storage.free(releases, allocator);
+                allocator.destroy(self);
+            },
+            .trailing => |counts| {
+                const base: [*]align(@alignOf(AnonymousCode)) u8 = @ptrCast(self);
+                const trailing: [*]?*Definition = @ptrCast(@alignCast(base + @sizeOf(AnonymousCode)));
+                const held: [*]*Definition = @ptrCast(trailing + counts.targets);
+                for (held[0..counts.dependencies]) |definition| definition.release(releases);
+                releases.releaseHeader(self.storage.code);
+                allocator.free(base[0..inlineSize(counts.targets, counts.dependencies)]);
+            },
+        }
         return true;
     }
 };

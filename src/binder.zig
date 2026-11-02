@@ -754,26 +754,25 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
 
 /// The most forms `bindReused` binds in one step. A constant, so the inline
 /// path is bounded work however it is used.
-pub const reused_binding_limit = 16;
+pub const reused_binding_limit = env.AnonymousCode.inline_limit;
 
-/// Binds a short quotation in one step from words its unit has already
-/// resolved, or returns null when any executable word is not in `cache`,
-/// leaving the full binder to resolve it. `cache.find(word)` returns what the
-/// word resolved to in the publication and provenance this binding would see,
-/// which is what the resolver would produce: an anonymous binding has no
-/// construction in progress, so binding a word is exactly looking it up. The
-/// cache keeps what it returns alive until this binding holds it.
+/// Binds a short quotation in one step, and one allocation, from words its
+/// unit has already resolved, or returns null when any executable word is not
+/// in `cache`, leaving the full binder to resolve it. `cache.find(word)`
+/// returns what the word resolved to in the publication and provenance this
+/// binding would see, which is what the resolver would produce: an anonymous
+/// binding has no construction in progress, so binding a word is exactly
+/// looking it up. The cache keeps what it returns alive until this binding
+/// holds it.
 pub fn bindReused(
     allocator: std.mem.Allocator,
     code: *value.ListHandle,
     cache: anytype,
-) error{OutOfMemory}!?env.AnonymousBody {
+) error{OutOfMemory}!?*env.AnonymousCode {
     const length: usize = @intCast(code.length());
     std.debug.assert(length <= reused_binding_limit);
-    if (code.kind() != .generic_spine or length == 0) {
-        heap.incRef(code);
-        return .{ .code = code, .targets = &.{}, .dependencies = null };
-    }
+    if (code.kind() != .generic_spine or length == 0)
+        return try env.AnonymousCode.createInline(allocator, code, &.{}, &.{});
     var found: [reused_binding_limit]?*env.Definition = @splat(null);
     var distinct: [reused_binding_limit]*env.Definition = undefined;
     var distinct_count: usize = 0;
@@ -791,20 +790,12 @@ pub fn bindReused(
             distinct_count += 1;
         }
     }
-    if (!any_target) {
-        heap.incRef(code);
-        return .{ .code = code, .targets = &.{}, .dependencies = null };
-    }
-    const targets = try allocator.alloc(?*env.Definition, length);
-    errdefer allocator.free(targets);
-    @memcpy(targets, found[0..length]);
-    const dependencies: ?*env.DependencyTable = if (distinct_count == 0) null else held: {
-        const table = try env.DependencyTable.create(allocator, distinct_count);
-        for (distinct[0..distinct_count]) |definition| table.hold(definition);
-        break :held table;
-    };
-    heap.incRef(code);
-    return .{ .code = code, .targets = targets, .dependencies = dependencies };
+    return try env.AnonymousCode.createInline(
+        allocator,
+        code,
+        if (any_target) found[0..length] else &.{},
+        distinct[0..distinct_count],
+    );
 }
 
 /// The occurrence a form executes as a word, or null when the form is data:

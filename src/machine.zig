@@ -5926,6 +5926,21 @@ pub const Unit = struct {
     fn bindCurrent(self: *Unit) MachineError!void {
         const current = &self.current.?;
         std.debug.assert(current.program == .unbound);
+        // A quotation only this evaluation references, such as one `compose`
+        // just built, is in no cache, since every cached executable holds its
+        // own quotation, and nothing can apply it again; so it is neither
+        // looked up nor remembered. Holding the only reference, the
+        // evaluation is the only party that could add another.
+        if (heap.isSoleReference(current.code)) {
+            if (try self.bindFromLookups(current.code)) |inline_binding| {
+                self.releases.releaseHeader(current.code);
+                // The evaluation holds the creation reference; no cache or
+                // application frame takes one.
+                current.program = .{ .bound = inline_binding.code.executable() };
+                return;
+            }
+            return self.startBinding(current);
+        }
         if (self.applicationExecutable(current.code)) |executable| {
             self.releases.releaseHeader(current.code);
             current.program = .{ .borrowed = executable };
@@ -5949,6 +5964,10 @@ pub const Unit = struct {
             self.rememberExecutable(inline_binding.code, inline_binding.publication);
             return;
         }
+        return self.startBinding(current);
+    }
+
+    fn startBinding(self: *Unit, current: *Eval) MachineError!void {
         var context = self.resolutionContext(self.inherited.registry.view());
         const cursor = binder.AnonymousBindingCursor.init(self.allocator, self.releases, current.code) catch |err| {
             context.deinit();
@@ -5982,16 +6001,12 @@ pub const Unit = struct {
         // Read once: every target is selected in this publication, and the
         // executable is cached under it.
         const publication = self.inherited.registry.currentPublication();
-        const body = try binder.bindReused(self.allocator, code, Cache{
+        const anonymous = try binder.bindReused(self.allocator, code, Cache{
             .lookups = &self.lookups,
             .publication = publication,
             .provenance = self.current.?.site.registration_provenance,
         }) orelse return null;
         _ = work.take(length);
-        const anonymous = env.AnonymousCode.create(self.allocator, body) catch |err| {
-            body.discard(self.releases, self.allocator);
-            return err;
-        };
         return .{ .code = anonymous, .publication = publication };
     }
 

@@ -919,6 +919,14 @@ fn claimHeldList(handle: *ListHandle, references: u32) ?*UniqueList {
     return @ptrCast(@alignCast(unique));
 }
 
+/// Whether the caller's one reference is the list's only one. A query, not a
+/// capability: it grants no write. A caller holding the only reference is the
+/// only party that could add another, so the answer stays true until it does.
+pub fn isSoleReference(handle: *const ListHandle) bool {
+    const header: *const Header = @ptrCast(@alignCast(handle));
+    return headerImpl(@constCast(header)).rc.load(.acquire) == 1;
+}
+
 pub fn claimUniqueList(handle: *ListHandle) ?*UniqueList {
     const unique = claimUniqueHeader(mutableHeader(handle)) orelse return null;
     return @ptrCast(@alignCast(unique));

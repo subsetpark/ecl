@@ -739,7 +739,10 @@ time, so it can never hit that cache; what repeats is its words. A short
 quotation, up to a constant number of forms, therefore binds in one bounded
 step when the unit has already resolved every word it executes in the same
 publication and provenance, which is what full binding would produce;
-otherwise it binds in full. The bootstrap unit skips the cache because core's directory changes
+otherwise it binds in full. Such a binding is one allocation. A quotation that
+only its evaluation references is in no cache, since every cached executable
+holds its own quotation, and can never be applied again, so it is neither
+looked up nor cached. The bootstrap unit skips the cache because core's directory changes
 without a publication. Nested quotations are not bound early for either reuse.
 
 ### An execution site correlates its contexts
