@@ -679,8 +679,10 @@ work charged to the unit. It borrows targets while it runs, since its captured
 view keeps them alive; deduplicating them is bounded work, and only after the
 walk does it take one reference to each distinct counted target. Those
 references retire as their own owner, one per step, so abandoning a binding,
-discarding an unsealed body, or retiring a definition is constant work. A word that names an unregistered module suspends binding while the module
-loads and restarts it against a view that holds the module; any other miss
+discarding an unsealed body, or retiring a definition is constant work. A word
+naming a module that is not registered binds to no target and resolves by
+explicit lookup when reached, which loads the module then: binding never
+loads a module, so a body pays only for the modules it calls. Any other miss
 fails at that word before the quotation has run.
 
 Explicit lookups use the same resolver one word at a time against the current
@@ -866,16 +868,16 @@ registry teardown uses the existing host-owned retirement protocol. Frame
 storage accommodates the lexical capability retained by a suspended load,
 with a 144-byte ceiling.
 
-### Loading restarts binding
+### Loading resumes a lookup
 
-A word naming an unregistered module may suspend binding, an explicit lookup,
-or a definition while the loader searches the embedded standard-library
-manifest, the module map, source paths, or native artifacts according to
-`ENVIRONMENT.md`. The continuation says how to resume: bind the suspended
-evaluation again, dispatch the exact word again, replay a primitive whose
-operands it restores, or return to a module seal, which restarts. Each resumes
-against a view that holds what the load published, so loading never mixes
-views into one executable, and none of it is part of the language contract.
+Binding never loads. A word naming an unregistered module suspends an explicit
+lookup, including a bound word reached with no target, or a primitive while
+the loader searches the embedded standard-library manifest, the module map,
+source paths, or native artifacts according to `ENVIRONMENT.md`. The
+continuation says how to resume: dispatch the exact word again, replay a
+primitive whose operands it restores, or only load. Each resumes against a
+view that holds what the load published, and none of it is part of the
+language contract.
 
 Root test discovery enumerates source artifacts rather than public module
 names. Source-only requests and qualified requests share artifact loading

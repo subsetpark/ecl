@@ -1805,9 +1805,6 @@ const QualifiedLoadContinuation = union(enum) {
         site: ?ErrorSite,
         trace_parent: ?intern.TraceWord,
     },
-    /// Bind the restored evaluation again, against a view that now holds the
-    /// loaded module. Nothing in it has executed.
-    rebind,
     load_only,
 };
 const QualifiedLoadRequest = struct {
@@ -1822,7 +1819,7 @@ const SourceLoadRequest = union(enum) {
     fn preservesCaller(self: SourceLoadRequest) bool {
         return switch (self) {
             .module => |module| switch (module.operation.continuation) {
-                .replay, .dispatch, .rebind => true,
+                .replay, .dispatch => true,
                 .load_only => false,
             },
             .source => false,
@@ -3379,7 +3376,8 @@ pub const Unit = struct {
                 return .detached;
             },
             .unresolved => |chain| return self.undefinedNameIn(requested.name, chain),
-            .retired, .alias_cycle => return self.failUnbound(requested, outcome),
+            .retired => return self.failUnbound(requested, .retired),
+            .alias_cycle => return self.failUnbound(requested, .alias_cycle),
         }
     }
     /// A batch import consumes its module symbol and requested-name list before
@@ -6069,52 +6067,17 @@ pub const Unit = struct {
     }
 
     /// The failure for a word that did not bind and will not after a load.
-    pub fn failUnbound(self: *Unit, word: value.Symbol, miss: binder.Miss) MachineError {
+    pub fn failUnbound(self: *Unit, word: value.Symbol, miss: binder.Unbound) MachineError {
         self.active_word = .plain(word.name);
         return switch (miss) {
             .unresolved => |chain| self.undefinedWordIn(word.name, chain),
-            .unknown_module_prefix, .unregistered_module => self.undefinedWordIn(word.name, .qualified),
             .retired => self.failRetiredWord(word.name),
             .alias_cycle => self.failFmt(.domain, "the aliases from `{s}` never reach a definition", .{intern.get(word.name)}),
         };
     }
 
-    /// A primitive consumed `operands` (owned, in stack order) before a word
-    /// it binds turned out to need a module loaded. Restore them, rewind the
-    /// primitive call, and run it again once the module is registered.
-    pub fn retryWithOperandsAfterLoad(
-        self: *Unit,
-        operands: []const Value,
-        word: value.Symbol,
-        miss: binder.Miss,
-    ) MachineError!WorkProgress {
-        try self.restoreOperands(operands);
-        self.current.?.rewind(self.active_index);
-        const request = QualifiedLoadRequest{
-            .qualified = word.name,
-            .context = self.current.?.site.registration_provenance,
-            .continuation = .replay,
-        };
-        switch (miss) {
-            .unknown_module_prefix => |prefix| try self.startDriver(QualifiedLoadPreparationDriver.init(prefix, request, .none)),
-            .unregistered_module => |name| try self.autoLoadModule(name, request),
-            else => unreachable,
-        }
-        return .detached;
-    }
-
-    /// Consumes `operands` on success and allocation failure alike.
-    fn restoreOperands(self: *Unit, operands: []const Value) error{OutOfMemory}!void {
-        var reservation = self.reserveStack(operands.len) catch |err| {
-            for (operands) |item| self.releases.releaseValue(item);
-            return err;
-        };
-        for (operands) |item| reservation.pushOwned(item);
-    }
-
-    /// Fails a binding or lookup miss for `word`, starting a module load when
-    /// one may make it resolvable. `continuation` says how to resume after the
-    /// load: rebind the current evaluation, or dispatch the word again.
+    /// Fails a lookup miss for `word`, starting a module load when one may
+    /// make it resolvable. `continuation` says how to resume after the load.
     fn missOrLoad(
         self: *Unit,
         word: value.Symbol,
@@ -6134,7 +6097,9 @@ pub const Unit = struct {
                 .none,
             )),
             .unregistered_module => |name| try self.autoLoadModule(name, request),
-            .unresolved, .retired, .alias_cycle => return self.failUnbound(word, miss),
+            .unresolved => |chain| return self.failUnbound(word, .{ .unresolved = chain }),
+            .retired => return self.failUnbound(word, .retired),
+            .alias_cycle => return self.failUnbound(word, .alias_cycle),
         }
     }
 
@@ -6912,8 +6877,7 @@ const LookupDispatchDriver = struct {
 
 /// Binds the current evaluation's quotation before any of it runs. Success
 /// seals an anonymous executable and resumes the evaluation bound to it; a
-/// miss fails at the word it could not bind, having executed nothing, or
-/// loads the module that may make it resolvable and binds again.
+/// miss fails at the word it could not bind, having executed nothing.
 const BindingDriver = struct {
     context: heap.Owned(binder.Context),
     cursor: heap.Owned(binder.AnonymousBindingCursor),
@@ -6949,11 +6913,9 @@ const BindingDriver = struct {
                 const code = self.cursor.borrow().code;
                 evaluator.retireDriver(self);
                 evaluator.active_index = failure.index;
-                evaluator.missOrLoad(word, failure.miss, .rebind) catch |err| {
-                    if (err == error.Ecl) evaluator.setFailureSite(code, failure.index);
-                    return err;
-                };
-                return .detached;
+                const unbound = evaluator.failUnbound(word, failure.miss);
+                evaluator.setFailureSite(code, failure.index);
+                return unbound;
             },
         }
     }
@@ -7035,7 +6997,7 @@ fn continueQualifiedRequest(
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
     return switch (request.continuation) {
-        .replay, .load_only, .rebind => .completed,
+        .replay, .load_only => .completed,
         .dispatch => |dispatch_request| continuation: {
             evaluator.retireDriver(driver);
             evaluator.active_word = .plain(dispatch_request.word.name);
@@ -8407,11 +8369,9 @@ const ModuleSealDriver = struct {
                             const code = reservation.quotation();
                             const word = heap.valuesConst(code)[failure.index].symbol;
                             evaluator.retireDriver(self);
-                            evaluator.missOrLoad(word, failure.miss, .load_only) catch |err| {
-                                if (err == error.Ecl) evaluator.setFailureSite(code, failure.index);
-                                return err;
-                            };
-                            return .detached;
+                            const unbound = evaluator.failUnbound(word, failure.miss);
+                            evaluator.setFailureSite(code, failure.index);
+                            return unbound;
                         },
                     }
                     continue;

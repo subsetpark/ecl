@@ -191,37 +191,17 @@ const DefineDriver = struct {
     };
 
     /// A word in the body did not bind. A definition never forward-references:
-    /// a miss fails at that word. A qualified word whose module may load
-    /// restores the definition's operands, rewinds to it, and runs it again
-    /// once the module is registered.
+    /// a miss fails at that word.
     fn bindingMiss(
-        self: *DefineDriver,
         evaluator: *Unit,
         code: *value.ListHandle,
         index: u32,
         word: value.Symbol,
-        miss: binder.Miss,
+        miss: binder.Unbound,
     ) MachineError!machine.WorkProgress {
-        switch (miss) {
-            .unknown_module_prefix, .unregistered_module => {
-                var operands: [3]Value = undefined;
-                var count: usize = 0;
-                if (self.annotation_value) |*annotation| {
-                    operands[count] = annotation.take();
-                    count += 1;
-                }
-                operands[count] = self.item.take();
-                operands[count + 1] = .{ .symbol = .{ .name = self.name } };
-                count += 2;
-                evaluator.retireDriver(self);
-                return evaluator.retryWithOperandsAfterLoad(operands[0..count], word, miss);
-            },
-            .unresolved, .retired, .alias_cycle => {
-                const failure = evaluator.failUnbound(word, miss);
-                evaluator.setFailureSite(code, index);
-                return failure;
-            },
-        }
+        const failure = evaluator.failUnbound(word, miss);
+        evaluator.setFailureSite(code, index);
+        return failure;
     }
 
     fn malformed(evaluator: *Unit) MachineError {
@@ -503,7 +483,7 @@ const DefineDriver = struct {
                     .failed => |failure| {
                         const code = binding.cursor.borrow().code;
                         const word = heap.valuesConst(code)[failure.index].symbol;
-                        return self.bindingMiss(evaluator, code, failure.index, word, failure.miss);
+                        return bindingMiss(evaluator, code, failure.index, word, failure.miss);
                     },
                 }
             },
@@ -584,7 +564,8 @@ fn resolveForReflection(
                 return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, miss) };
             },
             .unresolved => |chain| evaluator.undefinedNameIn(requested.name, chain),
-            .retired, .alias_cycle => evaluator.failUnbound(requested, miss),
+            .retired => evaluator.failUnbound(requested, .retired),
+            .alias_cycle => evaluator.failUnbound(requested, .alias_cycle),
         },
     };
 }
