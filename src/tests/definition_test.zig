@@ -693,7 +693,7 @@ test "binding: top-level source defines then uses, and a definition body cannot 
     });
 }
 
-test "binding: existing code keeps its targets while later binding sees replacements" {
+test "binding: definitions keep their targets while run-time code sees replacements" {
     try support.expectStacks(&.{
         .{ .name = "plain", .source = "(1) `foo def (foo) `bar def (2) `foo def bar foo", .expected = "1 2" },
         .{
@@ -704,16 +704,16 @@ test "binding: existing code keeps its targets while later binding sees replacem
         // A nested quotation is data until it is applied, so it binds against
         // whatever is current when it runs.
         .{ .name = "nested data", .source = "(1) `x def ((x)) `later def (2) `x def later call", .expected = "2" },
-        // Any publication invalidates a reused anonymous binding.
-        .{ .name = "reuse", .source = "(x) `q set (1) `x def q call (2) `x def q call", .expected = "1 2" },
-        // A combinator binds its quotation once per invocation, whether that
-        // binding came fresh or from the unit's reuse cache: a publication
-        // during the iteration reaches neither later element.
+        // A quotation applied at run time resolves each word when it is
+        // reached, so a publication reaches its next application.
+        .{ .name = "reapplied", .source = "(x) `q set (1) `x def q call (2) `x def q call", .expected = "1 2" },
+        // A publication during an iteration reaches the rest of that element
+        // and every later one.
         .{
-            .name = "invocation keeps its binding",
+            .name = "iteration sees a redefinition",
             .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
                 "[1 2] q each",
-            .expected = "[1 1]",
+            .expected = "[2 2]",
         },
         // A quotation built at run time is new each time, so it binds from
         // words the unit already resolved; a publication still reaches it.
@@ -730,10 +730,10 @@ test "binding: existing code keeps its targets while later binding sees replacem
         .{ .name = "typed list applied", .source = "[1 2] call [3 4] call", .expected = "1 2 3 4" },
         .{ .name = "cleave over literals", .source = "1 2 (+) (*) bi2 1 2 (+) (*) (-) tri2", .expected = "3 2 3 2 -1" },
         .{
-            .name = "invocation keeps a reused binding",
+            .name = "a resolved word sees a later redefinition",
             .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
                 "0 q call [1 2] q each",
-            .expected = "1 [1 1]",
+            .expected = "1 [2 2]",
         },
     });
 }
@@ -753,7 +753,7 @@ test "binding: one quotation value bound twice stays unchanged and independent" 
     });
 }
 
-test "binding: a quotation that cannot bind runs none of its forms" {
+test "binding: a run-time quotation fails at an unknown word when it reaches it" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -762,7 +762,8 @@ test "binding: a quotation that cannot bind runs none of its forms" {
     defer runtime.deinit();
     try expectOk(&runtime, "\"warm\" io.print");
     try expectErrorContains(&runtime, "(\"ran\" io.print missing) call", "word missing");
-    try std.testing.expectEqualStrings("warm\n", output.written());
+    // Forms before the unknown word have run.
+    try std.testing.expectEqualStrings("warm\nran\n", output.written());
     // Unexecuted nested data is not rejected for naming nothing.
     try expectOk(&runtime, "((missing)) `f def f len 1 = {kind user} assert");
     try expectErrorContains(&runtime, "f call", "word missing");

@@ -626,8 +626,8 @@ pub const DependencySet = poll.FixedMap(DefinitionKey, void);
 /// The distinct counted definitions one sealed owner's code calls, one
 /// reference each. Its capacity is exact: binding counts the distinct targets
 /// before creating it, then fills it one reference per step. It retires as its
-/// own owner, so a definition, an anonymous executable, or an abandoned
-/// binding hands it off in constant work, and the references are released one
+/// own owner, so a definition or an abandoned binding hands it off in constant
+/// work, and the references are released one
 /// per retirement step.
 pub const DependencyTable = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
@@ -672,20 +672,17 @@ pub const DependencyTable = struct {
 };
 
 /// What a running activation must hold to keep its executable's targets valid.
-/// A static owner needs nothing. A counted definition or an anonymous
-/// executable is retained by each activation running it and released when the
-/// activation ends; a tail call secures the callee's owner before the caller's
-/// is released.
+/// A static owner needs nothing. A counted definition is retained by each
+/// activation running it and released when the activation ends; a tail call
+/// secures the callee's owner before the caller's is released.
 pub const Owner = union(enum) {
     static,
     definition: *Definition,
-    anonymous: *AnonymousCode,
 
     pub fn retain(self: Owner) void {
         switch (self) {
             .static => {},
             .definition => |definition| definition.retain(),
-            .anonymous => |code| code.retain(),
         }
     }
 
@@ -693,7 +690,6 @@ pub const Owner = union(enum) {
         switch (self) {
             .static => {},
             .definition => |definition| definition.release(releases),
-            .anonymous => |code| code.release(releases),
         }
     }
 
@@ -701,36 +697,26 @@ pub const Owner = union(enum) {
         return switch (self) {
             .static => other == .static,
             .definition => |definition| other == .definition and other.definition == definition,
-            .anonymous => |code| other == .anonymous and other.anonymous == code,
         };
     }
 };
 
-/// A body binding produced and no owner has sealed yet: the retained code, its
-/// target table, and the table holding its dependencies. Discarding it is
-/// constant work.
-fn BodyIn(comptime Element: type) type {
-    return struct {
-        code: *value.ListHandle,
-        targets: []Element,
-        dependencies: ?*DependencyTable,
+/// A body bound for a construction and not yet sealed: the retained code, its
+/// target table, and the table holding its dependencies. Its targets are
+/// slots, which name members of the construction by index; only
+/// `Reservation.stage` accepts it, and only sealing resolves its slots into
+/// callable targets. Discarding it is constant work.
+pub const Bound = struct {
+    code: *value.ListHandle,
+    targets: []Slot,
+    dependencies: ?*DependencyTable,
 
-        pub fn discard(self: @This(), releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-            if (self.dependencies) |dependencies| dependencies.retire(releases);
-            if (self.targets.len != 0) allocator.free(self.targets);
-            releases.releaseHeader(self.code);
-        }
-    };
-}
-
-/// A body bound for a construction. Its targets are slots, which name members
-/// of the construction by index; only `Reservation.stage` accepts it, and
-/// only sealing resolves its slots into callable targets.
-pub const Bound = BodyIn(Slot);
-
-/// A body bound for an anonymous application. No construction is in progress
-/// for it, so every target is a sealed definition.
-pub const AnonymousBody = BodyIn(?*Definition);
+    pub fn discard(self: Bound, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        if (self.dependencies) |dependencies| dependencies.retire(releases);
+        if (self.targets.len != 0) allocator.free(self.targets);
+        releases.releaseHeader(self.code);
+    }
+};
 
 /// A sealed quotation, minted only by sealing. Its code keeps the literals and
 /// source provenance; the target table gives each top-level unquoted word the
@@ -777,117 +763,6 @@ pub const Executable = opaque {
         const targets = self.storage().targets;
         if (targets.len == 0) return null;
         return targets[index];
-    }
-};
-
-/// The counted owner of an executable bound for an anonymous application.
-pub const AnonymousCode = struct {
-    retirement: heap.ReleaseDomain.Retirement = .{},
-    refs: std.atomic.Value(u32) = .init(1),
-    storage: Executable.Storage,
-    held: Held,
-
-    /// The most forms a body bound in one allocation may have. A constant, so
-    /// creating or retiring such a body is bounded work.
-    pub const inline_limit = 16;
-
-    const Held = union(enum) {
-        /// Bound in full: the target table and dependency table are separate
-        /// allocations, and the dependencies retire as their own owner.
-        table: ?*DependencyTable,
-        /// Bound inline: the targets and then the dependencies follow this
-        /// header in its one allocation, at most `inline_limit` of each.
-        trailing: struct { targets: u32, dependencies: u32 },
-    };
-
-    /// Makes an anonymous executable with one reference from `body`. On
-    /// failure the caller still owns `body`.
-    pub fn create(allocator: std.mem.Allocator, body: AnonymousBody) error{OutOfMemory}!*AnonymousCode {
-        const result = try allocator.create(AnonymousCode);
-        result.* = .{
-            .storage = .{ .code = body.code, .targets = body.targets, .owner = .static },
-            .held = .{ .table = body.dependencies },
-        };
-        result.storage.owner = .{ .anonymous = result };
-        return result;
-    }
-
-    /// Makes an anonymous executable with one reference in a single
-    /// allocation, copying `targets` and taking its own reference to `code`
-    /// and to each of `dependencies`, which are distinct counted definitions.
-    /// On failure nothing is retained.
-    pub fn createInline(
-        allocator: std.mem.Allocator,
-        code: *value.ListHandle,
-        targets: []const ?*Definition,
-        dependencies: []const *Definition,
-    ) error{OutOfMemory}!*AnonymousCode {
-        std.debug.assert(targets.len <= inline_limit and dependencies.len <= inline_limit);
-        const bytes = try allocator.alignedAlloc(u8, .of(AnonymousCode), inlineSize(targets.len, dependencies.len));
-        const result: *AnonymousCode = @ptrCast(bytes.ptr);
-        const trailing: [*]?*Definition = @ptrCast(@alignCast(bytes.ptr + @sizeOf(AnonymousCode)));
-        @memcpy(trailing[0..targets.len], targets);
-        const held: [*]*Definition = @ptrCast(trailing + targets.len);
-        for (dependencies, held[0..dependencies.len]) |definition, *slot| {
-            definition.retain();
-            slot.* = definition;
-        }
-        heap.incRef(code);
-        result.* = .{
-            .storage = .{ .code = code, .targets = trailing[0..targets.len], .owner = .static },
-            .held = .{ .trailing = .{ .targets = @intCast(targets.len), .dependencies = @intCast(dependencies.len) } },
-        };
-        result.storage.owner = .{ .anonymous = result };
-        return result;
-    }
-
-    fn inlineSize(targets: usize, dependencies: usize) usize {
-        // The header's size is a multiple of its alignment, so the pointer
-        // arrays after it are aligned.
-        comptime std.debug.assert(@sizeOf(AnonymousCode) % @alignOf(?*Definition) == 0);
-        return @sizeOf(AnonymousCode) + (targets + dependencies) * @sizeOf(?*Definition);
-    }
-
-    pub fn executable(self: *const AnonymousCode) *const Executable {
-        return Executable.of(&self.storage);
-    }
-
-    pub fn retain(self: *AnonymousCode) void {
-        const old = self.refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-    }
-
-    pub fn release(self: *AnonymousCode, releases: *heap.ReleaseDomain) void {
-        const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) return;
-        _ = self.refs.load(.acquire);
-        releases.retire(self, &self.retirement);
-    }
-
-    /// Constant work: a full binding's dependencies retire as their own
-    /// owner, and an inline binding holds at most `inline_limit`.
-    pub fn advanceRetirement(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *AnonymousCode,
-    ) bool {
-        switch (self.held) {
-            .table => |dependencies| {
-                if (dependencies) |table| table.retire(releases);
-                self.storage.free(releases, allocator);
-                allocator.destroy(self);
-            },
-            .trailing => |counts| {
-                const base: [*]align(@alignOf(AnonymousCode)) u8 = @ptrCast(self);
-                const trailing: [*]?*Definition = @ptrCast(@alignCast(base + @sizeOf(AnonymousCode)));
-                const held: [*]*Definition = @ptrCast(trailing + counts.targets);
-                for (held[0..counts.dependencies]) |definition| definition.release(releases);
-                releases.releaseHeader(self.storage.code);
-                allocator.free(base[0..inlineSize(counts.targets, counts.dependencies)]);
-            },
-        }
-        return true;
     }
 };
 

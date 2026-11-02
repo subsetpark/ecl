@@ -46,8 +46,9 @@ frame machine ───────► environment and module resolution
 ```
 
 Each box is a cooperating runtime boundary. Reading creates ordinary runtime
-values; a quotation binds its words before it runs, while top-level source
-resolves each word as it is reached; a primitive may install a
+values; a definition binds its body when it is made, while top-level source
+and quotations applied at run time resolve each word as it is reached; a
+primitive may install a
 resumable driver; and a driver may yield to the scheduler many times before
 producing a value. The `Session` owns every component for the whole journey.
 
@@ -332,8 +333,9 @@ character, and comment recognition.
 The root program and every quotation are lists. Evaluation has three cases:
 
 - a non-symbol value is appended to the operand stack;
-- a symbol occurrence invokes the definition it was bound to; and
-- applying a quotation binds it, then evaluates its elements by the same rule.
+- a symbol occurrence invokes the definition it was bound to, or, in code that
+  is not bound, the definition it resolves to now; and
+- applying a quotation evaluates its elements by the same rule.
 
 A symbol is one representation whichever position it occupies: its interned
 name plus a link to the root it resolves in. The reader links it for the root
@@ -639,8 +641,7 @@ binding but is accepted by no execution, publication, or reflection path; only
 sealing yields a definition, so every holder of a definition holds sealed code,
 and executable code exists only once sealed. A body bound for a construction
 can name only that construction's own members, and the construction seals every
-member before any body runs. A body bound for an anonymous application can name
-only sealed definitions. A module group binds against a construction directory
+member before any body runs. A module group binds against a construction directory
 of its own, so a published directory never holds an unsealed entry.
 
 Ownership follows the root. Core's definitions live as long as the `Env`. A
@@ -648,7 +649,7 @@ module image owns its definitions, and the Session keeps every published image
 until teardown, so code bound to a replaced image and words written in it keep
 their meaning. A top-level session definition is counted, because replacement
 removes it from the directory while bound callers, running activations, and
-reuse caches may still hold it. Counted definitions are the only kind
+units' resolutions may still hold it. Counted definitions are the only kind
 reclaimed during a Session; the retention of published images is a deliberate
 exception, accepted to avoid an ownership protocol for quotations that escape
 their image, and memory grows with reload history.
@@ -664,9 +665,8 @@ ownership operation. Only top-level session definitions are counted: a module
 group's calls among its members, like core's, need no reference, because the
 image holding them lives until Session teardown. A definition's call of itself
 is never a dependency, so a recursive body is not a cycle. An evaluation running an
-executable holds the executable's owner: the counted definition whose body it
-is, or the anonymous owner of an application's executable. A static owner needs
-no hold. A tail call secures the callee's owner before it retires the caller,
+executable holds the executable's owner, the counted definition whose body it
+is. A static owner needs no hold. A tail call secures the callee's owner before it retires the caller,
 whose executable may hold the callee's last reference.
 
 Binding takes one quotation against one captured publication view. The
@@ -721,35 +721,26 @@ never reused and holds no snapshot; it only keys reusable bindings. It is
 per Session so that one Session's publications never change what another's
 units reuse, and so what a unit allocates is a function of its own run.
 
-### Applications bind at their first run
+### Run-time code resolves as it runs
 
-An evaluation is in one of three states. Top-level source is incremental: a
-file, a REPL line, or the prelude resolves each word when it is reached, so a
-definition made by one form is visible to the next. A quotation application
-starts unbound, and the machine binds it before taking its first form. A bound
-evaluation follows its executable's targets.
+An evaluation is either bound, following its executable's targets, or not
+bound: top-level source and every quotation applied at run time. Code that is
+not bound resolves each word when it is reached, so a definition made by one
+form is visible to the next and a redefinition reaches the next dispatch of
+the word, even partway through a quotation or an iteration. Nothing checks a
+quotation before it runs; an unresolved word fails where it is reached.
 
-A combinator invocation keeps the executables it runs for its quotations in
-its application frame, two slots, so a predicate and a body each bind once and
-every later element reuses them; an executable taken from the unit's cache is
-kept there exactly as a fresh one is, so a publication mid-iteration changes
-neither. A unit keeps a small cache of
-anonymous executables, each owning its exact quotation, keyed by that
-quotation's identity, the publication counter, and the applying site's
-registration provenance; any publication in the Session invalidates every
-entry. The cache is searched by identity and replaced in a fixed rotation,
-never placed by address, so its hits do not depend on heap layout.
-Equal quotations from different roots are distinct values and never share an
-entry. A quotation built at run time, as `compose` builds one, is new every
-time, so it can never hit that cache; what repeats is its words. A short
-quotation, up to a constant number of forms, therefore binds in one bounded
-step when the unit has already resolved every word it executes in the same
-publication and provenance, which is what full binding would produce;
-otherwise it binds in full. Such a binding is one allocation. A quotation that
-only its evaluation references is in no cache, since every cached executable
-holds its own quotation, and can never be applied again, so it is neither
-looked up nor cached. The bootstrap unit skips the cache because core's directory changes
-without a publication. Nested quotations are not bound early for either reuse.
+A unit keeps what its unbound code resolved, keyed by word and the applying
+site's registration provenance, for one publication: any publication in the
+Session empties it before its next use, which is what makes a redefinition
+visible. It is a direct-mapped table grown by doubling to a fixed bound, so a
+lookup is one probe and every maintenance step is bounded. Each entry holds
+its definition, so a definition it hands out outlives the dispatch that
+retains it. Repeating a word costs that probe; a quotation built at run time,
+as `compose` builds one, costs nothing more than a literal one, since nothing
+binds it. An iteration's applications borrow the quotation the combinator
+holds for the whole invocation. The bootstrap unit keeps no resolutions,
+because core's directory changes without a publication.
 
 ### An execution site correlates its contexts
 

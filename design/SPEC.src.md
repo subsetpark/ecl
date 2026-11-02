@@ -375,19 +375,18 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-**Binding.** Before a quotation is applied, each of its top-level unquoted
-words is resolved in the root that occurrence was written in (see Bindings
-and scope), against one coherent view of the current definitions and module
-registrations. A quotation executes nothing unless every one of its top-level
-words binds: an unresolved word fails the application at that word before any
-of its forms has run. Nested quotations and quoted words are data and bind
-only when they are themselves applied. A combinator binds a quotation at its
-first application and reuses that binding for the rest of its invocation;
-separate quotations, such as a predicate and a body, bind separately, and a
-quotation that is never applied is never bound. Binding never loads a module:
-a qualified word naming a module that is not registered binds without a
-target and resolves when it is first reached, loading the module then, so an
-unknown module or a name it does not export fails there, as an undefined word.
+**Resolution.** A word is resolved in the root that occurrence was written in
+(see Bindings and scope), against the current definitions and module
+registrations. Definitions bind their bodies when they are made (below).
+Everything else resolves each top-level word when it is reached: top-level
+source, and every quotation applied at run time, by `call`, a combinator,
+`@attempt`, or as a task's body. Such a quotation is not checked before it
+runs: an unresolved word fails at that word, after the forms before it have
+run. Nested quotations and quoted words are data and resolve only when they
+are themselves applied. Binding never loads a module: a qualified word in a
+definition naming a module that is not registered binds without a target and
+resolves when it is first reached, loading the module then, so an unknown
+module or a name it does not export fails there, as an undefined word.
 
 **Definitions bind when they are defined.** A top-level definition binds its
 body as `def` runs. Its own name, written in the root it is published into,
@@ -401,16 +400,16 @@ construction body that calls one finds nothing by that name.
 
 **Top-level source is incremental.** A file, a REPL line, or the prelude is
 evaluated form by form, and each top-level word is resolved when it is
-reached, so ``(1) `foo def foo`` defines `foo` and then calls it. This applies
-to the top level only; quotations still bind whole before they run.
+reached, so ``(1) `foo def foo`` defines `foo` and then calls it.
 
-**Bound code keeps its targets.** Replacing a definition or a module
-registration reaches code bound afterwards. Code already bound — an earlier
-definition, a running executable, a quotation a combinator has already
-applied — keeps the definition it was bound to. There is no historical view:
-a unit, a task, and an `@attempt` bind against the definitions current when
-they bind, so a task binds its body when it first runs, not when it is
-spawned. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
+**Definitions keep their targets; run-time code sees replacements.**
+Replacing a definition or a module registration reaches definitions bound
+afterwards and every word that run-time code reaches afterwards, including
+the remaining forms of a quotation already running and the later elements of
+an iteration already under way. A definition already made keeps the
+definitions its body was bound to. There is no historical view: a unit, a
+task, and an `@attempt` see the definitions current as each word is reached.
+Explicit operations on names — `execute`, `doc`, `effect`, `which`,
 and `see` — resolve the supplied symbol in its own root against the current
 definitions each time they run. A module image that bound code or a word
 names keeps its meaning for the rest of the Session after its registration is
