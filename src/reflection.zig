@@ -2,6 +2,7 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 const env = @import("env.zig");
+const modules = @import("modules.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
@@ -23,128 +24,80 @@ pub const Action = union(enum) {
 };
 
 pub const VisibleNameRoot = union(enum) {
-    scope: *env.Scope,
-    environment: env.EnvironmentView,
+    /// The session's top-level names in one captured view, which the cursor
+    /// owns.
+    session: modules.View,
+    /// A published image's names, held by the pin the cursor owns.
+    image: struct {
+        entries: ?env.NameMap.RawEntryCursor,
+        pin: modules.GenerationPin,
+    },
+    /// Core's names alone.
+    core,
 };
 
 pub const VisibleNameProgress = poll.StreamProgress(u32);
-/// The one public-name traversal shared by reflection and Session completion.
-/// A scope root is retained for the cursor's whole lifetime; all environment,
-/// directory, and generation storage is reached only through owned leases.
+/// The one public-name traversal shared by reflection and Session completion:
+/// a root's own public names, then core's.
 pub const VisibleNameCursor = struct {
-    const AfterEnvironment = union(enum) { scopes: ?*env.Scope, core };
-    const DirectState = struct {
-        cursor: env.NameCursor,
-        after: AfterEnvironment,
-    };
-    const Phase = union(enum) {
-        scopes: struct { current: ?*env.Scope },
-        direct: DirectState,
-        core: env.NameCursor,
-        complete,
-    };
+    environment: *env.Env,
+    root: VisibleNameRoot,
+    own: ?env.NameMap.RawEntryCursor,
+    core: ?env.NameMap.RawEntryCursor = null,
+    complete: bool = false,
 
-    retained_scope: ?*env.Scope,
-    core: env.EnvironmentView,
-    phase: Phase,
-    /// The binding version the reader observes in a session root.
-    pin: ?u64,
-
-    pub fn init(
-        root: VisibleNameRoot,
-        core: env.EnvironmentView,
-        pin: ?u64,
-    ) VisibleNameCursor {
-        return switch (root) {
-            .scope => |scope| result: {
-                scope.retain();
-                break :result .{
-                    .retained_scope = scope,
-                    .core = core,
-                    .phase = .{ .scopes = .{ .current = scope } },
-                    .pin = pin,
-                };
-            },
-            .environment => |environment| .{
-                .retained_scope = null,
-                .core = core,
-                .phase = .{ .direct = .{
-                    .cursor = environment.nameCursor().at(pin),
-                    .after = .core,
-                } },
-                .pin = pin,
+    pub fn init(root: VisibleNameRoot, environment: *env.Env) VisibleNameCursor {
+        return .{
+            .environment = environment,
+            .root = root,
+            .own = switch (root) {
+                .session => |*view| view.sessionEntries(),
+                .image => |image| image.entries,
+                .core => null,
             },
         };
     }
 
     pub fn deinit(self: *VisibleNameCursor) void {
-        switch (self.phase) {
-            .scopes, .complete => {},
-            .direct => |*state| state.cursor.deinit(),
-            .core => |*cursor| cursor.deinit(),
+        switch (self.root) {
+            .session => |*view| view.deinit(),
+            .image => |*image| image.pin.deinit(),
+            .core => {},
         }
-        if (self.retained_scope) |scope| scope.retire();
         self.* = undefined;
     }
 
-    fn continueAfter(self: *VisibleNameCursor, after: AfterEnvironment) void {
-        self.phase = switch (after) {
-            .scopes => |current| .{ .scopes = .{ .current = current } },
-            .core => .{ .core = self.core.nameCursor() },
+    fn publicEntry(entry: anytype) VisibleNameProgress {
+        return switch (entry.value) {
+            .definition => |definition| if (definition.visibility == .public)
+                .{ .item = intern.bindingId(entry.key) }
+            else
+                .pending,
+            .alias => |alias| if (alias.visibility == .public)
+                .{ .item = intern.bindingId(entry.key) }
+            else
+                .pending,
         };
     }
 
-    fn finishEnvironment(
-        self: *VisibleNameCursor,
-        state: *DirectState,
-    ) void {
-        const after = state.after;
-        state.cursor.deinit();
-        self.continueAfter(after);
-    }
-
-    fn publicEntry(entry: env.NameEntry) VisibleNameProgress {
-        var lease = entry.lease;
-        defer lease.deinit();
-        return if (lease.spec().visibility == .public) .{ .item = entry.name } else .pending;
-    }
-
     pub fn advance(self: *VisibleNameCursor) VisibleNameProgress {
-        return switch (self.phase) {
-            .scopes => |*state| result: {
-                const current = state.current orelse {
-                    self.phase = .{ .core = self.core.nameCursor() };
-                    break :result .pending;
-                };
-                // A root's own names, then core's: roots have no parents.
-                const environment = current.environmentOrNull() orelse {
-                    state.current = null;
-                    break :result .pending;
-                };
-                self.phase = .{ .direct = .{
-                    .cursor = environment.nameCursor().at(if (current.isSession()) self.pin else null),
-                    .after = .core,
-                } };
-                break :result .pending;
+        if (self.complete) return .complete;
+        if (self.own) |*own| switch (own.advance()) {
+            .pending => return .pending,
+            .item => |entry| return publicEntry(entry),
+            .complete => {
+                self.own = null;
+                return .pending;
             },
-            .direct => |*state| switch (state.cursor.advance()) {
-                .pending => .pending,
-                .item => |entry| publicEntry(entry),
-                .complete => result: {
-                    self.finishEnvironment(state);
-                    break :result .pending;
-                },
+        };
+        if (self.core == null) self.core = self.environment.coreEntries();
+        return switch (self.core.?.advance()) {
+            .pending => .pending,
+            .item => |entry| publicEntry(entry),
+            .complete => result: {
+                self.complete = true;
+                break :result .complete;
             },
-            .core => |*cursor| switch (cursor.advance()) {
-                .pending => .pending,
-                .item => |entry| publicEntry(entry),
-                .complete => result: {
-                    cursor.deinit();
-                    self.phase = .complete;
-                    break :result .complete;
-                },
-            },
-            .complete => .complete,
         };
     }
 };

@@ -872,10 +872,6 @@ pub fn length(header: *const Header) u64 {
     return headerImplConst(header).len;
 }
 
-pub fn refCount(handle: anytype) u32 {
-    return headerImplConst(@ptrCast(@alignCast(handle))).rc.load(.acquire);
-}
-
 fn publishList(header: *InitializingList) *ListHandle {
     return @ptrCast(@alignCast(header));
 }
@@ -1747,10 +1743,6 @@ pub fn requireOpaqueWorkerFacade(comptime Handle: type, comptime State: type) vo
     }
 }
 
-pub fn requireOpaqueObservation(comptime Handle: type) void {
-    requireOpaqueHandle(Handle, "observation");
-}
-
 /// A mutation authority is structurally the same shape as an observation
 /// handle — pointer-sized, opaque, owning nothing — and differs only in the
 /// operations it grants. It gets its own spelling so a capability that
@@ -1830,77 +1822,6 @@ pub const ReleaseDomain = struct {
         wake_fn: *const fn (*anyopaque, WakeReason) void,
     };
 
-    /// A replaced binding a pin may still observe: any pin from `since` up to
-    /// its replacement does. Kept bindings are guarded by the binding lock;
-    /// once no pin observes one, `unlink_fn` removes it from its chain under
-    /// that lock and `retire_fn` retires it after.
-    pub const KeptBinding = struct {
-        since: u64,
-        next: ?*KeptBinding = null,
-        unlink_fn: *const fn (*KeptBinding) void,
-        retire_fn: *const fn (*KeptBinding, *ReleaseDomain) void,
-    };
-
-    /// Kept bindings in no particular order, spliced whole in constant time.
-    pub const KeptList = struct {
-        first: ?*KeptBinding = null,
-        last: ?*KeptBinding = null,
-
-        fn push(self: *KeptList, kept: *KeptBinding) void {
-            kept.next = self.first;
-            if (self.first == null) self.last = kept;
-            self.first = kept;
-        }
-        fn pop(self: *KeptList) ?*KeptBinding {
-            const kept = self.first orelse return null;
-            self.first = kept.next;
-            if (self.first == null) self.last = null;
-            kept.next = null;
-            return kept;
-        }
-        /// Moves every binding of `other` here, leaving it empty.
-        fn take(self: *KeptList, other: *KeptList) void {
-            const first = other.first orelse return;
-            if (self.last) |last| last.next = first else self.first = first;
-            self.last = other.last;
-            other.* = .{};
-        }
-    };
-
-    /// A live unit's pin on the binding version current at its creation.
-    ///
-    /// Pins are listed newest first, which is also version order, because
-    /// each takes the version current when it is made. A kept binding waits
-    /// on the newest pin older than its replacement, the last pin that could
-    /// observe it, so ending a pin hands what it holds to the next older pin
-    /// without visiting any of it. Whether that pin observes each handed
-    /// binding is settled later, a bounded batch per release-domain turn.
-    pub const BindingPin = struct {
-        version: u64,
-        older: ?*BindingPin = null,
-        newer: ?*BindingPin = null,
-        /// Kept bindings this pin observes.
-        kept: KeptList = .{},
-        /// Bindings handed over by ended newer pins, not yet checked.
-        unchecked: KeptList = .{},
-        /// Links the pins with unchecked bindings, while `unchecked` is
-        /// nonempty.
-        dirty_next: ?*BindingPin = null,
-        dirty_previous: ?*BindingPin = null,
-    };
-
-    /// The bounded work of settling kept bindings after pins end. One per
-    /// domain, queued as a retirement while it has work.
-    const BindingSweep = struct {
-        retirement: Retirement = .{},
-        queued: bool = false,
-
-        pub fn advanceRetirement(domain: *ReleaseDomain, _: std.mem.Allocator, self: *BindingSweep) bool {
-            return domain.sweepBindings(self);
-        }
-    };
-    const binding_sweep_quantum = 64;
-
     pub const WakeReason = enum { retirement_available, backpressure_relieved };
 
     /// The archive's O(1) notification that one code header it indexed is
@@ -1917,18 +1838,6 @@ pub const ReleaseDomain = struct {
     };
 
     allocator: std.mem.Allocator,
-    /// Binding publication, pins, and kept bindings, under one lock. It is
-    /// taken per publication and per child unit, never per word.
-    bindings_mutex: std.Io.Mutex = .init,
-    /// The version of the newest binding publication.
-    binding_version: std.atomic.Value(u64) = .init(1),
-    /// The newest live pin; older ones follow through `BindingPin.older`.
-    newest_pin: ?*BindingPin = null,
-    /// Pins holding bindings the sweep has not checked.
-    dirty_pins: ?*BindingPin = null,
-    /// Kept bindings no pin observes any more, for the sweep to retire.
-    unobserved_bindings: KeptList = .{},
-    binding_sweep: BindingSweep = .{},
     queue_mutex: std.Io.Mutex = .init,
     claim_released: std.Io.Condition = .init,
     execution: enum { empty, available, claimed } = .empty,
@@ -2033,115 +1942,6 @@ pub const ReleaseDomain = struct {
             identity,
             @ptrCast(@alignCast(header)),
         );
-    }
-
-    /// Pins the binding version current now, for a unit that observes the
-    /// bindings of its creation for its whole life. A replaced binding stays
-    /// readable while some pin falls within the versions it was current for.
-    pub fn pinBindings(self: *ReleaseDomain) error{OutOfMemory}!*BindingPin {
-        const pin = try self.allocator.create(BindingPin);
-        std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
-        pin.* = .{ .version = self.binding_version.load(.seq_cst), .older = self.newest_pin };
-        if (self.newest_pin) |newest| newest.newer = pin;
-        self.newest_pin = pin;
-        return pin;
-    }
-
-    /// Ends a pin in constant time. What it kept passes to the next older pin,
-    /// which is now the last that could observe it, or to the sweep to retire
-    /// when there is none.
-    pub fn unpinBindings(self: *ReleaseDomain, pin: *BindingPin) void {
-        const start_sweep = start: {
-            std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
-            defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
-            if (pin.newer) |newer| newer.older = pin.older else self.newest_pin = pin.older;
-            if (pin.older) |older| older.newer = pin.newer;
-            if (pin.unchecked.first != null) self.removeDirtyLocked(pin);
-            var handed = pin.kept;
-            handed.take(&pin.unchecked);
-            if (handed.first == null) break :start false;
-            if (pin.older) |older| {
-                if (older.unchecked.first == null) self.addDirtyLocked(older);
-                older.unchecked.take(&handed);
-            } else self.unobserved_bindings.take(&handed);
-            if (self.binding_sweep.queued) break :start false;
-            self.binding_sweep.queued = true;
-            break :start true;
-        };
-        self.allocator.destroy(pin);
-        if (start_sweep) self.retire(&self.binding_sweep, &self.binding_sweep.retirement);
-    }
-
-    fn addDirtyLocked(self: *ReleaseDomain, pin: *BindingPin) void {
-        pin.dirty_previous = null;
-        pin.dirty_next = self.dirty_pins;
-        if (self.dirty_pins) |first| first.dirty_previous = pin;
-        self.dirty_pins = pin;
-    }
-
-    fn removeDirtyLocked(self: *ReleaseDomain, pin: *BindingPin) void {
-        if (pin.dirty_previous) |previous| previous.dirty_next = pin.dirty_next else self.dirty_pins = pin.dirty_next;
-        if (pin.dirty_next) |next| next.dirty_previous = pin.dirty_previous;
-        pin.dirty_next = null;
-        pin.dirty_previous = null;
-    }
-
-    /// Settles up to a quantum of handed-over bindings: each one is kept by
-    /// the pin holding it when that pin observes it, and otherwise by none,
-    /// because every older pin is older still. Returns true once nothing is
-    /// left to settle.
-    fn sweepBindings(self: *ReleaseDomain, sweep: *BindingSweep) bool {
-        var unobserved: KeptList = .{};
-        const settled = settled: {
-            std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
-            defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
-            for (0..binding_sweep_quantum) |_| {
-                if (self.unobserved_bindings.pop()) |kept| {
-                    kept.unlink_fn(kept);
-                    unobserved.push(kept);
-                    continue;
-                }
-                const pin = self.dirty_pins orelse break;
-                const kept = pin.unchecked.pop().?;
-                if (pin.unchecked.first == null) self.removeDirtyLocked(pin);
-                if (kept.since <= pin.version) pin.kept.push(kept) else {
-                    kept.unlink_fn(kept);
-                    unobserved.push(kept);
-                }
-            }
-            if (self.dirty_pins != null or self.unobserved_bindings.first != null) break :settled false;
-            // The next pin to end queues the sweep afresh.
-            sweep.* = .{};
-            break :settled true;
-        };
-        while (unobserved.pop()) |kept| kept.retire_fn(kept, self);
-        return settled;
-    }
-
-    /// Keeps a binding replaced by the publication in progress while a pin
-    /// observes it, and returns false when none does. Caller holds the
-    /// binding lock, so every pin is older than the replacement and the
-    /// newest is the last that can observe it.
-    pub fn keepBindingLocked(self: *ReleaseDomain, kept: *KeptBinding) bool {
-        const newest = self.newest_pin orelse return false;
-        if (newest.version < kept.since) return false;
-        newest.kept.push(kept);
-        return true;
-    }
-
-    /// Starts a binding publication and returns its version, newer than every
-    /// pin, holding the binding lock until `endBindingPublication`. The caller
-    /// publishes stamped with it and decides, against the pins, what becomes
-    /// of the binding it replaced; a pin taken later observes the publication.
-    pub fn beginBindingPublication(self: *ReleaseDomain) u64 {
-        std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
-        return self.binding_version.load(.seq_cst) + 1;
-    }
-
-    pub fn endBindingPublication(self: *ReleaseDomain, version: u64) void {
-        self.binding_version.store(version, .seq_cst);
-        std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
     }
 
     pub fn retire(self: *ReleaseDomain, owner: anytype, node: *Retirement) void {
@@ -2365,12 +2165,6 @@ pub const ReleaseDomain = struct {
 
     fn drainOwned(self: *ReleaseDomain) void {
         while (!self.advance(65_536)) {}
-        std.Io.Threaded.mutexLockUncancelable(&self.bindings_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.bindings_mutex);
-        // A live unit may still hold a pin, and what it keeps is released
-        // when it ends; with none left, the sweep has settled everything.
-        if (self.newest_pin == null)
-            std.debug.assert(self.dirty_pins == null and self.unobserved_bindings.first == null);
     }
 
     fn releaseNextChild(self: *ReleaseDomain, header: *Header) bool {

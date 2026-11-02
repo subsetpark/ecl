@@ -47,7 +47,7 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     embeddedGroup(true, &.{
-        "machine.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
+        "machine.zig", "binder.zig", "spans.zig", "prims.zig", "test_prims.zig", "internal.zig",
     }),
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -230,6 +230,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditSourceBodies() or failed;
     failed = auditFilesystemAuthority() or failed;
     failed = auditUnsafeCasts() or failed;
+    failed = auditConstructionTypestate() or failed;
     failed = auditPreludeLayout() or failed;
     failed = auditHttpServerWriteSink() or failed;
     failed = auditFormalValueKinds() or failed;
@@ -780,6 +781,23 @@ fn auditFilesystemAuthority() bool {
         "step",
         "cwd",
     ) or failed;
+    return failed;
+}
+
+/// A reservation and a sealed definition share storage, and the types keep
+/// them apart: only `Reservation` reads the reserved member of
+/// `Definition.body_state` and only `Definition` the sealed one. Zig fields
+/// cannot be private, so naming that field outside `env.zig` would bypass
+/// both handles; this confinement is the audit's.
+fn auditConstructionTypestate() bool {
+    var failed = false;
+    const body_state = [_][]const []const u8{&.{ ".", "body_state" }};
+    for (source_groups) |group| {
+        for (group.files, group.sources) |name, text| {
+            if (std.mem.eql(u8, name, "env.zig")) continue;
+            failed = auditTokens(name, text, &body_state) or failed;
+        }
+    }
     return failed;
 }
 

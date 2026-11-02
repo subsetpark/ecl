@@ -1,4 +1,4 @@
-//! Stable binding cells, name slots, and lazy scopes.
+//! Definitions, sealed executables, name directories, and scope links.
 const std = @import("std");
 const builtin = @import("builtin");
 const value = @import("value.zig");
@@ -10,7 +10,6 @@ const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const idioms = @import("idioms.zig");
 const native_module = @import("native_module.zig");
-const snapshot_api = @import("snapshot.zig");
 const reader_types = @import("reader_types.zig");
 /// In-tree primitives use Unit's ergonomic error helpers. This binding
 /// kind is not part of the native-extension ABI.
@@ -49,25 +48,6 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
     return @ptrCast(@alignCast(@constCast(document)));
 }
 
-pub const Binding = union(enum) {
-    word: *Quotation,
-    builtin: PrimitiveImpl,
-    native: NativeCallable,
-    pub fn retain(self: Binding) void {
-        switch (self) {
-            .word => |body| heap.incRef(quotationHeader(body)),
-            .builtin => {},
-            .native => |callable| callable.instance.retain(),
-        }
-    }
-    pub fn retire(self: Binding, releases: *heap.ReleaseDomain) void {
-        switch (self) {
-            .word => |body| releases.releaseHeader(quotationHeader(body)),
-            .builtin => {},
-            .native => |callable| callable.instance.releasePin(),
-        }
-    }
-};
 pub const Visibility = enum { public, private };
 /// Where a definition was published. A module definition records only its own
 /// module-local name: the image it belongs to has no canonical name, and the
@@ -153,27 +133,6 @@ pub const ValidatedEffect = struct {
 };
 pub const Effect = ValidatedEffect;
 
-pub const TopPublication = union(enum) {
-    word: struct {
-        body: *Quotation,
-        source: ?reader_types.SourceSlice = null,
-        effect: ?ValidatedEffect = null,
-        doc: ?*DocumentationString = null,
-    },
-    builtin: ImportedBuiltin,
-};
-
-/// A standard-library builtin that `import` binds directly instead of through
-/// a forwarding body. A standard-library module name can never be registered
-/// again, so its attribute is the same binding however late it is resolved.
-pub const ImportedBuiltin = struct {
-    primitive: PrimitiveImpl,
-    visibility: Visibility = .public,
-    effect: ?ValidatedEffect = null,
-    doc: ?*DocumentationString = null,
-    /// The attribute's qualified name, which a failure inside it reports.
-    reports_as: intern.TraceWord,
-};
 /// One word of a builtin-backed module: a host primitive published under a
 /// module name. The metadata is authored as plain text because these modules
 /// are compiled in and therefore have no loader descriptor to carry it.
@@ -235,15 +194,13 @@ pub const ModulePublication = union(enum) {
         effect: ?ValidatedEffect = null,
         doc: *DocumentationString,
     },
-    /// An import of a standard-library builtin, public as every import is.
-    imported: ImportedBuiltin,
 };
 
 /// What a trusted definition's body was recognized as, decided once when its
-/// environment froze. A frozen environment cannot change what the body's
-/// words mean, so the outcome is a property of the definition; only whether
-/// a particular call's operands admit it is left to that call. `env` stores
-/// the record for the recognizer that produced it and does not interpret it.
+/// group sealed. A sealed body's targets cannot change, so the outcome is a
+/// property of the definition; only whether a particular call's operands
+/// admit it is left to that call. `env` stores the record for the recognizer
+/// that produced it and does not interpret it.
 pub const DirectIdiom = struct {
     entry: u16,
     /// Borrowed from the body, which the binding retains.
@@ -252,848 +209,615 @@ pub const DirectIdiom = struct {
     active_index: ?u32 = null,
 };
 
-/// Name resolution in an environment that is about to freeze, as a word in
-/// one of its definitions resolves at runtime: its own environment, then core.
-pub const FrozenLookup = struct {
-    own: *const Environment,
-    /// The core a module image falls back to; null when `own` is core.
-    core: ?*const Environment,
-    own_scope: u32,
-    core_scope: u32,
-    /// Where a word's slot is found, so its root can be compared.
-    slots: *const SlotIndex,
+/// Who keeps a definition alive. Core definitions live as long as the `Env`;
+/// a module image's definitions live as long as the image, which the Session
+/// keeps until teardown once it is published. A top-level session definition
+/// is the one counted kind: replacement can make it unreachable from the
+/// directory while bound code, frames, and caches still hold it.
+pub const Lifetime = enum { static, counted };
 
-    pub const Hit = struct {
-        lease: BindingLease,
-        in_core: bool,
-    };
+/// Where a definition's body was written: its activation resolves runtime
+/// names and lands nested definitions there.
+pub const DefinitionRoot = enum { core, session, image };
 
-    /// The root id of the slot a word carries, or zero for an unlinked word.
-    fn rootOf(self: FrozenLookup, slot_id: u32) u32 {
-        return switch (wordTarget(slot_id)) {
-            .unlinked, .local => 0,
-            .image => |scope| @backingInt(scope),
-            .slot => |id| found: {
-                const found = self.slots.get(id) orelse break :found 0;
-                break :found @backingInt(found.rootCell().id);
-            },
-        };
-    }
-
-    /// Whether a word linked to `slot_id` resolves in this chain: its slot
-    /// belongs to this environment or to core.
-    pub fn admits(self: FrozenLookup, slot_id: u32) bool {
-        const stamp = self.rootOf(slot_id);
-        return stamp != 0 and (stamp == self.own_scope or stamp == self.core_scope);
-    }
-
-    /// Resolves `name` linked to `slot_id`: a core slot in core alone, the
-    /// environment's own slot there first and then in core.
-    pub fn resolve(self: FrozenLookup, slot_id: u32, name: u32) ?Hit {
-        const stamp = self.rootOf(slot_id);
-        const core = self.core orelse self.own;
-        if (self.core != null and stamp == self.own_scope) {
-            if (lookupFrozen(self.own, name)) |lease| return .{ .lease = lease, .in_core = false };
-        }
-        const lease = lookupFrozen(core, name) orelse return null;
-        return .{ .lease = lease, .in_core = true };
-    }
-};
-
-/// One lookup on the blocking freeze edge, which owns the environment.
-fn lookupFrozen(environment: *const Environment, name: u32) ?BindingLease {
-    var cursor = environment.directLookupCursor(name);
-    defer cursor.deinit();
-    return poll.drive(?BindingLease, &cursor, .{});
-}
-
-pub const BindingSpec = struct {
-    binding: Binding,
+/// One immutable, sealed target. Construction reserves a definition's storage
+/// before its body is bound, so a body may call itself (and a module group's
+/// members one another), but hands out only a `Reservation` for it: a
+/// `*Definition` exists only once sealing has installed the bound body. So
+/// every holder of a `*Definition` holds sealed code, and execution,
+/// publication, and reflection read it through `code` with no reserved case.
+pub const Definition = struct {
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    refs: std.atomic.Value(u32) = .init(1),
+    allocator: std.mem.Allocator,
+    lifetime: Lifetime,
+    /// Which member is active is the handle's type: a `Reservation` reads
+    /// `reserved`, a `Definition` reads `sealed`. Safe builds check the
+    /// active member; only this file names the field.
+    body_state: BodyState,
+    /// The distinct counted definitions the sealed body calls, held once each
+    /// for the definition's lifetime. Null when it calls none.
+    dependencies: ?*DependencyTable = null,
     visibility: Visibility = .public,
     origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
     direct_idiom: ?DirectIdiom = null,
-    /// The name a failure inside this builtin reports, when it is not the
-    /// name the call reached it by: an imported builtin reports its
-    /// attribute's qualified name, as a forwarding body would.
-    reports_as: ?intern.TraceWord = null,
-    fn fromTop(publication: TopPublication) BindingSpec {
-        return switch (publication) {
-            .word => |word| .{
-                .binding = .{ .word = word.body },
-                .source = word.source,
-                .effect = word.effect,
-                .doc = word.doc,
-            },
-            .builtin => |imported| .{
-                .binding = .{ .builtin = imported.primitive },
-                .visibility = imported.visibility,
-                .effect = imported.effect,
-                .doc = imported.doc,
-                .reports_as = imported.reports_as,
-            },
+    root: DefinitionRoot,
+    /// The module image the definition belongs to, as `modules` names it.
+    /// Opaque here: `env` never dereferences it.
+    home: ?*anyopaque = null,
+
+    /// What a sealed definition runs.
+    pub const Code = union(enum) {
+        source: Executable.Storage,
+        builtin: PrimitiveImpl,
+        native: NativeCallable,
+    };
+
+    /// A definition sealed at creation: a host callback.
+    pub const Callback = union(enum) {
+        builtin: PrimitiveImpl,
+        native: NativeCallable,
+    };
+
+    const BodyState = union {
+        reserved: Reserved,
+        sealed: Code,
+    };
+
+    /// The quotation awaiting binding and, once bound, the body awaiting
+    /// the seal.
+    const Reserved = struct {
+        quotation: *value.ListHandle,
+        bound: ?Bound = null,
+    };
+
+    pub const Metadata = struct {
+        visibility: Visibility = .public,
+        origin: BindingOrigin = .top,
+        effect: ?ValidatedEffect = null,
+        doc: ?*DocumentationString = null,
+        source: ?reader_types.SourceSlice = null,
+        root: DefinitionRoot,
+        home: ?*anyopaque = null,
+    };
+
+    /// A definition sealed at creation around a host callback, owning one
+    /// reference to each metadata value.
+    pub fn create(
+        allocator: std.mem.Allocator,
+        lifetime: Lifetime,
+        callback: Callback,
+        metadata: Metadata,
+    ) error{OutOfMemory}!*Definition {
+        const sealed: Code = switch (callback) {
+            .builtin => |primitive| .{ .builtin = primitive },
+            .native => |callable| .{ .native = callable },
+        };
+        const result = try allocate(allocator, lifetime, .{ .sealed = sealed }, metadata);
+        if (callback == .native) callback.native.instance.retain();
+        return result;
+    }
+
+    /// Reserves a definition whose body its construction owner will bind and
+    /// seal. `body` is retained here; the caller keeps its own.
+    pub fn reserve(
+        allocator: std.mem.Allocator,
+        lifetime: Lifetime,
+        body: *value.ListHandle,
+        metadata: Metadata,
+    ) error{OutOfMemory}!*Reservation {
+        const result = try allocate(allocator, lifetime, .{ .reserved = .{ .quotation = body } }, metadata);
+        heap.incRef(body);
+        return Reservation.of(result);
+    }
+
+    fn allocate(
+        allocator: std.mem.Allocator,
+        lifetime: Lifetime,
+        body_state: BodyState,
+        metadata: Metadata,
+    ) error{OutOfMemory}!*Definition {
+        const result = try allocator.create(Definition);
+        if (metadata.effect) |effect| effect.retain();
+        if (metadata.doc) |doc| heap.incRef(documentationHeader(doc));
+        if (metadata.source) |source| source.retain();
+        result.* = .{
+            .allocator = allocator,
+            .lifetime = lifetime,
+            .body_state = body_state,
+            .visibility = metadata.visibility,
+            .origin = metadata.origin,
+            .effect = metadata.effect,
+            .doc = metadata.doc,
+            .source = metadata.source,
+            .root = metadata.root,
+            .home = metadata.home,
+        };
+        return result;
+    }
+
+    /// What the definition runs.
+    pub inline fn code(self: *const Definition) Run {
+        return switch (self.body_state.sealed) {
+            .source => |*storage| .{ .source = Executable.of(storage) },
+            .builtin => |primitive| .{ .builtin = primitive },
+            .native => |callable| .{ .native = callable },
         };
     }
-    fn fromModule(
-        name: intern.NamespaceName,
-        publication: ModulePublication,
-    ) BindingSpec {
-        const origin: BindingOrigin = .{ .module_local = .{ .trace_word = name } };
-        return switch (publication) {
-            .word => |word| .{
-                .binding = .{ .word = word.body },
-                .source = word.source,
-                .visibility = word.visibility,
-                .origin = origin,
-                .effect = word.effect,
-                .doc = word.doc,
-            },
-            .native => |native| .{
-                .binding = .{ .native = native.callable },
-                .visibility = native.visibility,
-                .origin = origin,
-                .effect = native.effect,
-                .doc = native.doc,
-            },
-            .builtin => |primitive| .{
-                .binding = .{ .builtin = primitive.primitive },
-                .visibility = primitive.visibility,
-                .origin = origin,
-                .effect = primitive.effect,
-                .doc = primitive.doc,
-            },
-            .imported => |imported| .{
-                .binding = .{ .builtin = imported.primitive },
-                .origin = origin,
-                .effect = imported.effect,
-                .doc = imported.doc,
-                .reports_as = imported.reports_as,
-            },
+
+    /// A sealed definition's code as its consumers see it: a source body is
+    /// an executable handle.
+    pub const Run = union(enum) {
+        source: *const Executable,
+        builtin: PrimitiveImpl,
+        native: NativeCallable,
+    };
+
+    /// The source quotation a definition's body is shown as.
+    pub fn quotationBody(self: *const Definition) ?*value.ListHandle {
+        return switch (self.code()) {
+            .source => |executable| executable.code(),
+            .builtin, .native => null,
         };
     }
-    fn retain(self: BindingSpec) void {
-        self.binding.retain();
-        if (self.effect) |effect| effect.retain();
-        if (self.doc) |doc| heap.incRef(documentationHeader(doc));
-        if (self.source) |source| source.retain();
+
+    pub fn traceWord(self: *const Definition) ?intern.BindingName {
+        return self.origin.traceWord();
     }
-    fn retire(self: BindingSpec, releases: *heap.ReleaseDomain) void {
-        self.binding.retire(releases);
+
+    pub fn retain(self: *Definition) void {
+        std.debug.assert(self.lifetime == .counted);
+        const old = self.refs.fetchAdd(1, .monotonic);
+        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+
+    /// Drops one counted reference; the last schedules bounded retirement.
+    pub fn release(self: *Definition, releases: *heap.ReleaseDomain) void {
+        std.debug.assert(self.lifetime == .counted);
+        const old = self.refs.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old != 1) return;
+        _ = self.refs.load(.acquire);
+        releases.retire(self, &self.retirement);
+    }
+
+    /// Retires a static definition with its owning table.
+    pub fn retireStatic(self: *Definition, releases: *heap.ReleaseDomain) void {
+        std.debug.assert(self.lifetime == .static);
+        releases.retire(self, &self.retirement);
+    }
+
+    /// Constant work: the dependencies retire as their own owner, one
+    /// reference per step, so no definition walks a user-sized graph here.
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *Definition,
+    ) bool {
+        switch (self.body_state.sealed) {
+            .source => |storage| storage.free(releases, allocator),
+            .builtin => {},
+            .native => |callable| callable.instance.releasePin(),
+        }
+        // A self-call is never a dependency, so this cannot reach the
+        // definition it retires.
+        if (self.dependencies) |dependencies| dependencies.retire(releases);
+        self.freeMetadata(releases, allocator);
+        return true;
+    }
+
+    fn freeMetadata(self: *Definition, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         if (self.effect) |effect| effect.retire(releases);
         if (self.doc) |doc| releases.releaseHeader(documentationHeader(doc));
         if (self.source) |source| {
             var owned = source;
             owned.deinit();
         }
-    }
-    pub fn deinit(self: *BindingSpec, releases: *heap.ReleaseDomain) void {
-        self.retire(releases);
-    }
-};
-
-/// One published state of a name in a root: its binding, or its removal.
-/// Snapshots form a chain from the newest back, so a unit pinned to an older
-/// version can still find the state it observes. A replaced snapshot no live
-/// pin observes is unlinked from the chain and retired.
-const BindingSnapshot = struct {
-    retirement: heap.ReleaseDomain.Retirement = .{},
-    /// Null for a removal: the root binds nothing for the name from `since`.
-    spec: ?BindingSpec,
-    /// The binding version that published this snapshot.
-    since: u64,
-    /// The older snapshot a pinned reader walks to next. Chain links change
-    /// only under the binding lock; readers follow them without it.
-    previous: std.atomic.Value(?*BindingSnapshot),
-    /// The snapshot that replaced this one, for unlinking it later.
-    next: ?*BindingSnapshot = null,
-    /// Set while a pin still observes this replaced snapshot.
-    kept: heap.ReleaseDomain.KeptBinding = .{
-        .since = 0,
-        .unlink_fn = unlinkKept,
-        .retire_fn = retireKept,
-    },
-    /// The cell a replaced snapshot holds a reference on, so retirement can
-    /// wait out the cell's counted readers: those copying it, and pinned
-    /// readers walking past it. Null while current, and for the last snapshot
-    /// of a cell torn down after its readers.
-    cell: ?*BindingCell = null,
-    fn create(
-        allocator: std.mem.Allocator,
-        spec: ?BindingSpec,
-        previous: ?*BindingSnapshot,
-    ) error{OutOfMemory}!*BindingSnapshot {
-        const snapshot = try allocator.create(BindingSnapshot);
-        if (spec) |kept| kept.retain();
-        snapshot.* = .{ .spec = spec, .since = 0, .previous = .init(previous) };
-        return snapshot;
-    }
-    /// The newest snapshot from this one back that a reader pinned at
-    /// `version` observes, or null when none was published by then.
-    fn observedAt(self: *const BindingSnapshot, version: u64) ?*const BindingSnapshot {
-        var cursor: ?*const BindingSnapshot = self;
-        while (cursor) |snapshot| : (cursor = snapshot.previous.load(.acquire)) {
-            if (snapshot.since <= version) return snapshot;
-        }
-        return null;
-    }
-    /// Removes this replaced snapshot from its chain. Caller holds the
-    /// binding lock.
-    fn unlinkLocked(self: *BindingSnapshot) void {
-        const older = self.previous.load(.acquire);
-        self.next.?.previous.store(older, .release);
-        if (older) |snapshot| snapshot.next = self.next;
-    }
-    fn unlinkKept(kept: *heap.ReleaseDomain.KeptBinding) void {
-        const self: *BindingSnapshot = @fieldParentPtr("kept", kept);
-        self.unlinkLocked();
-    }
-    fn retireKept(kept: *heap.ReleaseDomain.KeptBinding, releases: *heap.ReleaseDomain) void {
-        const self: *BindingSnapshot = @fieldParentPtr("kept", kept);
-        releases.retire(self, &self.retirement);
-    }
-    pub fn advanceRetirement(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *BindingSnapshot,
-    ) bool {
-        const cell = self.cell;
-        // A counted reader may be copying this snapshot or walking past it.
-        if (cell) |owner| if (!owner.publisher.quiescent()) return false;
-        if (self.spec) |spec| spec.retire(releases);
-        allocator.destroy(self);
-        if (cell) |owner| owner.release();
-        return true;
-    }
-    fn specPointer(self: *const BindingSnapshot) ?*const BindingSpec {
-        return if (self.spec) |*spec| spec else null;
-    }
-    fn destroy(self: *BindingSnapshot, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
-        if (self.spec) |spec| spec.retire(releases);
         allocator.destroy(self);
     }
 };
-/// A binding's specification as a reader holds it; release it with the
-/// environment's allocator. This is intentionally distinct from the
-/// unpublished internal specification.
-pub const BindingLease = struct {
-    releases: *heap.ReleaseDomain,
-    held: union(enum) {
-        /// A copy holding references, which outlives the cell's snapshot.
-        owned: BindingSpec,
-        /// A slice reader's borrow: the current snapshot's specification,
-        /// valid until the read section ends. It holds no references.
-        borrowed: *const BindingSpec,
-    },
 
-    /// The specification this lease holds, borrowed from the lease.
-    pub fn spec(self: *const BindingLease) *const BindingSpec {
-        return switch (self.held) {
-            .owned => |*owned| owned,
-            .borrowed => |borrowed| borrowed,
+/// A definition under construction: the only handle its construction owner
+/// holds until sealing. Binding may name it as a target, and it carries the
+/// definition's metadata, but it cannot be executed, published, or
+/// reflected, since none of those accept it. Sealing consumes it and returns
+/// the `*Definition`; a construction that fails discards it instead.
+pub const Reservation = opaque {
+    fn of(definition: *Definition) *Reservation {
+        return @ptrCast(definition);
+    }
+
+    fn storage(self: *Reservation) *Definition {
+        return @ptrCast(@alignCast(self));
+    }
+
+    fn storageConst(self: *const Reservation) *const Definition {
+        return @ptrCast(@alignCast(self));
+    }
+
+    pub fn visibility(self: *const Reservation) Visibility {
+        return self.storageConst().visibility;
+    }
+
+    /// The quotation the reservation awaits binding for.
+    pub fn quotation(self: *const Reservation) *value.ListHandle {
+        return self.storageConst().body_state.reserved.quotation;
+    }
+
+    /// Hands the reservation its bound body, replacing one staged by an
+    /// earlier attempt. It owns the body until sealed or discarded.
+    pub fn stage(self: *Reservation, releases: *heap.ReleaseDomain, bound: Bound) void {
+        const definition = self.storage();
+        const reserved = &definition.body_state.reserved;
+        if (reserved.bound) |previous| previous.discard(releases, definition.allocator);
+        reserved.bound = bound;
+    }
+
+    /// Installs the staged body and returns the sealed definition, which then
+    /// holds the body's dependencies.
+    pub fn seal(self: *Reservation, releases: *heap.ReleaseDomain) *Definition {
+        const definition = self.storage();
+        const reserved = definition.body_state.reserved;
+        const bound = reserved.bound.?;
+        definition.dependencies = bound.dependencies;
+        // Every reservation a target slot names is sealed with this one, by
+        // the same construction, before anything can run the body.
+        const targets: []?*Definition = if (bound.targets.len == 0)
+            &.{}
+        else
+            @as([*]?*Definition, @ptrCast(bound.targets.ptr))[0..bound.targets.len];
+        definition.body_state = .{ .sealed = .{ .source = .{
+            .code = bound.code,
+            .targets = targets,
+            .owner = switch (definition.lifetime) {
+                .static => .static,
+                .counted => .{ .definition = definition },
+            },
+        } } };
+        releases.releaseHeader(reserved.quotation);
+        return definition;
+    }
+
+    /// Seals a reservation whose body executes no words: a literal table
+    /// entry. Fails, leaving it reserved, when a word would need binding.
+    pub fn sealLiteral(self: *Reservation, releases: *heap.ReleaseDomain) error{UnboundWord}!*Definition {
+        const body = self.quotation();
+        if (body.kind() == .generic_spine) for (heap.valuesConst(body)[0..@intCast(body.length())]) |form| {
+            if (form == .symbol and !isQuoted(form.symbol.slot) and localOperand(form.symbol.slot) == null)
+                return error.UnboundWord;
         };
+        heap.incRef(body);
+        self.stage(releases, .{ .code = body, .targets = &.{}, .dependencies = null });
+        return self.seal(releases);
     }
 
-    pub fn deinit(self: *BindingLease) void {
-        switch (self.held) {
-            .owned => |owned| owned.retire(self.releases),
-            .borrowed => {},
-        }
-        self.* = undefined;
-    }
-
-    /// The definition's module-local name, or null for a top-level binding.
-    /// Present exactly when the binding is module-local.
-    pub fn traceWord(self: *const BindingLease) ?intern.BindingName {
-        return self.spec().origin.traceWord();
-    }
-};
-pub const BindingCell = struct {
-    const Publisher = snapshot_api.Publisher(BindingSnapshot);
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    references: std.atomic.Value(u32) = .init(1),
-    publisher: Publisher,
-    snapshots: *BindingSnapshot,
-    retirement: heap.ReleaseDomain.Retirement = .{},
-    /// A cell whose first snapshot is stamped when the cell is adopted into
-    /// its slot, which is when the binding is published.
-    fn create(
-        allocator: std.mem.Allocator,
-        releases: *heap.ReleaseDomain,
-        spec: BindingSpec,
-    ) error{OutOfMemory}!*BindingCell {
-        const snapshot = try BindingSnapshot.create(allocator, spec, null);
-        errdefer snapshot.destroy(allocator, releases);
-        const cell = try allocator.create(BindingCell);
-        cell.* = .{
-            .allocator = allocator,
-            .releases = releases,
-            .publisher = .init(snapshot),
-            .snapshots = snapshot,
-        };
-        return cell;
-    }
-    /// Publishes `spec`, or the name's removal when null, as the cell's next
-    /// snapshot.
-    ///
-    /// In a versioned root (the session) the snapshot it replaces stays in
-    /// the chain while a live pin falls within it; otherwise it leaves the
-    /// chain now and retires once no counted reader holds it. Its uncounted
-    /// readers cannot: a pinned unit's pin keeps what it observes, and the
-    /// unit replacing it reads only current bindings, and does so after its
-    /// dispatches have retained what they keep.
-    ///
-    /// Any other root that changes is a module image under construction. Its
-    /// constructor reads it as the session's definer does, and a task that
-    /// constructor spawned reads it through counted leases
-    /// (Scope.isUnderConstruction), so no pin keeps its snapshots.
-    fn replace(
-        self: *BindingCell,
-        allocator: std.mem.Allocator,
-        spec: ?BindingSpec,
-        versioned: bool,
-    ) error{OutOfMemory}!void {
-        const replaced = self.snapshots;
-        const snapshot = try BindingSnapshot.create(allocator, spec, replaced);
-        const releases = self.releases;
-        const version = releases.beginBindingPublication();
-        snapshot.since = version;
-        replaced.next = snapshot;
-        replaced.cell = self;
-        self.retain();
-        replaced.kept.since = replaced.since;
-        const retire = !versioned or !releases.keepBindingLocked(&replaced.kept);
-        if (retire) replaced.unlinkLocked();
-        self.snapshots = snapshot;
-        self.publisher.publish(snapshot);
-        releases.endBindingPublication(version);
-        if (retire) releases.retire(replaced, &replaced.retirement);
-    }
-    pub fn advanceRetirement(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *BindingCell,
-    ) bool {
-        std.debug.assert(self.references.load(.acquire) == 0);
-        std.debug.assert(self.publisher.quiescent());
-        // A retiring root has no readers left. Its chain holds only the
-        // current snapshot: every replaced one holds this cell, and is gone.
-        var cursor = self.publisher.currentOwned();
-        self.publisher.publish(null);
-        while (cursor) |snapshot| {
-            cursor = snapshot.previous.load(.acquire);
-            snapshot.destroy(allocator, releases);
-        }
-        allocator.destroy(self);
-        return true;
-    }
-    fn retain(self: *BindingCell) void {
-        const old = self.references.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-    }
-    fn release(self: *BindingCell) void {
-        const old = self.references.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) return;
-        _ = self.references.load(.acquire);
-        self.releases.retire(self, &self.retirement);
-    }
-    /// The specification a reader pinned at `pin` observes, or the current one
-    /// for a null pin; null when the root binds nothing for the name then.
-    fn observed(self: *const BindingCell, pin: ?u64) ?*const BindingSpec {
-        const version = pin orelse {
-            const current = self.publisher.current.load(.seq_cst) orelse return null;
-            return current.specPointer();
-        };
-        // The pin keeps what it observes, but not a snapshot published after
-        // it, which an unlink may retire at any moment: the reader count
-        // holds every snapshot this reader touches until it has found its own.
-        var lease = self.publisher.acquire();
-        defer _ = lease.deinit();
-        const found = (lease.snapshot orelse return null).observedAt(version) orelse return null;
-        return found.specPointer();
-    }
-    /// A counted copy of what a reader pinned at `pin` observes, for a reader
-    /// that may hold neither a pin nor a read section; retirement waits out
-    /// the count.
-    pub fn load(self: *BindingCell, pin: ?u64) ?BindingLease {
-        var lease = self.publisher.acquire();
-        defer _ = lease.deinit();
-        const current = lease.snapshot orelse return null;
-        const snapshot = if (pin) |version| current.observedAt(version) orelse return null else current;
-        const spec = snapshot.spec orelse return null;
-        spec.retain();
-        return .{ .releases = self.releases, .held = .{ .owned = spec } };
-    }
-
-    /// What a dispatching unit pinned at `pin` observes, or the current
-    /// binding for a null pin: one load, no reader count and no references.
-    /// Valid for the dispatch (see `replace`). The lease owns nothing; anything
-    /// kept past the dispatch must be retained on its own, as a scheduled body
-    /// already is.
-    pub fn borrow(self: *BindingCell, pin: ?u64) ?BindingLease {
-        const spec = self.observed(pin) orelse return null;
-        return .{ .releases = self.releases, .held = .{ .borrowed = spec } };
+    /// Releases a reservation that will never be sealed. Its owner held its
+    /// only reference, and everything it owns releases in constant work.
+    pub fn discard(self: *Reservation, releases: *heap.ReleaseDomain) void {
+        const definition = self.storage();
+        const reserved = definition.body_state.reserved;
+        if (reserved.bound) |bound| bound.discard(releases, definition.allocator);
+        releases.releaseHeader(reserved.quotation);
+        definition.freeMetadata(releases, definition.allocator);
     }
 };
 
-/// An owned reference to one stable binding cell. Loading always rereads the
-/// cell's current snapshot; the one consumer that holds a payload across
-/// executions is a data combinator's resolution plan, for the length of a call.
-pub const BindingCellHandle = enum(usize) {
-    consumed = 0,
+/// What binding resolved a word to.
+pub const Target = union(enum) {
+    definition: *Definition,
+    /// A definition of the construction in progress, sealed with the body
+    /// that names it.
+    reserved: *Reservation,
+
+    /// The target-table slot naming this target in a bound body.
+    pub fn slot(self: Target) *const Slot {
+        return switch (self) {
+            .definition => |definition| @ptrCast(definition),
+            .reserved => |reservation| @ptrCast(reservation),
+        };
+    }
+};
+
+/// One entry of a bound body's target table: a target that is named but not
+/// yet callable, because its owner may still be under construction.
+pub const Slot = opaque {};
+
+/// A counted definition as a set key: its identity, never dereferenced
+/// through the key.
+pub const DefinitionKey = enum(usize) {
     _,
 
-    fn initRetained(binding_cell: *BindingCell) BindingCellHandle {
-        binding_cell.retain();
-        return @fromBackingInt(@intCast(@intFromPtr(binding_cell)));
+    pub fn of(target: *Definition) DefinitionKey {
+        return @fromBackingInt(@intFromPtr(target));
     }
-    fn cell(self: BindingCellHandle) *BindingCell {
-        std.debug.assert(self != .consumed);
+
+    pub fn definition(self: DefinitionKey) *Definition {
         return @ptrFromInt(@backingInt(self));
     }
-    pub fn load(self: BindingCellHandle, pin: ?u64) ?BindingLease {
-        return self.cell().load(pin);
-    }
-    pub fn borrow(self: BindingCellHandle, pin: ?u64) ?BindingLease {
-        return self.cell().borrow(pin);
-    }
-
-    pub fn deinit(self: *BindingCellHandle) void {
-        if (self.* == .consumed) return;
-        self.cell().release();
-        self.* = .consumed;
-    }
-};
-/// Copyable observation authority for an environment. The backing pointer is
-/// intentionally unavailable: readers can create leases and cursors, but
-/// cannot retarget allocator or retirement ownership metadata.
-pub const EnvironmentView = enum(usize) {
-    invalid = 0,
-    _,
-
-    fn init(environment: *const Environment) EnvironmentView {
-        return @fromBackingInt(@intCast(@intFromPtr(environment)));
-    }
-
-    fn target(self: EnvironmentView) *const Environment {
-        std.debug.assert(self != .invalid);
-        return @ptrFromInt(@backingInt(self));
-    }
-
-    pub fn nameCursor(self: EnvironmentView) NameCursor {
-        return self.target().nameCursor();
-    }
-
-    pub fn directLookupCursor(self: EnvironmentView, id: u32) DirectLookupCursor {
-        return self.target().directLookupCursor(id);
-    }
 };
 
-comptime {
-    heap.requireOpaqueObservation(EnvironmentView);
-}
+/// The set binding notes a body's distinct counted targets in.
+pub const DependencySet = poll.FixedMap(DefinitionKey, void);
 
-/// One counted reader of an environment's slots, which teardown waits out.
-const ReaderHold = struct {
-    environment: *const Environment,
+/// The distinct counted definitions one sealed owner's code calls, one
+/// reference each. Its capacity is exact: binding counts the distinct targets
+/// before creating it, then fills it one reference per step. It retires as its
+/// own owner, so a definition, an anonymous executable, or an abandoned
+/// binding hands it off in constant work, and the references are released one
+/// per retirement step.
+pub const DependencyTable = struct {
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    items: []*Definition,
+    len: usize = 0,
+    retiring: usize = 0,
 
-    fn init(environment: *const Environment) ReaderHold {
-        _ = @constCast(environment).readers.fetchAdd(1, .acquire);
-        return .{ .environment = environment };
-    }
-
-    fn deinit(self: *ReaderHold) void {
-        _ = @constCast(self.environment).readers.fetchSub(1, .release);
-        self.* = undefined;
-    }
-};
-
-pub const NameEntry = struct { name: u32, lease: BindingLease };
-pub const NameCursorProgress = poll.StreamProgress(NameEntry);
-/// The names an environment binds, one slot per step. A root's slots are only
-/// added while it lives, so a walk reports every name bound before it began
-/// and still bound when reached, and may report names bound during it.
-pub const NameCursor = struct {
-    reader: ReaderHold,
-    buckets: []const SlotTable.Bucket,
-    bucket: usize = 0,
-    next: ?*Slot = null,
-    /// The binding version the reader observes, or null for the current one.
-    pin: ?u64 = null,
-    /// Lists the names as a reader pinned at `pin` observes them.
-    pub fn at(self: NameCursor, pin: ?u64) NameCursor {
-        var pinned = self;
-        pinned.pin = pin;
-        return pinned;
-    }
-
-    pub fn deinit(self: *NameCursor) void {
-        self.reader.deinit();
-        self.* = undefined;
-    }
-    pub fn advance(self: *NameCursor) NameCursorProgress {
-        const slot = self.next orelse {
-            if (self.bucket == self.buckets.len) return .complete;
-            self.next = self.buckets[self.bucket].load(.acquire);
-            self.bucket += 1;
-            return .pending;
-        };
-        self.next = slot.next_in_root.load(.acquire);
-        const cell = (if (self.pin == null) slot.boundCell() else slot.cell.load(.acquire)) orelse return .pending;
-        const lease = cell.load(self.pin) orelse return .pending;
-        return .{ .item = .{ .name = slot.nameId(), .lease = lease } };
-    }
-};
-
-pub const DirectLookupProgress = poll.Progress(?BindingLease);
-pub const DirectLookupCursor = struct {
-    reader: ReaderHold,
-    validation: intern.NamespaceCursor,
-    capture_cell: bool = false,
-    cell: ?BindingCellHandle = null,
-    /// The binding version the reader observes, or null for the current one.
-    pin: ?u64 = null,
-    /// Looks the name up as a reader pinned at `pin` observes it.
-    pub fn at(self: DirectLookupCursor, pin: ?u64) DirectLookupCursor {
-        var pinned = self;
-        pinned.pin = pin;
-        return pinned;
-    }
-    pub fn deinit(self: *DirectLookupCursor) void {
-        if (self.cell) |*cell| cell.deinit();
-        self.reader.deinit();
-        self.* = undefined;
-    }
-    pub fn captureCell(self: *DirectLookupCursor) void {
-        self.capture_cell = true;
-    }
-    pub fn takeCell(self: *DirectLookupCursor) ?BindingCellHandle {
-        const result = self.cell;
-        self.cell = null;
+    pub fn create(allocator: std.mem.Allocator, capacity: usize) error{OutOfMemory}!*DependencyTable {
+        const items = try allocator.alloc(*Definition, capacity);
+        errdefer allocator.free(items);
+        const result = try allocator.create(DependencyTable);
+        result.* = .{ .items = items };
         return result;
     }
-    pub fn advance(self: *DirectLookupCursor) DirectLookupProgress {
-        return switch (self.validation.advance()) {
-            .pending => .pending,
-            .complete => |name| found: {
-                const binding_name = name orelse break :found .{ .complete = null };
-                const slot = self.reader.environment.slots.get(@backingInt(binding_name)) orelse
-                    break :found .{ .complete = null };
-                // A pinned reader may observe a binding removed since, so it
-                // asks the cell rather than the slot's current flag.
-                const binding_cell = (if (self.pin == null) slot.boundCell() else slot.cell.load(.acquire)) orelse
-                    break :found .{ .complete = null };
-                const lease = binding_cell.load(self.pin) orelse break :found .{ .complete = null };
-                if (self.capture_cell) self.cell = .initRetained(binding_cell);
-                break :found .{ .complete = lease };
-            },
+
+    /// Takes one reference to `definition`, which must be counted and not
+    /// yet held here.
+    pub fn hold(self: *DependencyTable, definition: *Definition) void {
+        definition.retain();
+        self.items[self.len] = definition;
+        self.len += 1;
+    }
+
+    pub fn retire(self: *DependencyTable, releases: *heap.ReleaseDomain) void {
+        releases.retire(self, &self.retirement);
+    }
+
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *DependencyTable,
+    ) bool {
+        if (self.retiring < self.len) {
+            self.items[self.retiring].release(releases);
+            self.retiring += 1;
+            return false;
+        }
+        allocator.free(self.items);
+        allocator.destroy(self);
+        return true;
+    }
+};
+
+/// What a running activation must hold to keep its executable's targets valid.
+/// A static owner needs nothing. A counted definition or an anonymous
+/// executable is retained by each activation running it and released when the
+/// activation ends; a tail call secures the callee's owner before the caller's
+/// is released.
+pub const Owner = union(enum) {
+    static,
+    definition: *Definition,
+    anonymous: *AnonymousCode,
+
+    pub fn retain(self: Owner) void {
+        switch (self) {
+            .static => {},
+            .definition => |definition| definition.retain(),
+            .anonymous => |code| code.retain(),
+        }
+    }
+
+    pub fn release(self: Owner, releases: *heap.ReleaseDomain) void {
+        switch (self) {
+            .static => {},
+            .definition => |definition| definition.release(releases),
+            .anonymous => |code| code.release(releases),
+        }
+    }
+
+    pub fn eql(self: Owner, other: Owner) bool {
+        return switch (self) {
+            .static => other == .static,
+            .definition => |definition| other == .definition and other.definition == definition,
+            .anonymous => |code| other == .anonymous and other.anonymous == code,
         };
     }
 };
-pub const BindError = error{ OutOfMemory, Frozen };
-/// One root's bindings: a slot per name it has bound or linked, each holding
-/// the name's stable, lease-backed cell.
-pub const Environment = struct {
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    /// Whether this root's bindings are versioned for pinned units: true for
-    /// the session alone (see `Scope.isSession`).
-    versioned: bool = false,
-    writer: std.Io.Mutex = .init,
-    /// Counted name and lookup cursors, which teardown waits out.
-    readers: std.atomic.Value(u32) = .init(0),
-    frozen: std.atomic.Value(bool) = .init(false),
-    /// This root's name slots, by raw name id: one for every name it has bound
-    /// or a word in it has linked. Guarded by `writer`, so a binding and its
-    /// slot are made consistent under one lock. The environment owns them and
-    /// frees them when it is torn down.
-    slots: SlotTable = .{},
-    /// The bucket count the slot table is sized to when its first slot is
-    /// made. A module image binds and links few names; the session and core
-    /// many.
-    slot_buckets: usize = 64,
 
-    pub const TeardownCursor = struct {
-        target: *Environment,
-        state: enum { waiting_for_readers, complete },
+/// A body binding produced and no owner has sealed yet: the retained code, its
+/// target table, and the table holding its dependencies. Its targets are
+/// slots, which name but cannot call, so an unsealed body exposes nothing
+/// executable; sealing turns it into an `Executable`. Discarding it is
+/// constant work.
+pub const Bound = struct {
+    code: *value.ListHandle,
+    targets: []?*const Slot,
+    dependencies: ?*DependencyTable,
 
-        /// Starts in `waiting_for_readers` rather than asserting quiescence.
-        ///
-        /// The retain-before-dereference order should make a live reader here
-        /// unreachable: a borrow acquires the image before it touches the
-        /// scope, so an environment only reaches teardown once its image has no
-        /// references left. This wait adds defence beyond the ownership argument. An assert
-        /// would be the worst of both -- it neither prevents the race nor
-        /// survives ReleaseFast, where it compiles away.
-        pub fn init(target: *Environment) TeardownCursor {
-            return .{ .target = target, .state = .waiting_for_readers };
-        }
-
-        pub fn advance(self: *TeardownCursor) bool {
-            switch (self.state) {
-                .waiting_for_readers => {
-                    if (self.target.readers.load(.acquire) != 0) return false;
-                    // The root is retiring, so no word linked to these slots
-                    // can prove it live again: drop what they hold.
-                    self.target.slots.retireAll(self.target.allocator);
-                    self.state = .complete;
-                    return true;
-                },
-                .complete => return true,
-            }
-        }
-    };
-    pub fn init(allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) Environment {
-        return .{
-            .allocator = allocator,
-            .releases = releases,
-        };
-    }
-    fn lockBlocking(self: *Environment) void {
-        std.Io.Threaded.mutexLockUncancelable(&self.writer);
-    }
-    fn unlock(self: *Environment) void {
-        std.Io.Threaded.mutexUnlock(&self.writer);
-    }
-    pub fn nameCursor(self: *const Environment) NameCursor {
-        return .{ .reader = .init(self), .buckets = self.slots.buckets() };
-    }
-    pub fn directLookupCursor(self: *const Environment, id: u32) DirectLookupCursor {
-        return .{
-            .reader = .init(self),
-            // A lookup may find a reserved name; only publication may not use
-            // one. The runtime installs the words it reserves — the locals
-            // backend — and a gate that refused to resolve them would reserve
-            // them from their only legitimate caller. Nothing else can reach
-            // this table under a reserved name, because every publishing path
-            // still validates strictly.
-            .validation = .initReserved(id),
-        };
-    }
-
-    /// The slot for raw name `name`, made unlinked if the root has none.
-    /// Caller holds `writer`.
-    fn slotLocked(self: *Environment, name: u32) error{OutOfMemory}!*Slot {
-        if (self.slots.get(name)) |existing| return existing;
-        try self.slots.reserve(self.allocator, self.slot_buckets);
-        const created = try self.allocator.create(Slot);
-        created.* = .{};
-        created.name.store(name, .monotonic);
-        self.slots.put(created);
-        return created;
-    }
-
-    pub const BindProgress = poll.Progress(*BindingCell);
-    /// Binds a name in one step under `writer`. A name keeps one cell for the
-    /// root's lifetime: the first binding makes it, and every later binding,
-    /// including one after removal, replaces its payload.
-    pub const BindCursor = struct {
-        environment: *Environment,
-        id: intern.NamespaceName,
-        spec: BindingSpec,
-        /// A cell made before taking the lock, for a name that had none then.
-        candidate_cell: ?*BindingCell,
-
-        fn init(
-            environment: *Environment,
-            id: intern.NamespaceName,
-            spec: BindingSpec,
-        ) error{OutOfMemory}!BindCursor {
-            environment.lockBlocking();
-            const has_cell = if (environment.slots.get(@backingInt(id))) |slot|
-                slot.cell.load(.acquire) != null
-            else
-                false;
-            environment.unlock();
-            return .{
-                .environment = environment,
-                .id = id,
-                .spec = spec,
-                .candidate_cell = if (has_cell) null else try BindingCell.create(
-                    environment.allocator,
-                    environment.releases,
-                    spec,
-                ),
-            };
-        }
-        pub fn deinit(self: *BindCursor) void {
-            if (self.candidate_cell) |candidate| candidate.release();
-            self.* = undefined;
-        }
-        pub fn advance(self: *BindCursor) BindError!BindProgress {
-            const environment = self.environment;
-            environment.lockBlocking();
-            defer environment.unlock();
-            if (environment.frozen.load(.acquire)) return error.Frozen;
-            const slot = try environment.slotLocked(@backingInt(self.id));
-            // Cells are never removed while the root lives, so a name that had
-            // one when this cursor began still has it; one that had none may
-            // have gained one since, and the candidate then goes unused.
-            const cell = if (slot.cell.load(.acquire)) |kept| replaced: {
-                try kept.replace(environment.allocator, self.spec, environment.versioned);
-                break :replaced kept;
-            } else adopted: {
-                const candidate = self.candidate_cell.?;
-                self.candidate_cell = null;
-                // Adoption publishes the first binding: a unit pinned before
-                // this version finds no snapshot it observes.
-                const version = environment.releases.beginBindingPublication();
-                candidate.snapshots.since = version;
-                slot.cell.store(candidate, .release);
-                environment.releases.endBindingPublication(version);
-                break :adopted candidate;
-            };
-            slot.bound.store(true, .release);
-            return .{ .complete = cell };
-        }
-    };
-
-    /// A retained reference to the cell bound to raw name `name`, or null when
-    /// nothing is bound. Caller holds `writer`.
-    fn boundCellLocked(self: *Environment, name: u32) ?*BindingCell {
-        const slot = self.slots.get(name) orelse return null;
-        const cell = slot.boundCell() orelse return null;
-        cell.retain();
-        return cell;
-    }
-
-    fn bindCursor(
-        self: *Environment,
-        name: intern.NamespaceName,
-        spec: BindingSpec,
-    ) error{OutOfMemory}!BindCursor {
-        return .init(self, name, spec);
-    }
-    fn bind(
-        self: *Environment,
-        name: intern.NamespaceName,
-        spec: BindingSpec,
-    ) BindError!*BindingCell {
-        var cursor = try self.bindCursor(name, spec);
-        defer cursor.deinit();
-        return poll.driveFallible(*BindingCell, &cursor, .{});
-    }
-
-    pub const UnbindProgress = poll.Progress(bool);
-    /// Removes a name in one step under `writer`. The slot keeps its cell,
-    /// which still holds the last payload until the name is bound again or the
-    /// root retires: dispatch borrows cells without references, so one is
-    /// never freed while its root lives.
-    pub const UnbindCursor = struct {
-        environment: *Environment,
-        id: intern.NamespaceName,
-
-        fn init(environment: *Environment, id: intern.NamespaceName) UnbindCursor {
-            return .{ .environment = environment, .id = id };
-        }
-        pub fn deinit(self: *UnbindCursor) void {
-            self.* = undefined;
-        }
-        pub fn advance(self: *UnbindCursor) BindError!UnbindProgress {
-            const environment = self.environment;
-            environment.lockBlocking();
-            defer environment.unlock();
-            if (environment.frozen.load(.acquire)) return error.Frozen;
-            const slot = environment.slots.get(@backingInt(self.id)) orelse return .{ .complete = false };
-            if (!slot.bound.load(.acquire)) return .{ .complete = false };
-            // Removal is published like a binding, so a unit pinned before it
-            // keeps observing the name.
-            try slot.cell.load(.acquire).?.replace(environment.allocator, null, environment.versioned);
-            slot.bound.store(false, .release);
-            return .{ .complete = true };
-        }
-    };
-
-    fn unbindCursor(self: *Environment, name: intern.NamespaceName) UnbindCursor {
-        return .init(self, name);
-    }
-
-    /// The mutation authority for a module image's own environment. An image
-    /// owns this environment outright, so it publishes and freezes directly
-    /// rather than routing through the scope it also owns.
-    pub fn modulePublisher(self: *Environment) ModulePublisher {
-        return .init(self);
-    }
-    /// Records each recognizable definition's outcome before the environment
-    /// freezes. It republishes only cells that change and never walks the
-    /// environment, so a failure leaves every definition as it was.
-    /// Only the idiom table's direct names can be recognized, so the edge
-    /// looks those up rather than walking the environment, and its work does
-    /// not grow with the environment's size.
-    fn recognizeDirect(self: *Environment, lookup: FrozenLookup) error{OutOfMemory}!void {
-        for (idioms.direct_names) |spelling| {
-            const id = try intern.intern(spelling);
-            var lease = lookupFrozen(self, id) orelse continue;
-            defer lease.deinit();
-            const body = switch (lease.spec().binding) {
-                .word => |body| body,
-                .builtin, .native => continue,
-            };
-            const idiom = idioms.recognizeTrusted(lookup, spelling, body) orelse continue;
-            const name = intern.namespaceName(id) catch continue;
-            var recognized = lease.spec().*;
-            recognized.direct_idiom = idiom;
-            _ = self.bind(name, recognized) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Frozen => unreachable,
-            };
-        }
-    }
-
-    fn freeze(self: *Environment) void {
-        self.lockBlocking();
-        defer self.unlock();
-        self.frozen.store(true, .release);
+    pub fn discard(self: Bound, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        if (self.dependencies) |dependencies| dependencies.retire(releases);
+        if (self.targets.len != 0) allocator.free(self.targets);
+        releases.releaseHeader(self.code);
     }
 };
+
+/// A sealed quotation, minted only by sealing. Its code keeps the literals and
+/// source provenance; the target table gives each top-level unquoted word the
+/// definition it was bound to. Positions that push a value, quoted symbols,
+/// and lowered locals operations have no target. A quotation without
+/// executable words has an empty table. Dispatch borrows targets; the owner
+/// holds the counted ones through its dependency table, so dispatch adds no
+/// ownership operation of its own.
+///
+/// Opaque: its storage is embedded in its owner and reached only through
+/// this handle, so nothing outside sealing can make one.
+pub const Executable = opaque {
+    const Storage = struct {
+        code: *value.ListHandle,
+        targets: []?*Definition,
+        owner: Owner,
+
+        fn free(self: Storage, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+            if (self.targets.len != 0) allocator.free(self.targets);
+            releases.releaseHeader(self.code);
+        }
+    };
+
+    fn of(held: *const Storage) *const Executable {
+        return @ptrCast(held);
+    }
+
+    inline fn storage(self: *const Executable) *const Storage {
+        return @ptrCast(@alignCast(self));
+    }
+
+    /// The quotation it runs, which keeps its literals and provenance.
+    pub inline fn code(self: *const Executable) *value.ListHandle {
+        return self.storage().code;
+    }
+
+    /// What an activation running it must hold.
+    pub inline fn owner(self: *const Executable) Owner {
+        return self.storage().owner;
+    }
+
+    /// The definition bound at `index`, or null when the form there is data.
+    pub inline fn target(self: *const Executable, index: u32) ?*Definition {
+        const targets = self.storage().targets;
+        if (targets.len == 0) return null;
+        return targets[index];
+    }
+};
+
+/// The counted owner of an executable bound for an anonymous application.
+pub const AnonymousCode = struct {
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    refs: std.atomic.Value(u32) = .init(1),
+    storage: Executable.Storage,
+    dependencies: ?*DependencyTable,
+
+    /// Seals a bound body as an anonymous executable with one reference. On
+    /// failure the caller still owns `bound`. An anonymous body names only
+    /// sealed definitions, since no construction is in progress for it.
+    pub fn create(allocator: std.mem.Allocator, bound: Bound) error{OutOfMemory}!*AnonymousCode {
+        const result = try allocator.create(AnonymousCode);
+        const targets: []?*Definition = if (bound.targets.len == 0)
+            &.{}
+        else
+            @as([*]?*Definition, @ptrCast(bound.targets.ptr))[0..bound.targets.len];
+        result.* = .{
+            .storage = .{ .code = bound.code, .targets = targets, .owner = .static },
+            .dependencies = bound.dependencies,
+        };
+        result.storage.owner = .{ .anonymous = result };
+        return result;
+    }
+
+    pub fn executable(self: *const AnonymousCode) *const Executable {
+        return Executable.of(&self.storage);
+    }
+
+    pub fn retain(self: *AnonymousCode) void {
+        const old = self.refs.fetchAdd(1, .monotonic);
+        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+
+    pub fn release(self: *AnonymousCode, releases: *heap.ReleaseDomain) void {
+        const old = self.refs.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old != 1) return;
+        _ = self.refs.load(.acquire);
+        releases.retire(self, &self.retirement);
+    }
+
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *AnonymousCode,
+    ) bool {
+        if (self.dependencies) |dependencies| dependencies.retire(releases);
+        self.storage.free(releases, allocator);
+        allocator.destroy(self);
+        return true;
+    }
+};
+
+/// A name's entry in a directory: a definition, or a name alias that every
+/// later binding or lookup follows through the registry. An alias freezes the
+/// mapping, never the target it selects.
+pub const Entry = union(enum) {
+    definition: *Definition,
+    alias: Alias,
+
+    pub fn retain(self: Entry) void {
+        switch (self) {
+            .definition => |definition| if (definition.lifetime == .counted) definition.retain(),
+            .alias => {},
+        }
+    }
+
+    pub fn release(self: Entry, releases: *heap.ReleaseDomain) void {
+        switch (self) {
+            .definition => |definition| if (definition.lifetime == .counted) definition.release(releases),
+            .alias => {},
+        }
+    }
+};
+
+/// `name -> module.binding`, followed at every binding or lookup.
+pub const Alias = struct {
+    module: intern.ModuleName,
+    binding: intern.BindingName,
+    visibility: Visibility = .public,
+};
+
+/// A directory of names. Session and image directories are immutable once
+/// readers can reach them; core's is filled only while it is being built.
+pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
+
+/// A name in a module group under construction: a reservation the group will
+/// seal, a definition sealed at creation, or an alias. Only the construction
+/// owner reads this directory; sealing builds the published `NameMap` from
+/// it, so a published directory never holds a reservation.
+pub const GroupEntry = union(enum) {
+    reserved: *Reservation,
+    definition: *Definition,
+    alias: Alias,
+};
+
+/// A module group's construction directory.
+pub const GroupMap = poll.FixedMap(intern.BindingName, GroupEntry);
+
 const ScopeAllocation = enum { embedded, heap };
-const ScopeStorage = union(enum) {
-    session: *Environment,
-    core_build: *Environment,
-    module_root: *Environment,
+
+/// Which root a scope is. A session or core-building scope names the one
+/// directory of its kind; a module root is its image's own scope, which
+/// `modules` reaches by field parent.
+pub const ScopeStorage = union(enum) {
+    session,
+    core_build: CorePublisher,
+    module_root,
 };
+
 pub const Scope = struct {
     allocator: std.mem.Allocator,
     storage: ScopeStorage,
     refs: std.atomic.Value(u32) = .init(1),
     allocation: ScopeAllocation = .embedded,
-    /// The cell this root's words and slots name. Allocated on first use, so a
-    /// root nothing links into costs nothing. A module image installs its own
-    /// before the scope is reachable.
+    /// A module image's cell, which its words name. Allocated on first use, so
+    /// an image nothing links into costs nothing. Session and core words name
+    /// the `Env`'s own cells instead.
     label_cell: std.atomic.Value(?*ScopeCell) = .init(null),
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: ?RetireCursor.State = null,
 
-    /// The id of this scope's cell, or `.none` if it has never minted one.
-    ///
-    /// One atomic load and no allocation, so an activation can record it on
-    /// entry and later compare a word's stamp against it with a single integer
-    /// compare. A scope with no cell can name no word, so `.none` is not a
-    /// missing answer -- it correctly fails every stamp comparison.
+    /// The id of a module root's cell, or `.none` if it has never minted one.
     pub fn cellId(self: *const Scope) ScopeId {
         const cell = self.label_cell.load(.acquire) orelse return .none;
         return cell.id;
     }
 
-    /// The one root whose bindings are versioned for pinned units: core is
-    /// frozen, and a module image is frozen once registered.
-    pub fn isSession(self: *const Scope) bool {
-        return self.storage == .session;
-    }
-    /// Whether this scope is a module image still under construction, whose
-    /// constructor may replace a binding while a task it spawned reads it.
-    pub fn isUnderConstruction(self: *const Scope) bool {
-        return switch (self.storage) {
-            .module_root => |environment| !environment.frozen.load(.acquire),
-            else => false,
-        };
-    }
-    /// Whether this scope is a module image's root, so a diagnostic can name
-    /// the chain a word actually searched rather than the one the running
-    /// activation would have.
     pub fn isModuleRoot(self: *const Scope) bool {
         return self.storage == .module_root;
     }
@@ -1112,16 +836,9 @@ pub const Scope = struct {
             std.debug.assert(old != 0);
             if (old != 1) return .{ .scope = scope, .state = .complete };
             _ = scope.refs.load(.acquire);
-            // Before any teardown step, so a quotation labelled here reads a
-            // definite `retired` and never a scope under teardown. Taken with a
-            // swap because a module image retires its own scope's cell as soon
-            // as the image's last reference drops, which is earlier than this;
-            // whichever path arrives first is the one that drops the owner
-            // reference.
-            // The words written in this scope name it and nothing else, so its
-            // cell retires with it. That is what makes applying a quotation
-            // from a replaced image a definite failure rather than a silent
-            // change of meaning.
+            // A word written in this scope names its cell and nothing else, so
+            // the cell retires with it: binding such a word afterwards is a
+            // definite failure rather than a silent change of meaning.
             const cleared = scope.label_cell.swap(null, .acq_rel);
             if (cleared) |cell| cell.retire();
             return .{ .scope = scope, .state = .destroy };
@@ -1131,8 +848,7 @@ pub const Scope = struct {
             return switch (self.state) {
                 .destroy => {
                     const allocator = self.scope.allocator;
-                    const allocation = self.scope.allocation;
-                    switch (allocation) {
+                    switch (self.scope.allocation) {
                         .heap => allocator.destroy(self.scope),
                         .embedded => {},
                     }
@@ -1143,11 +859,11 @@ pub const Scope = struct {
             };
         }
     };
-    /// Teardown owner for scopes embedded in a larger allocation. Unlike an
-    /// ordinary retained reference, the embedding allocation is the scope's
-    /// storage authority: it must remain present until every heap child has
-    /// propagated its parent release. Only then may the owner reference be
-    /// consumed and the embedded scope invalidated.
+
+    /// Teardown owner for scopes embedded in a larger allocation. The
+    /// embedding allocation is the scope's storage authority: it must remain
+    /// present until every holder has released, and only then may the owner
+    /// reference be consumed.
     pub const EmbeddedTeardownCursor = struct {
         scope: *Scope,
         state: State = .waiting_for_children,
@@ -1165,14 +881,6 @@ pub const Scope = struct {
 
         pub fn advance(self: *EmbeddedTeardownCursor) bool {
             return switch (self.state) {
-                // Waits on `scope.refs` alone, and that is sufficient rather
-                // than an oversight. A name or lookup cursor is not counted
-                // here, but such a reader can only have reached this scope
-                // through a borrow that acquired the image first, and an image
-                // with a live reference never reaches retirement -- so by the
-                // time this runs, no such reader on this scope can exist. The
-                // environment's own cursor waits on its readers anyway, which is
-                // where one would be caught if that reasoning were ever falsified.
                 .waiting_for_children => result: {
                     if (self.scope.refs.load(.acquire) != 1) break :result false;
                     self.state = .{ .retiring = self.scope.retireCursor() };
@@ -1186,43 +894,34 @@ pub const Scope = struct {
             };
         }
     };
+
     fn direct(allocator: std.mem.Allocator, storage: ScopeStorage) Scope {
         return .{ .allocator = allocator, .storage = storage };
     }
-    /// A module image's root. It carries no canonical name: the same frozen
-    /// environment may execute under any number of registrations.
-    pub fn moduleRoot(allocator: std.mem.Allocator, target: *Environment) Scope {
-        return direct(allocator, .{ .module_root = target });
+
+    /// A module image's root. It carries no canonical name: the same sealed
+    /// image may execute under any number of registrations.
+    pub fn moduleRoot(allocator: std.mem.Allocator) Scope {
+        return direct(allocator, .module_root);
     }
+
     pub fn retain(self: *Scope) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
-    pub fn environmentOrNull(self: *const Scope) ?EnvironmentView {
-        return switch (self.storage) {
-            .session => |target| .init(target),
-            .core_build => |target| .init(target),
-            .module_root => |target| .init(target),
-        };
-    }
-    fn releaseDomain(self: *const Scope) *heap.ReleaseDomain {
-        return switch (self.storage) {
-            .session => |target| target.releases,
-            .core_build => |target| target.releases,
-            .module_root => |target| target.releases,
-        };
-    }
+
     pub fn retireCursor(self: *Scope) RetireCursor {
         return .init(self);
     }
-    pub fn retire(self: *Scope) void {
+
+    pub fn retire(self: *Scope, releases: *heap.ReleaseDomain) void {
         const cursor = self.retireCursor();
         if (cursor.state == .complete) return;
         std.debug.assert(self.allocation == .heap);
         self.retirement_state = cursor.state;
-        const releases = self.releaseDomain();
         releases.retire(self, &self.retirement);
     }
+
     pub fn advanceRetirement(
         _: *heap.ReleaseDomain,
         _: std.mem.Allocator,
@@ -1233,267 +932,68 @@ pub const Scope = struct {
         self.retirement_state = cursor.state;
         return false;
     }
-    /// Drops a root scope that was never really used: `replaceRoot` overwriting
-    /// a freshly built one.
-    ///
-    /// This neither clears a label cell nor frees through `RetireCursor`, so it
-    /// is only sound while no cell exists -- which is to say before the unit has
-    /// executed anything. Both callers (`prelude.install` and task spawn) run
-    /// there. The assert encodes that precondition rather than leaving it to
-    /// commentary: a third caller appearing mid-execution trips here instead of
-    /// silently stranding a borrow whose cell still names this scope.
+
+    /// Drops a root scope that was never really used: `replaceRoot`
+    /// overwriting a freshly built one before the unit executed anything.
     pub fn releaseTrivial(self: *Scope) void {
         std.debug.assert(self.label_cell.load(.acquire) == null);
-        std.debug.assert(self.environmentOrNull() != null);
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old == 1);
         _ = self.refs.load(.acquire);
     }
-    fn writableEnvironment(self: *Scope) *Environment {
-        return switch (self.storage) {
-            .session => |target| target,
-            .core_build => |target| target,
-            .module_root => |target| target,
-        };
-    }
-    /// One word definition, in the shape both publication kinds accept.
-    pub const WordDefinition = struct {
-        body: *Quotation,
-        source: ?reader_types.SourceSlice = null,
-        visibility: Visibility = .public,
-        effect: ?ValidatedEffect = null,
-        doc: ?*DocumentationString = null,
-    };
-
-    pub const UnpublishCursor = union(enum) {
-        absent,
-        environment: Environment.UnbindCursor,
-
-        pub fn deinit(self: *UnpublishCursor) void {
-            switch (self.*) {
-                .absent => {},
-                .environment => |*cursor| cursor.deinit(),
-            }
-            self.* = undefined;
-        }
-        pub fn advance(self: *UnpublishCursor) BindError!Environment.UnbindProgress {
-            return switch (self.*) {
-                .absent => |*state| absent: {
-                    state.* = {};
-                    break :absent .{ .complete = false };
-                },
-                .environment => |*cursor| cursor.advance(),
-            };
-        }
-    };
-
-    /// Removes only this scope's direct binding. An absent local binding is a
-    /// successful no-op; core bindings are observation-only from here and
-    /// become visible again once a local shadow is removed.
-    pub fn unpublishWordCursor(
-        self: *Scope,
-        name: intern.NamespaceName,
-    ) UnpublishCursor {
-        const target = switch (self.storage) {
-            .session => |environment| environment,
-            .core_build => |environment| environment,
-            .module_root => |environment| environment,
-        };
-        return .{ .environment = target.unbindCursor(name) };
-    }
-
-    /// Publishes one word definition, whichever publication this scope
-    /// accepts. Callers were switching on `publisher()` themselves and
-    /// restating the payload in both arms to differ in one field, so the
-    /// narrowing lives here instead: a `TopPublication` has no place for a
-    /// visibility, and dropping it is sound because privacy is only offered
-    /// where it means something — `defp`/`setp` are refused outside a module
-    /// root, so a caller reaching a top scope has already established that
-    /// its definition is public. Taking the word fields rather than a whole
-    /// `ModulePublication` is what keeps this total: there is no native or
-    /// builtin case to reject, because neither can be spelled here.
-    pub fn publishWordCursor(
-        self: *Scope,
-        name: intern.NamespaceName,
-        definition: WordDefinition,
-    ) error{OutOfMemory}!Environment.BindCursor {
-        return switch (self.publisher()) {
-            .module => |module| module.cursor(name, .{ .word = .{
-                .body = definition.body,
-                .source = definition.source,
-                .visibility = definition.visibility,
-                .effect = definition.effect,
-                .doc = definition.doc,
-            } }),
-            .top => |top| top.cursor(name, .{ .word = .{
-                .body = definition.body,
-                .source = definition.source,
-                .effect = definition.effect,
-                .doc = definition.doc,
-            } }),
-        };
-    }
-
-    /// Publishes an imported standard-library builtin, in whichever
-    /// publication this scope accepts.
-    pub fn publishImportedCursor(
-        self: *Scope,
-        name: intern.NamespaceName,
-        imported: ImportedBuiltin,
-    ) error{OutOfMemory}!Environment.BindCursor {
-        return switch (self.publisher()) {
-            .module => |module| module.cursor(name, .{ .imported = imported }),
-            .top => |top| top.cursor(name, .{ .builtin = imported }),
-        };
-    }
-
-    /// The one publication this scope accepts. Every scope has exactly one,
-    /// so a definition sink is chosen by switching on a capability rather
-    /// than by asking a kind enum and trusting the answer; neither arm can be
-    /// applied to the wrong storage, which is what the two `unreachable`
-    /// bodies here used to be for.
-    pub fn publisher(self: *Scope) ScopePublisher {
-        return switch (self.storage) {
-            .session, .core_build => .{ .top = .init(self) },
-            .module_root => |target| .{ .module = .init(target) },
-        };
-    }
 };
-/// Authority to publish top-level bindings into one scope. Only the scope
-/// issues it, so a holder cannot target a module root or reach the scope.
-pub const TopPublisher = enum(usize) {
+
+/// Authority to publish into core while it is being built. Minted only by
+/// `BuildingEnv.rootScope`, and refused once core is frozen.
+pub const CorePublisher = enum(usize) {
     invalid = 0,
     _,
 
-    fn init(scope: *Scope) TopPublisher {
-        return @fromBackingInt(@intCast(@intFromPtr(scope)));
+    fn init(state: *EnvState) CorePublisher {
+        return @fromBackingInt(@intCast(@intFromPtr(state)));
     }
 
-    fn target(self: TopPublisher) *Environment {
-        std.debug.assert(self != .invalid);
-        const scope: *Scope = @ptrFromInt(@backingInt(self));
-        return scope.writableEnvironment();
-    }
-
-    pub fn publish(
-        self: TopPublisher,
-        name: intern.NamespaceName,
-        publication: TopPublication,
-    ) BindError!*BindingCell {
-        return self.target().bind(name, BindingSpec.fromTop(publication));
-    }
-
-    pub fn cursor(
-        self: TopPublisher,
-        name: intern.NamespaceName,
-        publication: TopPublication,
-    ) error{OutOfMemory}!Environment.BindCursor {
-        return self.target().bindCursor(name, BindingSpec.fromTop(publication));
-    }
-};
-
-/// Authority to publish definitions into one module image's environment and to
-/// end its construction. The backing pointer is unavailable, so a holder can
-/// define and freeze but cannot retarget the environment or reach its
-/// allocator and retirement ownership.
-pub const ModulePublisher = enum(usize) {
-    invalid = 0,
-    _,
-
-    fn init(environment: *Environment) ModulePublisher {
-        return @fromBackingInt(@intCast(@intFromPtr(environment)));
-    }
-
-    fn target(self: ModulePublisher) *Environment {
+    fn target(self: CorePublisher) *EnvState {
         std.debug.assert(self != .invalid);
         return @ptrFromInt(@backingInt(self));
     }
 
-    pub fn publish(
-        self: ModulePublisher,
-        name: intern.NamespaceName,
-        publication: ModulePublication,
-    ) BindError!*BindingCell {
-        return self.target().bind(name, BindingSpec.fromModule(name, publication));
+    pub const Error = error{ OutOfMemory, Frozen, Duplicate };
+
+    /// Publishes a sealed static definition. Core names are introduced once:
+    /// a bound body may already target the earlier definition, so replacing
+    /// it would leave that target dangling.
+    pub fn publish(self: CorePublisher, name: intern.BindingName, definition: *Definition) Error!void {
+        const state = self.target();
+        if (state.core_frozen) return error.Frozen;
+        return state.publishCore(name, definition);
     }
 
-    pub fn cursor(
-        self: ModulePublisher,
-        name: intern.NamespaceName,
-        publication: ModulePublication,
-    ) error{OutOfMemory}!Environment.BindCursor {
-        return self.target().bindCursor(name, BindingSpec.fromModule(name, publication));
-    }
-
-    /// Ends construction. A sealed image has no publisher, so this is the one
-    /// transition that makes late definition impossible rather than merely
-    /// refused. Recognition runs first, against the image's final bindings;
-    /// if it fails, the image is not frozen and is not published.
-    pub fn freeze(self: ModulePublisher, own_scope: ScopeId, recognition: ?ModuleRecognition) error{OutOfMemory}!void {
-        const environment = self.target();
-        if (recognition) |selected| try environment.recognizeDirect(.{
-            .own = environment,
-            .core = selected.core.target(),
-            .own_scope = @backingInt(own_scope),
-            .core_scope = @backingInt(selected.core_scope),
-            .slots = selected.slots,
-        });
-        environment.freeze();
+    /// The releases definitions retire into.
+    pub fn releaseDomain(self: CorePublisher) *heap.ReleaseDomain {
+        return heap.hostDomain(self.target().host);
     }
 };
 
-/// What a module image's freeze edge recognizes against besides the image
-/// itself: the core its definitions fall back to.
-pub const ModuleRecognition = struct {
-    core: EnvironmentView,
-    core_scope: ScopeId,
-    slots: *const SlotIndex,
-};
-
-/// Which publication one scope accepts. Exactly one arm exists per scope.
-pub const ScopePublisher = union(enum) {
-    top: TopPublisher,
-    module: ModulePublisher,
-};
 comptime {
-    heap.requireOpaqueMutation(TopPublisher);
-    heap.requireOpaqueMutation(ModulePublisher);
+    heap.requireOpaqueMutation(CorePublisher);
 }
 
-/// The indirection that lets a quotation name the scope its text was written
-/// in without any value holding an owning pointer into the environment. Whoever
-/// owns a publishing scope's lifetime allocates one cell and retires it when
-/// that scope goes, and each reference to the cell holds a count, so a cell
-/// outlives its scope exactly as long as something still names it. Reclamation
-/// goes through the release domain rather than happening on a reader's stack,
-/// which is what keeps a concurrent reader safe against a publisher clearing
-/// the same cell.
-///
-/// Keeping the owning edge outside the value heap is what keeps the heap
-/// acyclic: an owning `*Scope` in a value would close a cycle on the first
-/// `def` — Scope -> Environment -> BindingCell -> BindingSpec -> binding.word ->
-/// Scope — and precise reference counting cannot release that.
 /// A scope's stable public name. A word occurrence carries one of these rather
 /// than a pointer, because it has four bytes to spend and not eight. Zero means
-/// "no written-in scope" and resolves wherever the word is invoked.
+/// "no written-in scope" and resolves in core.
 ///
 /// Ids are issued monotonically and never recycled. A word token holds a bare
 /// integer and takes no reference, so a reused id would let a stale token
 /// resolve into an unrelated scope — a silent wrong answer, which is worse than
-/// any failure this design can otherwise produce. Ids are consumed only by the
-/// two roots and by module images, so the space is spent on registrations and
+/// any failure this design can otherwise produce. Ids are consumed by core, the
+/// session, and module images, so the space is spent on registrations and
 /// reloads rather than on execution.
 pub const ScopeId = enum(u32) { none = 0, _ };
 
-/// A `ScopeId` is 24 bits of directory index plus a reserved high byte.
-///
-/// The byte is reserved for a generation tag, which is what reusing an index
-/// would require: a stale word token holds a bare id and takes no reference of
-/// its own, so without a tag a reused index would let it resolve into an
-/// unrelated scope. Reuse is deferred rather than impossible, and the tag is
-/// not the only thing it would need -- see design/INTERPRETER.md for why a weak
-/// image reference comes with it. Until then the byte stays clear, asserted on
-/// every issued id, so adding the tag later cannot collide with a live value.
+/// A `ScopeId` is 24 bits of directory index plus a reserved high byte, kept
+/// clear so a generation tag could later be added without colliding with a
+/// live id.
 pub const id_bits: u5 = 24;
 
 comptime {
@@ -1505,53 +1005,40 @@ comptime {
 
 /// What a `ScopeId` names right now.
 pub const ScopeResolution = union(enum) {
-    /// Id zero: a word with no written-in scope.
+    /// Id zero: a word with no written-in scope, which resolves in core.
     unscoped,
-    /// An id that was issued and whose scope has since been torn down.
+    /// An id that was issued and whose image has since been torn down.
     retired,
-    /// Core alone, which the machine spells as a null resolution scope. Core is
-    /// a terminal phase rather than a link in any chain, so no `Scope` denotes
-    /// it and a primitive or embedded-prelude word names this instead.
+    /// Core alone.
     core,
-    /// A live cell. The scope is deliberately not handed over here: reaching it
+    /// The session's top-level directory.
+    session,
+    /// A live image cell. The scope is not handed over here: reaching it
     /// requires a `Liveness` proof, because a cell names its image without
-    /// holding it and the bare pointer was exactly the unsound borrow.
+    /// holding it.
     cell: *ScopeCell,
 };
 
-/// Proof that a borrowed scope stays alive for the duration of the borrow.
-///
-/// Three arms and no fourth. The type exists so that obtaining a `*Scope` from
-/// a cell is impossible without having decided which one applies -- the defect
-/// being fixed is precisely that `scopeOf` used to hand out a pointer nobody
-/// held.
+/// Proof that a borrowed image scope stays alive for the duration of the
+/// borrow. Obtaining a `*Scope` from a cell is impossible without deciding
+/// which arm applies.
 pub const Liveness = union(enum) {
-    /// The running activation already holds this image, proven by comparing its
-    /// anchor against the cell's. Zero atomic cost, and the common case: a
-    /// module body executing its own words.
+    /// The running activation already holds this image.
     activation_held,
     /// A reference was acquired for this borrow and is held for at least as
     /// long as the scope pointer is used.
     fresh_pin,
-    /// The cell names no image: the session root, which outlives every unit
-    /// that reads it, so nothing is acquired.
-    non_image,
 };
 
-/// How a producer of symbol occurrences links each one to its name's slot in
-/// the root it writes into. A reader that links nothing carries none, and
-/// every symbol it produces carries slot zero.
+/// How a producer of symbol occurrences links each one to the root it writes
+/// into. A reader that links nothing carries none, and every symbol it
+/// produces resolves in core.
 pub const SymbolLinker = struct {
-    environment: Env,
-    root: *ScopeCell,
+    root: ScopeId,
 
     pub fn link(self: SymbolLinker, name: u32) error{OutOfMemory}!u32 {
-        var handle = self.environment;
-        const target = if (self.root.core)
-            &handle.privateState().core
-        else
-            self.root.scope.load(.acquire).?.writableEnvironment();
-        return @backingInt(try handle.linkSlot(self.root, target, name));
+        _ = name;
+        return @backingInt(self.root);
     }
 };
 
@@ -1563,68 +1050,45 @@ pub const ImageAnchor = opaque {};
 pub const ScopeCell = struct {
     id: ScopeId,
     scope: std.atomic.Value(?*Scope) = .init(null),
-    /// The image anchor this cell names. Null for every
-    /// cell that names no image -- the session root and the embedded core cell
-    /// -- which is what selects `Liveness.non_image`.
-    ///
-    /// It outlives the image, so it stays readable after retirement; that is the
-    /// whole reason the borrow tests the owner rather than the scope.
+    /// The image anchor this cell names; null for core and the session.
     owner: std.atomic.Value(?*ImageAnchor) = .init(null),
-    /// Core is a terminal resolution phase rather than a link in any chain, so
-    /// it has no `Scope` to point at. One embedded cell carries this instead,
-    /// and a primitive or embedded-prelude literal labels against it.
-    core: bool = false,
-    /// Fills in what this cell names, before its id has escaped.
-    ///
-    /// The owner is stored before the scope, and both before registration, so a
-    /// reader that can see the scope can already see what to acquire before
-    /// touching it. This used to be a post-hoc store on a cell whose id was
-    /// already reachable through the lock-free directory, which left two
-    /// windows: an id naming a cell with no scope yet (a spurious `retired` for
-    /// a live image), and one naming a live scope with no owner yet (the
-    /// `non_image` arm dereferencing an image with nothing held). Being the
-    /// only constructor is what closes them.
+    kind: Kind = .image,
+
+    pub const Kind = enum { core, session, image };
+
+    /// Fills in what this cell names, before its id has escaped. The owner is
+    /// stored before the scope, so a reader that can see the scope can already
+    /// see what to acquire before touching it.
     pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: ?*ImageAnchor) void {
         if (owner) |handle| self.owner.store(handle, .release);
         self.scope.store(scope, .release);
     }
 
-    /// The image owner, or null when this cell names none.
     pub fn ownerHandle(self: *const ScopeCell) ?*ImageAnchor {
         return self.owner.load(.acquire);
     }
 
-    /// The borrowed scope, obtainable only against a liveness proof. The proof
-    /// is not inspected -- it cannot be, since `env` does not know what an
-    /// owner is -- so it documents and gates rather than validates. Its value is
-    /// that no caller reaches a scope without having stated why that is safe.
+    /// The borrowed scope, obtainable only against a liveness proof.
     pub fn scopeUnder(self: *const ScopeCell, _: Liveness) ?*Scope {
         return self.scope.load(.acquire);
     }
 
-    /// Marks the cell as naming nothing, which is what a word written in a
-    /// replaced or removed image resolves to. Deliberately not freed here: a
-    /// cell is read without a lock and without a reference on every word
-    /// dispatch, so the `Env` owns them all and frees them together at
-    /// teardown, the one point at which no reader exists.
+    /// Marks the cell as naming nothing. The `Env` owns every cell and frees
+    /// them together at teardown, the one point at which no reader exists.
     pub fn retire(self: *ScopeCell) void {
         self.scope.store(null, .release);
     }
 };
 
-/// A three-level direct directory keyed by the 24 low bits of an id, the same
-/// shape and for the same reason as `spans.HeaderIndex`: a sibling consumer of
-/// a small dense id space rather than an extension of it. Pages are installed
-/// once and live for the directory's lifetime, so a reader needs no lock and
-/// lookup is three atomic loads — which is what makes it usable on the
-/// dispatch path. Ids are never reused: a stale word holds a bare id and no
-/// reference, so a reused id would let it reach an unrelated entry.
-fn Directory(comptime Id: type, comptime Entry: type) type {
+/// A three-level direct directory keyed by the 24 low bits of an id. Pages are
+/// installed once and live for the directory's lifetime, so a reader needs no
+/// lock and lookup is three atomic loads. Ids are never reused.
+fn Directory(comptime Id: type, comptime Item: type) type {
     return struct {
         const Self = @This();
         const radix = 256;
         const Leaf = struct {
-            entries: [radix]std.atomic.Value(?*Entry) = @splat(.init(null)),
+            entries: [radix]std.atomic.Value(?*Item) = @splat(.init(null)),
         };
         const Branch = struct {
             leaves: [radix]std.atomic.Value(?*Leaf) = @splat(.init(null)),
@@ -1646,7 +1110,8 @@ fn Directory(comptime Id: type, comptime Entry: type) type {
             };
         }
 
-        fn get(self: *const Self, id: Id) ?*Entry {
+        fn get(self: *const Self, id: Id) ?*Item {
+            if (@backingInt(id) > max_id) return null;
             const branch_index, const leaf_index, const entry_index = coordinates(id);
             const branch = self.branches[branch_index].load(.acquire) orelse return null;
             const leaf = branch.leaves[leaf_index].load(.acquire) orelse return null;
@@ -1654,14 +1119,11 @@ fn Directory(comptime Id: type, comptime Entry: type) type {
         }
 
         /// Issues the next id and installs the entry. A missing page is
-        /// allocated with the lock released and the target rechecked after, so
-        /// no allocation happens while a publisher holds it and a registration
-        /// into existing pages allocates nothing. A candidate a racing
-        /// publisher made unnecessary is destroyed unused.
+        /// allocated with the lock released and the target rechecked after.
         fn register(
             self: *Self,
             allocator: std.mem.Allocator,
-            entry: *Entry,
+            entry: *Item,
         ) error{OutOfMemory}!Id {
             var branch_candidate: ?*Branch = null;
             var leaf_candidate: ?*Leaf = null;
@@ -1710,9 +1172,6 @@ fn Directory(comptime Id: type, comptime Entry: type) type {
             std.debug.assert(leaf.entries[entry_index].load(.acquire) == null);
             leaf.entries[entry_index].store(entry, .release);
             self.next.store(raw + 1, .monotonic);
-            // Restates what the `max_id` refusal above already guarantees. It
-            // is here so that adding a generation tag to the reserved byte
-            // cannot silently start overlapping issued indices.
             std.debug.assert(raw >> id_bits == 0);
             return id;
         }
@@ -1728,26 +1187,14 @@ fn Directory(comptime Id: type, comptime Entry: type) type {
     };
 }
 const ScopeIndex = Directory(ScopeId, ScopeCell);
-const SlotIndex = Directory(SlotId, Slot);
 
-/// The id a word occurrence carries: its name's slot in the root it was
-/// written in. Zero is a word linked to nothing, which only the locals
-/// backend's reserved words are.
-///
-/// A word written in a module image carries the image's `ScopeId` with
-/// `image_root_flag` set instead, and finds its slot by name in the image's
-/// table. Images come and go, so giving each of their slots a directory id,
-/// which is never reused, would grow the directory with every module churned;
-/// the image's own scope id already names it, and its name is in the word.
-pub const SlotId = enum(u32) { none = 0, _ };
-pub const image_root_flag: u32 = 1 << 31;
 /// A locals operation the reader lowered `|...|` into carries its count or
-/// index in the slot field with this flag set: one form per bind, read, or
-/// drop. It names no slot. Directory and scope ids stay below it.
+/// index in the link field with this flag set: one form per bind, read, or
+/// drop. It names no root. Scope ids stay below it.
 pub const local_operand_flag: u32 = 1 << 30;
 
-/// See `value.quote_flag`. Directory and scope ids stay below it, and a locals
-/// operation never carries it.
+/// See `value.quote_flag`. Scope ids stay below it, and a locals operation
+/// never carries it.
 pub const quote_flag: u32 = value.quote_flag;
 
 /// Whether an occurrence is quoted.
@@ -1758,7 +1205,7 @@ pub fn unquoted(raw: u32) u32 {
     return if (isQuoted(raw)) raw & ~quote_flag else raw;
 }
 
-/// The slot field of a locals operation with `operand`.
+/// The link field of a locals operation with `operand`.
 pub fn localOperandSlot(operand: u32) u32 {
     std.debug.assert(operand < quote_flag);
     return local_operand_flag | operand;
@@ -1766,175 +1213,54 @@ pub fn localOperandSlot(operand: u32) u32 {
 
 /// The count or index a locals operation carries, or null for any other word.
 pub fn localOperand(raw: u32) ?u32 {
-    if (raw & (image_root_flag | local_operand_flag) != local_operand_flag) return null;
+    if (raw & local_operand_flag == 0) return null;
     return raw & ~local_operand_flag;
 }
 
-/// What a word's slot field names.
+/// What a word's link names.
 pub const WordTarget = union(enum) {
+    /// Built by the implementation for itself: resolves in core.
     unlinked,
-    /// A lowered locals operation, with its count or index; no slot.
+    /// A lowered locals operation, with its count or index.
     local: u32,
-    /// A session or core slot, by directory id.
-    slot: SlotId,
-    /// A module image root; the slot is found by name once the image is proven
-    /// live.
-    image: ScopeId,
+    /// The root the word was written in.
+    root: ScopeId,
 };
+
 /// A quoted occurrence's target is its link's: the flag says how it runs, not
 /// where its name resolves.
 pub fn wordTarget(raw_occurrence: u32) WordTarget {
     const raw = unquoted(raw_occurrence);
     if (raw == 0) return .unlinked;
-    if (raw & image_root_flag != 0) return .{ .image = @fromBackingInt(raw & ~image_root_flag) };
     if (localOperand(raw)) |operand| return .{ .local = operand };
-    return .{ .slot = @fromBackingInt(raw) };
+    return .{ .root = @fromBackingInt(raw) };
 }
 
-/// One name in one root: the session, a module image, or core.
-///
-/// A word links to its slot when it is written and reads the slot each time it
-/// executes, so a definition reaches every word written in that root at its
-/// next execution. The slot shares the root's binding cell for its name: a
-/// binding made while the slot exists reuses the slot's cell, so the cell's
-/// identity never changes and a reader never races a pointer swap. Removing
-/// the name only clears `bound`.
-///
-/// A session or core slot is found through the directory by id, before
-/// anything proves its root live, so it is owned by the `Env` for its whole
-/// lifetime. A module image's slot is found only by name in the image's own
-/// table, after the image is proven live, so it is freed with the image.
-pub const Slot = struct {
-    /// The id words carry for this slot, zero until a word first links to it.
-    /// A binding makes the slots of names no word has linked yet.
-    id: std.atomic.Value(u32) = .init(0),
-    name: std.atomic.Value(u32) = .init(0),
-    /// The root this slot belongs to, set when it is linked. Cells are immortal, so it is readable
-    /// whether or not the root is, and it is what a reader proves liveness
-    /// against before touching `cell`.
-    root: std.atomic.Value(?*ScopeCell) = .init(null),
-    /// The root's binding cell for the name, adopted on first binding and held
-    /// until the root retires. Null while the name has never been bound here.
-    cell: std.atomic.Value(?*BindingCell) = .init(null),
-    /// Whether the root currently binds the name. False after removal, when
-    /// `cell` still holds the last binding but nothing reads it.
-    bound: std.atomic.Value(bool) = .init(false),
-    /// Core's binding for the name, the fallback when the root has none. Core
-    /// is frozen before any other root links a word, so this is fixed at link
-    /// time; core's slot holds the cell for the `Env`'s lifetime. Null for a
-    /// core slot and for a name core does not bind.
-    core: std.atomic.Value(?*BindingCell) = .init(null),
-    /// The next slot in the same bucket of its root's table.
-    next_in_root: std.atomic.Value(?*Slot) = .init(null),
-
-    pub fn nameId(self: *const Slot) u32 {
-        return self.name.load(.monotonic);
-    }
-    pub fn rootCell(self: *const Slot) *ScopeCell {
-        return self.root.load(.monotonic).?;
-    }
-    pub fn coreCell(self: *const Slot) ?*BindingCell {
-        return self.core.load(.monotonic);
-    }
-
-    /// The cell this slot currently yields: the root's binding, else core's.
-    /// The caller must have proven the root live.
-    pub fn current(self: *const Slot) ?*BindingCell {
-        if (self.bound.load(.acquire)) return self.cell.load(.acquire);
-        return self.core.load(.monotonic);
-    }
-
-    /// The root's own binding for the name, or null when it binds none. Needs
-    /// no proof beyond holding the environment: a slot keeps its cell until
-    /// the root retires.
-    fn boundCell(self: *const Slot) ?*BindingCell {
-        if (!self.bound.load(.acquire)) return null;
-        return self.cell.load(.acquire);
-    }
-
-    /// Drops what the slot holds. Runs only during the root's teardown, when
-    /// no reader can prove the root live.
-    fn retire(self: *Slot) void {
-        self.bound.store(false, .release);
-        if (self.cell.swap(null, .acq_rel)) |held| held.release();
-        self.core.store(null, .monotonic);
-    }
-};
-
-/// One root's slots by name: a bucket array chained through the slots, sized
-/// once when the root makes its first slot and never rehashed, so no binding
-/// or link pays for a resize. Writes are guarded by the root's `writer`; reads
-/// need no lock. Dispatch reaches a slot through its id instead.
-const SlotTable = struct {
-    const Bucket = std.atomic.Value(?*Slot);
-    /// Published once, before any slot is put; readers that find it null
-    /// find nothing.
-    buckets_ptr: std.atomic.Value(?[*]Bucket) = .init(null),
-    len: usize = 0,
-
-    fn bucket(len: usize, name: u32) usize {
-        const mixed = @as(u64, name) *% 0x9E3779B97F4A7C15;
-        return @intCast((mixed >> 32) % len);
-    }
-    /// Safe without `writer`: a put publishes a fully initialized slot with a
-    /// release store, and nothing is removed until the root retires, when no
-    /// reader can prove it live.
-    fn get(self: *const SlotTable, name: u32) ?*Slot {
-        const heads = self.buckets_ptr.load(.acquire) orelse return null;
-        var cursor = heads[bucket(self.len, name)].load(.acquire);
-        while (cursor) |slot| : (cursor = slot.next_in_root.load(.acquire)) {
-            if (slot.nameId() == name) return slot;
-        }
-        return null;
-    }
-    /// Every bucket, empty before the first slot is made.
-    fn buckets(self: *const SlotTable) []const Bucket {
-        const heads = self.buckets_ptr.load(.acquire) orelse return &.{};
-        return heads[0..self.len];
-    }
-    fn reserve(self: *SlotTable, allocator: std.mem.Allocator, count: usize) error{OutOfMemory}!void {
-        if (self.buckets_ptr.load(.monotonic) != null) return;
-        const heads = try allocator.alloc(Bucket, count);
-        for (heads) |*head| head.* = .init(null);
-        self.len = count;
-        self.buckets_ptr.store(heads.ptr, .release);
-    }
-    fn put(self: *SlotTable, slot: *Slot) void {
-        const heads = self.buckets_ptr.load(.monotonic).?;
-        const head = &heads[bucket(self.len, slot.nameId())];
-        slot.next_in_root.store(head.load(.monotonic), .monotonic);
-        head.store(slot, .release);
-    }
-    /// Retires and frees every slot, then frees the buckets.
-    fn retireAll(self: *SlotTable, allocator: std.mem.Allocator) void {
-        const heads = self.buckets_ptr.load(.acquire) orelse return;
-        for (heads[0..self.len]) |*head| {
-            var cursor = head.load(.acquire);
-            while (cursor) |slot| {
-                cursor = slot.next_in_root.load(.acquire);
-                slot.next_in_root.store(null, .monotonic);
-                slot.retire();
-                allocator.destroy(slot);
-            }
-        }
-        allocator.free(heads[0..self.len]);
-        self.* = .{};
-    }
-};
+const core_capacity_hint: usize = 2048;
 
 const EnvState = struct {
     host: *const heap.HostCleanup,
-    core: Environment,
-    session: Environment,
+    /// Core's directory: filled while core is built, immutable once frozen.
+    core: NameMap,
+    core_frozen: bool = false,
     core_cell: ScopeCell,
-    /// Every cell this Env has issued, freed together at teardown. Images are
-    /// constructed concurrently, so the list needs its own lock: it is grown
-    /// off the registry's writer lock and off the scope index's.
+    session_cell: ScopeCell,
+    /// Every cell this Env has issued, freed together at teardown.
     cells: std.ArrayList(*ScopeCell) = .empty,
     cells_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
-    slot_index: SlotIndex = .{},
     locals_words: intern.LocalsWords,
+
+    fn publishCore(self: *EnvState, name: intern.BindingName, definition: *Definition) CorePublisher.Error!void {
+        // Core is fixed bootstrap input sized well inside its table, so a full
+        // table is a bootstrap defect rather than a runtime condition.
+        if (self.core.count() * 2 >= self.core.slots.len) return error.OutOfMemory;
+        var lookup = self.core.rawLookup(name);
+        const existing = poll.drive(?Entry, &lookup, .{});
+        if (existing != null) return error.Duplicate;
+        var put = self.core.putCursor(name, .{ .definition = definition });
+        _ = poll.drive(bool, &put, .{});
+    }
 };
 
 pub const Env = enum(usize) {
@@ -1949,83 +1275,72 @@ pub const Env = enum(usize) {
     pub fn init(host_owner: *heap.HostOwner) error{OutOfMemory}!Env {
         const host = host_owner.cleanup();
         const allocator = host.allocator();
-        const releases = heap.hostDomain(host);
         const locals_words = try intern.LocalsWords.mint();
-        const backing = try allocator.create(EnvState);
-        backing.* = .{
-            .host = host,
-            .core = .{ .allocator = allocator, .releases = releases, .slot_buckets = 1024 },
-            .session = .{ .allocator = allocator, .releases = releases, .versioned = true, .slot_buckets = 1024 },
-            .locals_words = locals_words,
-            // SAFETY: the cell needs the Env handle that this very allocation
-            // becomes, so it is filled in on the next line, before `backing`
-            // escapes and before anything can read it.
-            .core_cell = undefined,
+        var core_init = NameMap.initCursor(allocator, core_capacity_hint);
+        errdefer core_init.deinit();
+        const core = while (true) switch (try core_init.advance()) {
+            .pending => {},
+            .complete => |map| break map,
         };
-        const result: Env = @fromBackingInt(@intCast(@intFromPtr(backing)));
-        backing.core_cell = .{ .id = .none, .core = true };
-        // Core needs a real id: a prelude word's tokens name it, and id zero
-        // would mean "unscoped" and resolve them wherever they were invoked,
-        // which is the leak this whole change closes. The core cell is embedded
-        // and never retires, so its entry stands for the Env's lifetime.
-        backing.core_cell.id = backing.scopes.register(allocator, &backing.core_cell) catch |err| {
-            var session_cursor = Environment.TeardownCursor.init(&backing.session);
-            while (!session_cursor.advance()) {}
-            var core_cursor = Environment.TeardownCursor.init(&backing.core);
-            while (!core_cursor.advance()) {}
-            backing.scopes.deinit(allocator);
-            allocator.destroy(backing);
+        const backing = allocator.create(EnvState) catch |err| {
+            var owned = core;
+            owned.deinit();
             return err;
         };
-        return result;
+        backing.* = .{
+            .host = host,
+            .core = core,
+            .locals_words = locals_words,
+            .core_cell = .{ .id = .none, .kind = .core },
+            .session_cell = .{ .id = .none, .kind = .session },
+        };
+        errdefer {
+            backing.scopes.deinit(allocator);
+            backing.core.deinit();
+            allocator.destroy(backing);
+        }
+        // Core and the session need real ids: a word linked to either names
+        // it, and id zero would mean "unscoped".
+        backing.core_cell.id = try backing.scopes.register(allocator, &backing.core_cell);
+        backing.session_cell.id = try backing.scopes.register(allocator, &backing.session_cell);
+        return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
+
     pub fn deinit(self: *Env) void {
         const backing = self.privateState();
         const allocator = backing.host.allocator();
-        var session_cursor = Environment.TeardownCursor.init(&backing.session);
-        while (!session_cursor.advance()) {}
-        var core_cursor = Environment.TeardownCursor.init(&backing.core);
-        while (!core_cursor.advance()) {}
-        // Drain completely before freeing. Reversing the order causes a
-        // write-after-free, and the path is short enough to walk: teardown
-        // defers each binding cell, whose retirement releases its snapshots,
-        // whose `spec.retire` releases a `.word` body's header, whose
-        // destruction releases that quotation's elements. If one of those
-        // drops the last reference to a stamped image, `ModuleImage.release`
-        // retires the image's `label_cell` -- an Env-owned cell -- before any
-        // other teardown step. `drainOwned` runs to quiescence, so every one of
-        // those generations lands inside the single drain below.
-        //
-        // An image held only by a binding used to be the reachable shape; with
-        // module values gone, a registered image normally dies in
-        // `Session.deinit`'s earlier registry drain with the cells still alive.
-        // The ordering stays because it is correct regardless of which owner
-        // releases last. Note also that a leak checker cannot witness the failure --
-        // `DebugAllocator` reports double frees and leaks but cannot report a stray write
-        // into freed-but-mapped memory -- so a green allocator result here is
-        // not evidence about this ordering. Only a sanitizer or this argument
-        // is.
+        const releases = heap.hostDomain(backing.host);
+        var entries = backing.core.rawEntries();
+        while (true) switch (entries.advance()) {
+            .pending => {},
+            .item => |entry| switch (entry.value) {
+                .definition => |definition| definition.retireStatic(releases),
+                .alias => {},
+            },
+            .complete => break,
+        };
+        // Drain completely before freeing: a retiring definition may release
+        // headers whose destruction reaches Env-owned cells.
         backing.host.drain();
+        backing.core.deinit();
         for (backing.cells.items) |cell| allocator.destroy(cell);
         backing.cells.deinit(allocator);
-        // The directory outlives nothing that reads it: `scopes.get` has exactly
-        // one caller, `scopeOf`, reached only from dispatch, and execution stops
-        // at `scheduler.deinit` before any teardown begins. Its pages hold
-        // pointers nobody follows again.
         backing.scopes.deinit(allocator);
-        backing.slot_index.deinit(allocator);
         allocator.destroy(backing);
         self.* = .consumed;
     }
-    /// The id a primitive or embedded-prelude definition's words carry, so
-    /// core alone is their chain.
-    pub fn coreScopeId(self: *Env) ScopeId {
+
+    pub fn coreScopeId(self: *const Env) ScopeId {
         return self.privateState().core_cell.id;
     }
 
-    /// The id of a module image's scope cell. `owner` is stored opaque
-    /// and never dereferenced here; it is what lets a borrow acquire the image
-    /// before reading the scope, and what stays readable once the image is gone.
+    pub fn sessionScopeId(self: *const Env) ScopeId {
+        return self.privateState().session_cell.id;
+    }
+
+    /// The id of a module image's scope cell. `owner` is stored opaque and
+    /// never dereferenced here; it is what lets a borrow acquire the image
+    /// before reading the scope.
     pub fn scopeIdForOwned(
         self: *Env,
         scope: *Scope,
@@ -2034,138 +1349,38 @@ pub const Env = enum(usize) {
         return (try self.scopeCell(scope, owner)).id;
     }
 
-    /// The cell a primitive or embedded-prelude definition labels against.
-    /// It never retires: core lives for the `Env`'s lifetime.
-    pub fn coreCell(self: *Env) *ScopeCell {
-        return &self.privateState().core_cell;
-    }
-
-    /// The domain binding snapshots retire into, and so the one a slice must
-    /// enter to read them without references.
-    pub fn bindingDomain(self: *const Env) *heap.ReleaseDomain {
+    /// The domain definitions retire into.
+    pub fn releaseDomain(self: *const Env) *heap.ReleaseDomain {
         return heap.hostDomain(self.privateState().host);
     }
 
-    /// The directory freeze-time recognition resolves a word's slot through.
-    pub fn slotDirectory(self: *const Env) *const SlotIndex {
-        return &self.privateState().slot_index;
+    /// Links words written into the root `root` names.
+    pub fn linker(_: *const Env, root: ScopeId) SymbolLinker {
+        return .{ .root = root };
     }
 
-    /// Links words to their names' slots in the root `root` names. The root
-    /// must outlive every use of the linker: the reader or construction that
-    /// holds it runs inside that root.
-    pub fn linker(self: *Env, root: *ScopeCell) SymbolLinker {
-        return .{ .environment = self.*, .root = root };
-    }
-
-    /// The slot a word carries, or null for an unlinked word or one whose id
-    /// was never issued. A slot is never freed while the `Env` lives, so this
-    /// needs no proof; what the slot references does.
-    pub fn slot(self: *const Env, id: SlotId) ?*Slot {
-        if (id == .none) return null;
-        return self.privateState().slot_index.get(id);
-    }
-
-    /// The slot for `name` in the root `root` names, whose bindings live in
-    /// `environment`, linked on first use: given an id, its root, and core's
-    /// binding for the fallback. Linking never defines anything, so a frozen
-    /// root links as readily as a live one.
-    pub fn linkSlot(
-        self: *Env,
-        root: *ScopeCell,
-        environment: *Environment,
-        name: u32,
-    ) error{OutOfMemory}!SlotId {
-        const backing = self.privateState();
-        // `core.x` is core's `x` in every root, core included: link it to
-        // core's own slot rather than to a slot no root ever binds. In core
-        // itself that is the prelude's reading of every quote, `(x)
-        // core.first`, which otherwise resolved through the registry on
-        // every call.
-        if (try intern.coreQualifiedName(name)) |unqualified| {
-            if (root.core or environment == &backing.core)
-                return self.linkSlot(root, environment, unqualified);
-        }
-        if (!root.core and environment != &backing.core) {
-            if (try intern.coreQualifiedName(name)) |unqualified|
-                return self.linkSlot(&backing.core_cell, &backing.core, unqualified);
-        }
-        environment.lockBlocking();
-        defer environment.unlock();
-        const image = root.ownerHandle() != null;
-        // A core-build scope carries a non-core cell, but its words are core's:
-        // the slot names core's cell and takes no fallback lock on itself.
-        const into_core = root.core or environment == &backing.core;
-        const slot_root = if (into_core) &backing.core_cell else root;
-        const target = try environment.slotLocked(name);
-        if (target.id.load(.monotonic) != 0) return if (image)
-            @fromBackingInt(image_root_flag | @backingInt(root.id))
-        else
-            @fromBackingInt(target.id.load(.monotonic));
-        // The id first, so failure leaves the slot unlinked. An image's slots
-        // take no directory id; words name the image instead.
-        const id: SlotId = if (image)
-            @fromBackingInt(image_root_flag | @backingInt(root.id))
-        else
-            try backing.slot_index.register(backing.host.allocator(), target);
-        target.root.store(slot_root, .monotonic);
-        if (!into_core) {
-            // Core's slots hold its cells until the Env is torn down, so the
-            // fallback needs no reference of its own. Lock order is always a
-            // root's writer before core's: core never links into another root.
-            backing.core.lockBlocking();
-            defer backing.core.unlock();
-            if (backing.core.boundCellLocked(name)) |cell| {
-                target.core.store(cell, .monotonic);
-                cell.release();
-            }
-        }
-        target.id.store(@backingInt(id), .release);
-        return id;
-    }
-
-    /// The slot for `name` in `image`, a module root the caller has proven
-    /// live, or null when no word in it named `name`.
-    pub fn imageSlot(_: *const Env, image: *Scope, name: u32) ?*Slot {
-        return switch (image.storage) {
-            .module_root => |environment| environment.slots.get(name),
-            .session, .core_build => null,
-        };
-    }
-    /// The cell for one ordinary scope, created on first use. The scope retires
-    /// it when its own refcount drops, before any teardown step.
+    /// The cell for one module root, created on first use. The scope retires
+    /// it when its own refcount drops.
     pub fn scopeCell(
         self: *Env,
         scope: *Scope,
         owner: ?*ImageAnchor,
     ) error{OutOfMemory}!*ScopeCell {
+        std.debug.assert(scope.isModuleRoot());
         if (scope.label_cell.load(.acquire)) |existing| {
-            // A cell is born with its owner, so a later mint for the same scope
-            // agrees rather than amends. An owner arriving after the id has
-            // escaped is precisely the window this shape exists to remove, so
-            // reintroducing it here would be the same defect one call deeper.
             std.debug.assert(owner == null or existing.ownerHandle() == owner);
             return existing;
         }
         const cell = try self.newScopeCell(scope, owner);
         if (scope.label_cell.cmpxchgStrong(null, cell, .release, .acquire)) |raced| {
-            // The loser's cell is simply never named by anything. It stays
-            // owned by the `Env` like every other cell and is freed at
-            // teardown; retiring it here only marks it as naming nothing.
             cell.retire();
             return raced.?;
         }
         return cell;
     }
 
-    /// A fresh indirection cell for one publishing scope. The caller owns the
-    /// scope's lifetime and must `retire()` the cell before that scope's storage
-    /// is torn down.
-    /// A cell complete before its id exists.
-    ///
-    /// `register` is the sole point at which an id escapes into the lock-free
-    /// directory, so everything the cell will ever name is set before it. A null
-    /// scope is the cell that names nothing -- what a race loser becomes.
+    /// A fresh cell complete before its id exists: `register` is the sole
+    /// point at which an id escapes into the lock-free directory.
     pub fn newScopeCell(
         self: *Env,
         scope: ?*Scope,
@@ -2176,10 +1391,6 @@ pub const Env = enum(usize) {
         const cell = try allocator.create(ScopeCell);
         cell.* = .{ .id = .none };
         if (scope) |named| cell.publishOwned(named, owner);
-        // The Env owns every cell for its whole lifetime. A cell is read
-        // without a lock and without a reference on every word dispatch, so
-        // there is no safe earlier point to free one. Taking ownership before
-        // registering leaves the failure path with nothing to undo.
         {
             std.Io.Threaded.mutexLockUncancelable(&backing.cells_mutex);
             defer std.Io.Threaded.mutexUnlock(&backing.cells_mutex);
@@ -2188,63 +1399,47 @@ pub const Env = enum(usize) {
                 return err;
             };
         }
-        // Owned by `cells` from here, so a failed registration leaves a cell
-        // that names nothing rather than one that leaks.
         cell.id = try backing.scopes.register(allocator, cell);
         return cell;
     }
 
-    /// What a word's scope id names right now. Zero is a word with no
-    /// written-in scope and resolves where it is invoked; a nonzero id with no
-    /// entry was issued and has since retired, which is a definite failure
-    /// rather than a fallback that would change what the word means.
+    /// What a word's root id names right now.
     pub fn scopeOf(self: *const Env, id: ScopeId) ScopeResolution {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
-        if (cell.core) return .core;
-        // A cleared scope is a definite retirement. A live one is handed over as
-        // the cell itself, requiring the caller to prove liveness before
-        // it can read the scope out.
-        if (cell.scope.load(.acquire) == null) return .retired;
-        return .{ .cell = cell };
+        return switch (cell.kind) {
+            .core => .core,
+            .session => .session,
+            .image => if (cell.scope.load(.acquire) == null) .retired else .{ .cell = cell },
+        };
+    }
+
+    /// One lookup in core's directory. Core is immutable once frozen, and
+    /// written only by the bootstrap unit before then.
+    pub fn coreLookup(self: *const Env, name: intern.BindingName) NameMap.RawLookupCursor {
+        return self.privateState().core.rawLookup(name);
+    }
+
+    /// Core's names, for enumeration.
+    pub fn coreEntries(self: *const Env) NameMap.RawEntryCursor {
+        return self.privateState().core.rawEntries();
     }
 
     /// The reserved locals backend, bindable without a lookup in any scope.
     pub fn localsWords(self: *const Env) intern.LocalsWords {
         return self.privateState().locals_words;
     }
-    pub fn coreView(self: *const Env) EnvironmentView {
-        return .init(&self.privateState().core);
-    }
-    pub fn sessionView(self: *const Env) EnvironmentView {
-        return .init(&self.privateState().session);
-    }
-    pub fn define(
-        self: *Env,
-        name: intern.NamespaceName,
-        publication: TopPublication,
-    ) error{OutOfMemory}!void {
-        _ = self.privateState().session.bind(name, BindingSpec.fromTop(publication)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Frozen => unreachable,
-        };
-    }
-    fn installCoreSpec(self: *Env, name: intern.NamespaceName, spec: BindingSpec) error{OutOfMemory}!void {
-        _ = self.privateState().core.bind(name, spec) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Frozen => unreachable,
-        };
-    }
-    /// A fresh Env together with the one capability that may build its
-    /// core. No other factory issues a `BuildingEnv`, so the core is built at
-    /// most once and never after it freezes.
+
+    /// A fresh Env together with the one capability that may build its core.
     pub fn initBuilding(host_owner: *heap.HostOwner) error{OutOfMemory}!struct { Env, BuildingEnv } {
         const environment = try init(host_owner);
         return .{ environment, BuildingEnv.init(environment) };
     }
-    pub fn sessionRoot(self: *Env, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .{ .session = &self.privateState().session });
+
+    pub fn sessionRoot(_: *Env, allocator: std.mem.Allocator) Scope {
+        return Scope.direct(allocator, .session);
     }
+
     pub fn createSessionRoot(self: *Env, allocator: std.mem.Allocator) error{OutOfMemory}!*Scope {
         const root = try allocator.create(Scope);
         root.* = self.sessionRoot(allocator);
@@ -2252,13 +1447,14 @@ pub const Env = enum(usize) {
         return root;
     }
 };
+
 comptime {
     heap.requireOpaqueHostRoot(Env, EnvState);
     heap.requireOpaqueMutation(BuildingEnv);
 }
+
 /// Typestate capability for the only phase in which core publication is
-/// legal. `finish` consumes the capability and freezes the core. It is an
-/// opaque handle minted only by `Env.initBuilding`.
+/// legal. `finish` consumes the capability and freezes the core.
 pub const BuildingEnv = enum(usize) {
     invalid = 0,
     _,
@@ -2328,19 +1524,28 @@ pub const BuildingEnv = enum(usize) {
                 error.InvalidName => unreachable,
             };
             var environment = builder.target();
-            const core = &environment.privateState().core;
-            const document_value = try machine.stringValue(core.allocator, core.releases, definition.doc);
-            defer core.releases.releaseValue(document_value);
+            const state = environment.privateState();
+            const allocator = state.host.allocator();
+            const releases = heap.hostDomain(state.host);
+            const document_value = try machine.stringValue(allocator, releases, definition.doc);
+            defer releases.releaseValue(document_value);
             const builtin_effect: ?BuiltinEffect = if (data.effect) |*effect|
                 try effect.build(builder, effect)
             else
                 null;
-            defer if (builtin_effect) |effect| core.releases.releaseValue(effect.value);
-            try environment.installCoreSpec(install_name, .{
-                .binding = .{ .builtin = definition.primitive },
+            defer if (builtin_effect) |effect| releases.releaseValue(effect.value);
+            const created = try Definition.create(allocator, .static, .{ .builtin = definition.primitive }, .{
                 .effect = if (builtin_effect) |effect| effect.validated else null,
                 .doc = documentation(document_value.list).?,
+                .root = .core,
             });
+            state.publishCore(install_name, created) catch |err| {
+                created.retireStatic(releases);
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.Frozen, error.Duplicate => unreachable,
+                };
+            };
         }
     };
 
@@ -2350,32 +1555,23 @@ pub const BuildingEnv = enum(usize) {
         effect: *const StaticBuiltin.EffectData,
     ) error{OutOfMemory}!BuiltinEffect {
         var environment = self.target();
-        const core = &environment.privateState().core;
+        const allocator = environment.privateState().host.allocator();
         var tokens: [token_count]value.Value = undefined;
         for (effect.tokens, &tokens) |token, *destination| {
             const id = try intern.intern(token);
             destination.* = .{ .symbol = .{ .name = id } };
         }
-        const effect_value = try list.fromValuesGeneric(core.allocator, &tokens);
+        const effect_value = try list.fromValuesGeneric(allocator, &tokens);
         return .{
             .value = effect_value,
             .validated = .fromValidated(effect_value.list, effect.separator),
         };
     }
 
-    pub fn installCore(
-        self: *BuildingEnv,
-        name: intern.NamespaceName,
-        body: *Quotation,
-    ) error{OutOfMemory}!void {
-        var environment = self.target();
-        try environment.installCoreSpec(name, .{
-            .binding = .{ .word = body },
-        });
-    }
     pub fn installBuiltin(self: *BuildingEnv, comptime definition: BuiltinWord) error{OutOfMemory}!void {
         return StaticBuiltin.init(definition).install(self);
     }
+
     pub fn installBuiltins(self: *BuildingEnv, comptime definitions: []const BuiltinWord) error{OutOfMemory}!void {
         const descriptors = comptime blk: {
             @setEvalBranchQuota(100_000);
@@ -2394,30 +1590,39 @@ pub const BuildingEnv = enum(usize) {
             try descriptor.install(self);
         }
     }
+
     /// The Env under construction, for the bootstrap Unit that evaluates the
     /// prelude against it. It grants no core publication; that stays here.
     pub fn runtime(self: *const BuildingEnv) Env {
         return self.target();
     }
+
+    /// The root the bootstrap Unit evaluates the prelude in. Its storage is the
+    /// core publisher, which refuses once core is frozen.
     pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
         var environment = self.target();
-        return Scope.direct(allocator, .{ .core_build = &environment.privateState().core });
+        return Scope.direct(allocator, .{ .core_build = .init(environment.privateState()) });
     }
-    /// Recognizes the core's trusted definitions against their final bindings,
-    /// then freezes the core. On failure the core is not frozen and the builder
-    /// is not consumed, so the session that owns it does not start.
-    pub fn finish(self: *BuildingEnv) error{OutOfMemory}!void {
+
+    /// Records recognition for core's trusted source definitions, then
+    /// freezes core. `recognize` is handed each source definition by name.
+    pub fn finish(
+        self: *BuildingEnv,
+        recognize: *const fn (Env, []const u8, *Definition) void,
+    ) error{OutOfMemory}!void {
         var environment = self.target();
-        const core = &environment.privateState().core;
-        const core_scope = @backingInt(environment.coreScopeId());
-        try core.recognizeDirect(.{
-            .own = core,
-            .core = null,
-            .own_scope = core_scope,
-            .core_scope = core_scope,
-            .slots = &environment.privateState().slot_index,
-        });
-        core.freeze();
+        const state = environment.privateState();
+        for (idioms.direct_names) |spelling| {
+            const id = try intern.intern(spelling);
+            const name = intern.namespaceName(id) catch continue;
+            var lookup = state.core.rawLookup(name);
+            const entry = poll.drive(?Entry, &lookup, .{}) orelse continue;
+            switch (entry) {
+                .definition => |definition| if (definition.code() == .source) recognize(environment, spelling, definition),
+                .alias => {},
+            }
+        }
+        state.core_frozen = true;
         self.* = .invalid;
     }
 };
@@ -2428,11 +1633,13 @@ fn countEffectTokens(comptime source: []const u8) usize {
     for (source) |byte| count += @intFromBool(byte == ' ');
     return count;
 }
+
 pub fn assertStaticNamespace(comptime name: []const u8) void {
     if (intern.isReservedBytes(name) or !lexer.validSymbolSegment(name)) {
         @compileError("invalid builtin namespace name: " ++ name);
     }
 }
+
 pub fn assertStaticModuleName(comptime name: []const u8) void {
     @setEvalBranchQuota(10_000);
     if (name.len == 0) @compileError("embedded module name must be nonempty");
@@ -2454,12 +1661,8 @@ pub fn assertStaticModuleName(comptime name: []const u8) void {
         @compileError("invalid embedded module name: " ++ name);
     }
 }
-pub const testing = if (builtin.is_test) struct {
-    pub fn deinitEnvironment(environment: *Environment) void {
-        var cursor = Environment.TeardownCursor.init(environment);
-        while (!cursor.advance()) {}
-    }
 
+pub const testing = if (builtin.is_test) struct {
     pub fn deinitScope(scope: *Scope, releases: *heap.ReleaseDomain) void {
         switch (scope.allocation) {
             .embedded => {
@@ -2473,25 +1676,6 @@ pub const testing = if (builtin.is_test) struct {
         }
     }
 } else struct {};
-test "environment definition propagates every allocation failure" {
-    const Probe = struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            var host = heap.HostOwner.init(allocator);
-            const releases = host.domain();
-            defer host.cleanup().drain();
-            var environment = try Env.init(&host);
-            defer environment.deinit();
-            const body = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 7 }});
-            defer releases.releaseValue(body);
-            const name = try intern.internNamespace("failure-probe");
-            const replacement = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 9 }});
-            defer releases.releaseValue(replacement);
-            try environment.define(name, .{ .word = .{ .body = quotation(body.list).? } });
-            try environment.define(name, .{ .word = .{ .body = quotation(replacement.list).? } });
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
-}
 
 test "env: issued scope ids leave their reserved high bits clear" {
     var host = heap.HostOwner.init(std.testing.allocator);
@@ -2499,77 +1683,15 @@ test "env: issued scope ids leave their reserved high bits clear" {
     var container = try Env.init(&host);
     defer container.deinit();
 
-    // More than one leaf's worth, so the assertion covers ids whose directory
-    // coordinates differ in the branch and leaf bytes and not only the entry.
     const issued = ScopeIndex.radix + 3;
-    var previous: u32 = 0;
+    var previous: u32 = @backingInt(container.sessionScopeId());
     for (0..issued) |_| {
-        // Names nothing: this assertion concerns only issued ids.
         const cell = try container.newScopeCell(null, null);
         const raw = @backingInt(cell.id);
         try std.testing.expect(raw != 0);
         try std.testing.expect(raw <= ScopeIndex.max_id);
         try std.testing.expectEqual(@as(u32, 0), raw >> id_bits);
-        // Monotonic and never reused, which is the property the reserved byte
-        // exists to let us relax later.
         try std.testing.expect(raw > previous);
         previous = raw;
     }
-}
-
-test "env: a slot keeps one cell per name across binding, removal, and rebinding" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    var container = try Env.init(&host);
-    defer container.deinit();
-    const backing = container.privateState();
-    const list_api = @import("list.zig");
-
-    const one = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
-    defer releases.releaseValue(one);
-    const two = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 2 }});
-    defer releases.releaseValue(two);
-    const core_body = try list_api.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 3 }});
-    defer releases.releaseValue(core_body);
-
-    const root = try container.newScopeCell(null, null);
-    const late = try intern.internNamespace("slot-late");
-    const early = try intern.internNamespace("slot-early");
-    const shared = try intern.internNamespace("slot-shared");
-
-    // Linked before any binding: unbound, with no core fallback.
-    const early_id = try container.linkSlot(root, &backing.session, intern.namespaceId(early));
-    const early_slot = container.slot(early_id).?;
-    try std.testing.expect(early_slot.current() == null);
-    try container.define(early, .{ .word = .{ .body = quotation(one.list).? } });
-    const first_cell = early_slot.current().?;
-
-    // Removal clears the slot without dropping its cell; rebinding reuses it.
-    var unbind = backing.session.unbindCursor(early);
-    defer unbind.deinit();
-    try std.testing.expect(try poll.driveFallible(bool, &unbind, .{}));
-    try std.testing.expect(early_slot.current() == null);
-    try container.define(early, .{ .word = .{ .body = quotation(two.list).? } });
-    try std.testing.expectEqual(first_cell, early_slot.current().?);
-    var lease = first_cell.load(null).?;
-    defer lease.deinit();
-    try std.testing.expectEqual(@as(i64, 2), list_api.atUnchecked(.{ .list = quotationHeader(lease.spec().binding.word) }, 0).int);
-
-    // Linked after a binding: adopts the environment's cell.
-    try container.define(late, .{ .word = .{ .body = quotation(one.list).? } });
-    const late_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(late))).?;
-    try std.testing.expect(late_slot.current() != null);
-    try std.testing.expectEqual(late_slot.id.load(.monotonic), @backingInt(try container.linkSlot(root, &backing.session, intern.namespaceId(late))));
-
-    // Core is the fallback until the root shadows the name, and again after.
-    _ = try backing.core.bind(shared, BindingSpec.fromTop(.{ .word = .{ .body = quotation(core_body.list).? } }));
-    const shared_slot = container.slot(try container.linkSlot(root, &backing.session, intern.namespaceId(shared))).?;
-    const core_cell = shared_slot.current().?;
-    try container.define(shared, .{ .word = .{ .body = quotation(one.list).? } });
-    try std.testing.expect(shared_slot.current().? != core_cell);
-    var remove_shadow = backing.session.unbindCursor(shared);
-    defer remove_shadow.deinit();
-    _ = try poll.driveFallible(bool, &remove_shadow, .{});
-    try std.testing.expectEqual(core_cell, shared_slot.current().?);
 }

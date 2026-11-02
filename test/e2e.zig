@@ -1209,7 +1209,7 @@ test "e2e: reflection acceptance" {
         .exit_code = 0,
         .stdout_contains = &.{
             "(s 2 +)",
-            "f -> f def public (-- n)",
+            "f -> m.f def public generation 1 (-- n)",
         },
         .stdout_excludes = &.{" s "},
         .stderr = "",
@@ -1220,31 +1220,6 @@ test "e2e: a construction body already knows the name it is built under" {
     var named = try run(&.{ build_options.ecl_exe, "-e", "[] (*module* io.pp) `named @defm" });
     defer named.deinit();
     try named.expect(.{ .exit_code = 0, .stdout = "named\n", .stderr = "" });
-}
-
-test "e2e: module removal acceptance" {
-    const module = "[] ((7) `peek def) `core.c @defm ";
-    var by_name = try run(&.{
-        build_options.ecl_exe,
-        "-e",
-        module ++ "`short `core.c alias `short undefm " ++
-            "[] (core.c.peek) @attempt `err at `kind at io.pp [] (short.peek) @attempt `err at `kind at io.pp " ++
-            module ++ "core.c.peek io.pp",
-    });
-    defer by_name.deinit();
-    try by_name.expect(.{
-        .exit_code = 0,
-        .stdout = "undefined-word\nundefined-word\n7\n",
-        .stderr = "",
-    });
-
-    var by_canonical_name = try run(&.{
-        build_options.ecl_exe,
-        "-e",
-        module ++ "`core.c undefm [] (core.c.peek) @attempt `err at `kind at io.pp",
-    });
-    defer by_canonical_name.deinit();
-    try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "undefined-word\n", .stderr = "" });
 }
 
 test "e2e: optional module annotation acceptance" {
@@ -1491,7 +1466,7 @@ test "e2e: M6 combinators parse and contract payloads" {
     defer rebound.deinit();
     try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
-    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set k *) each" });
+    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set) each" });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,

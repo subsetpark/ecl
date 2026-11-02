@@ -419,7 +419,7 @@ pub const Session = enum(usize) {
                     error.Invalid => return error.InvalidHostConfig,
                 };
                 errdefer map.deinit();
-                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), map, host.initial_cwd);
+                break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), &registry, map, host.initial_cwd);
             }
             break :discovery null;
         };
@@ -510,7 +510,7 @@ pub const Session = enum(usize) {
         const host = core.host_owner.cleanup();
         const closing_native_owner = core.native_owner.closeCalls();
         core.scheduler.deinit(&core.root_tasks);
-        if (core.root_scope) |root_scope| root_scope.retire();
+        if (core.root_scope) |root_scope| root_scope.retire(core.releaseDomain());
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
@@ -809,14 +809,9 @@ pub const Session = enum(usize) {
             return .empty;
         }
 
-        const root: reflection.VisibleNameRoot = if (core.root_scope) |scope|
-            .{ .scope = scope }
-        else
-            .{ .environment = core.environment.sessionView() };
         var visible = reflection.VisibleNameCursor.init(
-            root,
-            core.environment.coreView(),
-            null,
+            .{ .session = core.registry.view() },
+            &core.environment,
         );
         defer visible.deinit();
         while (true) switch (visible.advance()) {
@@ -921,15 +916,6 @@ pub const Session = enum(usize) {
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeDiagnostics(bytes, true);
     }
-    fn defineForTest(
-        self: *Session,
-        name: intern.NamespaceName,
-        publication: env.TopPublication,
-    ) error{OutOfMemory}!void {
-        const core = self.coreState();
-        defer core.scheduler.settleRootRetirement();
-        return core.environment.define(name, publication);
-    }
     fn schedulerWorkerThreadCountForTest(self: *const Session) usize {
         return self.coreState().scheduler.workerThreadCount();
     }
@@ -965,7 +951,6 @@ pub const Session = enum(usize) {
     pub const lastMaxFrames = testOnly(lastMaxFramesForTest);
     pub const lastIdiomHits = testOnly(lastIdiomHitsForTest);
     pub const lastPhraseHits = testOnly(lastPhraseHitsForTest);
-    pub const define = testOnly(defineForTest);
     pub const schedulerWorkerThreadCount = testOnly(schedulerWorkerThreadCountForTest);
     pub const schedulerTimerThreadCount = testOnly(schedulerTimerThreadCountForTest);
     pub const schedulerTimerEntryCount = testOnly(schedulerTimerEntryCountForTest);
@@ -1056,7 +1041,7 @@ fn sessionTypeExposesAuthority(
     comptime depth: u8,
     comptime position: SessionAuthorityPosition,
 ) bool {
-    if (T == env.BindingLease or T == modules.GenerationLease) return true;
+    if (T == env.Definition or T == modules.GenerationLease) return true;
     if (position == .result and
         (T == std.mem.Allocator or
             T == std.Io or
@@ -1066,7 +1051,6 @@ fn sessionTypeExposesAuthority(
             T == heap.HostOwner or
             T == heap.ReleaseDomain or
             T == env.Env or
-            T == env.EnvironmentView or
             T == modules.Registry or
             T == machine.Unit or
             T == scheduler_api.Scheduler or
@@ -1364,7 +1348,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         .complete => |owned| break owned,
     };
     defer image.deinit();
-    var sealed = try image.seal(null);
+    var sealed = try image.sealLiteralGroup();
     defer sealed.deinit();
     _ = try modules.testing.register(registry, &sealed);
 

@@ -138,9 +138,9 @@ publication, reclamation, or architectural enforcement. The short rules in
   replacement and reclamation. Use sequential consistency when correctness
   depends on a single total order across independent reader/writer atomics;
   weakening it requires an explicit proof.
-- Binding, Shape, Directory, module-generation, and analogous snapshot
-  publishers use one explicit reader/writer handoff that prevents early
-  reclamation under every final-reader/later-writer interleaving.
+- Shape, Directory, and analogous snapshot publishers use one explicit
+  reader/writer handoff that prevents early reclamation under every
+  final-reader/later-writer interleaving.
 - Read terminal task state under the same lock or tagged publication transition
   that makes it terminal; never infer completion from independently nullable
   fields.
@@ -153,7 +153,10 @@ publication, reclamation, or architectural enforcement. The short rules in
   rather than total publication/reload history. Document any retention or
   backpressure bound while readers remain, recycle fixed retirement records
   where appropriate, and prove the residual bound with delayed readers and
-  repeated public updates.
+  repeated public updates. Published module images are the one documented
+  exception: a Session keeps every image it published until teardown (see
+  `design/INTERPRETER.md`), so reload history grows memory by one image per
+  registration and nothing else may.
 
 ## Architectural enforcement
 

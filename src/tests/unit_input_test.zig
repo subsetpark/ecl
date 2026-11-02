@@ -226,10 +226,10 @@ test "unit inputs: a runtime-built body acquires no attribution" {
     );
 
     // Rejected roots must also avoid the stable image ScopeId used only to
-    // label rewritten occurrences. Define, execute, replace, and retire
-    // runtime-built bodies in one Unit so the measurement excludes
-    // per-source archive retention; ten times the cycles must not retain ten
-    // times the settled memory.
+    // label rewritten occurrences. Define, execute, and replace runtime-built
+    // bodies in one Unit so the measurement excludes per-source archive
+    // retention. A Session keeps every published image, so memory grows with
+    // the registrations made; it must grow no faster than they do.
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     {
         var runtime_inputs8 = try runtime_fixture.Fixture.init();
@@ -238,7 +238,7 @@ test "unit inputs: a runtime-built body acquires no attribution" {
         defer measured.deinit();
         const cycle = "[] ((1) `x def) () cat `runtime-built @defm " ++
             "[] ((1) `x def) () cat `runtime-built @defm " ++
-            "runtime-built.x pop `runtime-built undefm";
+            "`runtime-built.x execute pop";
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";
         const large = "[1] 200 take (pop " ++ cycle ++ ") for";
         try expectStack(&measured, small, "");
@@ -249,7 +249,7 @@ test "unit inputs: a runtime-built body acquires no attribution" {
         const after_large = counting.total_requested_bytes;
         const small_growth = after_small -| before_small;
         const large_growth = after_large -| after_small;
-        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
+        try std.testing.expect(large_growth <= small_growth * 10 * 2 + 4096);
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -285,7 +285,7 @@ test "unit inputs: a nested construction inside a stamped body still names its o
     // pointing at the enclosing one.
     try expectStack(
         &runtime,
-        "[] ((1) `x defp ( -- n ) ([] ((2) `x defp ( -- n ) (x) `get def) `nest-inner @defm nest-inner.get) " ++
+        "[] ((1) `x defp ( -- n ) ([] ((2) `x defp ( -- n ) (x) `get def) `nest-inner @defm `nest-inner.get execute) " ++
             "`outer def) `nest @defm nest.outer",
         "2",
     );
@@ -302,7 +302,7 @@ test "unit inputs: a nested construction inside a stamped body still names its o
     // And a nested construction with explicit empty seeds behaves the same way.
     try expectStack(
         &runtime,
-        "[] ((1) `x defp ( -- n ) ([] ((2) `x defp ( -- n ) (x) `get def) `seeded-inner @defm seeded-inner.get) " ++
+        "[] ((1) `x defp ( -- n ) ([] ((2) `x defp ( -- n ) (x) `get def) `seeded-inner @defm `seeded-inner.get execute) " ++
             "`outer def) `nest-seeded @defm nest-seeded.outer",
         "2",
     );

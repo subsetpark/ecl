@@ -4,7 +4,6 @@ const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
-const env = @import("../env.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 
@@ -33,15 +32,13 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
     try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), text) != null);
 }
 
-test "plain call sites observe rebinding removal and core shadowing" {
+test "bound call sites keep their targets across rebinding and core shadowing" {
     try support.expectStack(
         "1 `cached-value set (cached-value) `probe def " ++
-            "probe probe 2 `cached-value set probe " ++
-            "`cached-value unset [] (probe) @attempt `err at `kind at " ++
-            "3 `cached-value set probe " ++
+            "probe probe 2 `cached-value set probe cached-value " ++
             "(4 dup +) `core-probe def core-probe core-probe " ++
-            "(10) `dup def core-probe `dup undef core-probe",
-        "1 1 2 undefined-word 3 8 8 14 8",
+            "(10) `dup def core-probe dup",
+        "1 1 1 2 8 8 8 10",
     );
 }
 
@@ -50,7 +47,7 @@ test "plain call sites remain correct after observation pool and cache churn" {
         "1 `outside set (outside) `probe def probe probe probe " ++
             "3 (" ++ support.repeated("outside pop ", 32) ++ ") times " ++
             "2 `outside set probe",
-        "1 1 1 2",
+        "1 1 1 1",
     );
 }
 
@@ -85,7 +82,7 @@ test "every primitive exposes meaningful reflective documentation" {
         "if",         "while",       "times",        "cond",           "each",           "zip-with",
         "for",        "fold",        "scan",         "stencil",        "unfold",         "infra",
         "def",        "set",         "defp",         "setp",           "test",           "tests",
-        "@test",      "unset",       "undef",        "doc",            "which",          "see",
+        "@test",      "effect",      "exports",      "doc",            "which",          "see",
         "@defm",      "import",      "alias",        "words",          "load",           "@spawn",
         "task.await", "task.cancel", "task.pending", "task.await-any", "task.await-for", "@each",
         "+",          "-",           "*",            "/",              "div",            "mod",
@@ -288,34 +285,6 @@ test "redefinition and set replace behavior and clear metadata" {
     try expectErrorContains(&runtime, "`set-target doc", "kind domain");
 }
 
-test "unset and undef equivalently remove only the current scope binding" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-
-    try expectOk(&runtime, "1 `removed-by-unset set `removed-by-unset unset");
-    try expectErrorContains(&runtime, "removed-by-unset", "kind undefined-word");
-    try expectOk(&runtime, "2 `removed-by-undef set `removed-by-undef undef");
-    try expectErrorContains(&runtime, "removed-by-undef", "kind undefined-word");
-
-    // Missing direct bindings are idempotent no-ops. In particular, neither
-    // spelling can mutate the immutable core environment.
-    try expectOk(&runtime, "`never-bound unset `never-bound undef");
-    try expectOk(&runtime, "9 `dup set `dup undef 4 dup");
-    var display = try runtime.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("4 4", display.bytes());
-
-    // A removed name can be published again, and module construction applies
-    // the same operation to public and private bindings.
-    try expectOk(&runtime, "3 `again set `again unset 5 `again set again");
-    try expectOk(&runtime, "[] (1 `public set 2 `private setp `public unset `private undef " ++
-        "(-- n) (7) `kept def) `unbound @defm unbound.kept");
-    try expectErrorContains(&runtime, "unbound.public", "kind undefined-word");
-    try expectErrorContains(&runtime, "unbound.private", "kind undefined-word");
-}
-
 test "recognized malformed annotations are domain errors" {
     try support.expectErrors(&.{
         .{ .name = "duplicate separator", .source = "(a -- b -- c) (1) `x def", .kind = "domain", .word = "def" },
@@ -359,8 +328,9 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "alias core", .source = "[] () `m @defm `core `m alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "[] ((-- x) (1) `-- def) `m @defm", .kind = "domain", .word = "def" },
         .{ .name = "private value", .source = "[] (1 `: setp) `m @defm", .kind = "domain", .word = "defp" },
-        .{ .name = "unset separator", .source = "`-- unset", .kind = "domain", .word = "undef" },
-        .{ .name = "undef qualified", .source = "`m.x undef", .kind = "domain", .word = "undef" },
+        .{ .name = "unset is not a word", .source = "`x unset", .kind = "undefined-word", .word = "unset" },
+        .{ .name = "undef is not a word", .source = "`x undef", .kind = "undefined-word", .word = "undef" },
+        .{ .name = "undefm is not a word", .source = "`m undefm", .kind = "undefined-word", .word = "undefm" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });
     try support.expectStack("`-- `: (-- :) `x:y", "-- : (-- :) x:y");
@@ -428,21 +398,12 @@ test "long annotation traversal and reflection observe cancellation" {
     defer runtime_inputs10.deinit();
     var reflection_runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs10.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer reflection_runtime.deinit();
-    const long_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    defer cleanup.releaseValue(long_body);
-    const codepoints = try allocator.alloc(u32, 70_000);
-    defer allocator.free(codepoints);
-    @memset(codepoints, 'd');
-    const long_doc = try list.fromCodepoints(allocator, codepoints);
-    defer cleanup.releaseValue(long_doc);
-    const long_id = try intern.intern("long-doc");
-    try reflection_runtime.define(
-        try intern.namespaceName(long_id),
-        .{ .word = .{
-            .body = env.quotation(long_body.list).?,
-            .doc = env.documentation(long_doc.list).?,
-        } },
-    );
+    const long_doc = try allocator.alloc(u8, 70_000);
+    defer allocator.free(long_doc);
+    @memset(long_doc, 'd');
+    const long_definition = try std.fmt.allocPrint(allocator, "(: \"{s}\") (1) `long-doc def", .{long_doc});
+    defer allocator.free(long_definition);
+    try expectOk(&reflection_runtime, long_definition);
     reflection_runtime.requestCancellation();
     try expectErrorContains(&reflection_runtime, "`long-doc see", "unit cancelled");
     try std.testing.expect(reflection_runtime.lastPolls() >= 1);
@@ -719,4 +680,187 @@ test "reuse: a result never overwrites a value still observed" {
         .{ .name = "owned cat", .source = "1000 range dup 500 drop cat len", .expected = "1500" },
         .{ .name = "owned put", .source = "5 range 2 99 put", .expected = "[0 1 99 3 4]" },
     });
+}
+
+// Construction-time binding. A quotation's words carry the root they were
+// written in; binding resolves its top-level unquoted words there once, and
+// the executable it produces never retargets.
+
+test "binding: top-level source defines then uses, and a definition body cannot forward-reference" {
+    try support.expectStack("(1) `foo def foo", "1");
+    try support.expectErrors(&.{
+        .{ .name = "forward reference", .source = "(later) `early def", .kind = "undefined-word", .word = "later" },
+    });
+}
+
+test "binding: existing code keeps its targets while later binding sees replacements" {
+    try support.expectStacks(&.{
+        .{ .name = "plain", .source = "(1) `foo def (foo) `bar def (2) `foo def bar foo", .expected = "1 2" },
+        .{
+            .name = "qualified",
+            .source = "[] ((1) `x def) `a @defm (a.x) `old def [] ((2) `x def) `a @defm old a.x",
+            .expected = "1 2",
+        },
+        // A nested quotation is data until it is applied, so it binds against
+        // whatever is current when it runs.
+        .{ .name = "nested data", .source = "(1) `x def ((x)) `later def (2) `x def later call", .expected = "2" },
+        // Any publication invalidates a reused anonymous binding.
+        .{ .name = "reuse", .source = "(x) `q set (1) `x def q call (2) `x def q call", .expected = "1 2" },
+        // A combinator binds its quotation once per invocation, whether that
+        // binding came fresh or from the unit's reuse cache: a publication
+        // during the iteration reaches neither later element.
+        .{
+            .name = "invocation keeps its binding",
+            .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
+                "[1 2] q each",
+            .expected = "[1 1]",
+        },
+        // A quotation built at run time is new each time, so it binds from
+        // words the unit already resolved; a publication still reaches it.
+        .{
+            .name = "built quotation sees replacements",
+            .source = "(1) `x def (x) () compose call (x) () compose call (2) `x def (x) () compose call",
+            .expected = "1 1 2",
+        },
+        .{
+            .name = "built quotation repeats a counted word",
+            .source = "(1) `x def (x x +) () compose call (x x x + +) () compose call",
+            .expected = "2 3",
+        },
+        .{ .name = "typed list applied", .source = "[1 2] call [3 4] call", .expected = "1 2 3 4" },
+        .{ .name = "cleave over literals", .source = "1 2 (+) (*) bi2 1 2 (+) (*) (-) tri2", .expected = "3 2 3 2 -1" },
+        .{
+            .name = "invocation keeps a reused binding",
+            .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
+                "0 q call [1 2] q each",
+            .expected = "1 [1 1]",
+        },
+    });
+}
+
+test "binding: one quotation value bound twice stays unchanged and independent" {
+    try support.expectStacks(&.{
+        .{
+            .name = "shared body",
+            .source = "(pop pop 42) dup `derive-epsilon def `derive-empty def 1 2 derive-epsilon 3 4 derive-empty",
+            .expected = "42 42",
+        },
+        .{
+            .name = "independent targets",
+            .source = "(1) `x def (x) dup `p def (2) `x def `q def p q",
+            .expected = "1 2",
+        },
+    });
+}
+
+test "binding: a quotation that cannot bind runs none of its forms" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "\"warm\" io.print");
+    try expectErrorContains(&runtime, "(\"ran\" io.print missing) call", "word missing");
+    try std.testing.expectEqualStrings("warm\n", output.written());
+    // Unexecuted nested data is not rejected for naming nothing.
+    try expectOk(&runtime, "((missing)) `f def f len 1 = {kind user} assert");
+    try expectErrorContains(&runtime, "f call", "word missing");
+}
+
+test "binding: words resolve in the root they were written in" {
+    try support.expectStacks(&.{
+        // A caller's quotation keeps its own meaning inside a module wrapper.
+        .{
+            .name = "wrapper",
+            .source = "[] ((|q| q call) `apply def) `w @defm (5) `five def (five) w.apply",
+            .expected = "5",
+        },
+        // Equal quotations from different roots bind differently, and reuse
+        // never conflates them.
+        .{
+            .name = "equal data",
+            .source = "[] ((7) `k defp ((k)) `q def) `m @defm (1) `k def " ++
+                "m.q (k) match? [1 2] (pop m.q call (k) call +) each",
+            .expected = "1 [8 8]",
+        },
+        // `execute` and reflection resolve the supplied symbol in its own root;
+        // equality and printing ignore that root.
+        .{
+            .name = "explicit lookup",
+            .source = "[] (( -- n ) (7) `k defp (`k) `sym def) `m @defm (1) `k def " ++
+                "m.sym execute k m.sym effect `k effect m.sym `k match? m.sym",
+            .expected = "7 1 (-- n) () 1 k",
+        },
+    });
+}
+
+test "binding: imports are name aliases followed at every binding" {
+    try support.expectStacks(&.{
+        .{
+            .name = "alias",
+            .source = "[] ((1) `x def) `a @defm `a (x) import (x) `via def [] ((2) `x def) `a @defm via x",
+            .expected = "1 2",
+        },
+        .{
+            .name = "re-export",
+            .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm b.x [] ((2) `x def) `a @defm b.x",
+            .expected = "1 2",
+        },
+        // Chain length is not evidence of a cycle.
+        .{ .name = "long acyclic chain", .source = comptime aliasChain(100), .expected = "7" },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "alias cycle",
+            .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm [] (`b (x) import) `a @defm b.x",
+            .kind = "domain",
+            .message_contains = "never reach a definition",
+        },
+    });
+}
+
+test "binding: a module binds as one group when it is sealed" {
+    try support.expectStacks(&.{
+        .{
+            .name = "forward and mutual",
+            .source = "[] (( n -- b ) (dup 0 = (pop 1) (1 - odd?) if) `even? def " ++
+                "( n -- b ) (dup 0 = (pop 0) (1 - even?) if) `odd? def) `parity @defm 4 parity.even? 3 parity.even?",
+            .expected = "1 0",
+        },
+        .{
+            .name = "self-qualified",
+            .source = "[] (( -- n ) (self-named.base 1 +) `next def ( -- n ) (41) `base def) `self-named @defm self-named.next",
+            .expected = "42",
+        },
+        // A quotation injected into a replacement body was written in the
+        // session, so its qualified name means the registered module, never
+        // the group being sealed under that name.
+        .{
+            .name = "injected qualified word",
+            .source = "[] ((1) `x def) `m @defm [(m.x)] ((2) `x def `y def) `m @defm m.y m.x",
+            .expected = "1 2",
+        },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "duplicate definition", .source = "[] ((1) `x def (2) `x def) `twice @defm", .kind = "domain", .message_contains = "more than once" },
+        .{
+            .name = "definition and import",
+            .source = "[] ((1) `x def) `src @defm [] ((1) `x def `src (x) import) `clash @defm",
+            .kind = "domain",
+            .message_contains = "more than once",
+        },
+        // Staged definitions cannot run before the module is sealed.
+        .{ .name = "staged", .source = "[] ((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
+        .{ .name = "failed seal publishes nothing", .source = "[] ([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
+    });
+}
+
+/// A chain of `depth` modules, each re-exporting the previous one's `x`, from
+/// `a0` up to `a<depth>`, followed by a call through the last.
+fn aliasChain(comptime depth: usize) []const u8 {
+    @setEvalBranchQuota(100_000);
+    comptime var source: []const u8 = "[] ((7) `x def) `a0 @defm ";
+    inline for (1..depth + 1) |i| source = source ++ std.fmt.comptimePrint("[] (`a{d} (x) import) `a{d} @defm ", .{ i - 1, i });
+    return source ++ std.fmt.comptimePrint("a{d}.x", .{depth});
 }

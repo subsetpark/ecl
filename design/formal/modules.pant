@@ -10,7 +10,7 @@ RegistryName.
 BindingName.
 > This model is normative for registry names, aliases, generations, and
 > publication, including the construction of the images they publish;
-> abstract definitions and visibility; and call contexts and generation pins.
+> abstract definitions and visibility; and call contexts.
 > Modules are pure code: a registration carries no operand stack and no
 > state of its own, and a generation is nothing but an image published under
 > a name.
@@ -26,12 +26,11 @@ BindingName.
 > either the top-level evaluator or identifies the exact active call
 > performing a registry mutation.
 >
-> A qualified call resolves a registry name and public binding and pins the
-> name's current image in one atomic action. Resolution before replacement
-> or removal retains the selected image; resolution afterward observes only
-> the replacement or the absence of the registration. Explicit qualification
-> always performs this fresh registry dispatch, including when it names the
-> caller's own module.
+> A qualified call selects a registry name's current image and a public
+> binding in it in one atomic action. Selection happens when the code holding
+> the qualified word is bound, so bound code keeps the image it selected;
+> selection afterward observes only the replacement. Explicit lookup performs
+> a fresh selection each time it runs.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
 ---
 canonical? module-name or alias? module-name.
@@ -57,8 +56,8 @@ where
 
 > The model has one kind of module object: an immutable image, published
 > under exactly one canonical name as one generation. Reload publishes a new
-> image under the same name and retires the previous one; removal retires the
-> current image and drops its names. A name is live while it maps to a
+> image under the same name and retires the previous one. No action removes a
+> registration. A name is live while it maps to a
 > published, non-retired image, which is that name's current generation. A
 > live canonical name has zero or more direct aliases.
 >
@@ -69,9 +68,9 @@ where
 > Domain atoms are possibilities rather than initially existing language
 > values.
 >
-> Retirement is monotonic: replacement or removal retires the former current
-> image and no retired image becomes current again. Active calls retain their
-> selected images.
+> Retirement is monotonic: replacement retires the former current
+> image and no retired image becomes current again. A retired image stays
+> published, so code bound to it and words written in it keep their meaning.
 Call.
 Image.
 Definition.
@@ -224,7 +223,7 @@ where
 
 > `Add alias` resolves either kind of occupied target name and stores a direct
 > reference to its current image; semantic alias chains do not exist. The
-> alias follows the canonical name through reload and removal. Canonical and
+> alias follows the canonical name through reload. Canonical and
 > alias names form one disjoint namespace, and an occupied name cannot be
 > repointed. The supplied invocation context is the top-level evaluator or the
 > exact call performing the mutation.
@@ -250,37 +249,10 @@ Registry ~> Add alias @ invoker: InvocationContext,
 
 where
 
-> `Remove` resolves a canonical name or alias to its current image, then
-> atomically retires that image and removes its canonical name and every
-> alias. Removal does not end already active calls, whose pins remain valid.
-> A later registration of the same spelling is a fresh generation that shares
-> nothing with the removed one. The supplied invocation context is the
-> top-level evaluator or the exact call performing the mutation.
-Registry ~> Remove @ invoker: InvocationContext,
-                     module-name: RegistryName,
-                     canonical? module-name or alias? module-name.
----
-(some image: Image,
-     image = image-of module-name |
-  (all registry-name: RegistryName |
-    canonical?' registry-name =
-      (canonical? registry-name and image-of registry-name != image) and
-    alias?' registry-name =
-      (alias? registry-name and image-of registry-name != image) and
-    image-of' registry-name = image-of registry-name) and
-
-  (all other-image: Image |
-    image-published?' other-image = image-published? other-image and
-    image-retired?' other-image =
-      (image-retired? other-image or other-image = image) and
-    image-name' other-image = image-name other-image)).
-
-where
-
 > `Begin scoped call` resolves the name stored in a word occurrence against the
 > image stored in that occurrence. A quotation or word occurrence owns this
-> scope but does not cache a definition. The image must still be current or
-> held by another active call. Private definitions are available to
+> scope but does not cache a definition. The image must have been published;
+> a retired image still answers. Private definitions are available to
 > same-image scoped resolution without becoming publicly invocable.
 Calls ~> Begin scoped call @ caller: Call,
                              occurrence: WordOccurrence,
@@ -291,10 +263,7 @@ Calls ~> Begin scoped call @ caller: Call,
 some image: Image,
      image = occurrence-image occurrence,
      constructed? image,
-     (image-published? image and ~image-retired? image) or
-       #(each owner: Call,
-              call-active? owner and call-image owner = image |
-           owner) > 0,
+     image-published? image,
      binding-present? image binding-name,
      definition: Definition,
      definition = definition-at image binding-name,
@@ -313,8 +282,7 @@ some image: Image,
 
 where
 
-> `Complete call` releases the call's image pin after its invocation has
-> completed. Calls are split into begin and complete actions only to express
+> `Complete call` ends the call after its invocation has completed. Calls are split into begin and complete actions only to express
 > publication concurrency; the prose-level invocation remains one language
 > operation.
 Calls ~> Complete call @ completed: Call,

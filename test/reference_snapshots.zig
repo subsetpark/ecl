@@ -109,9 +109,6 @@ const cases = [_]Case{
     .{ .name = "qualify execute", .source = "[] ((41) `f def) `core.utils @defm `core.utils `f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "`qualify doc" },
-    .{ .name = "undefm unknown", .source = "`nowhere undefm" },
-    .{ .name = "undefm then resolve", .source = "[] ((1) `x def) `gone @defm `gone undefm gone.x" },
-    .{ .name = "doc undefm", .source = "`undefm doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
     .{ .name = "result ok", .source = "[1 2] result.ok" },
@@ -751,7 +748,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line 204 col 51}}
+        \\{kind user msg "bad" word raise trace (raise fail) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== result.ok? ===
         \\source: [] (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -853,7 +850,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line 184 col 25}}
+        \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (defp setp) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== qualify execute ===
         \\source: [] ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0
@@ -873,27 +870,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\"<411-characters-elided>"
-        \\stderr:
-        \\<empty>
-        \\=== undefm unknown ===
-        \\source: `nowhere undefm
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{kind undefined-word msg "undefined word `nowhere`" word nowhere trace (nowhere) data {name nowhere scope qualified source "<command>" line 1 col 10}}
-        \\=== undefm then resolve ===
-        \\source: [] ((1) `x def) `gone @defm `gone undefm gone.x
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{kind undefined-word msg "undefined word `gone.x`" word gone.x trace (gone.x) data {name gone.x scope qualified source "<command>" line 1 col 42}}
-        \\=== doc undefm ===
-        \\source: `undefm doc
-        \\exit: 0
-        \\stdout:
-        \\"<359-characters-elided>"
         \\stderr:
         \\<empty>
         \\=== result ok ===
