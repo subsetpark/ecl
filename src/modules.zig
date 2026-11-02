@@ -1558,6 +1558,8 @@ pub const GroupCursor = struct {
 
     pub fn deinit(self: *GroupCursor) void {
         if (self.init) |*cursor| cursor.deinit();
+        // A pending insertion holds its entry until it lands in the directory.
+        if (self.put) |pending| ModuleImage.retireGroupEntry(pending.value, self.image.releases);
         if (self.lookup) |pending| ModuleImage.retireGroupEntry(pending.staged.entry, self.image.releases);
         self.* = undefined;
     }

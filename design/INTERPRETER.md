@@ -46,7 +46,8 @@ frame machine ───────► environment and module resolution
 ```
 
 Each box is a cooperating runtime boundary. Reading creates ordinary runtime
-values; resolution occurs when a word executes; a primitive may install a
+values; a quotation binds its words before it runs, while top-level source
+resolves each word as it is reached; a primitive may install a
 resumable driver; and a driver may yield to the scheduler many times before
 producing a value. The `Session` owns every component for the whole journey.
 
@@ -633,24 +634,14 @@ members call one another; sealing installs the bound body as its executable. A
 reserved definition is reachable only from its construction owner, so it can be
 neither executed nor published.
 
-The boundary is three handles. Reserving yields a `Reservation`, which binding
-may name as a target and which carries the definition's metadata, but which
-no execution, publication, or reflection path accepts. Sealing consumes it
-and yields the `*Definition`, so every holder of a definition holds sealed
-code. A body bound for a construction names the construction's members only
-by index, never by reservation: a definition constructed alone is member zero
-of its own construction, and a module group's members index the group's table.
-Each reservation records its construction, and sealing resolves the indices
-against that construction one target per step. A body can therefore name only
-members of the construction that seals it, and that construction seals every
-member before any body runs. A body bound for an anonymous application
-resolves as an explicit lookup does, so its table holds only sealed
-definitions. An `Executable` is an opaque handle over storage embedded in its
-owner, minted only by sealing. The reservation and the definition share
-storage, so the source audit confines the one field holding both states to
-`env`. A module group binds against its own construction directory, whose
-entries may be reservations; sealing builds the published directory from it
-one entry per step, so a published directory never holds a reservation.
+Construction is a typed boundary. A reserved definition can be named by
+binding but is accepted by no execution, publication, or reflection path; only
+sealing yields a definition, so every holder of a definition holds sealed code,
+and executable code exists only once sealed. A body bound for a construction
+can name only that construction's own members, and the construction seals every
+member before any body runs. A body bound for an anonymous application can name
+only sealed definitions. A module group binds against a construction directory
+of its own, so a published directory never holds an unsealed entry.
 
 Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
@@ -678,20 +669,17 @@ is, or the anonymous owner of an application's executable. A static owner needs
 no hold. A tail call secures the callee's owner before it retires the caller,
 whose executable may hold the callee's last reference.
 
-A `BindingCursor` binds one quotation against one captured publication view. A
-`Resolver` resolves each word: by its link to a root, then the root's directory
+Binding takes one quotation against one captured publication view. The
+resolver resolves each word: by its link to a root, then the root's directory
 and core, or, for a dotted spelling, a module registration and its public
 entry; `core.` names core alone. A name alias is followed through the same
 resolver, as the module holding it would resolve it; Brent's algorithm detects
 a cycle without bounding the length of an acyclic chain. Binding is bounded
 work charged to the unit. It borrows targets while it runs, since its captured
-view keeps them alive, and notes each distinct counted one in a fixed map whose
-capacity the forms still to bind fix, so it never grows; clearing and probing
-it are cursors charged one slot per step. Only after the walk does it take
-references, into an exact-size table, one per step. The table
-retires as its own owner, one reference per retirement step, so abandoning a
-binding, discarding an unsealed body, or retiring a definition is constant
-work. A word that names an unregistered module suspends binding while the module
+view keeps them alive; deduplicating them is bounded work, and only after the
+walk does it take one reference to each distinct counted target. Those
+references retire as their own owner, one per step, so abandoning a binding,
+discarding an unsealed body, or retiring a definition is constant work. A word that names an unregistered module suspends binding while the module
 loads and restarts it against a view that holds the module; any other miss
 fails at that word before the quotation has run.
 
@@ -748,12 +736,10 @@ never placed by address, so its hits do not depend on heap layout.
 Equal quotations from different roots are distinct values and never share an
 entry. A quotation built at run time, as `compose` builds one, is new every
 time, so it can never hit that cache; what repeats is its words. A short
-quotation, up to a constant number of forms so the step is bounded, therefore
-binds inline from the unit's explicit-lookup cache when every word it executes
-is there for the current publication and provenance. That is exactly what the
-full binder would compute, since an anonymous binding has no construction in
-progress; any miss sends it to the full binder, whose completion records the
-words it resolved. The bootstrap unit skips the cache because core's directory changes
+quotation, up to a constant number of forms, therefore binds in one bounded
+step when the unit has already resolved every word it executes in the same
+publication and provenance, which is what full binding would produce;
+otherwise it binds in full. The bootstrap unit skips the cache because core's directory changes
 without a publication. Nested quotations are not bound early for either reuse.
 
 ### An execution site correlates its contexts

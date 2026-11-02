@@ -400,27 +400,24 @@ test "concurrency: applying an escaped quotation races reload" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A quotation that escaped `racer` names the image it was written in, and
-    // an application from a spawned task has no home, so nothing pins that
-    // image while the words resolve. A concurrent `@defm` can
-    // therefore free the scope under the resolving worker.
+    // spawned tasks bind and apply it while a concurrent `@defm` replaces that
+    // image. The Session keeps the replaced image, so each task resolves the
+    // escaped words against it while the registry publishes the new one.
     //
-    // This test exists to catch that. It is named into the `concurrency:` tier
-    // so it actually runs under ThreadSanitizer and at eight workers — it was
-    // previously in neither, which is why an earlier "TSan is green" claim on
-    // this branch was not evidence about this path at all. The assertions are
-    // deliberately weak: failures stay inside the envelope and the runtime keeps progressing;
-    // TSan and the allocator are what should speak here.
+    // Named into the `concurrency:` tier so it runs under ThreadSanitizer and
+    // at eight workers. The assertions are deliberately weak: failures stay
+    // inside the envelope and the runtime keeps progressing; TSan and the
+    // allocator are what should speak here.
     try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `racer @defm racer.q `held set");
     try expectOk(&runtime, "[1] 24 take (pop [] ([] (held call) @attempt) @spawn) each " ++
         "[] ((2) `k def ((k)) `q def) `racer @defm " ++
         "(task.await) each pop");
 }
 
-// Stubs. Implemented by the patch each one names; see
-// gameplans/stamped-word-image-home.json. The `concurrency:` prefix is
-// load-bearing: the TSan and 8-worker tiers select on it.
+// The `concurrency:` prefix is load-bearing: the TSan and 8-worker tiers
+// select on it.
 
-test "concurrency: a resolver racing an image's last release never dereferences its scope" {
+test "concurrency: escaped quotations keep running old code across a concurrent reload" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -428,16 +425,11 @@ test "concurrency: a resolver racing an image's last release never dereferences 
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
-        // The quotation escapes its module, so its words are stamped against an
-        // image nothing holds. Tasks apply it while a reload drives that image
-        // to its last release underneath them.
-        //
-        // This is the test that separates this design from the one it replaced.
-        // Pinning at the *end* of resolution leaves the window open: the borrow
-        // reads the cell's scope, the last release frees the environment, and
-        // the walk is already inside it. Pinning at the borrow closes it, so
-        // every task either runs the old code or fails `'domain` -- never both
-        // and never neither.
+        // The quotation escapes its module, so its words are linked to the
+        // image it was written in. Tasks bind and apply it while a reload
+        // replaces that image; the Session keeps the replaced image, so every
+        // task runs the old code, and the allocator checks that nothing the
+        // reload published or retired leaks.
         try expectOk(
             &runtime,
             "[] ((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
@@ -452,7 +444,7 @@ test "concurrency: a resolver racing an image's last release never dereferences 
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
-test "concurrency: a resolver racing environment teardown resolves without a dereference" {
+test "concurrency: a reload that drops a word leaves escaped quotations running old code" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     const allocator = counting.allocator();
     {
@@ -460,10 +452,9 @@ test "concurrency: a resolver racing environment teardown resolves without a der
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
         defer runtime.deinit();
-        // Reload rather than removal, so the *old* image's environment tears
-        // down through the release domain while tasks are still applying a
-        // quotation stamped against it. The domain drives teardown indirectly,
-        // which is the only way the waiting state is reached.
+        // The reload drops `q`, while tasks are still applying a quotation
+        // written in the old image. The Session keeps that image, so its words
+        // still resolve there.
         try expectOk(
             &runtime,
             "[] ((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
