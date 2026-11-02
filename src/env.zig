@@ -272,6 +272,18 @@ pub const Definition = struct {
     const Reserved = struct {
         quotation: *value.ListHandle,
         bound: ?Bound = null,
+        /// The construction whose table the body's reserved targets index.
+        construction: Construction = .single,
+        /// How many of the staged body's targets sealing has resolved.
+        resolved: usize = 0,
+    };
+
+    /// The reservations a body's reserved targets can name. A definition
+    /// constructed alone can name only itself; a module group's members name
+    /// one another through the group's table.
+    const Construction = union(enum) {
+        single,
+        group: *const ReservationTable,
     };
 
     pub const Metadata = struct {
@@ -421,9 +433,9 @@ pub const Definition = struct {
 };
 
 /// A definition under construction: the only handle its construction owner
-/// holds until sealing. Binding may name it as a target, and it carries the
-/// definition's metadata, but it cannot be executed, published, or
-/// reflected, since none of those accept it. Sealing consumes it and returns
+/// holds until sealing. Binding names it by its index in its construction,
+/// and it carries the definition's metadata, but it cannot be executed,
+/// published, or reflected, since none of those accept it. Sealing consumes it and returns
 /// the `*Definition`; a construction that fails discards it instead.
 pub const Reservation = opaque {
     fn of(definition: *Definition) *Reservation {
@@ -447,6 +459,12 @@ pub const Reservation = opaque {
         return self.storageConst().body_state.reserved.quotation;
     }
 
+    /// Makes the reservation the member at `index` of a group construction,
+    /// whose bodies name it by that index.
+    pub fn join(self: *Reservation, table: *const ReservationTable) void {
+        self.storage().body_state.reserved.construction = .{ .group = table };
+    }
+
     /// Hands the reservation its bound body, replacing one staged by an
     /// earlier attempt. It owns the body until sealed or discarded.
     pub fn stage(self: *Reservation, releases: *heap.ReleaseDomain, bound: Bound) void {
@@ -454,17 +472,46 @@ pub const Reservation = opaque {
         const reserved = &definition.body_state.reserved;
         if (reserved.bound) |previous| previous.discard(releases, definition.allocator);
         reserved.bound = bound;
+        reserved.resolved = 0;
     }
 
-    /// Installs the staged body and returns the sealed definition, which then
-    /// holds the body's dependencies.
-    pub fn seal(self: *Reservation, releases: *heap.ReleaseDomain) *Definition {
+    /// Seals the staged body one target per step. A reserved target is an
+    /// index into this reservation's own construction, so it names a member
+    /// the same construction seals before anything can run the body; it is
+    /// resolved in place to that member's definition, which shares the
+    /// reservation's storage. Completes with the sealed definition, which
+    /// then holds the body's dependencies.
+    pub fn advanceSeal(self: *Reservation, releases: *heap.ReleaseDomain) poll.Progress(*Definition) {
+        const definition = self.storage();
+        const reserved = &definition.body_state.reserved;
+        const targets = reserved.bound.?.targets;
+        if (reserved.resolved < targets.len) {
+            const at = &targets[reserved.resolved];
+            reserved.resolved += 1;
+            switch (at.decode()) {
+                .none, .definition => {},
+                .reserved => |index| {
+                    const own = [1]*Reservation{self};
+                    const members: []const *Reservation = switch (reserved.construction) {
+                        .single => &own,
+                        .group => |table| table.items,
+                    };
+                    at.* = .of(.{ .definition = members[@backingInt(index)].storage() });
+                },
+            }
+            return .pending;
+        }
+        return .{ .complete = self.install(releases) };
+    }
+
+    /// Installs a staged body whose targets are all resolved.
+    fn install(self: *Reservation, releases: *heap.ReleaseDomain) *Definition {
         const definition = self.storage();
         const reserved = definition.body_state.reserved;
         const bound = reserved.bound.?;
         definition.dependencies = bound.dependencies;
-        // Every reservation a target slot names is sealed with this one, by
-        // the same construction, before anything can run the body.
+        // Every slot now holds a definition or nothing, with the same bits
+        // as the optional pointer the executable reads.
         const targets: []?*Definition = if (bound.targets.len == 0)
             &.{}
         else
@@ -491,7 +538,7 @@ pub const Reservation = opaque {
         };
         heap.incRef(body);
         self.stage(releases, .{ .code = body, .targets = &.{}, .dependencies = null });
-        return self.seal(releases);
+        return self.install(releases);
     }
 
     /// Releases a reservation that will never be sealed. Its owner held its
@@ -505,25 +552,59 @@ pub const Reservation = opaque {
     }
 };
 
-/// What binding resolved a word to.
-pub const Target = union(enum) {
-    definition: *Definition,
-    /// A definition of the construction in progress, sealed with the body
-    /// that names it.
-    reserved: *Reservation,
+/// A construction member's position in its construction's table.
+pub const ReservedIndex = enum(u32) {
+    _,
 
-    /// The target-table slot naming this target in a bound body.
-    pub fn slot(self: Target) *const Slot {
-        return switch (self) {
-            .definition => |definition| @ptrCast(definition),
-            .reserved => |reservation| @ptrCast(reservation),
-        };
+    pub fn of(index: usize) ReservedIndex {
+        return @fromBackingInt(@intCast(index));
     }
 };
 
-/// One entry of a bound body's target table: a target that is named but not
-/// yet callable, because its owner may still be under construction.
-pub const Slot = opaque {};
+/// The members of a module group construction, by index. Borrowed: the
+/// group's construction directory owns each reservation.
+pub const ReservationTable = struct {
+    items: []*Reservation = &.{},
+};
+
+/// What binding resolved a word to.
+pub const Target = union(enum) {
+    definition: *Definition,
+    /// A member of the construction in progress, sealed with the body that
+    /// names it. A definition constructed alone is member zero of its own.
+    reserved: ReservedIndex,
+};
+
+/// One entry of a construction body's target table: nothing, a sealed
+/// definition, or a member of the construction by index. It names no
+/// reservation directly, so a body can only name members of whichever
+/// construction seals it. A definition is stored as its pointer, so a
+/// resolved table has the bits of `[]?*Definition`.
+pub const Slot = enum(usize) {
+    none = 0,
+    _,
+
+    const reserved_tag: usize = 1;
+
+    pub fn of(target: Target) Slot {
+        return switch (target) {
+            .definition => |definition| @fromBackingInt(@intFromPtr(definition)),
+            .reserved => |index| @fromBackingInt((@as(usize, @backingInt(index)) << 1) | reserved_tag),
+        };
+    }
+
+    fn decode(self: Slot) union(enum) { none, definition: *Definition, reserved: ReservedIndex } {
+        const bits = @backingInt(self);
+        if (bits == 0) return .none;
+        if (bits & reserved_tag != 0) return .{ .reserved = @fromBackingInt(@intCast(bits >> 1)) };
+        return .{ .definition = @ptrFromInt(bits) };
+    }
+
+    comptime {
+        std.debug.assert(@alignOf(Definition) > reserved_tag);
+        std.debug.assert(@sizeOf(Slot) == @sizeOf(?*Definition));
+    }
+};
 
 /// A counted definition as a set key: its identity, never dereferenced
 /// through the key.
@@ -628,10 +709,10 @@ pub const Owner = union(enum) {
 /// A body binding produced and no owner has sealed yet: the retained code, its
 /// target table, and the table holding its dependencies. Discarding it is
 /// constant work.
-fn BodyIn(comptime TargetRef: type) type {
+fn BodyIn(comptime Element: type) type {
     return struct {
         code: *value.ListHandle,
-        targets: []?TargetRef,
+        targets: []Element,
         dependencies: ?*DependencyTable,
 
         pub fn discard(self: @This(), releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
@@ -642,16 +723,14 @@ fn BodyIn(comptime TargetRef: type) type {
     };
 }
 
-/// A body bound for a construction. Its targets are slots, which name but
-/// cannot call, because a slot may name a reservation of that construction;
-/// only `Reservation.stage` accepts it, and only sealing the construction
-/// turns its slots into callable targets.
-pub const Bound = BodyIn(*const Slot);
+/// A body bound for a construction. Its targets are slots, which name members
+/// of the construction by index; only `Reservation.stage` accepts it, and
+/// only sealing resolves its slots into callable targets.
+pub const Bound = BodyIn(Slot);
 
 /// A body bound for an anonymous application. No construction is in progress
-/// for it, so every target is a sealed definition, and nothing here can name
-/// a reservation.
-pub const AnonymousBody = BodyIn(*Definition);
+/// for it, so every target is a sealed definition.
+pub const AnonymousBody = BodyIn(?*Definition);
 
 /// A sealed quotation, minted only by sealing. Its code keeps the literals and
 /// source provenance; the target table gives each top-level unquoted word the
@@ -787,9 +866,15 @@ pub const NameMap = poll.FixedMap(intern.BindingName, Entry);
 /// owner reads this directory; sealing builds the published `NameMap` from
 /// it, so a published directory never holds a reservation.
 pub const GroupEntry = union(enum) {
-    reserved: *Reservation,
+    reserved: Member,
     definition: *Definition,
     alias: Alias,
+};
+
+/// A reservation of a module group with its index in the group's table.
+pub const Member = struct {
+    reservation: *Reservation,
+    index: ReservedIndex,
 };
 
 /// A module group's construction directory.

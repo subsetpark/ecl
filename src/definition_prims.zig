@@ -146,6 +146,12 @@ const DefineDriver = struct {
             context: heap.Owned(binder.Context),
             cursor: heap.Owned(binder.BindingCursor),
         },
+        /// The bound body staged on the reservation, sealing one target per
+        /// step.
+        sealing: struct {
+            binding_name: intern.BindingName,
+            reservation: *env.Reservation,
+        },
         publishing_session: heap.Owned(modules.Registry.DefineCursor),
         publishing_test: modules.TestDeclarationCursor,
         /// Ownership has passed to the directory.
@@ -177,6 +183,7 @@ const DefineDriver = struct {
                     binding.context.deinit(releases, allocator);
                     binding.reservation.discard(releases);
                 },
+                .sealing => |sealing| sealing.reservation.discard(releases),
                 .publishing_session => |*cursor| cursor.deinit(releases, allocator),
                 .validate_name, .source, .publishing_test, .published => {},
             }
@@ -461,7 +468,6 @@ const DefineDriver = struct {
                 context.self_reference = .{
                     .root = if (root == .session) evaluator.environment.sessionScopeId() else evaluator.environment.coreScopeId(),
                     .name = intern.bindingId(publication.binding_name),
-                    .reservation = reservation,
                 };
                 const cursor = binder.BindingCursor.init(
                     evaluator.allocator,
@@ -492,29 +498,7 @@ const DefineDriver = struct {
                         binding.cursor.deinit(evaluator.releases, evaluator.allocator);
                         binding.context.deinit(evaluator.releases, evaluator.allocator);
                         reservation.stage(evaluator.releases, bound);
-                        const definition = reservation.seal(evaluator.releases);
-                        switch (self.scope.storage) {
-                            .session => {
-                                // The registry cursor takes the definition's
-                                // first reference.
-                                self.state.borrowMut().* = .{ .publishing_session = .init(
-                                    evaluator.inherited.registry.defineCursor(name, .{ .definition = definition }),
-                                ) };
-                            },
-                            .core_build => |publisher| {
-                                self.state.borrowMut().* = .published;
-                                publisher.publish(name, definition) catch |err| {
-                                    definition.retireStatic(evaluator.releases);
-                                    return switch (err) {
-                                        error.OutOfMemory => error.OutOfMemory,
-                                        error.Frozen => evaluator.fail(.domain, "core is sealed"),
-                                        error.Duplicate => evaluator.fail(.domain, "a core name is defined once"),
-                                    };
-                                };
-                                return .completed;
-                            },
-                            .module_root => unreachable,
-                        }
+                        self.state.borrowMut().* = .{ .sealing = .{ .binding_name = name, .reservation = reservation } };
                     },
                     .failed => |failure| {
                         const code = binding.cursor.borrow().code;
@@ -522,6 +506,31 @@ const DefineDriver = struct {
                         return self.bindingMiss(evaluator, code, failure.index, word, failure.miss);
                     },
                 }
+            },
+            .sealing => |sealing| switch (sealing.reservation.advanceSeal(evaluator.releases)) {
+                .pending => _ = work.spend(),
+                .complete => |definition| switch (self.scope.storage) {
+                    .session => {
+                        // The registry cursor takes the definition's first
+                        // reference.
+                        self.state.borrowMut().* = .{ .publishing_session = .init(
+                            evaluator.inherited.registry.defineCursor(sealing.binding_name, .{ .definition = definition }),
+                        ) };
+                    },
+                    .core_build => |publisher| {
+                        self.state.borrowMut().* = .published;
+                        publisher.publish(sealing.binding_name, definition) catch |err| {
+                            definition.retireStatic(evaluator.releases);
+                            return switch (err) {
+                                error.OutOfMemory => error.OutOfMemory,
+                                error.Frozen => evaluator.fail(.domain, "core is sealed"),
+                                error.Duplicate => evaluator.fail(.domain, "a core name is defined once"),
+                            };
+                        };
+                        return .completed;
+                    },
+                    .module_root => unreachable,
+                },
             },
             .publishing_session => |*cursor| switch (try cursor.borrowMut().advance()) {
                 .pending => _ = work.spend(),

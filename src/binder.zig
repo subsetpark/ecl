@@ -35,7 +35,6 @@ pub const Group = struct {
 pub const SelfReference = struct {
     root: env.ScopeId,
     name: u32,
-    reservation: *env.Reservation,
 };
 
 /// Everything a resolution reads besides the word: the captured view, how to
@@ -255,7 +254,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
             const binding: intern.BindingName = @fromBackingInt(self.name);
             if (mode == .binding) if (context.self_reference) |reference| {
                 if (reference.name == self.name and self.writtenIn(context, reference.root))
-                    return self.finish(.{ .resolved = .{ .reserved = reference.reservation } });
+                    return self.finish(.{ .resolved = .{ .reserved = .of(0) } });
             };
             switch (self.root) {
                 .retired => return self.miss(.retired),
@@ -317,10 +316,10 @@ pub fn ResolverIn(comptime mode: Mode) type {
         fn followGroup(self: *Self, context: *const Context, entry: env.GroupEntry, require_public: bool) Progress {
             comptime std.debug.assert(mode == .binding);
             switch (entry) {
-                .reserved => |reservation| {
-                    if (require_public and reservation.visibility() != .public)
+                .reserved => |member| {
+                    if (require_public and member.reservation.visibility() != .public)
                         return self.miss(.{ .unresolved = .qualified });
-                    return self.finish(.{ .resolved = .{ .reserved = reservation } });
+                    return self.finish(.{ .resolved = .{ .reserved = member.index } });
                 },
                 .definition => |definition| return self.follow(context, .{ .definition = definition }, require_public),
                 .alias => |alias| return self.followAlias(context, alias, require_public),
@@ -564,9 +563,13 @@ pub const AnonymousBindingCursor = BindingCursorIn(.lookup);
 pub fn BindingCursorIn(comptime mode: Mode) type {
     return struct {
         const Self = @This();
-        const TargetRef = switch (mode) {
-            .lookup => *env.Definition,
-            .binding => *const env.Slot,
+        const Element = switch (mode) {
+            .lookup => ?*env.Definition,
+            .binding => env.Slot,
+        };
+        const no_target: Element = switch (mode) {
+            .lookup => null,
+            .binding => .none,
         };
         pub const Body = switch (mode) {
             .lookup => env.AnonymousBody,
@@ -576,7 +579,7 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
         releases: *heap.ReleaseDomain,
         /// Retained by the cursor until the bound body takes it.
         code: *value.ListHandle,
-        targets: []?TargetRef,
+        targets: []Element,
         index: u32 = 0,
         any_target: bool = false,
         step: Step = .walk,
@@ -619,8 +622,8 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
             code: *value.ListHandle,
         ) error{OutOfMemory}!Self {
             const length: usize = @intCast(code.length());
-            const targets: []?TargetRef = if (code.kind() == .generic_spine and length != 0)
-                try allocator.alloc(?TargetRef, length)
+            const targets: []Element = if (code.kind() == .generic_spine and length != 0)
+                try allocator.alloc(Element, length)
             else
                 &.{};
             heap.incRef(code);
@@ -655,7 +658,7 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
             };
             self.targets[self.index] = switch (mode) {
                 .lookup => target,
-                .binding => target.slot(),
+                .binding => .of(target),
             };
             self.index += 1;
             const counted = definition orelse return;
@@ -719,7 +722,7 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
                             self.step = .{ .resolve = ResolverIn(mode).init(context, word) };
                             continue;
                         }
-                        self.targets[self.index] = null;
+                        self.targets[self.index] = no_target;
                         self.index += 1;
                         continue;
                     }
@@ -729,7 +732,7 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
                         self.step = .{ .collect = seen.rawEntries() };
                         continue;
                     }
-                    const targets: []?TargetRef = if (self.any_target) self.targets else empty: {
+                    const targets: []Element = if (self.any_target) self.targets else empty: {
                         if (self.targets.len != 0) self.allocator.free(self.targets);
                         break :empty &.{};
                     };

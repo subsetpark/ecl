@@ -471,6 +471,13 @@ const ModuleImage = struct {
     /// the slots before `group_sealed` have moved.
     group: ?env.GroupMap = null,
     group_sealed: usize = 0,
+    /// How many reservations the group has staged; each is the member at
+    /// its staging position.
+    member_count: usize = 0,
+    /// The group's members by index, filled as the group directory is
+    /// built, for sealing to resolve the bodies' reserved targets. Freed with
+    /// the construction directory.
+    members: env.ReservationTable = .{},
     /// The sealed directory; null until the group is sealed.
     names: ?env.NameMap = null,
     scope: env.Scope,
@@ -550,6 +557,12 @@ const ModuleImage = struct {
         std.debug.assert(self.group == null and self.names == null);
         try self.staging.push(.{ .name = name, .entry = entry });
         self.staged_count += 1;
+        if (entry == .reserved) self.member_count += 1;
+    }
+
+    fn freeMembers(self: *ModuleImage) void {
+        if (self.members.items.len != 0) self.allocator.free(self.members.items);
+        self.members = .{};
     }
 
     /// Whether a word written in this image may resolve against its
@@ -596,6 +609,7 @@ const ModuleImage = struct {
                     group.deinit();
                     self.group = null;
                 }
+                self.freeMembers();
                 if (self.names) |*names| {
                     self.retirement_state = .{ .names = names.rawEntries() };
                     return false;
@@ -634,7 +648,7 @@ const ModuleImage = struct {
 
     fn retireGroupEntry(entry: env.GroupEntry, releases: *heap.ReleaseDomain) void {
         switch (entry) {
-            .reserved => |reservation| reservation.discard(releases),
+            .reserved => |member| member.reservation.discard(releases),
             .definition => |definition| definition.retireStatic(releases),
             .alias => {},
         }
@@ -1408,15 +1422,18 @@ pub const OwnedImage = enum(usize) {
         const origin: env.BindingOrigin = .{ .module_local = .{ .trace_word = name } };
         const handle: *anyopaque = @ptrCast(image);
         const created: env.GroupEntry = switch (publication) {
-            .word => |word| .{ .reserved = try env.Definition.reserve(image.allocator, .static, env.quotationHeader(word.body), .{
-                .visibility = word.visibility,
-                .origin = origin,
-                .effect = word.effect,
-                .doc = word.doc,
-                .source = word.source,
-                .root = .image,
-                .home = handle,
-            }) },
+            .word => |word| .{ .reserved = .{
+                .reservation = try env.Definition.reserve(image.allocator, .static, env.quotationHeader(word.body), .{
+                    .visibility = word.visibility,
+                    .origin = origin,
+                    .effect = word.effect,
+                    .doc = word.doc,
+                    .source = word.source,
+                    .root = .image,
+                    .home = handle,
+                }),
+                .index = .of(image.member_count),
+            } },
             .native => |native| .{ .definition = try env.Definition.create(image.allocator, .static, .{ .native = native.callable }, .{
                 .visibility = native.visibility,
                 .origin = origin,
@@ -1548,7 +1565,11 @@ pub const GroupCursor = struct {
     pub fn advance(self: *GroupCursor) Error!poll.Progress(void) {
         const image = self.image;
         if (image.group == null) {
-            if (self.init == null) self.init = env.GroupMap.initCursor(image.allocator, image.staged_count);
+            if (self.init == null) {
+                if (image.member_count != 0 and image.members.items.len == 0)
+                    image.members = .{ .items = try image.allocator.alloc(*env.Reservation, image.member_count) };
+                self.init = env.GroupMap.initCursor(image.allocator, image.staged_count);
+            }
             const cursor = &self.init.?;
             switch (try cursor.advance()) {
                 .pending => {},
@@ -1576,6 +1597,11 @@ pub const GroupCursor = struct {
                         ModuleImage.retireGroupEntry(staged.entry, image.releases);
                         self.duplicate = staged.name;
                         return error.Duplicate;
+                    }
+                    if (staged.entry == .reserved) {
+                        const member = staged.entry.reserved;
+                        image.members.items[@backingInt(member.index)] = member.reservation;
+                        member.reservation.join(&image.members);
                     }
                     self.put = image.group.?.putCursor(staged.name, staged.entry);
                 },
@@ -1636,6 +1662,7 @@ pub const SealCursor = struct {
             group.deinit();
             image.group = null;
             image.group_sealed = 0;
+            image.freeMembers();
             return .complete;
         }
         const slot = group.slotEntry(image.group_sealed) orelse {
@@ -1643,10 +1670,16 @@ pub const SealCursor = struct {
             return .pending;
         };
         const published: env.Entry = switch (slot.value) {
-            .reserved => |reservation| .{ .definition = switch (self.mode) {
-                .bound => reservation.seal(image.releases),
-                .literal => try reservation.sealLiteral(image.releases),
-            } },
+            .reserved => |member| .{
+                .definition = switch (self.mode) {
+                    // One target per step; the slot moves once it is sealed.
+                    .bound => switch (member.reservation.advanceSeal(image.releases)) {
+                        .pending => return .pending,
+                        .complete => |definition| definition,
+                    },
+                    .literal => try member.reservation.sealLiteral(image.releases),
+                },
+            },
             .definition => |definition| .{ .definition = definition },
             .alias => |alias| .{ .alias = alias },
         };

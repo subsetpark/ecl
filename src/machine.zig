@@ -8404,15 +8404,15 @@ const ModuleSealDriver = struct {
                 switch (bind.entries.advance()) {
                     .pending => {},
                     .item => |entry| switch (entry.value) {
-                        .reserved => |reservation| {
+                        .reserved => |member| {
                             // Built before assignment: assigning `try` in place
                             // would mark `current` present before a failure.
                             const cursor = try binder.BindingCursor.init(
                                 evaluator.allocator,
                                 evaluator.releases,
-                                reservation.quotation(),
+                                member.reservation.quotation(),
                             );
-                            bind.current = .{ .reservation = reservation, .cursor = cursor };
+                            bind.current = .{ .reservation = member.reservation, .cursor = cursor };
                         },
                         .definition, .alias => {},
                     },
