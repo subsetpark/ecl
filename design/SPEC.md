@@ -1628,7 +1628,7 @@ that name.
 
 ##### Action
 
-> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action. Selection happens when the code holding the qualified word is bound, so bound code keeps the image it selected; selection afterward observes only the replacement. Explicit lookup performs a fresh selection each time it runs.
+> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. Explicit lookup performs the same fresh selection each time it runs.
 
 **`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
 
@@ -1642,7 +1642,7 @@ that name.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so code bound to it and words written in it keep their meaning.
+> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so words written in it keep their meaning.
 
 `Call`.
 
@@ -1909,9 +1909,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   Splicing or rearranging quotations preserves the roots of their existing
   word occurrences. A word the implementation builds for itself carries no
   root and resolves in core. Re-registering a module publishes a new image
-  under the module name, so code bound afterwards runs the new code. Bound
-  code is not re-pointed, and words written in the old image go on resolving
-  there. Seed values passed to unit constructors are not part
+  under the module name, so a qualified word reached afterwards runs the new
+  code, in code defined earlier too. Words written in the old image go on
+  resolving there. Seed values passed to unit constructors are not part
   of the construction body. Runtime-built captures retain their existing
   word scopes.
 - `@defm` is parameterized by the seed operand — ``values (body) `name @defm`` —
@@ -1964,8 +1964,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   word lives in a task and is reached through its mailbox (see
   [Mailboxes](#mailboxes)).
 - **Every published generation lasts the Session.** Reload publishes a new
-  generation under the name; code bound to the old one, and words written in
-  it, keep their meaning. Memory therefore grows with reload history within a
+  generation under the name; words written in the old one keep resolving
+  there. Memory therefore grows with reload history within a
   Session; how soon an unreachable generation is reclaimed is not part of the
   language.
 - Failed registration changes nothing: the previous generation, if any,
@@ -1986,7 +1986,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   definition `m.x` selects then, so an import never captures the definition it
   validated, and reflection reports that definition's metadata. A public
   import in a module re-exports the alias, which chains: `a.x` names `m.x`.
-  Aliases that never reach a definition are `` `domain `` when bound.
+  Aliases that never reach a definition are `` `domain `` when reached or
+  validated.
   At top level, naming a binding that already exists replaces only that
   binding; in a module body an imported name, like a defined one, may be
   introduced once. Importing selected names never splices an entire module.
@@ -1996,7 +1997,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   import. `qualify` validates a module-name symbol, which may be `` `core ``,
   and an unqualified binding-name symbol and constructs the corresponding
   executable word; `execute` resolves that word when it runs, in the root the
-  symbol carries, and invokes it as bound code would, preserving its module
+  symbol carries, and invokes it as dispatch would, preserving its module
   home, private lookup, annotations, tracing, native/builtin path, and
   cancellation. `alias` registers a short registry name; aliases and module
   names may not collide in either direction. `which` shows any name's

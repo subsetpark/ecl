@@ -376,7 +376,7 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Bind a pri
 `( sequence -- bool )` — Return 1 when a sequence has no elements and 0 otherwise.
 
 ### execute
-`( word -- ... )` — Resolve a symbol now, in the root it was written in, and invoke what it names as bound code would. Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes, private resolution, annotations, tracing, builtins, native calls, and cancellation are preserved.
+`( word -- ... )` — Resolve a symbol now, in the root it was written in, and invoke what it names as dispatch would. Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes, private resolution, annotations, tracing, builtins, native calls, and cancellation are preserved.
 
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status.
@@ -477,7 +477,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
 
 ### import
-`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: code bound afterwards, and explicit lookups, follow it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once.
+`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: every dispatch and explicit lookup follows it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once.
 
 ### importp
 `( module-name q -- )` — `import`, publishing each alias as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body under construction; elsewhere it is `` `domain ``.

@@ -1545,10 +1545,9 @@ pub const IsolatedApplication = struct {
     }
 };
 
-/// What this unit's unbound code has resolved each word to, all in one
-/// publication: a word in top-level source or in a quotation applied at run
-/// time resolves when it is reached, and reaching it again in the same
-/// publication reuses that resolution. Any publication in the Session
+/// What this unit's code has resolved each word to, all in one
+/// publication: every word resolves when it is reached, and reaching it again
+/// in the same publication reuses that resolution. Any publication in the Session
 /// invalidates every entry, so a redefinition reaches the next dispatch of
 /// the word. An entry holds a counted definition, so a definition handed out
 /// here outlives the invocation that retains it.
@@ -2518,7 +2517,7 @@ pub const Unit = struct {
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    /// What this unit's unbound code resolved its words to.
+    /// What this unit's code resolved its words to.
     resolutions: WordResolutions = .{},
     max_frames: usize = 0,
     entry_base: usize,

@@ -58,7 +58,7 @@ The main components are these:
 | Session | Lifetime root, persistent operand stack, host services, and unit transaction | `session.zig` |
 | Reader and source archive | Turn source into executable values while retaining optional diagnostic lineage | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
-| Names and modules | Construction-time binding, immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
+| Names and modules | Resolution at dispatch, validated and immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
 | Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
@@ -1196,7 +1196,10 @@ primitive unchanged and pays nothing. A phrase entry is the only change a new
 phrase needs, and a head that is not a kernel word fails to compile. A
 primitive reached other than as the word being dispatched declines. The following words
 are checked where the phrase runs, against the current definitions, so a user
-definition of `sum` takes effect for the phrase and it then runs as written. A word reached other than
+definition of `sum` takes effect for the phrase and it then runs as written. The
+phrase consumes those words instead of dispatching them, so it records what
+they resolve to as dispatch would, and a phrase on every iteration costs one
+probe per word. A word reached other than
 from a source position, a phrase split across a definition, or a shape the fold
 cannot take runs the words as written. A fault inside the phrase is reported as the last following word's
 own recognition reports it.

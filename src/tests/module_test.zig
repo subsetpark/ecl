@@ -385,7 +385,7 @@ test "session: public definition mutation settles retirement every turn" {
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
         defer runtime.deinit();
-        // A replaced top-level definition no bound code holds is reclaimed,
+        // A replaced top-level definition nothing still holds is reclaimed,
         // so redefining one name settles to bounded live memory.
         try expectChurnBounded(&runtime, &counting, 1024);
         try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
