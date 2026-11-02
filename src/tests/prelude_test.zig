@@ -7,7 +7,6 @@ const modules = @import("../modules.zig");
 const spans = @import("../spans.zig");
 const intern = @import("../intern.zig");
 const heap = @import("../heap.zig");
-const list = @import("../list.zig");
 
 test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{
@@ -214,13 +213,13 @@ fn expectInvalidPrelude(source: []const u8) !void {
         "invalid-prelude.ecl",
         source,
     ));
-    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
-    defer heap.hostDomain(host.cleanup()).releaseValue(body);
-    try building.installCore(
-        try intern.internNamespace("still-writable"),
-        env.quotation(body.list).?,
-    );
+    // A failed prelude leaves core unfrozen: it still accepts a definition.
+    const definition = try env.Definition.create(allocator, .static, .{ .builtin = stillWritable }, .{ .root = .core });
+    var scope = building.rootScope(allocator);
+    try scope.storage.core_build.publish(try intern.internNamespace("still-writable"), definition);
 }
+
+fn stillWritable(_: *@import("../machine.zig").Unit) @import("../machine.zig").MachineError!void {}
 
 test "bootstrap rejects malformed failing and unbalanced source" {
     try expectInvalidPrelude("(");

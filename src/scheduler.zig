@@ -1978,9 +1978,6 @@ pub const WorkerScheduler = enum(usize) {
         // the generation pin below keeps alive. It may not define there.
         unit.execution_scope = parent_scope;
         unit.root_defining = false;
-        // It also keeps the bindings that exist now, whatever its spawner
-        // defines later.
-        unit.binding_pin = try unit.environment.bindingDomain().pinBindings();
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;
@@ -1992,7 +1989,7 @@ pub const WorkerScheduler = enum(usize) {
                 unit.executeRootAtModule(generation);
             },
         }
-        try machine.initialize(unit, request.quotation, request.initial_stack);
+        try machine.initializeApplication(unit, request.quotation, request.initial_stack);
         // Attach the moved resources to the child's scope while the scope is
         // still private: nothing can reach it, so a failure here unwinds by
         // dropping the new memberships and the originals never moved.

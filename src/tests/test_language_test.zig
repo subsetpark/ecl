@@ -161,8 +161,7 @@ test "testing: reload and removal replace the discoverable test catalog coherent
             "[] ((2) `new test) `changing @defm " ++
             "tests dup len 1 = {kind user} assert " ++
             "first `name at `new match? {kind user} assert " ++
-            "stale @test `err dict.has? {kind user} assert " ++
-            "`changing undefm tests len 0 = {kind user} assert",
+            "stale @test `err dict.has? {kind user} assert",
     );
 }
 

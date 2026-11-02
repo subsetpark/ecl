@@ -442,8 +442,25 @@ pub const direct_names = blk: {
 
 /// Decides one trusted definition's direct entry when its environment
 /// freezes, against bindings that can no longer change.
-pub fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Quotation) ?env.DirectIdiom {
-    const phrase: Value = .{ .list = env.quotationHeader(body) };
+/// Name resolution against directories that can no longer change: a sealing
+/// group's own, then core. It admits only words written in that group's image
+/// or in core, as a word in one of its definitions resolves.
+pub const FrozenLookup = struct {
+    context: *const anyopaque,
+    resolve_fn: *const fn (*const anyopaque, value.Symbol) ?FrozenHit,
+
+    pub fn resolve(self: FrozenLookup, word: value.Symbol) ?FrozenHit {
+        return self.resolve_fn(self.context, word);
+    }
+};
+
+pub const FrozenHit = struct {
+    definition: *const env.Definition,
+    in_core: bool,
+};
+
+pub fn recognizeTrusted(lookup: FrozenLookup, name: []const u8, definition: *const env.Definition) ?env.DirectIdiom {
+    const phrase: Value = .{ .list = definition.code().source.code() };
     for (registry, 0..) |entry, index| {
         if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
         if (entry.following.len != 0) continue;
@@ -462,7 +479,7 @@ pub fn recognizeTrusted(lookup: env.FrozenLookup, name: []const u8, body: *env.Q
 /// once, when a trusted definition is recognized; or where the phrase runs,
 /// when a quotation is offered.
 const WordGuard = union(enum) {
-    frozen: env.FrozenLookup,
+    frozen: FrozenLookup,
     live: *Unit,
 
     fn matches(
@@ -496,19 +513,7 @@ const LiveWord = struct {
 /// hold is resolved in full. Either way it must be the trusted binding
 /// expected, from a slot on core or the running root.
 fn followingWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind) error{OutOfMemory}!?LiveWord {
-    if (!plainWord(word.slot)) return null;
-    const cached = try evaluator.cachedResolution(word) orelse return liveWord(evaluator, word, binding, null);
-    if (cached.origin != .core and cached.origin != .standard_library) return null;
-    const spec = cached.spec;
-    switch (binding) {
-        .builtin => if (spec.binding != .builtin) return null,
-        .source => if (spec.binding != .word) return null,
-    }
-    return .{
-        .trace_word = cached.trace_word,
-        .idiom = spec.direct_idiom,
-        .body = if (spec.binding == .word) env.quotationHeader(spec.binding.word) else null,
-    };
+    return liveWord(evaluator, word, binding, null);
 }
 
 /// Resolves `word` where the phrase runs and returns it only when it is the
@@ -518,20 +523,18 @@ fn followingWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind) err
 /// matched it, so what it returns stays valid for the call.
 fn liveWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
     if (!plainWord(word.slot)) return null;
-    // SAFETY: read only after `peekSlotWord` returns true, which initializes it.
-    var resolved: machine.Resolution = undefined;
-    if (!evaluator.peekSlotWord(word, &resolved)) return null;
-    defer resolved.deinit(evaluator.allocator);
+    const resolved = evaluator.peekWord(word) orelse return null;
     if (resolved.origin != .core and resolved.origin != .standard_library) return null;
-    const spec = resolved.lease.spec();
+    const definition = resolved.definition;
+    const code = definition.code();
     switch (binding) {
-        .builtin => if (spec.binding != .builtin or (primitive != null and spec.binding.builtin != primitive.?)) return null,
-        .source => if (spec.binding != .word) return null,
+        .builtin => if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null,
+        .source => if (code != .source) return null,
     }
     return .{
         .trace_word = resolved.trace_word,
-        .idiom = spec.direct_idiom,
-        .body = if (spec.binding == .word) env.quotationHeader(spec.binding.word) else null,
+        .idiom = definition.direct_idiom,
+        .body = if (code == .source) code.source.code() else null,
     };
 }
 
@@ -592,19 +595,19 @@ fn matchAtoms(
 /// The binding guard, decided once. A trusted word may resolve in the frozen
 /// environment or core; a candidate-module word only in the frozen image.
 fn frozenBindingMatches(
-    lookup: env.FrozenLookup,
+    lookup: FrozenLookup,
     word: value.Symbol,
     binding: BindingKind,
     primitive: ?env.PrimitiveImpl,
     origin: ExpectedOrigin,
 ) bool {
-    if (!lookup.admits(word.slot)) return false;
-    var hit = lookup.resolve(word.slot, word.name) orelse return false;
-    defer hit.lease.deinit();
+    const hit = lookup.resolve(word) orelse return false;
+    const definition = hit.definition;
+    const code = definition.code();
     const binding_matches = switch (binding) {
-        .builtin => hit.lease.spec().binding == .builtin and
-            (primitive == null or hit.lease.spec().binding.builtin == primitive.?),
-        .source => hit.lease.spec().binding == .word,
+        .builtin => code == .builtin and
+            (primitive == null or code.builtin == primitive.?),
+        .source => code == .source,
     };
     const origin_matches = switch (origin) {
         .trusted => true,

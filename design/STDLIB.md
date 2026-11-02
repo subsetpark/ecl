@@ -376,7 +376,7 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Bind a pri
 `( sequence -- bool )` — Return 1 when a sequence has no elements and 0 otherwise.
 
 ### execute
-`( word -- ... )` — Resolve and apply a symbol late through the ordinary word-dispatch path, exactly as if that symbol appeared in executable position. Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes, private resolution, annotations, tracing, builtins, native calls, and cancellation are preserved.
+`( word -- ... )` — Resolve a symbol now, in the root it was written in, and invoke what it names as bound code would. Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes, private resolution, annotations, tracing, builtins, native calls, and cancellation are preserved.
 
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status.
@@ -477,10 +477,10 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
 
 ### import
-`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported binding dispatches through the module, preserves the original's effect and documentation, and may replace an existing local binding. `see` renders a forwarding binding as its one-word quotation, and a directly bound standard-library builtin as `<primitive>`.
+`( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: code bound afterwards, and explicit lookups, follow it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once.
 
 ### importp
-`( module-name q -- )` — `import`, publishing each forwarding binding as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body; elsewhere it is `` `domain ``.
+`( module-name q -- )` — `import`, publishing each alias as a private module word: the importing module's words use it, but it is not part of that module's public surface. Legal only inside a module body under construction; elsewhere it is `` `domain ``.
 
 ### in?
 `( value list -- bool )` — Membership. Pervades over the sought value — the left operand, never the list — down to its atoms; each atom is then tested by whole-value `match?` against the list's top-level elements, so the result takes the sought value's shape: `[2 5] [1 2 3] in?` is `[1 0]`. The list is only ever read one level deep, and a list operand is decomposed before any comparison, so `in?` cannot ask whether a sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, the results of two atom searches. Use `([1 1] match?) any?` for that.
@@ -797,12 +797,6 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Declare a 
 # => list
 ```
 
-### undef
-`( name -- )` — Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `unset`; removing a local shadow may reveal a parent or core binding.
-
-### undefm
-`( module-name -- )` — Remove the module currently registered under a canonical name or unqualified alias, resolved exactly as ordinary registry lookup resolves it. An unregistered name is `` `undefined-word ``. Removal strips every alias targeting the module in the same publish; an already-dispatched call finishes under the generation it resolved. See [Modules](SPEC.md#modules).
-
 ### unfold
 `( state predicate step -- state list )` — *Isolated*. Before every step, apply the predicate under contract `( state -- bool )`. When it returns 0, return the current state and all generated items. When it returns 1, apply the step under contract `( state -- state item )`, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`.
 
@@ -815,9 +809,6 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Declare a 
 
 ### unless
 `( bool else -- ... )` — *Inline.* Call the quotation when the condition is the boolean 0; otherwise do nothing.
-
-### unset
-`( name -- )` — Remove a direct binding from the current scope, or do nothing when that scope does not bind the name. An exact alias of `undef`; removing a local shadow may reveal a parent or core binding. Defined in ecl.
 
 ### update
 `( collection selector quotation -- collection )` — Apply an isolated `( value -- value )` quotation at the selected positions. A list collection's selector pervades with the same nested shape as `at` and is processed left to right, so repeated indices observe earlier updates. A dictionary selector is one whole-value key. The entire selector is validated before the quotation is first applied; an empty selector returns the list unchanged without applying it.

@@ -368,7 +368,7 @@ test "concurrency: a large seeded construction cannot starve a peer task" {
         &runtime,
         "[] (70000 range (69999 (pop) times) @attempt pop " ++
             "70000 range (69999 (pop) times) ((1) `x defp ( -- n ) (x) `go def) " ++
-            "`starve @defm starve.go) @spawn " ++
+            "`starve @defm `starve.go execute) @spawn " ++
             "[] (7) @spawn pair task.await-any pop",
     );
     var actual = try display(&runtime);

@@ -93,8 +93,10 @@ test "loader: map validation and snapshot construction clean up every allocation
         fn run(allocator: std.mem.Allocator, filename: []const u8, cwd: []const u8) !void {
             var owner = @import("../heap.zig").HostOwner.init(allocator);
             defer owner.cleanup().drain();
+            var main = try @import("../modules.zig").Registry.init(owner.cleanup());
+            defer main.deinit();
             const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true);
-            const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), map, cwd) catch |err| {
+            const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), &main, map, cwd) catch |err| {
                 map.deinit();
                 return err;
             };
@@ -146,12 +148,12 @@ test "loader: private modules belong to their defining file independent of load 
             "{path \"other.ecl\" kind ecl exports [\"root.other\"]}]}}}";
         try writeInput(&fixture, "ecl.modules", map);
         try writeInput(&fixture, "foo.ecl", "[] ((99) `answer def) `root.foo.hidden @defm\n" ++
-            "[] ((baz.answer) `answer def (call) `apply def " ++
+            "[] (((baz.answer)) `answer def (call) `apply def " ++
             "(root.foo.hidden.answer) `own def) `root.foo @defm\n");
         try writeInput(&fixture, "bar.ecl", "[] ((42) `answer def) `baz @defm\n" ++
             "[] (`baz (answer) import " ++
             "((baz.answer)) `quoted def " ++
-            "(root.foo.answer) `foreign def " ++
+            "((root.foo.answer)) `foreign def " ++
             "([] ((9) `answer def) `baz @defm) `replace def) `root.bar @defm\n");
         try writeInput(&fixture, "other.ecl", "[] ((7) `answer def) `baz @defm\n" ++
             "[] ((baz.answer) `answer def) `root.other @defm\n");
@@ -173,12 +175,14 @@ test "loader: private modules belong to their defining file independent of load 
         defer runtime.deinit();
 
         if (bar_first) try expectOk(&runtime, "root.bar.answer pop");
-        try expectErrorContains(&runtime, "root.foo.answer", &.{"not exported by the active module map"});
+        // A file's private module and an export it has no edge to stay
+        // invisible to quotations written in another file, wherever they run.
+        try expectErrorContains(&runtime, "root.foo.answer call", &.{"not exported by the active module map"});
         try expectOk(&runtime, "root.bar.answer root.other.answer root.bar.quoted root.foo.apply");
         try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
         try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
         try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[2].int);
-        try expectErrorContains(&runtime, "root.bar.foreign", &.{"not exported by the active module map"});
+        try expectErrorContains(&runtime, "root.bar.foreign call call", &.{"not exported by the active module map"});
         try expectErrorContains(&runtime, "baz.answer", &.{"not exported by the active module map"});
         try expectErrorContains(&runtime, "`baz (answer) import", &.{"not exported by the active module map"});
         try expectErrorContains(&runtime, "root.foo.hidden.answer", &.{"not exported by the active module map"});
@@ -269,7 +273,7 @@ test "scope: @attempt refuses definitions and imports" {
     defer runtime.deinit();
     try expectErrorContains(&runtime, "[] (1 `k set) @attempt `err at raise", &.{ "kind domain", "word def" });
     try expectOk(&runtime, "[] (7 `x set) `m @defm");
-    try expectErrorContains(&runtime, "[] (`m (x) import x) @attempt `err at raise", &.{ "kind domain", "word import" });
+    try expectErrorContains(&runtime, "[] (`m (x) import) @attempt `err at raise", &.{ "kind domain", "word import" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
@@ -289,32 +293,11 @@ test "module: privacy module-body contract top-level private and qualified trace
     // A body that leaves a value behind is refused and registers nothing.
     try expectErrorContains(&runtime, "[] (1) `bad @defm", &.{ "kind domain", "left 1 value" });
     try expectErrorContains(&runtime, "bad.x", &.{"kind undefined-word"});
-    try expectOk(&runtime, "[] (( -- n ) (missing) `boom def) `trace-module @defm");
-    try expectErrorContains(&runtime, "trace-module.boom", &.{ "word missing", "trace (missing trace-module.boom)" });
+    // A word its group cannot bind fails the module's construction.
+    try expectErrorContains(&runtime, "[] (( -- n ) (missing) `boom def) `trace-module @defm", &.{ "kind undefined-word", "word missing" });
+    try expectErrorContains(&runtime, "trace-module.boom", &.{"kind undefined-word"});
     try expectOk(&runtime, "[] (( n -- n ) (dup 0 > (1 - f 1 +) (pop missing) if) `f def) `recursive @defm");
     try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (missing recursive.f recursive.f recursive.f)"});
-}
-
-test "modules: removal strips aliases and leaves no half-removed entry" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    try expectOk(&runtime, "[] ((1) `x def) `a @defm [] ((2) `x def) `b @defm " ++
-        "`short `a alias `a (x) import short.x a.x x");
-    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
-    try expectOk(&runtime, "`a undefm");
-    // The canonical name and every alias targeting it go in one publish.
-    try expectErrorContains(&runtime, "a.x", &.{"kind undefined-word"});
-    try expectErrorContains(&runtime, "short.x", &.{"kind undefined-word"});
-    try expectErrorContains(&runtime, "`short (x) import", &.{"kind undefined-word"});
-    // Enumeration never shows a half-removed entry, and unrelated modules
-    // and their aliases are untouched.
-    try expectOk(&runtime, "`other `b alias other.x b.x");
-    // Re-aliasing a removed name is a missing-module error as before.
-    try expectErrorContains(&runtime, "`again `a alias", &.{"kind undefined-word"});
 }
 
 test "module: qualified import replacement and alias collisions" {
@@ -336,7 +319,7 @@ test "module: qualified import replacement and alias collisions" {
     try expectErrorContains(&runtime, "`dotted.name `a alias", &.{"kind domain"});
 }
 
-test "module: qualified call sites heal generations and bypass aliases" {
+test "module: bound qualified calls keep their targets across reload and alias changes" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -350,13 +333,13 @@ test "module: qualified call sites heal generations and bypass aliases" {
             "[] ((2) `v def) `cache-heal @defm probe " ++
             "[] ((10) `v def) `alias-a @defm [] ((20) `v def) `alias-b @defm " ++
             "`short `alias-a alias (short.v) `alias-probe def alias-probe " ++
-            "`short `alias-b alias alias-probe " ++
-            "[] ((3) `v def) `removed-cache @defm (removed-cache.v) `removed-probe def " ++
-            "removed-probe `removed-cache undefm [] (removed-probe) @attempt `err at `kind at",
+            "`short `alias-b alias alias-probe",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("1 2 10 20 3 undefined-word", display.bytes());
+    // A bound qualified call keeps the definition it was bound to: neither a
+    // reload nor a repointed alias retargets it.
+    try std.testing.expectEqualStrings("1 1 10 10", display.bytes());
 }
 
 test "module: provisional tasks keep rollback generations alive until quiescence" {
@@ -438,7 +421,8 @@ test "module: import explicitly replaces requested bindings and preserves metada
         "1 `mean set `stats (mean count) import mean count " ++
         "`count doc \"Count.\" match? `count see");
     try std.testing.expectEqualStrings("", diagnostics.written());
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(stats.count)\n") != null);
+    // An import is a name alias: reflection shows the definition it selects.
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n : \"Count.\") (4)\n") != null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
@@ -581,9 +565,8 @@ test "module: a parameterized behavior dependency is a quotation the caller wrot
     // Purity comes from the unit-constructor boundary itself: `@defm` runs
     // the construction body in the image's chain whatever scope its text was
     // written in, so a bare `k` inside the body is undefined however recently
-    // the session defined one.
-    try expectOk(&runtime, "[] ((k *) `scale def) `body-dep @defm");
-    try expectErrorContains(&runtime, "body-dep.scale", &.{
+    // the session defined one, and the module's construction fails.
+    try expectErrorContains(&runtime, "(3) `k def [] ((k *) `scale def) `body-dep @defm", &.{
         "kind undefined-word",
         "word k",
     });
@@ -722,8 +705,8 @@ test "loader: load is one unit and preserves file provenance" {
     try expectOk(&runtime, "loaded.answer");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[2].int);
     try expectOk(&runtime, "[] (\"test/acceptance/load-stack.ecl\" load) @attempt pop");
-    try expectOk(&runtime, "\"test/acceptance/load-provenance.ecl\" load");
-    try expectErrorContains(&runtime, "loaded-boom", &.{ "word missing", "source \"test/acceptance/load-provenance.ecl\"" });
+    // A definition that cannot bind fails where it is defined, at its source.
+    try expectErrorContains(&runtime, "\"test/acceptance/load-provenance.ecl\" load", &.{ "word missing", "source \"test/acceptance/load-provenance.ecl\"" });
     try expectOk(&runtime, "\"test/acceptance/load-stack.ecl\" load");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[3].int);
     try std.testing.expectEqualStrings("side", output.written());
@@ -907,8 +890,7 @@ test "module: an undefined word names the chain its own scope searched" {
     // look.
     try expectOk(&runtime, "[] ((|q| q call) `apply def) `m @defm");
     try expectErrorContains(&runtime, "(nope) m.apply", &.{ "word nope", "scope session" });
-    try expectOk(&runtime, "[] ((missing) `f def) `own @defm");
-    try expectErrorContains(&runtime, "own.f", &.{ "word missing", "scope module" });
+    try expectErrorContains(&runtime, "[] ((missing) `f def) `own @defm", &.{ "word missing", "scope module" });
     try expectErrorContains(&runtime, "nope", &.{ "word nope", "scope session" });
 }
 
@@ -1071,13 +1053,13 @@ test "module source: construction refusal reaches helper words and nested attemp
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
+    // A staged definition cannot run before its module is sealed, so a
+    // construction body cannot reach a constructor through its own helper.
     try expectErrorContains(
         &runtime,
         "[] (([] (1) @spawn) `start def start) `helper @defm",
-        &.{ "kind domain", "word @spawn", "helper.start" },
+        &.{ "kind undefined-word", "word start" },
     );
-    // The helper is spelled under the name the body is being built for: an
-    // image knows its name before its body runs.
     // An `@attempt` inside the body observes the refusal as data; construction
     // then completes without having started a task.
     try expectOk(&runtime, "[] ([] ([] (1) @spawn) @attempt `err at `kind at `k set) `nested @defm nested.k task.pending len");

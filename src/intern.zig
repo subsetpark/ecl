@@ -544,19 +544,6 @@ pub const QualifiedCursor = struct {
 };
 
 pub const DotProgress = poll.Progress(?usize);
-pub const DotCursor = struct {
-    bytes: []const u8,
-    index: usize = 0,
-    pub fn advance(self: *DotCursor) DotProgress {
-        if (self.index == self.bytes.len) return .{ .complete = null };
-        const index = self.index;
-        self.index += 1;
-        return if (self.bytes[index] == '.') .{ .complete = index } else .pending;
-    }
-};
-pub fn dotCursor(bytes: []const u8) DotCursor {
-    return .{ .bytes = bytes };
-}
 
 pub const LastDotCursor = struct {
     bytes: []const u8,
@@ -656,19 +643,6 @@ pub fn get(id: u32) []const u8 {
 /// whole-name rule, not a segment rule; `core.utils` stays an ordinary module.
 pub fn isReservedRegistryBytes(name: []const u8) bool {
     return std.mem.eql(u8, name, "core");
-}
-
-/// The unqualified name `core.x` spells, or null for any other name. A
-/// `core.`-qualified occurrence is core's word wherever it is written, so it
-/// links to core's slot for `x` and dispatches, caches, and fuses as that
-/// plain word does; only its spelling stays qualified, for traces.
-pub fn coreQualifiedName(name: u32) error{OutOfMemory}!?u32 {
-    const spelling = get(name);
-    const prefix = "core.";
-    if (!std.mem.startsWith(u8, spelling, prefix)) return null;
-    const rest = spelling[prefix.len..];
-    if (rest.len == 0 or std.mem.indexOfScalar(u8, rest, '.') != null) return null;
-    return try intern(rest);
 }
 
 pub fn isReservedBytes(name: []const u8) bool {

@@ -248,19 +248,21 @@ pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
     };
 }
 
-/// Exact-capacity, non-rehashing map used by runtime publication snapshots.
-/// Its key is nominal in entries and cursors; conversion to an integer is
-/// confined to the hash-slot adapter.
+/// Exact-capacity, non-rehashing map used by runtime publication snapshots
+/// and binding's dependency sets. Its key is nominal in entries and cursors;
+/// conversion to an integer is confined to the hash-slot adapter. An
+/// `enum(usize)` key is an identity, such as an address, whose low bits carry
+/// alignment rather than entropy.
 pub fn FixedMap(comptime K: type, comptime V: type) type {
     const key_info = switch (@typeInfo(K)) {
         .@"enum" => |info| info,
-        else => @compileError("FixedMap keys must be nominal enum(u32) values"),
+        else => @compileError("FixedMap keys must be nominal enum(u32) or enum(usize) values"),
     };
-    if (key_info.tag_type != u32)
-        @compileError("FixedMap keys must be nominal enum(u32) values");
+    if (key_info.tag_type != u32 and key_info.tag_type != usize)
+        @compileError("FixedMap keys must be nominal enum(u32) or enum(usize) values");
     return struct {
         const Self = @This();
-        const Entry = struct { key: K, value: V };
+        pub const Entry = struct { key: K, value: V };
 
         allocator: std.mem.Allocator,
         slots: []?Entry,
@@ -273,6 +275,17 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
 
         pub fn count(self: *const Self) usize {
             return self.count_value;
+        }
+
+        /// The number of slots, for a bounded walk that must resume at a
+        /// recorded slot.
+        pub fn slotCount(self: *const Self) usize {
+            return self.slots.len;
+        }
+
+        /// The entry in slot `index`, if any.
+        pub fn slotEntry(self: *const Self, index: usize) ?Entry {
+            return self.slots[index];
         }
 
         pub const RawEntryProgress = StreamProgress(Entry);
@@ -386,6 +399,10 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
         }
 
         fn slot(key: K, capacity: usize) usize {
+            if (key_info.tag_type == usize) {
+                const raw: u64 = @backingInt(key);
+                return @as(usize, @truncate((raw >> 4) *% 0x9E37_79B9_7F4A_7C15 >> 32)) & (capacity - 1);
+            }
             const raw: u32 = @backingInt(key);
             return @as(usize, raw *% 0x9e37_79b9) & (capacity - 1);
         }

@@ -72,7 +72,7 @@ pub const Snapshot = opaque {
     }
     /// Consumes the complete validated map on success; failure leaves it with the caller.
     /// All runtime allocations derive from the Session's host cleanup owner.
-    pub fn fromMap(host: *const heap.HostCleanup, map: *module_map.Validated, start: []const u8) error{OutOfMemory}!*Snapshot {
+    pub fn fromMap(host: *const heap.HostCleanup, main: *const modules.Registry, map: *module_map.Validated, start: []const u8) error{OutOfMemory}!*Snapshot {
         const allocator = host.allocator();
         const owned = try allocator.create(Backing);
         errdefer allocator.destroy(owned);
@@ -88,7 +88,7 @@ pub const Snapshot = opaque {
         for (sources, map.artifacts(), 0..) |*source, artifact, index| {
             const absolute = try std.fs.path.join(allocator, &.{ map.scope(artifact.scope).root, artifact.path });
             errdefer allocator.free(absolute);
-            source.* = .{ .owner = owned, .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .absolute_path = absolute, .private_registry = try modules.Registry.init(host) };
+            source.* = .{ .owner = owned, .artifact = @fromBackingInt(@intCast(@as(u32, @intCast(index)))), .absolute_path = absolute, .private_registry = try modules.Registry.initPrivate(host, main) };
             built += 1;
         }
         owned.* = .{ .host = host, .map = map, .sources = sources, .start_dir = start_dir };
