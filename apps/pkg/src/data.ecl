@@ -7,10 +7,7 @@
  (|text|
   text str.str?
   `type error.new "pkg reads a package file from text" error.with-message assert
-  text parse
-  dup len 1 =
-  `shape error.new "a package file is exactly one form" error.with-message assert
-  first) `read-one def
+  text parse-one) `read-one def
 
  ### defp entry-of
  (key holder -- pair : "Return a key and its value as a pair.")

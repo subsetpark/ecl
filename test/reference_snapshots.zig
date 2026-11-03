@@ -63,6 +63,8 @@ const cases = [_]Case{
     .{ .name = "join", .source = "[\"a\" 2] \"-\" join" },
     .{ .name = "str.format", .source = "[3.14 2] \"pi={} n={}\" str.format" },
     .{ .name = "parse", .source = "\"42\" parse first" },
+    .{ .name = "parse-one", .source = "\"{kind io msg \\\"x\\\"}\" parse-one" },
+    .{ .name = "parse-one shape", .source = "\"1 2\" parse-one" },
     .{ .name = "int", .source = "\"42\" int \"a\" first int" },
     .{ .name = "float", .source = "\"3.5\" float 3 float" },
     .{ .name = "chars", .source = "`foo chars [104 195 169] chars" },
@@ -556,6 +558,20 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\42
         \\stderr:
         \\<empty>
+        \\=== parse-one ===
+        \\source: "{kind io msg \"x\"}" parse-one
+        \\exit: 0
+        \\stdout:
+        \\{kind io msg "x"}
+        \\stderr:
+        \\<empty>
+        \\=== parse-one shape ===
+        \\source: "1 2" parse-one
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{kind shape msg "parse-one requires exactly one form" word raise trace (raise assert parse-one) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== int ===
         \\source: "42" int "a" first int
         \\exit: 0
