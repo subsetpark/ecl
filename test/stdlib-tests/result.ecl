@@ -108,7 +108,7 @@
   `type
   "exactly one of `ok or `err"
   raises-containing
-  ({nope 1} 9 result.or-else)
+  ({nope 1} 9 result.or-default)
   `type
   "exactly one of `ok or `err"
   raises-containing
@@ -142,7 +142,7 @@
  ### test documentation
  (-- : "Expose documentation for every result module export.")
  ([result.ok result.err result.ok? result.err? result.or-raise
-   result.or-else result.and-then result.map-err result.recover
+   result.or-default result.and-then result.map-err result.recover
    result.recover-kinds result.either result.all result.partition]
   documented)
  `documentation test

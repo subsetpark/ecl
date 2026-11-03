@@ -92,7 +92,7 @@ const cases = [_]Case{
     .{ .name = "fail", .source = "\"bad\" fail" },
     .{ .name = "result.ok?", .source = "[] (2 3 +) @attempt result.ok?" },
     .{ .name = "result.or-raise", .source = "[] (2 3 +) @attempt result.or-raise" },
-    .{ .name = "result.or-else", .source = "[] (2 3 +) @attempt 9 result.or-else" },
+    .{ .name = "result.or-default", .source = "[] (2 3 +) @attempt 9 result.or-default" },
     .{ .name = "result.either", .source = "[7] result.ok (first) (pop 0) result.either" },
     .{ .name = "result.map-err", .source = "{kind io} result.err (pop {kind domain}) result.map-err" },
     // The prelude no longer carries these: the envelope interpreters live in
@@ -763,8 +763,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[5]
         \\stderr:
         \\<empty>
-        \\=== result.or-else ===
-        \\source: [] (2 3 +) @attempt 9 result.or-else
+        \\=== result.or-default ===
+        \\source: [] (2 3 +) @attempt 9 result.or-default
         \\exit: 0
         \\stdout:
         \\[5]

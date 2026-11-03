@@ -1,7 +1,7 @@
 # DoD-25a: the result module's whole contract, reached both through explicit
 # metadata-preserving imports and by bare qualified reference.
 `result
-(ok err ok? err? or-raise or-else and-then map-err recover
+(ok err ok? err? or-raise or-default and-then map-err recover
  recover-kinds either all)
 import
 
@@ -43,7 +43,7 @@ import
 # The envelope interpreters that moved out of the prelude: qualified and
 # explicitly imported.
 [] (2 3 +) @attempt or-raise io.pp
-[] (missing) @attempt 9 or-else io.pp
+[] (missing) @attempt 9 or-default io.pp
 [] (2 3 +) @attempt result.or-raise io.pp
 [] ({nope 1} result.or-raise) @attempt `err at `kind at io.pp
 

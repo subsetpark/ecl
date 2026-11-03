@@ -470,7 +470,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( collection quotation -- )` — *Isolated*, contract `( a -- )`. Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing.
 
 ### getenv
-`( name -- string )` — The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`or-else` is the defaulting idiom. Absent host IO is `` `io ``.
+`( name -- string )` — The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`result.or-default` is the defaulting idiom. Absent host IO is `` `io ``.
 
 ### grade
 `( list -- indices )` — The stable ascending sort permutation. Orders by `cmp`, so every element pair must be mutually comparable; the error's index names the later element of a pair that is not.
@@ -2426,6 +2426,24 @@ agent holding that state: ``[0 0] agent.start `rng set`` then
 Every entry validates its result envelope before invoking a caller quotation.
 A success payload is always a list representing a stack.
 
+Each word has one role. Transformers return a result and run their quotation
+isolated under `@attempt`, so a quotation that fails yields a failed result.
+Eliminators leave plain values and run their quotations inline, so they can
+reach the stack beneath the result.
+
+| Role | Words |
+|---|---|
+| Construct | `ok`, `err` |
+| Test | `ok?`, `err?` |
+| Transform the success | `and-then` |
+| Transform the failure | `recover`, `recover-kinds`, `map-err` |
+| Eliminate | `either`, `or-raise`, `or-default` |
+| Combine | `all`, `partition` |
+
+`recover` may turn a failure into a success; `map-err` keeps it a failure and
+replaces only the error dict. `or-default` returns the success list or, on
+failure, the fallback value as given.
+
 ### err
 `( error -- result )` — Tag an error dict as a failed result.
 
@@ -2461,7 +2479,7 @@ A success payload is always a list representing a stack.
 ### ok?
 `( result -- bool )` — Return 1 when a well-formed result is a success.
 
-### or-else
+### or-default
 `( result fallback -- value )` — Return a success list, or the fallback value for a failure.
 
 ### or-raise

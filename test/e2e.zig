@@ -1593,7 +1593,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "[] (\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-else io.pp",
+            "[] (\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-default io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -1718,7 +1718,7 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
         defer result.deinit();
         try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
     }
-    for ([_][]const u8{ "result.map-error", "result.case" }) |old| {
+    for ([_][]const u8{ "result.map-error", "result.case", "result.or-else" }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
         try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });

@@ -57,9 +57,9 @@
  (result -- values : "Return a success list, or re-raise the stored error dict unchanged.")
  (checked dup `ok dict.has? (`ok at) (`err at raise) if) `or-raise def
 
- ### def or-else
+ ### def or-default
  (result fallback -- value : "Return a success list, or the fallback value for a failure.")
- (swap checked swap over `ok dict.has? (pop `ok at) (nip) if) `or-else def
+ (swap checked swap over `ok dict.has? (pop `ok at) (nip) if) `or-default def
 
  ### def and-then
  (result quotation -- result :
