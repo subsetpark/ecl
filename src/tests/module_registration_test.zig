@@ -127,6 +127,40 @@ test "module registration: nested definitions and reloads publish through the re
     try expectStack(&runtime, "[4 5] (+ `sum set) `seeded @defm seeded.sum", "9");
 }
 
+test "module registration: a documentation annotation documents the generation it publishes" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+
+    // The annotation beneath the operands is consumed, and its documentation is
+    // returned in canonical form, as `doc` returns a word's.
+    try expectStack(&runtime, "(: \"Small\n    helpers.\") [] ((wrap) `one def) `doc.m @defm `doc.m module-doc", "\"Small helpers.\"");
+    try expectStack(&runtime, "(: \"Seedless.\") ((wrap) `one def) `doc.s @defm! `doc.s module-doc", "\"Seedless.\"");
+
+    // Documentation belongs to a generation: a reload states its own, and a
+    // reload without an annotation leaves the module undocumented.
+    try expectStack(&runtime, "(: \"Second.\") [] () `doc.m @defm `doc.m module-doc", "\"Second.\"");
+    try expectOk(&runtime, "[] () `doc.m @defm");
+    try expectErrorContains(&runtime, "`doc.m module-doc", &.{ "kind domain", "no documentation" });
+
+    // An alias reports its target's documentation.
+    try expectStack(&runtime, "`doc-short `doc.s alias `doc-short module-doc", "\"Seedless.\"");
+
+    // Only an annotation is consumed: any other list beneath the operands
+    // stays on the caller's stack.
+    try expectStack(&runtime, "7 [1 2] [] () `doc.plain @defm", "7 [1 2]");
+
+    // A module declares no stack effect, so only an exact `(: "text")` is its
+    // annotation; any other list, annotation-shaped or not, is caller data.
+    try expectStack(&runtime, "(-- :) (x -- y) (: 5) [] ((1) `v def) `doc.data @defm doc.data.v", "(-- :) (x -- y) (: 5) 1");
+    try expectErrorContains(&runtime, "`doc.data module-doc", &.{ "kind domain", "no documentation" });
+
+    try expectErrorContains(&runtime, "`core module-doc", &.{ "kind domain", "word module-doc" });
+    try expectErrorContains(&runtime, "`doc.missing module-doc", &.{"kind undefined-word"});
+    try expectErrorContains(&runtime, "42 module-doc", &.{"kind type"});
+}
+
 test "module registration: a construction body must leave its stack empty" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();

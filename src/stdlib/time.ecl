@@ -1,15 +1,17 @@
 ### module time
-# Pure UTC time over tagged Unix millisecond timestamps. A timestamp is the
-# one-key dictionary {unix ms}; a monotonic instant from clock.now is
-# {monotonic ms}, and each word accepts only its own domain. Nothing here
-# reads a clock.
-#
-# Every failure is raised against the public word the program called, so a
-# checked kernel overflow inside the arithmetic is reported as this module's
-# own `overflow. Calendar arithmetic follows Hinnant's days-from-civil
-# algorithm without wider intermediates: 146097 days is a whole number of
-# weeks, so the weekday never needs the era, and a negative day count is
-# scaled from its successor so the full int millisecond range stays reachable.
+# Calendar arithmetic follows Hinnant's days-from-civil algorithm without wider
+# intermediates: 146097 days is a whole number of weeks, so the weekday never
+# needs the era, and a negative day count is scaled from its successor so the
+# full int millisecond range stays reachable.
+(: "Pure UTC time over the millisecond timestamps `clock.unix` produces. Every word accepts and
+    returns whole milliseconds; a timestamp is `{unix ms}` and nothing else — a `{monotonic ms}`
+    instant, an untagged int, a float payload, or a dictionary with any other key is `` `type ``.
+    Arithmetic is checked: leaving the int millisecond range is `` `overflow ``. Calendar words use
+    the proleptic Gregorian calendar with no leap seconds, so Unix time here is the POSIX count in
+    which every day has exactly 86,400,000 milliseconds. The representable range runs from
+    `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`. Nothing in this module
+    reads a clock. Every failure is raised against the public word the program called, so an
+    overflow inside the arithmetic is reported as that word's own `` `overflow ``.")
 []
 (
  ### defp fail

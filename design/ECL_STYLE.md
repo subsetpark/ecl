@@ -53,7 +53,7 @@ or imply re-exports.
 
 ```ecl
 ### module example
-# Small collection helpers.
+(: "Small collection helpers.")
 []
 (
  ### def singleton
@@ -83,6 +83,11 @@ The following rules are enforced for checked-in first-party source:
   source. A public word's annotation is also its `design/STDLIB.md` entry, so
   its docstring states the full observable contract: shape, application
   context, failures, and edge cases. Examples stay in the reference fragment.
+- A standard module documents itself with a documentation-only annotation
+  between its `### module` header and its operands; that docstring is its
+  section's introduction in `design/STDLIB.md` and what `module-doc` returns.
+  Implementation notes stay in `#` comments beneath the header. Tables and
+  examples go under `#### ` headings in the module's reference fragment.
 
 Keep tests at the direct module construction root, beside definitions. Use a
 meaningful annotation docstring for checked-in tests; the body may call private

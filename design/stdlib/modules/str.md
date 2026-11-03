@@ -1,8 +1,5 @@
 ## str
 
-All case and whitespace operations use the ASCII character classes; every
-non-ASCII scalar passes through unchanged.
-
 ### contains?
 
 #### Examples

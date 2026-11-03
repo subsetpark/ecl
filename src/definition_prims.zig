@@ -565,11 +565,11 @@ fn installLookup(evaluator: *Fiber, requested: value.Symbol) MachineError!void {
 }
 /// A binding's documentation as written, retained while it is normalized:
 /// definitions keep it unnormalized, and `doc` and `see` normalize it to show.
-const DocumentNormalization = struct {
+pub const DocumentNormalization = struct {
     document: heap.Owned(Value),
     normalizer: heap.Owned(doc_text.NormalizeCursor),
 
-    fn init(evaluator: *Fiber, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
+    pub fn init(evaluator: *Fiber, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
         const item: Value = .{ .list = env.documentationHeader(document) };
         const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator, item);
         heap.retainValue(item);
@@ -577,7 +577,7 @@ const DocumentNormalization = struct {
     }
 
     /// The normalized string, owned, once done.
-    fn advance(self: *DocumentNormalization, work: *poll.WorkBudget) error{OutOfMemory}!?Value {
+    pub fn advance(self: *DocumentNormalization, work: *poll.WorkBudget) error{OutOfMemory}!?Value {
         return switch (try self.normalizer.borrowMut().advance(work)) {
             .pending => null,
             .complete => |normalized| normalized,

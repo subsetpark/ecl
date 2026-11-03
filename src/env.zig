@@ -152,6 +152,20 @@ pub const BuiltinWord = struct {
     primitive: PrimitiveImpl,
 };
 
+/// A module of host primitives. Its documentation is required for the same
+/// reason a builtin word's is; `module-doc` normalizes it when read, so it may
+/// be written as wrapped prose.
+pub const BuiltinModule = struct {
+    words: []const BuiltinWord,
+    doc: []const u8,
+};
+
+pub fn assertStaticBuiltinModule(comptime name: []const u8, comptime module: BuiltinModule) void {
+    if (module.words.len == 0) @compileError("embedded builtin module has no words: " ++ name);
+    if (module.doc.len == 0) @compileError("empty builtin module documentation: " ++ name);
+    for (module.words) |word| assertStaticBuiltin(word);
+}
+
 pub fn assertStaticBuiltin(comptime word: BuiltinWord) void {
     assertStaticNamespace(word.name);
     if (word.doc.len == 0) @compileError("empty builtin documentation: " ++ word.name);

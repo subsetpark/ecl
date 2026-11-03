@@ -764,6 +764,14 @@ stays in its construction frame throughout, and the frame's unwind discards it
 on failure. A construction body that leaves values on its stack is refused
 before sealing, so no image carries state out of its body.
 
+Module documentation is a property of the image, not of the registration. A
+source construction consumes its annotation before the body runs, a native
+loader takes it from the validated descriptor, and a builtin loader from its
+manifest entry; each records it on the unpublished image, which owns that
+reference until it retires. Reload therefore never inherits documentation, and
+`module-doc` reads whichever generation the name selects when it runs, exactly as
+a qualified call does.
+
 Registration publishes the sealed image and adds it to the registry's history,
 which holds one reference to every image the registry ever published. Old code
 keeps running: a word written in a replaced generation keeps resolving there,
@@ -1717,7 +1725,8 @@ documentation. Installation validates that declaration and publishes its
 metadata directly; primitive families own their declarations, and kernel
 spellings remain owned by their closed operation enums. The source audit
 checks semantic spelling conventions across all classified production sources;
-documentation completeness and effect syntax are compile-time requirements.
+documentation completeness and effect syntax are compile-time requirements,
+for a builtin module's own documentation as for each of its words.
 Validated static descriptors carry those declarations into a shared runtime
 installation path. Effect token storage is specialized by its required capacity,
 not by the spelling of each word; installation retains declaration order and

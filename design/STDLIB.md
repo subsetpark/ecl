@@ -14,7 +14,8 @@ words precede letter-spelled ones. An entry gives the word's successful stack
 effect followed by its semantics. For a word defined in ecl, the entry is the
 definition's own annotation, the same effect and documentation that `which`,
 `see`, and `doc` reflect; words without a declared effect state their shape in
-documentation.
+documentation. A module section opens with the module's own documentation, the
+text `module-doc` returns.
 At module boundaries, declared output contracts are checked when the invocation
 completes, including any deferred work. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of
@@ -591,6 +592,9 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ### min-of
 `( sequence -- value )` — Return the least element of a nonempty sequence.
 
+### module-doc
+`( module-name -- string )` — Return the canonical documentation string of a module's current generation, loading an embedded or mapped module on first mention. A source module states it with a documentation-only annotation before its `@defm` operands; a native module, in its descriptor. An alias reports its target's documentation. An invalid module name, `` `core ``, or a module without documentation is `` `domain ``; an unknown one is `` `undefined-word ``.
+
 ### neg
 `( x -- y )` — **Pervasive.** Negate numeric values with checked integer overflow.
 
@@ -1110,23 +1114,19 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 
 ## agent
 
-An agent is a task whose stack is its state. Quotations sent to it run in
-arrival order, each as an isolated unit over that stack, so a failing
-quotation leaves the state exactly as it was. A `call` quotation is
-`( state... -- state... result )`: the top of its result stack is the reply and
-the rest is the new state. A `send` quotation is `( state... -- state... )` and
-keeps its whole result stack. This is how a program keeps state that outlives
-a word, for example an ambient random generator:
+An agent is a task whose stack is its state. Quotations sent to it run in arrival order, each as an isolated unit over that stack, so a failing quotation leaves the state exactly as it was. A `call` quotation is `( state... -- state... result )`: the top of its result stack is the reply and the rest is the new state. A `send` quotation is `( state... -- state... )` and keeps its whole result stack. This is how a program keeps state that outlives a word.
+
+A call to an agent that has ended raises `` `io ``. A call whose request was accepted waits forever if the agent ends before replying, unless it bounds the call with `call-for`. An agent ends when it is cancelled, or when it receives a message that is not a quotation request, such as a bare value sent to its address with `task.send`; that message fails the agent.
+
+#### Examples
+
+An ambient random generator:
 
 ```ecl
 [0 0] agent.start `rng set
 rng (5 rand.int) agent.call
 # => 0
 ```
-
-A call to an agent that has ended raises `` `io ``. A call whose request was
-accepted waits forever if the agent ends before replying, unless it bounds the
-call with `call-for`.
 
 ### send
 `( address quotation -- )` — Apply a quotation to the agent's stack without waiting for a reply. The whole result stack becomes the new state; a failing quotation changes nothing and reports nothing.
@@ -1156,6 +1156,8 @@ Stack-polymorphic. Turn the current task into an agent whose state is the stack 
 
 ## archive
 
+Exact hashing, archive inspection, and hostile-input-safe extraction. Binary payloads are ordinary lists of integers in `0...255`.
+
 ### next-member
 `( archive -- metadata )` — Select the next archive member and return `{path string kind symbol size int}` in archive order. Kinds are `` `file `` and `` `directory ``; size is the content length in bytes. `{}` denotes stable end. Advancing skips unread contents of the previous member. Metadata owns its path independently of later cursor operations or closure.
 
@@ -1180,17 +1182,9 @@ Stack-polymorphic. Turn the current task into an agent whose state is the stack 
 
 ## clock
 
-Scheduler-backed time. `now`, `elapsed`, and `sleep` read the one monotonic
-clock the Session's scheduler owns, so a program's instants, its sleeps, and
-every `task.await-for` deadline agree on the current time. `unix` reads the
-process realtime clock, which is always available to CLI programs.
+Scheduler-backed time. `now`, `elapsed`, and `sleep` read the one monotonic clock the Session's scheduler owns, so a program's instants, its sleeps, and every `task.await-for` deadline agree on the current time. `unix` reads the process realtime clock, which is always available to CLI programs.
 
-Every quantity is a whole number of milliseconds. A monotonic instant is the
-one-key dictionary `{monotonic ms}` counting from Session construction; a wall
-timestamp is `{unix ms}` counting from 1970-01-01T00:00:00Z. The tag is the
-clock domain: an instant handed to a `time` word, or a timestamp handed to
-`elapsed`, is `` `type ``. Monotonic instants are not portable across Sessions and
-carry no date; wall time may jump and is not suitable for scheduling.
+Every quantity is a whole number of milliseconds. A monotonic instant is the one-key dictionary `{monotonic ms}` counting from Session construction; a wall timestamp is `{unix ms}` counting from 1970-01-01T00:00:00Z. The tag is the clock domain: an instant handed to a `time` word, or a timestamp handed to `elapsed`, is `` `type ``. Monotonic instants are not portable across Sessions and carry no date; wall time may jump and is not suitable for scheduling.
 
 ### elapsed
 `( instant -- milliseconds )` — Monotonic milliseconds from an instant produced by `now` to the present. Anything but `{monotonic int}` is `` `type ``.
@@ -1212,6 +1206,8 @@ clock.now `start set 250 clock.sleep start clock.elapsed 250 >=
 `( -- timestamp )` — Read the process realtime clock as `{unix ms}`. Convert with the `time` module. Wall time can jump and must not be used for scheduling deadlines.
 
 ## csv
+
+RFC 4180 comma-separated values with columnar parsing.
 
 ### emit
 `( rows -- text )` — Render rows of string fields as canonical, CRLF-terminated RFC 4180 text, quoting exactly the fields that require it. Non-list rows and non-string cells are `` `type ``; a zero-field row is `` `shape ``.
@@ -1244,16 +1240,7 @@ dict.from-lists table.from-columns
 
 ## dict
 
-These operations preserve the language's immutable, insertion-ordered
-dictionary semantics. The constructor family accepts one key/value association,
-flat adjacent entries, parallel key/value lists, association lists, or one
-shared value for a key list. All constructors reject duplicate keys instead of
-silently choosing a winner. Core `at`, `put`, `update`, and `del` treat a
-dictionary selector as one whole-value key. `dict.put` also assigns one whole key and value. Batch operations `dict.at`,
-`dict.at-or`, `dict.update`, `dict.take`, `dict.del`, and `dict.split` consume
-a list of whole keys: strings and composite keys remain atomic. The public
-`dict` module is ECL over the host kernels exported by `dict.core`, so a
-failure inside a kernel reports its `dict.core` name.
+These operations preserve the language's immutable, insertion-ordered dictionary semantics. The constructor family accepts one key/value association, flat adjacent entries, parallel key/value lists, association lists, or one shared value for a key list. All constructors reject duplicate keys instead of silently choosing a winner. Core `at`, `put`, `update`, and `del` treat a dictionary selector as one whole-value key. `dict.put` also assigns one whole key and value. Batch operations `dict.at`, `dict.at-or`, `dict.update`, `dict.take`, `dict.del`, and `dict.split` consume a list of whole keys: strings and composite keys remain atomic. The public `dict` module is ECL over the host kernels exported by `dict.core`, so a failure inside a kernel reports its `dict.core` name.
 
 ### associate
 `( key value -- dict )` — Build a one-entry dictionary associating `key` with `value`.
@@ -1367,9 +1354,7 @@ failure inside a kernel reports its `dict.core` name.
 
 ## error
 
-Errors are ordinary dictionaries. Construction and inspection do not raise
-unless an operation's own input violates its contract; control effects remain
-core words.
+Errors are ordinary dictionaries with a required symbol at `` `kind `` and optional, typed diagnostic fields. Construction and inspection do not raise unless an operation's own input violates its contract; control effects remain core words.
 
 ### new
 `( kind -- error )` — Build the error dictionary `{kind kind}` from a kind symbol.
@@ -1398,13 +1383,7 @@ core words.
 
 ## fd
 
-Byte streams. An fd is a byte endpoint: the standard devices, a file opened
-with `fs.open-reader`, a process pipe from `proc.stdin`, `proc.stdout`, or
-`proc.stderr`, and a connection's endpoints are all one kind to the words
-here, which name the operations every byte endpoint shares. Nothing in `fd`
-decodes or encodes text: that is `io`. A read of either kind may leave bytes
-read ahead with the endpoint value, so a program that reads lines keeps the
-value it reads them through. The host primitives are published as `fd.core`.
+Byte streams. An fd is a byte endpoint: the standard devices, a file opened with `fs.open-reader`, a process pipe from `proc.stdin`, `proc.stdout`, or `proc.stderr`, and a connection's endpoints are all one kind to the words here, which name the operations every byte endpoint shares. Nothing in `fd` decodes or encodes text: that is `io`. A read of either kind may leave bytes read ahead with the endpoint value, so a program that reads lines keeps the value it reads them through. The host primitives are published as `fd.core`.
 
 ### bytes?
 `( value -- bool )` — Return 1 when the value is a list of integers in `0...255`, what `write` accepts as one piece, and 0 for anything else, including a string.
@@ -1438,52 +1417,15 @@ value it reads them through. The host primitives are published as `fd.core`.
 
 ## fs
 
-Filesystem words accept a named `root` symbol or a directory resource and a `path` string.
-The command line uses `` `cwd `` for the startup working directory. Applications
-may explicitly open other host directories. All filesystem operations are available on each root,
-subject to operating-system permissions and runtime limits.
+Filesystem words accept a named `root` symbol or a directory resource and a `path` string. The command line uses `` `cwd `` for the startup working directory. Applications may explicitly open other host directories. All filesystem operations are available on each root, subject to operating-system permissions and runtime limits.
 
-A path is a UTF-8 slash path in the canonical grammar: `.` names the root
-itself, and every other path is one or more nonempty components separated by
-exactly one `/`, with no `.`, `..`, or NUL component and no leading, trailing,
-or repeated separator. Backslash is an ordinary filename character. Paths are
-never normalized here; normalize with `path.normalize` and accept the result
-with `path.valid-relative?` first. Words that act on a child entry (`create-*`,
-`replace-*`, `mkdir`, `rename`, `remove-file`, `remove-dir`) reject `.`.
+A path is a UTF-8 slash path in the canonical grammar: `.` names the root itself, and every other path is one or more nonempty components separated by exactly one `/`, with no `.`, `..`, or NUL component and no leading, trailing, or repeated separator. Backslash is an ordinary filename character. Paths are never normalized here; normalize with `path.normalize` and accept the result with `path.valid-relative?` first. Words that act on a child entry (`create-*`, `replace-*`, `mkdir`, `rename`, `remove-file`, `remove-dir`) reject `.`.
 
-Resolution is descriptor-relative beneath the root's retained handle. An
-intermediate symlink is followed only while its target stays within the root;
-an absolute target, a relative target that would pop above the root, more than
-40 followed links, or more than 64 KiB of expanded resolver input is refused.
-`child-dir`, `open-list`, `open-reader`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy`
-follow a final link under the same rule; every other word acts on the final
-entry itself. Containment is never a lexical prefix check.
+Resolution is descriptor-relative beneath the root's retained handle. An intermediate symlink is followed only while its target stays within the root; an absolute target, a relative target that would pop above the root, more than 40 followed links, or more than 64 KiB of expanded resolver input is refused. `child-dir`, `open-list`, `open-reader`, `read-bytes`, `read-text`, `stat`, `list`, and the source side of `copy` follow a final link under the same rule; every other word acts on the final entry itself. Containment is never a lexical prefix check.
 
-Path-taking failures carry a data dictionary with `` `operation `` (the word's own
-symbol), `` `root `` and `` `path `` (or `` `source-root ``, `` `source-path ``,
-`` `destination-root ``, and `` `destination-path `` for `copy`), and a closed
-`` `reason `` symbol: `` `invalid-path ``, `` `unknown-root ``,
-`` `not-found ``, `` `already-exists ``, `` `not-directory ``, `` `is-directory ``,
-`` `not-regular ``, `` `not-empty ``, `` `symlink-loop ``, `` `symlink-escape ``,
-`` `invalid-utf8 ``, `` `limit ``, `` `access-denied ``, `` `read-only ``, `` `no-space ``,
-`` `busy ``, `` `cross-device ``, `` `unsupported ``, `` `changed ``, or `` `io ``. The kind is
-`` `type `` for wrong value kinds or byte-list members outside `0..255`, `` `domain ``
-for malformed paths and unknown roots,
-`` `overflow `` for a configured limit, `` `cancelled `` for cancellation, and `` `io ``
-for filesystem state and host failures. Host error names never appear as data.
+Path-taking failures carry a data dictionary with `` `operation `` (the word's own symbol), `` `root `` and `` `path `` (or `` `source-root ``, `` `source-path ``, `` `destination-root ``, and `` `destination-path `` for `copy`), and a closed `` `reason `` symbol: `` `invalid-path ``, `` `unknown-root ``, `` `not-found ``, `` `already-exists ``, `` `not-directory ``, `` `is-directory ``, `` `not-regular ``, `` `not-empty ``, `` `symlink-loop ``, `` `symlink-escape ``, `` `invalid-utf8 ``, `` `limit ``, `` `access-denied ``, `` `read-only ``, `` `no-space ``, `` `busy ``, `` `cross-device ``, `` `unsupported ``, `` `changed ``, or `` `io ``. The kind is `` `type `` for wrong value kinds or byte-list members outside `0..255`, `` `domain `` for malformed paths and unknown roots, `` `overflow `` for a configured limit, `` `cancelled `` for cancellation, and `` `io `` for filesystem state and host failures. Host error names never appear as data.
 
-Reads, writes, and copies are bounded by the transfer limit
-(1 GiB by default) and advance in 64 KiB quanta; listings are bounded by an
-entry count (100,000) and aggregate name bytes (64 MiB); a Session runs at most
-64 filesystem operations at once. Mutation stages complete contents in a
-private sibling entry and publishes with one atomic namespace operation, so
-failure or cancellation before the commit leaves the destination unchanged.
-Staged contents are flushed to the device before publication, so a crash
-after the commit cannot leave an empty file under the final name; directory
-entry durability, ownership, timestamps, and extended attributes are not
-promised. Created files use the host's ordinary creation mode under the
-process umask, a replaced file keeps its permission bits, and a copy carries
-the source's permission bits under the umask.
+Reads, writes, and copies are bounded by the transfer limit (1 GiB by default) and advance in 64 KiB quanta; listings are bounded by an entry count (100,000) and aggregate name bytes (64 MiB); a Session runs at most 64 filesystem operations at once. Mutation stages complete contents in a private sibling entry and publishes with one atomic namespace operation, so failure or cancellation before the commit leaves the destination unchanged. Staged contents are flushed to the device before publication, so a crash after the commit cannot leave an empty file under the final name; directory entry durability, ownership, timestamps, and extended attributes are not promised. Created files use the host's ordinary creation mode under the process umask, a replaced file keeps its permission bits, and a copy carries the source's permission bits under the umask.
 
 ### child-dir
 `( root path -- directory )` — Acquire an independent directory resource beneath an existing root. Resolution, including final symlinks, is confined to that root. The acquired directory becomes the new containment boundary; closing its ordinary parent resource does not close it. Children of a staging resource, including further descendants, close when staging is sealed or closed even after task ownership transfer. `.` acquires the root itself.
@@ -1580,6 +1522,8 @@ the source's permission bits under the umask.
 
 ## host
 
+Read-only metadata about the host process: its startup directory and the path of the running executable.
+
 ### cwd
 `( -- path )` — Return the absolute startup directory captured by the Session host as UTF-8 text. This does not consult `PWD` or change the working directory.
 
@@ -1588,23 +1532,9 @@ the source's permission bits under the umask.
 
 ## http
 
-Requests yield while awaiting network I/O, including under cooperative scheduling
-and with one worker. Each invocation has one total 30-second monotonic deadline,
-including preparation, redirects, transfer, and response construction. Expiry is
-`` `timeout ``; task cancellation remains `` `cancelled ``. Neither returns a partial
-response.
+Requests yield while awaiting network I/O, including under cooperative scheduling and with one worker. Each invocation has one total 30-second monotonic deadline, including preparation, redirects, transfer, and response construction. Expiry is `` `timeout ``; task cancellation remains `` `cancelled ``. Neither returns a partial response.
 
-Internal Session configuration defaults to 16 live requests, a 16 KiB target,
-16 MiB outbound body, 64 MiB encoded and 64 MiB decoded inbound bodies, and
-64 KiB / 256 occurrences of supplied request headers and received response
-headers. Header byte counts include field-line framing; received whitespace
-counts before normalization and repeated fields count before deduplication.
-Redirect responses share cumulative inbound budgets; body limits also apply to
-chunked and compressed transfers. The response transport holds at most 64 KiB
-and backend scratch at most 16 MiB per request. Admission remains reserved until
-response construction and cleanup finish. Exceeding a limit is `` `overflow `` with
-the target URL in error data; allocation failure remains `OutOfMemory`.
-Configuration is internal: there are no new request fields or CLI options.
+Internal Session configuration defaults to 16 live requests, a 16 KiB target, 16 MiB outbound body, 64 MiB encoded and 64 MiB decoded inbound bodies, and 64 KiB / 256 occurrences of supplied request headers and received response headers. Header byte counts include field-line framing; received whitespace counts before normalization and repeated fields count before deduplication. Redirect responses share cumulative inbound budgets; body limits also apply to chunked and compressed transfers. The response transport holds at most 64 KiB and backend scratch at most 16 MiB per request. Admission remains reserved until response construction and cleanup finish. Exceeding a limit is `` `overflow `` with the target URL in error data; allocation failure remains `OutOfMemory`. Configuration is internal: there are no new request fields or CLI options.
 
 ### get
 `( request -- response )` — Fetch a partial or complete `http.request` value, using GET and redirect following as defaults. The request must carry a string `` `target `` URL. An optional `` `method `` overrides GET, optional `` `headers `` are sent once per value in list order, and an optional byte-list `` `body `` is sent exactly for POST, PUT, or PATCH. A nonempty body with another method is `` `domain ``. Return `{status int, headers dict, body string}`. A transport or protocol failure is `` `io `` carrying the URL in `` `path ``; a non-2xx status is an ordinary response.
@@ -1620,15 +1550,7 @@ Configuration is internal: there are no new request fields or CLI options.
 
 ## http.request
 
-Words over partial or complete request dictionaries. Recognized optional
-fields are `` `method ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``,
-`` `peer ``, and `` `params ``. `http.server` handlers receive every field except
-`` `params ``, which `http.server.route` may add; outbound `http.get` and
-`http.post` accept partial values and apply their documented defaults, while
-`http.send` consumes a complete value. The words here build a complete
-request, read absent headers/query/body using empty defaults, and return
-updated copies; the original is never changed. A word given a malformed
-request dictionary, or a name that is not a string, is `` `type ``.
+Words over partial or complete request dictionaries. Recognized optional fields are `` `method ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``, `` `peer ``, and `` `params ``. `http.server` handlers receive every field except `` `params ``, which `http.server.route` may add; outbound `http.get` and `http.post` accept partial values and apply their documented defaults, while `http.send` consumes a complete value. The words here build a complete request, read absent headers/query/body using empty defaults, and return updated copies; the original is never changed. A word given a malformed request dictionary, or a name that is not a string, is `` `type ``.
 
 ### query
 `( request -- params )` — Parse the request's `` `query `` string, such as `"a=1&b=%2Fx&c"`, into a dictionary from string keys to string values, such as `{"a" "1" "b" "/x" "c" ""}`: `&`-separated pairs, each split at its first `=`, a pair without `=` mapping its key to `""`, empty pieces ignored, and a later duplicate key replacing an earlier one. `%XX` escapes are decoded in keys and values and the decoded text must be valid UTF-8; `+` is left as it is. An empty query is `{}`. A `%` not followed by two hexadecimal digits, or a decoded key or value that is not valid UTF-8, is `` `domain ``; a non-request is `` `type ``.
@@ -1672,14 +1594,7 @@ request dictionary, or a name that is not a string, is `` `type ``.
 
 ## http.response
 
-Words over the response dictionary `{status headers body}`: the value
-`http.get`, `http.post`, and `http.send` return and the value an `http.server`
-handler leaves. They build a response, read its headers by name regardless of
-letter case, classify its status, and return updated copies. `valid?` accepts
-every well-shaped value; the wire rules a server enforces (no 1xx, reserved
-header names, no CR or LF) belong to `http.server.render-response`. A word
-given a value that is not a response dictionary, a status outside `100...599`,
-or a name that is not a string is `` `type ``.
+Words over the response dictionary `{status headers body}`: the value `http.get`, `http.post`, and `http.send` return and the value an `http.server` handler leaves. They build a response, read its headers by name regardless of letter case, classify its status, and return updated copies. `valid?` accepts every well-shaped value; the wire rules a server enforces (no 1xx, reserved header names, no CR or LF) belong to `http.server.render-response`. A word given a value that is not a response dictionary, a status outside `100...599`, or a name that is not a string is `` `type ``.
 
 ### redirect
 `( location -- response )` — Return a 302 response with `{"location" (location)}` as its headers and an empty body. A non-string location is `` `type ``.
@@ -1725,114 +1640,45 @@ or a name that is not a string is `` `type ``.
 
 ## http.server
 
-HTTP/1.1 serving over `net` connections, defined in ECL. The module holds no
-authority of its own: `@serve` takes a listener the program already obtained
-through `net.listen`, so a Session that cannot bind cannot serve, and every
-socket operation is one of the `net` words. The parsers, the response
-renderer, and `route` take and return ordinary values and never touch a
-connection, so they can be used and tested without a socket. Requests and
-responses are the dictionaries `http.request` and `http.response` build and
-read.
+HTTP/1.1 serving over `net` connections, defined in ECL. The module holds no authority of its own: `@serve` takes a listener the program already obtained through `net.listen`, so a Session that cannot bind cannot serve, and every socket operation is one of the `net` words. The parsers, the response renderer, and `route` take and return ordinary values and never touch a connection, so they can be used and tested without a socket. Requests and responses are the dictionaries `http.request` and `http.response` build and read.
 
-A request is the dictionary
-`{method target path query headers body peer}`:
+A request is the dictionary `{method target path query headers body peer}`:
 
-- `` `method `` and `` `target `` are the first two tokens of the request line, as
-  strings;
-- `` `path `` and `` `query `` are the target split at the first `?`, undecoded;
-  `` `query `` is `""` when the target has no `?`;
-- `` `headers `` is a dictionary from ASCII-lowercased header name to the list of
-  its trimmed values in arrival order, so a repeated header keeps every value;
-- `` `body `` is the exact byte list named by `Content-Length`, `[]` when the
-  request has none; and
-- `` `peer `` is the peer's `address:port` formatted from `net.peer-address`,
-  with an IPv6 address in brackets.
+- `` `method `` and `` `target `` are the first two tokens of the request line, as strings;
+- `` `path `` and `` `query `` are the target split at the first `?`, undecoded; `` `query `` is `""` when the target has no `?`;
+- `` `headers `` is a dictionary from ASCII-lowercased header name to the list of its trimmed values in arrival order, so a repeated header keeps every value;
+- `` `body `` is the exact byte list named by `Content-Length`, `[]` when the request has none; and
+- `` `peer `` is the peer's `address:port` formatted from `net.peer-address`, with an IPv6 address in brackets.
 
-A response is the dictionary `{status headers body}` with exactly those
-keys: an integer status in `200...599`, since interim 1xx responses are not
-served, with an empty body when the status is 204, 205, or 304; a headers
-dictionary whose keys are
-strings and whose values are a string or a list of strings, written once per
-value in the given order and with the name as given; and a body that is a
-string, written as UTF-8, or a byte list. The names `content-length`,
-`connection`, and `transfer-encoding` are reserved in any letter case: the
-server writes `Content-Length` and `Connection: close` itself, and a response
-naming one of them is `` `domain ``. Header names must be nonempty HTTP tokens
-and values may not contain CR, LF, NUL, or a control character other than
-tab, so a value built from request data cannot split the response.
+A response is the dictionary `{status headers body}` with exactly those keys: an integer status in `200...599`, since interim 1xx responses are not served, with an empty body when the status is 204, 205, or 304; a headers dictionary whose keys are strings and whose values are a string or a list of strings, written once per value in the given order and with the name as given; and a body that is a string, written as UTF-8, or a byte list. The names `content-length`, `connection`, and `transfer-encoding` are reserved in any letter case: the server writes `Content-Length` and `Connection: close` itself, and a response naming one of them is `` `domain ``. Header names must be nonempty HTTP tokens and values may not contain CR, LF, NUL, or a control character other than tab, so a value built from request data cannot split the response.
 
-Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is
-answered the same way, and only HTTP/1.1 requests must carry one `Host`
-header. A HEAD request is answered with the handler's status and headers and
-no body. Any `Transfer-Encoding` header is answered 411 and a
-version other than `HTTP/1.1` or `HTTP/1.0` is answered 505. There is no
-keep-alive: every response carries `Connection: close`, and the connection is
-closed once the response is written. TLS, chunked bodies, pipelining, and
-upgrades belong to a proxy in front of the server.
+Framing is HTTP/1.1 with `Content-Length` bodies only; an HTTP/1.0 request is answered the same way, and only HTTP/1.1 requests must carry one `Host` header. A HEAD request is answered with the handler's status and headers and no body. Any `Transfer-Encoding` header is answered 411 and a version other than `HTTP/1.1` or `HTTP/1.0` is answered 505. There is no keep-alive: every response carries `Connection: close`, and the connection is closed once the response is written. TLS, chunked bodies, pipelining, and upgrades belong to a proxy in front of the server.
 
-The `@serve` configuration is a dictionary whose keys are all optional; `{}`
-is valid. Each limit is an integer greater than zero.
+The `@serve` configuration is a dictionary whose keys are all optional; `{}` is valid. Each limit is an integer greater than zero.
 
-- `` `max-header-bytes `` (default `32768`): the most bytes accepted before the
-  CRLFCRLF that ends the head; more is 431.
-- `` `max-body-bytes `` (default `1048576`): the largest `Content-Length`
-  accepted; a larger one is 413 before any body byte is read.
-- `` `max-in-flight `` (default `128`): the number of acceptor children, each
-  handling one connection at a time.
-- `` `read-timeout-ms `` (default `10000`): the deadline for reading one whole
-  request, head and body; expiry is 408.
-- `` `on-failure `` (default `(str io.eprint)`): a quotation `( error -- )`
-  applied to the error dictionary of every request the server answers 500; a
-  failure of the quotation itself is discarded.
+- `` `max-header-bytes `` (default `32768`): the most bytes accepted before the CRLFCRLF that ends the head; more is 431.
+- `` `max-body-bytes `` (default `1048576`): the largest `Content-Length` accepted; a larger one is 413 before any body byte is read.
+- `` `max-in-flight `` (default `128`): the number of acceptor children, each handling one connection at a time.
+- `` `read-timeout-ms `` (default `10000`): the deadline for reading one whole request, head and body; expiry is 408.
+- `` `on-failure `` (default `(str io.eprint)`): a quotation `( error -- )` applied to the error dictionary of every request the server answers 500; a failure of the quotation itself is discarded.
 
-The server answers a request it cannot serve with a minimal `text/plain`
-response of the status below and then closes the connection:
+The server answers a request it cannot serve with a minimal `text/plain` response of the status below and then closes the connection:
 
-- 400: a malformed request line; a header line without `:` or beginning with
-  space or tab (obsolete folding); an HTTP/1.1 request without exactly one
-  `Host` header of the form `uri-host [":" port]`; non-UTF-8 bytes in the
-  head; a
-  `Content-Length` that is not a digit string or whose repeated values
-  differ; end of stream after some bytes arrived but before the head or the
-  body is complete.
+- 400: a malformed request line; a header line without `:` or beginning with space or tab (obsolete folding); an HTTP/1.1 request without exactly one `Host` header of the form `uri-host [":" port]`; non-UTF-8 bytes in the head; a `Content-Length` that is not a digit string or whose repeated values differ; end of stream after some bytes arrived but before the head or the body is complete.
 - 408: `` `read-timeout-ms `` elapses while the request is being read.
 - 411: any `Transfer-Encoding` header.
 - 413: `Content-Length` exceeds `` `max-body-bytes ``.
 - 431: `` `max-header-bytes `` is exceeded before the head ends.
-- 500: the handler fails, leaves other than exactly one value, or leaves a
-  response `render-response` rejects.
+- 500: the handler fails, leaves other than exactly one value, or leaves a response `render-response` rejects.
 - 505: a version other than `HTTP/1.1` or `HTTP/1.0`.
 
-A peer that connects and closes without sending a byte, or that resets or
-otherwise fails during the read or the write, is closed silently: nothing is
-written and `` `on-failure `` is not applied.
+A peer that connects and closes without sending a byte, or that resets or otherwise fails during the read or the write, is closed silently: nothing is written and `` `on-failure `` is not applied.
 
-The handler is a quotation with the contract `( request -- response )`. Each
-request applies it as `[request] handler @attempt` in a fresh unit, so a
-handler's failure is data to the server and the ambient stack never crosses
-the boundary. A successful handler leaves exactly one value, and that value
-must satisfy `render-response`. Any other outcome — a raised error, an empty
-or multi-valued result, a malformed response — answers 500 and applies the
-`` `on-failure `` quotation to the error dictionary (for a wrong result count, a
-`` `contract `` error naming the observed count); the serving unit and every other
-in-flight request are unaffected. Every response the server writes, whether
-the handler's or its own, is validated in full before any byte is written.
+The handler is a quotation with the contract `( request -- response )`. Each request applies it as `[request] handler @attempt` in a fresh unit, so a handler's failure is data to the server and the ambient stack never crosses the boundary. A successful handler leaves exactly one value, and that value must satisfy `render-response`. Any other outcome — a raised error, an empty or multi-valued result, a malformed response — answers 500 and applies the `` `on-failure `` quotation to the error dictionary (for a wrong result count, a `` `contract `` error naming the observed count); the serving unit and every other in-flight request are unaffected. Every response the server writes, whether the handler's or its own, is validated in full before any byte is written.
 
-`@serve` serves up to `` `max-in-flight `` connections at a time, each in a child
-unit that owns its connection, so a connection is closed on every path.
-Beyond that bound, and at the host's live-connection maximum, further
-connections wait in the kernel backlog.
+`@serve` serves up to `` `max-in-flight `` connections at a time, each in a child unit that owns its connection, so a connection is closed on every path. Beyond that bound, and at the host's live-connection maximum, further connections wait in the kernel backlog.
 
-`@serve` does not return. The serving unit ends only when it is cancelled,
-failing `` `cancelled ``, or when an acceptor's `net.accept` fails, in which case
-that error is raised from `@serve`. Abortive listener closure cancels an admitted
-accept; graceful shutdown may instead report backend closure as `` `io ``. Admission
-after closure raises `` `io ``. Either ending cancels and quiesces every acceptor,
-reader, and handler child by the ordinary scope rules and closes every
-connection those children own. The listener itself is untouched: `@serve`
-never calls `net.close` on the listener it was given, which stays the
-caller's to close explicitly or through its own scope and may be served
-again.
+`@serve` does not return. The serving unit ends only when it is cancelled, failing `` `cancelled ``, or when an acceptor's `net.accept` fails, in which case that error is raised from `@serve`. Abortive listener closure cancels an admitted accept; graceful shutdown may instead report backend closure as `` `io ``. Admission after closure raises `` `io ``. Either ending cancels and quiesces every acceptor, reader, and handler child by the ordinary scope rules and closes every connection those children own. The listener itself is untouched: `@serve` never calls `net.close` on the listener it was given, which stays the caller's to close explicitly or through its own scope and may be served again.
 
 #### Examples
 
@@ -1899,10 +1745,7 @@ Validation of the arguments completes before any request is accepted. A non-port
 
 ## io
 
-Text over byte streams. Every word here that touches a stream encodes or
-decodes UTF-8 at that boundary, through `bytes` and `chars`; the console
-conveniences are the same words applied to `fd.out` and `fd.err`. The host
-primitives are published as `io.core`.
+Text over byte streams. Every word here that touches a stream encodes or decodes UTF-8 at that boundary, through `bytes` and `chars`; the console conveniences are the same words applied to `fd.out` and `fd.err`. The host primitives are published as `io.core`.
 
 ### debug
 `( value label -- value )` — Write the string label, `": "`, and the value's pretty-printed representation plus newline, leaving the value on the stack. Semantically `io.prin ": " io.prin io.inspect`; a non-string label is the same `` `type `` failure as `io.prin`.
@@ -1945,6 +1788,8 @@ primitives are published as `io.core`.
 
 ## json
 
+RFC 8259 JSON. `parse` reads JSON text into ECL values and `emit` renders a value as JSON text.
+
 ### emit
 `( value -- text )` — Render an ECL value as RFC 8259 JSON. Dict keys must be strings or symbols; the only emitted symbol values are `` `null ``, `` `true ``, and `` `false ``.
 
@@ -1960,44 +1805,15 @@ primitives are published as `io.core`.
 
 ## net
 
-TCP listeners and connections. Any local IP literal and port can be requested,
-subject to operating-system restrictions and runtime resource limits. Port zero
-requests an ephemeral bind. Names are never resolved. IPv4-mapped IPv6 literals
-normalize to IPv4. Binding uses address reuse, so a closed connection's
-`TIME_WAIT` does not prevent rebinding; two live listeners cannot hold the same
-address and port.
+TCP listeners and connections. Any local IP literal and port can be requested, subject to operating-system restrictions and runtime resource limits. Port zero requests an ephemeral bind. Names are never resolved. IPv4-mapped IPv6 literals normalize to IPv4. Binding uses address reuse, so a closed connection's `TIME_WAIT` does not prevent rebinding; two live listeners cannot hold the same address and port.
 
-The public words are ECL compositions over `net.core.listener`, the registered
-operations `net.core.accept`, `net.core.local-address`, and
-`net.core.peer-address`, and the endpoint selectors `net.core.input` and
-`net.core.output`. Each operation requires `[]`. Accept occupies its FIFO lane
-until completion or cancellation. Address operations use an independent control
-lane. Factories and selectors are opaque identities for their resource kinds.
+The public words are ECL compositions over `net.core.listener`, the registered operations `net.core.accept`, `net.core.local-address`, and `net.core.peer-address`, and the endpoint selectors `net.core.input` and `net.core.output`. Each operation requires `[]`. Accept occupies its FIFO lane until completion or cancellation. Address operations use an independent control lane. Factories and selectors are opaque identities for their resource kinds.
 
-Listeners and connections belong to task scopes. Retaining or sending a port
-shares use; `@give` transfers ownership. A newly accepted connection remains
-provisionally owned by its exchange until `port.result` publishes it into the
-receiving scope. Failed publication retains that provisional ownership, and
-closing an unclaimed exchange closes the connection. Accepted connections are
-independent of their listener, including after listener closure. Scope closure
-aborts its resources and joins socket cleanup even while identities remain
-retained elsewhere.
+Listeners and connections belong to task scopes. Retaining or sending a port shares use; `@give` transfers ownership. A newly accepted connection remains provisionally owned by its exchange until `port.result` publishes it into the receiving scope. Failed publication retains that provisional ownership, and closing an unclaimed exchange closes the connection. Accepted connections are independent of their listener, including after listener closure. Scope closure aborts its resources and joins socket cleanup even while identities remain retained elsewhere.
 
-A listener takes a connection from the kernel backlog only for an active
-accept with connection capacity available. At capacity, accept parks until a
-connection closes. A waiting accept holds no connection slot. Admission itself
-is bounded by the resource's operation capacity; additional callers park.
-Competing accepts consume distinct connections and do not broadcast. A peer
-that aborts before acceptance is skipped. The runtime does not retry a failed
-operation or reopen a failed resource.
+A listener takes a connection from the kernel backlog only for an active accept with connection capacity available. At capacity, accept parks until a connection closes. A waiting accept holds no connection slot. Admission itself is bounded by the resource's operation capacity; additional callers park. Competing accepts consume distinct connections and do not broadcast. A peer that aborts before acceptance is skipped. The runtime does not retry a failed operation or reopen a failed resource.
 
-Byte endpoints preserve exact integer bytes in `0...255`; they perform no text
-decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each
-call stays contiguous under bounded pressure. `fd.finish` on the output
-endpoint rejects new writers and sends EOF after admitted writers and queued
-bytes drain, while the input direction remains readable. Framing, TLS,
-encoding, and protocol limits belong to libraries. Deadlines compose tasks
-with `task.await-for`, cancellation, and joining.
+Byte endpoints preserve exact integer bytes in `0...255`; they perform no text decoding. Reads have a single-pending-reader rule. Writes execute FIFO and each call stays contiguous under bounded pressure. `fd.finish` on the output endpoint rejects new writers and sends EOF after admitted writers and queued bytes drain, while the input direction remains readable. Framing, TLS, encoding, and protocol limits belong to libraries. Deadlines compose tasks with `task.await-for`, cancellation, and joining.
 
 ### accept
 `( listener -- connection )` — Wait for a peer and claim the accepted connection port into the calling task scope. Accepted connections remain usable after their listener closes. At host connection capacity, wait until a slot is free; competing accepts receive distinct connections. A non-listener is `` `type ``. Abortive listener closure cancels admitted accepts; graceful shutdown may instead report backend closure as `` `io ``. A new call after closure is `` `io ``. Socket or buffer exhaustion and host failures are `` `io ``. Cancelling an accept closes any connection still provisionally owned by that exchange, so none is lost before delivery. Completed exchanges retain their own result and cleanup lifetime independently of the listener.
@@ -2052,13 +1868,7 @@ net.close
 
 ## path
 
-Lexical operations over slash-separated path strings. Every argument and
-result is a string of Unicode scalar values; the separator is always `/`, and
-no word reads the filesystem, consults the working directory, follows links,
-or applies drive-letter, backslash, case-folding, or Unicode-normalization
-rules. Normalization is lexical: it never proves that a path stays within a
-directory, which is why `fs` accepts only the canonical grammar and enforces
-containment at its directory handles.
+Lexical operations over slash-separated path strings. Every argument and result is a string of Unicode scalar values; the separator is always `/`, and no word reads the filesystem, consults the working directory, follows links, or applies drive-letter, backslash, case-folding, or Unicode-normalization rules. Normalization is lexical: it never proves that a path stays within a directory, which is why `fs` accepts only the canonical grammar and enforces containment at its directory handles.
 
 ### absolute?
 `( path -- bool )` — Return 1 exactly when the path begins with `/`.
@@ -2089,26 +1899,25 @@ containment at its directory handles.
 
 ## port
 
-Factories, operation selectors, and endpoint selectors are opaque `` `port ``
-values exported through ordinary library bindings. Repeated lookup preserves
-identity. Selectors belong to their issuing module instance and resource kind;
-using another kind or the wrong capability variant raises `` `type ``. These
-borrowed capabilities are not transferable scope owners.
+Factories, operation selectors, and endpoint selectors are opaque `` `port `` values exported through ordinary library bindings. Repeated lookup preserves identity. Selectors belong to their issuing module instance and resource kind; using another kind or the wrong capability variant raises `` `type ``. These borrowed capabilities are not transferable scope owners.
 
-Exchanges are opaque `` `port `` values with their own task-scope ownership.
-An exchange survives the invocation that created it. Retaining or sending its
-value shares use; `@give` transfers its scope ownership. Exiting
-the owning scope aborts outstanding work and joins cancellation cleanup.
+Exchanges are opaque `` `port `` values with their own task-scope ownership. An exchange survives the invocation that created it. Retaining or sending its value shares use; `@give` transfers its scope ownership. Exiting the owning scope aborts outstanding work and joins cancellation cleanup.
 
-New child resources carried by a result or message remain provisionally
-owned until `port.result` or `port.receive` succeeds. A claim publishes all
-attached children into the receiving scope together; failed publication retains
-the source and its owners. Discarding an unclaimed result or queued message
-closes its provisional children, and exchange cleanup joins their retirement.
-Already published capabilities share use without moving scope ownership.
-Children declare whether they depend on their issuing parent. Parent closure
-closes and joins dependent children even after `@give`; independent children
-remain usable in their receiving scope. Closed children remain opaque identities.
+New child resources carried by a result or message remain provisionally owned until `port.result` or `port.receive` succeeds. A claim publishes all attached children into the receiving scope together; failed publication retains the source and its owners. Discarding an unclaimed result or queued message closes its provisional children, and exchange cleanup joins their retirement. Already published capabilities share use without moving scope ownership. Children declare whether they depend on their issuing parent. Parent closure closes and joins dependent children even after `@give`; independent children remain usable in their receiving scope. Closed children remain opaque identities.
+
+For TCP resources, `port.shutdown` closes a listener or delivers a connection's accepted writes before closing its socket. Accepted connections remain independent of their listener. `port.close` may discard queued connection bytes. Both words join socket cleanup. For a process, `port.shutdown` requests process-group termination with the host's escalation policy; `port.close` requests immediate process-group kill. Both join process cleanup, including blocked pipe transport. A completed process wait exchange remains observable after resource closure; new wait operations require an open resource.
+
+A cancelled exchange raises `` `cancelled `` from `port.await` and `port.result`. Observation does not consume the result. Operations that produce only stream output have `[]` as their result. Input finish, output EOF, completion, and cleanup are distinct events. An active cancellation releases its controller lane only after acknowledgement and return; a controller that cannot restore reusable state closes its resource.
+
+Endpoints may belong to a resource or to one exchange. Resource endpoints retain their direction and buffered data across exchange completion; finishing a resource endpoint or closing its resource ends that direction. A message may carry a sender through which its recipient replies to a backend request. Such a sender retains only its permitted direction; request identifiers, notifications, and response ordering follow the issuing library's protocol. Endpoint capabilities preserve the source identity and cannot be transferred independently with `@give`. A selector from another issuing kind, or a read or write through the wrong direction, raises `` `type ``; an endpoint not permitted by its source raises `` `domain ``. Buffered output remains readable before a terminal failure is raised. Once observed, EOF remains stable through later exchange failure or resource cleanup. An early input consumer exit wakes blocked writers with `` `io ``. Streaming callers must drain independent outputs concurrently when necessary for progress; waiting for completion does not drain them.
+
+`port.call` is an ECL composition. It closes the exchange before returning its result or re-raising its terminal error. It leaves the resource with its owner. The public `port` module composes the host operations exported by `port.core`.
+
+Configuration and initial requests may contain integers, floats, characters, symbols, lists, dictionaries, and port capabilities. Executable words, tasks, and modules are rejected recursively with `` `type ``. Each value is bounded by 64 KiB of scalar/text bytes, 4,096 nodes, and 16 capability occurrences; exceeding a bound raises `` `overflow `` before initialization or admission. Retaining an existing resource in a request shares use and does not transfer its scope.
+
+Messages and terminal results use the same structured-value bounds. Default message capacity is 16 per endpoint and a shared 1 MiB byte budget per resource. A controller-held message retains its capacity reservation until forwarded, returned as a result, or discarded. This permits forwarding when the shared budget is full. Exceeding the resource's entire byte budget raises `` `overflow ``; temporary saturation parks the producer. Receiving is competing consumption, not broadcast. Event construction failure leaves the message queued. A receiving scope that has begun closing cannot consume a message or result; the claim fails with `` `cancelled `` without consuming the source. Abortive close discards queued messages and unclaimed results; a discarded successful result raises `` `io `` if claimed later. Completion observation remains repeatable. Existing capabilities in messages share use and retain their owner.
+
+#### Operations
 
 | Word | Effect | Contract |
 |---|---|---|
@@ -2124,61 +1933,6 @@ remain usable in their receiving scope. Closed children remain opaque identities
 | `port.cancel` | `( exchange -- )` | Request cancellation idempotently. Completion remains observable and waits for controller return. |
 | `port.shutdown` | `( resource -- )` | Stop new admission, perform registered graceful shutdown, and join cleanup. Unsupported resources raise `` `domain ``. Repeated calls observe the same outcome. |
 | `port.close` | `( resource-or-exchange -- )` | Abort and join cleanup. Idempotent for every resource and exchange. |
-
-For TCP resources, `port.shutdown` closes a listener or delivers a connection's
-accepted writes before closing its socket. Accepted connections remain independent
-of their listener. `port.close` may discard queued connection bytes. Both words
-join socket cleanup. For a process, `port.shutdown` requests process-group
-termination with the host's escalation policy; `port.close` requests immediate
-process-group kill. Both join process cleanup, including blocked pipe transport.
-A completed process wait exchange remains observable after resource closure;
-new wait operations require an open resource.
-
-A cancelled exchange raises `` `cancelled `` from `port.await` and `port.result`.
-Observation does not consume the result. Operations that produce only
-stream output have `[]` as their result. Input finish, output EOF, completion,
-and cleanup are distinct events. An active cancellation releases its controller
-lane only after acknowledgement and return; a controller that cannot restore
-reusable state closes its resource.
-
-Endpoints may belong to a resource or to one exchange. Resource endpoints
-retain their direction and buffered data across exchange completion; finishing
-a resource endpoint or closing its resource ends that direction.
-A message may carry a sender through which its recipient replies to a backend
-request. Such a sender retains only its permitted direction; request identifiers,
-notifications, and response ordering follow the issuing library's protocol.
-Endpoint capabilities preserve the source identity and cannot be transferred
-independently with `@give`. A selector from another issuing kind, or a read or
-write through the wrong direction, raises `` `type ``; an endpoint not permitted
-by its source raises `` `domain ``. Buffered output remains readable before a
-terminal failure is raised. Once observed, EOF remains stable through later
-exchange failure or resource cleanup. An early input consumer exit wakes blocked
-writers with `` `io ``. Streaming callers must drain independent outputs concurrently when
-necessary for progress; waiting for completion does not drain them.
-
-`port.call` is an ECL composition. It closes the exchange before returning its
-result or re-raising its terminal error. It leaves the resource with its owner.
-The public `port` module composes the host operations exported by `port.core`.
-
-Configuration and initial requests may contain integers, floats, characters,
-symbols, lists, dictionaries, and port capabilities. Executable words, tasks,
-and modules are rejected recursively with `` `type ``. Each value is bounded by
-64 KiB of scalar/text bytes, 4,096 nodes, and 16 capability occurrences; exceeding
-a bound raises `` `overflow `` before initialization or admission. Retaining an
-existing resource in a request shares use and does not transfer its scope.
-
-Messages and terminal results use the same structured-value bounds. Default
-message capacity is 16 per endpoint and a shared 1 MiB byte budget per resource.
-A controller-held message retains its capacity reservation until forwarded,
-returned as a result, or discarded. This permits forwarding when the shared
-budget is full. Exceeding the resource's entire byte budget raises `` `overflow ``;
-temporary saturation parks the producer. Receiving is competing consumption,
-not broadcast. Event construction failure leaves the message queued. A receiving
-scope that has begun closing cannot consume a message or result; the claim
-fails with `` `cancelled `` without consuming the source.
-Abortive close discards queued messages and unclaimed results; a discarded
-successful result raises `` `io `` if claimed later. Completion observation remains
-repeatable. Existing capabilities in messages share use and retain their owner.
 
 ### await
 `( exchange -- )` — Observe completion without consuming the result or draining output.
@@ -2218,43 +1972,25 @@ repeatable. Existing capabilities in messages share use and retain their owner.
 
 ## proc
 
-Subprocess ports with bounded live counts, queues, and capture sizes.
-Process creation is available as an ordinary standard-library operation.
-Executable access is determined by the operating system.
+Subprocess ports with bounded live counts, queues, and capture sizes. Process creation is available as an ordinary standard-library operation. Executable access is determined by the operating system.
 
-The public words are ECL compositions over registered process capabilities,
-common port transport, and task primitives.
+The public words are ECL compositions over registered process capabilities, common port transport, and task primitives.
 
-`proc.core.process` is the registered process factory. Applying `port.open`
-to it and a spawn specification creates a process resource subject to the
-common structured-value and process limits as `proc.spawn`.
-The returned resource supports the process words and common lifecycle words;
-the factory is an opaque identity for the process resource kind.
+`proc.core.process` is the registered process factory. Applying `port.open` to it and a spawn specification creates a process resource subject to the common structured-value and process limits as `proc.spawn`. The returned resource supports the process words and common lifecycle words; the factory is an opaque identity for the process resource kind.
 
-The registered operations `proc.core.wait`, `proc.core.terminate`,
-`proc.core.kill`, and `proc.core.capture-limits` require an empty request list.
-Wait returns the termination dictionary described below. Terminate and kill
-request the corresponding process action and return `[]`; they do not wait
-for process exit. Capture-limits returns a dictionary with `` `stdout `` and
-`` `stderr `` capture limits. Wait has its own FIFO lane; the
-other operations share an independent control lane. Cancelling a wait leaves
-the process running and makes its lane reusable after cancellation settles.
-Each exchange result is claimable once, while completion observation is
-repeatable. Process exit leaves the resource open for further operations;
-closing the resource prevents new admission and joins backend cleanup.
+The registered operations `proc.core.wait`, `proc.core.terminate`, `proc.core.kill`, and `proc.core.capture-limits` require an empty request list. Wait returns the termination dictionary described below. Terminate and kill request the corresponding process action and return `[]`; they do not wait for process exit. Capture-limits returns a dictionary with `` `stdout `` and `` `stderr `` capture limits. Wait has its own FIFO lane; the other operations share an independent control lane. Cancelling a wait leaves the process running and makes its lane reusable after cancellation settles. Each exchange result is claimable once, while completion observation is repeatable. Process exit leaves the resource open for further operations; closing the resource prevents new admission and joins backend cleanup.
 
-`proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint
-selectors for process resources, and `proc.stdin`, `proc.stdout`, and
-`proc.stderr` are the endpoints they select, usable with every `fd` and `io`
-word. `port.endpoint` with stdin grants writing and
-finishing; stdout and stderr grant reading. Their byte, EOF, and single-reader
-contracts are shared with the corresponding process words. Finishing stdin
-delivers accepted bytes before closing that direction, is idempotent, and
-rejects subsequent writes, including empty writes. Endpoints share permitted
-use without owning the resource; they cannot be transferred with `@give`.
+`proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint selectors for process resources, and `proc.stdin`, `proc.stdout`, and `proc.stderr` are the endpoints they select. `port.endpoint` with stdin grants writing and finishing, so `fd.write` and `fd.finish` apply; stdout and stderr grant reading, so `fd.read`, `fd.read-line`, `fd.read-all`, and the `io` readers apply. An endpoint is borrowed, so `fd.close` on it is `` `type ``; close the resource with `port.close`. Their byte, EOF, and single-reader contracts are shared with the corresponding process words. Finishing stdin delivers accepted bytes before closing that direction, is idempotent, and rejects subsequent writes, including empty writes. Endpoints share permitted use without owning the resource; they cannot be transferred with `@give`.
 
-A spawn specification is a dictionary whose keys are symbols, with only the
-following fields. The nested environment dictionary uses **string** keys.
+A spawn specification is a dictionary whose keys are symbols, with only the fields `` `executable `` (required), `` `args ``, `` `cwd ``, and `` `env ``. The nested environment dictionary uses **string** keys.
+
+Paths, arguments, and environment strings cannot contain NUL. Environment names must be nonempty and contain no `=`. The child inherits nothing from the interpreter's environment: `` `env `` is exactly what it sees, and omitting it starts the child with an empty environment. Forward a host variable explicitly with `getenv`, for example `{} "HOME" dup getenv put`. There is no shell-command form, expansion, or `PATH` search: spaces and shell metacharacters in an argument are passed literally. Unknown fields and missing `` `executable `` are `` `domain ``; non-symbol keys and wrongly typed fields are `` `type ``; invalid field values are `` `domain ``. Validation precedes process creation.
+
+Prefer `proc.run` when the output fits a known bound. With `proc.spawn`, feed stdin and drain **both** output pipes concurrently when they can fill. A child may wait for stdin EOF before exiting, so call `proc.close-input` when feeding is complete. `proc.wait` does not drain output: waiting first can deadlock on a full pipe. Reads may split text characters or application messages across chunks. Close the resource with `port.close` when finished; waiting for exit does not close it.
+
+Bytes are ordinary integer lists whose elements are all in `0...255`. Process streams do not decode Unicode. A port is an opaque identity capability that prints `<port:N>` and has type `` `port ``; it exposes no PID and cannot be passed through JSON. Native words can view and forward its opaque identity.
+
+#### Spawn specification
 
 | Field | Value | Required / default |
 | --- | --- | --- |
@@ -2263,17 +1999,9 @@ following fields. The nested environment dictionary uses **string** keys.
 | `` `cwd `` | Absolute directory path string without `.` or `..` components | Startup working directory |
 | `` `env `` | String-to-string dictionary, for example `{"LANG" "C"}` | `{}`; the child's complete environment |
 
-Paths, arguments, and environment strings cannot contain NUL. Environment
-names must be nonempty and contain no `=`. The child inherits nothing from the
-interpreter's environment: `` `env `` is exactly what it sees, and omitting it
-starts the child with an empty environment. Forward a host variable explicitly
-with `getenv`, for example `{} "HOME" dup getenv put`.
-There is no shell-command form, expansion, or `PATH` search: spaces and shell
-metacharacters in an argument are passed literally. Unknown fields and missing
-`` `executable `` are `` `domain ``; non-symbol keys and wrongly typed fields are
-`` `type ``; invalid field values are `` `domain ``. Validation precedes process creation.
+#### Examples
 
-For example, on a POSIX host with `/bin/cat`, capture a byte-exact round trip:
+On a POSIX host with `/bin/cat`, capture a byte-exact round trip:
 
 ```ecl
 {executable "/bin/cat" stdin [104 101 108 108 111 10]} proc.run
@@ -2298,19 +2026,6 @@ These examples require the named executables and directory to exist, and the
 host to permit the requested paths and capture bounds. Use `bytes` to encode
 text for stdin and `chars` to decode complete UTF-8 output. Arbitrary process
 output may not be valid UTF-8.
-
-Prefer `proc.run` when the output fits a known bound. With `proc.spawn`, feed
-stdin and drain **both** output pipes concurrently when they can fill. A child
-may wait for stdin EOF before exiting, so call `proc.close-input` when feeding
-is complete. `proc.wait` does not drain output: waiting first can deadlock on a
-full pipe. Reads may split text characters or application messages across
-chunks. Close the resource with `port.close` when finished; waiting for exit
-does not close it.
-
-Bytes are ordinary integer lists whose elements are all in `0...255`. Process
-streams do not decode Unicode. A port is an opaque identity capability that
-prints `<port:N>` and has type `` `port ``; it exposes no PID and cannot be passed
-through JSON. Native words can view and forward its opaque identity.
 
 ### kill
 `( resource -- )` — Request force termination of the process group and arrange direct-child reap. Idempotent and safe after natural exit while the resource remains open. This does not wait for exit; use `proc.wait` to observe termination and `port.close` to join cleanup.
@@ -2372,11 +2087,7 @@ Capture overflow kills and cleans the process before raising `` `overflow ``. De
 
 ## rand
 
-Explicit-state pseudorandom draws are pure except for `entropy`; see
-[Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw
-returns the advanced state alongside its result. An ambient generator is an
-agent holding that state: ``[0 0] agent.start `rng set`` then
-`rng (5 rand.int) agent.call`.
+Explicit-state pseudorandom draws are pure except for `entropy`; see [Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw returns the advanced state alongside its result. An ambient generator is an agent holding that state: ``[0 0] agent.start `rng set`` then `rng (5 rand.int) agent.call`.
 
 ### deal
 `( state count pool -- state results )` — Draw `count` distinct ints in `[0, pool)` without replacement, advancing the state by `count`. Work and memory follow `count`, never `pool`. A negative count or pool, or a count above the pool, is `` `domain ``; a non-int count or pool is `` `type ``.
@@ -2426,28 +2137,20 @@ agent holding that state: ``[0 0] agent.start `rng set`` then
 
 ## result
 
-Every entry validates its result envelope before invoking a caller quotation.
-A success payload is always a list representing a stack.
+Results have the `{ok values}` or `{err error}` form produced by `@attempt` and `task.await`. Every entry validates its result envelope before invoking a caller quotation. A success payload is always a list representing a stack.
 
-Each word has one role. Transformers return a result and run their quotation
-isolated under `@attempt`, so a quotation that fails yields a failed result.
-Eliminators leave plain values and run their quotations inline, so they can
-reach the stack beneath the result.
+Each word has one role. Transformers return a result and run their quotation isolated under `@attempt`, so a quotation that fails yields a failed result. Eliminators leave plain values and run their quotations inline, so they can reach the stack beneath the result.
 
-| Role | Words |
-|---|---|
-| Construct | `ok`, `err` |
-| Test | `ok?`, `err?` |
-| Transform the success | `map` |
-| Transform the failure | `recover`, `recover-kinds`, `map-err` |
-| Eliminate | `either`, `or-raise`, `or-default` |
-| Combine | `all`, `partition` |
+- Construct: `ok`, `err`.
+- Test: `ok?`, `err?`.
+- Transform the success: `map`.
+- Transform the failure: `recover`, `recover-kinds`, `map-err`.
+- Eliminate: `either`, `or-raise`, `or-default`.
+- Combine: `all`, `partition`.
 
-`map` replaces the success stack with what its quotation leaves, and a raising
-quotation turns the success into a failure. `recover` may likewise turn a
-failure into a success; `map-err` always keeps a failure and replaces only the
-error dict. `or-default` returns the success list or, on failure, the fallback
-value as given.
+`map` replaces the success stack with what its quotation leaves, and a raising quotation turns the success into a failure. `recover` may likewise turn a failure into a success; `map-err` always keeps a failure and replaces only the error dict. `or-default` returns the success list or, on failure, the fallback value as given.
+
+`raise`, `fail`, and `assert` operate on errors directly and remain core words.
 
 ### err
 `( error -- result )` — Tag an error dict as a failed result.
@@ -2511,6 +2214,8 @@ value as given.
 
 ## source
 
+Inert inspection of ECL source: what a source declares, found by the reader's discovery rule without evaluating it.
+
 ### declarations
 `( quotation -- list )` — Inspect parsed source without executing it. Return the symbols immediately preceding top-level `@defm` words, in source order. Preserve duplicate names and report literal spellings without validating namespace or export policy. Ignore computed names and declarations inside quotations, lists, dictionaries, strings, or comments. This reports syntactic declarations, not proof that executing the source would register a module. Like other quotation operations, this accepts a list (`` `type `` otherwise). Use `parse` to inspect text, with its ordinary parse failures. Inspection is cancellable.
 
@@ -2523,8 +2228,7 @@ value as given.
 
 ## str
 
-All case and whitespace operations use the ASCII character classes; every
-non-ASCII scalar passes through unchanged.
+All case and whitespace operations use the ASCII character classes; every non-ASCII scalar passes through unchanged.
 
 ### str?
 `( value -- bool )` — Return 1 when a value is a string, a list whose every element is a char, and 0 for every other value. The empty string answers 1, and so does the empty list: they are one value. Never raises.
@@ -2608,9 +2312,9 @@ non-ASCII scalar passes through unchanged.
 
 ## table
 
-Every operation except `valid?` first validates the ordinary column dict as a
-table. See the environment's [table contract](ENVIRONMENT.md#tables) for the
-table convention and frozen error kinds.
+Tables are column dictionaries. Column names are nonempty strings, column values are lists, and every column has the same length. A table has at least one column and may have zero rows. Column order is dictionary insertion order. Tables remain ordinary dictionaries: `type`, `keys`, `at`, and `put` keep their normal behavior.
+
+Every operation except `valid?` first validates the ordinary column dict as a table. See the environment's [table contract](ENVIRONMENT.md#tables) for the table convention and frozen error kinds.
 
 ### from-records
 `( records -- table )` — Build a table from a nonempty list of dicts sharing one key set. The first record fixes the schema order; later records may use a different key order.
@@ -2709,15 +2413,13 @@ table convention and frozen error kinds.
 
 ## task
 
-Task handles are created by the core unit constructors `@spawn` and `@give`.
-A handle observes a task's lifetime and result. `task.address` derives the
-task's address, which names only its mailbox, and `task.self` is the
-executing task's own. Use `(task.await) each` to collect results in input
-order without cancelling siblings or re-raising task errors.
+Task handles are created by the core unit constructors `@spawn` and `@give`. A handle observes a task's lifetime and result. `task.address` derives the task's address, which names only its mailbox, and `task.self` is the executing task's own. Use `(task.await) each` to collect results in input order without cancelling siblings or re-raising task errors.
 
-Request and reply is a composition over `send` and `receive`: spawn a helper
-task, send its address with the request, and await the helper, whose result
-is the reply. `task.await-for` bounds the exchange.
+Request and reply is a composition over `send` and `receive`: spawn a helper task, send its address with the request, and await the helper, whose result is the reply. `task.await-for` bounds the exchange.
+
+#### Examples
+
+Request and reply:
 
 ```ecl
 (|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def
@@ -2767,23 +2469,14 @@ is the reply. `task.await-for` bounds the exchange.
 
 ## test.default
 
-The bundled runner is ordinary ECL policy over the closed `tests` / `@test`
-substrate. Projects may replace it with any public qualified runner word.
+The bundled runner is ordinary ECL policy over the closed `tests` / `@test` substrate. Projects may replace it with any public qualified runner word. The host supplies only catalog discovery, protected invocation, and root dispatch.
 
 ### run
 `( -- )` — Discover canonical tests and invoke them sequentially in deterministic module and name order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures and request process status 1 if any failed.
 
 ## time
 
-Pure UTC time over the millisecond timestamps `clock.unix` produces. Every
-word accepts and returns whole milliseconds; a timestamp is `{unix ms}` and
-nothing else — a `{monotonic ms}` instant, an untagged int, a float payload,
-or a dictionary with any other key is `` `type ``. Arithmetic is checked: leaving
-the int millisecond range is `` `overflow ``. Calendar words use the proleptic
-Gregorian calendar with no leap seconds, so Unix time here is the POSIX count
-in which every day has exactly 86,400,000 milliseconds. The representable
-range runs from `-292275055-05-16T16:47:04.192` through
-`292278994-08-17T07:12:55.807`. Nothing in this module reads a clock.
+Pure UTC time over the millisecond timestamps `clock.unix` produces. Every word accepts and returns whole milliseconds; a timestamp is `{unix ms}` and nothing else — a `{monotonic ms}` instant, an untagged int, a float payload, or a dictionary with any other key is `` `type ``. Arithmetic is checked: leaving the int millisecond range is `` `overflow ``. Calendar words use the proleptic Gregorian calendar with no leap seconds, so Unix time here is the POSIX count in which every day has exactly 86,400,000 milliseconds. The representable range runs from `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`. Nothing in this module reads a clock. Every failure is raised against the public word the program called, so an overflow inside the arithmetic is reported as that word's own `` `overflow ``.
 
 ### add
 `( timestamp milliseconds -- timestamp )` — Shift a timestamp by a signed integer millisecond duration.

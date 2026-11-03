@@ -14,6 +14,11 @@ const Value = @import("../value.zig").Value;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Host primitives behind the `fd` module, which composes them into its public words.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "in",

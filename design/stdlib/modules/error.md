@@ -1,9 +1,5 @@
 ## error
 
-Errors are ordinary dictionaries. Construction and inspection do not raise
-unless an operation's own input violates its contract; control effects remain
-core words.
-
 ### with-message
 
 #### Examples

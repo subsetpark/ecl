@@ -23,6 +23,11 @@ const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 const Value = machine.Value;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Host primitives behind the `io` module, which composes them into its public words.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "pp",

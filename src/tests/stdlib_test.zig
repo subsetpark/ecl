@@ -70,6 +70,23 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
     });
 }
 
+test "stdlib: every embedded module documents itself" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    // Source, builtin, and native transports each publish a nonempty
+    // documentation string with the module's first generation.
+    for (stdlib.names()) |name| {
+        const source = try std.fmt.allocPrint(allocator, "`{s} module-doc dup str.str? swap len 0 >", .{name});
+        defer allocator.free(source);
+        try expectDisplay(&runtime, source, "1 1");
+        try expectOk(&runtime, "pop pop");
+    }
+}
+
 test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // No search path is configured; embedded modules resolve independently
     // of the isolated filesystem inputs.

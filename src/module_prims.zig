@@ -30,6 +30,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "qualify", .primitive = qualify, .effect = "module-name binding-name -- qualified-word", .doc = "Validate a canonical module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed." },
         .{ .name = "words", .primitive = words, .effect = "--", .doc = "Print the visible dictionary in sorted order." },
         .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``." },
+        .{ .name = "module-doc", .primitive = moduleDocWord, .effect = "module-name -- string", .doc = "Return the canonical documentation string of a module's current generation, loading an embedded or mapped module on first mention. A source module states it with a documentation-only annotation before its `@defm` operands; a native module, in its descriptor. An alias reports its target's documentation. An invalid module name, `` `core ``, or a module without documentation is `` `domain ``; an unknown one is `` `undefined-word ``." },
         .{ .name = "stdlib", .primitive = stdlibWord, .effect = "-- names", .doc = "Return the names of the embedded standard-library modules as a list of symbols in codepoint order." },
         .{ .name = "@load", .primitive = loadSeeded, .effect = "values path --", .doc = "*Unit constructor.* Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive." },
         .{ .name = "@load!", .primitive = loadSeedless, .effect = "path --", .doc = "*Unit constructor.* `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`." },
@@ -51,19 +52,47 @@ fn defmSeedless(evaluator: *Fiber) MachineError!void {
     try startDefm(evaluator, name, try evaluator.popSeedlessUnitInput());
 }
 
+/// The value beneath the operands documents the module only when it is exactly
+/// `(: "text")`. Anything else is the caller's data and stays where it is: a
+/// module declares no stack effect, so nothing else could be its annotation.
 fn startDefm(evaluator: *Fiber, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
     var input = popped;
     errdefer input.deinit(evaluator.releases);
+    var doc: heap.Owned(Value) = .none;
+    errdefer doc.deinit(evaluator.releases, evaluator.allocator);
+    if (evaluator.available() != 0) {
+        if (try moduleDocumentation(evaluator.visibleOperandBorrowed(evaluator.available() - 1))) |document| {
+            heap.retainValue(document);
+            doc = .init(document);
+            evaluator.discard(1);
+        }
+    }
+    // From here the driver owns both; an uninstalled driver disposes them.
+    const owned_doc = doc;
+    doc = .none;
     try evaluator.startDriver(DefmDriver{
         .input = .init(input.move()),
         .validation = .init(name),
+        .doc = owned_doc,
     });
+}
+
+/// The documentation string of a module annotation, read in constant work.
+fn moduleDocumentation(candidate: Value) error{OutOfMemory}!?Value {
+    if (candidate != .list or candidate.list.length() != 2) return null;
+    const marker = list.atUnchecked(candidate, 0);
+    if (marker != .symbol or marker.symbol.name != try intern.intern(":")) return null;
+    const document = list.atUnchecked(candidate, 1);
+    if (!document.isString() or env.documentation(document.list) == null) return null;
+    return document;
 }
 
 const DefmDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     input: heap.Owned(machine.OwnedUnitInput),
     validation: intern.ModuleNameCursor,
+    /// The module's documentation, consumed from beneath the operands.
+    doc: heap.Owned(Value) = .none,
 
     pub fn advance(evaluator: *Fiber, self: *DefmDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -79,14 +108,22 @@ const DefmDriver = struct {
                     return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier");
                 try evaluator.refuseReservedModule(name, evaluator.current.?.site.registration_provenance);
                 const input = self.input.take();
+                var doc = self.doc;
+                self.doc = .none;
+                defer doc.deinit(evaluator.releases, evaluator.allocator);
                 evaluator.retireDriver(self);
-                try evaluator.moduleOwned(name, input);
+                try evaluator.moduleOwned(
+                    name,
+                    input,
+                    if (doc.isPresent()) env.documentation(doc.borrow().list).? else null,
+                );
                 return .detached;
             },
         };
         return .stepped;
     }
 };
+
 /// Returns the canonical registration selected by the active execution home.
 /// The name belongs to the home rather than the image: one image can be
 /// registered more than once, and an alias still reaches its target's
@@ -620,6 +657,63 @@ const ExportsDriver = struct {
                 .complete => |result| return .{ .output = result },
             },
         };
+        return .stepped;
+    }
+};
+
+fn moduleDocWord(evaluator: *Fiber) MachineError!void {
+    const requested = try evaluator.popSymbol();
+    try evaluator.startDriver(ModuleDocDriver{ .requested = requested, .validation = .init(requested) });
+}
+
+/// Read one module generation's documentation and normalize it as `doc`
+/// does. A cold module rewinds this call behind the ordinary qualified
+/// auto-load, so the replay finds it registered.
+const ModuleDocDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    requested: u32,
+    validation: intern.ModuleNameCursor,
+    acquire: heap.Owned(machine.ModuleLookupCursor) = .none,
+    name: ?intern.ModuleName = null,
+    normalization: heap.Owned(definition_prims.DocumentNormalization) = .none,
+
+    pub fn advance(evaluator: *Fiber, self: *ModuleDocDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const work = evaluator.workBudget();
+        while (work.spend()) {
+            if (self.normalization.isPresent()) {
+                if (try self.normalization.borrowMut().advance(work)) |normalized|
+                    return .{ .output = normalized };
+            } else if (self.acquire.isPresent()) switch (self.acquire.borrowMut().advance()) {
+                .pending => {},
+                .complete => |maybe_generation| {
+                    var generation = heap.Owned(modules.GenerationLease).init(maybe_generation orelse {
+                        const requested = self.requested;
+                        const module_name = self.name.?;
+                        evaluator.retireDriver(self);
+                        return evaluator.retryQualifiedOperandAfterLoad(
+                            .{ .name = requested },
+                            .{ .unregistered_module = module_name },
+                        );
+                    });
+                    defer generation.deinit(evaluator.releases, evaluator.allocator);
+                    const document = generation.borrow().documentation() orelse
+                        return evaluator.fail(.domain, "module has no documentation");
+                    self.acquire.deinit(evaluator.releases, evaluator.allocator);
+                    self.normalization = .init(try .init(evaluator, document));
+                },
+            } else switch (self.validation.advance()) {
+                .pending => {},
+                .complete => |maybe_name| {
+                    const name = maybe_name orelse
+                        return evaluator.fail(.domain, "module-doc requires a valid module name");
+                    if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
+                        return evaluator.fail(.domain, "`core` is a qualifier, not a documented module");
+                    self.name = name;
+                    self.acquire = .init(machine.ModuleLookupCursor.atCurrent(evaluator, name));
+                },
+            }
+        }
         return .stepped;
     }
 };

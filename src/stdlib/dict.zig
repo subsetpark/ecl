@@ -18,6 +18,11 @@ const Value = value.Value;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Host kernels behind the `dict` module. A failure inside one reports its `dict.core` name.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "at-or",
