@@ -592,7 +592,7 @@ pub const Extension = ecl.module(.{
     .words = .{
         ecl.word("increment", "Increment an integer.", increment),
         ecl.word("discard", "Discard one value.", discard),
-        ecl.word("split", "Return one input twice.", split),
+        ecl.word("twin", "Return one input twice.", split),
         ecl.word("forward", "Forward an input unchanged.", forward),
         ecl.word("nested-port", "Observe and forward the first port in a list or dictionary.", forwardNestedPort),
         ecl.word("fail-user", "Raise the user error kind.", failUser),

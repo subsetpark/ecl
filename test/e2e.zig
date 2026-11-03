@@ -193,9 +193,9 @@ test "e2e: proc write serializes at scheduler call arrival" {
         allocator,
         "`proc (spawn write close-input read-stdout wait) import " ++
             "{{executable \"{s}\" args (\"first-byte\")}} spawn `p set " ++
-            "[1] 200000 take `bytes set " ++
-            "[] (p bytes write) @spawn `first set [] () @spawn task.await pop " ++
-            "p [2] write first task.await pop p close-input p 1 read-stdout [1] match? p wait pop",
+            "[1] 200000 take `payload set " ++
+            "[] (p payload write) @spawn `early set [] () @spawn task.await pop " ++
+            "p [2] write early task.await pop p close-input p 1 read-stdout [1] match? p wait pop",
         .{process_exe},
     );
     defer allocator.free(program);
@@ -1187,8 +1187,8 @@ test "e2e: explicit import replacement acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 `mean set 2 `count set [] (3 `mean set 4 `count set) `stats @defm " ++
-            "`stats (mean count) import mean count",
+        "1 `avg set 2 `count set [] (3 `avg set 4 `count set) `stats @defm " ++
+            "`stats (avg count) import avg count",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1464,7 +1464,11 @@ test "e2e: M6 combinators parse and contract payloads" {
 
     var rebound = try run(&.{ build_options.ecl_exe, "test/acceptance/redefined-plus.ecl" });
     defer rebound.deinit();
-    try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
+    try rebound.expect(.{
+        .exit_code = 0,
+        .stdout = "42\n",
+        .stderr = "warning: `+` now shadows the core word for top-level code; `core.+` still reaches it\n",
+    });
 
     var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set) each" });
     defer refused.deinit();

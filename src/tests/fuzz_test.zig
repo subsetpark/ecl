@@ -898,7 +898,7 @@ test "fuzz: real scheduler publication cancellation and join traces settle" {
 fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
     const programs = [_][]const u8{
         "7 sample.forward pop",
-        "7 sample.split pop pop",
+        "7 sample.twin pop pop",
         "7 sample.singleton pop",
         "[] (7 sample.draft-fail) @attempt pop",
         "sample.cooperative pop",
