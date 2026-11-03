@@ -870,7 +870,7 @@ test "e2e: cancellation timeout and @each agree at one and eight workers" {
         defer cancel_timeout.deinit();
         try cancel_timeout.expect(.{
             .exit_code = 0,
-            .stdout = "cancelled\ntimeout\n",
+            .stdout = "cancelled\ntimeout\ncancelled\n",
             .stderr = "",
         });
 

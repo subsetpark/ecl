@@ -168,7 +168,7 @@ const FailureSite = union(enum) {
 };
 pub const FiberConstructor = enum { spawn, @"test" };
 /// A fiber runs in one of two roles, and everything that differs between them
-/// follows from which. A root fiber runs a submission or the prelude and may
+/// follows from which. A root fiber runs a submission, the prelude, or host-driven loading and may
 /// define. A task fiber runs in its spawner's scope without being a root of
 /// its own, so it may not define; it records the word that constructed it.
 pub const FiberRole = union(enum) {
@@ -8563,7 +8563,7 @@ const FailureDriver = struct {
                     continue;
                 };
                 const boundary = evaluator.frames.items[@backingInt(boundary_index)].boundary;
-                if (boundary.mode == .attempt) {
+                if (boundary.mode == .attempt and !evaluator.cancelled.load(.acquire)) {
                     const item = nearest.error_value;
                     self.beginUnwind(item, .{ .caught = .{
                         .boundary_index = boundary_index,

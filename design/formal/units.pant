@@ -218,7 +218,7 @@ where
 > by a cancellation error prevents its parent's success whatever boundary
 > opened it, so cancellation fails every unit of the cancelled task or root
 > from the innermost out.
-Units, Nesting ~> Begin nested unit @ parent: Unit, entry: Value, body: Value, unit-created? parent, unit-active? parent, value-type entry = list-type, value-type body = list-type.
+Units, Nesting ~> Begin nested unit @ parent: Unit, entry: Value, body: Value, reifying: Bool, unit-created? parent, unit-active? parent, value-type entry = list-type, value-type body = list-type.
 ---
 > Beginning a nested unit is beginning a unit that also records its parent.
 > Whether its boundary reifies failure is the opener's choice and stays fixed.
@@ -233,6 +233,7 @@ some unit: Unit, ~unit-created? unit |
   unit-error' unit = unit-error unit and
   unit-nested?' unit and
   unit-parent' unit = parent and
+  unit-reifying?' unit = reifying and
   (all other: Unit, other != unit |
     unit-created?' other = unit-created? other and
     unit-active?' other = unit-active? other and

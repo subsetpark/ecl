@@ -750,7 +750,7 @@ the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success
 `{err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
 a script's boundary is the process. Cancellation propagates the same way but
-is never data: no boundary reifies a cancellation error, so cancelling a task
+is never data: no boundary inside the cancelled task reifies a cancellation error, so cancelling a task
 or the root fails every unit it has open, innermost first.
 
 Source-position and other diagnostic fields appear when known. Absence is
@@ -1152,13 +1152,13 @@ initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**uni
 
 > `Begin nested unit` opens a unit inside an active parent unit. Units nest strictly: a parent cannot become terminal while a unit nested in it is active. A reifying nested unit, as `@attempt` opens, turns its failure into data its parent continues with. Any other nested failure propagates, so its parent cannot succeed. Cancellation is never reified: a nested unit failed by a cancellation error prevents its parent's success whatever boundary opened it, so cancellation fails every unit of the cancelled task or root from the innermost out.
 
-**`Units`**, **`Nesting`** ↝ Begin nested unit *parent*: `Unit`, *entry*: `Value`, *body*: `Value`, **unit-created?** *parent*, **unit-active?** *parent*, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
+**`Units`**, **`Nesting`** ↝ Begin nested unit *parent*: `Unit`, *entry*: `Value`, *body*: `Value`, *reifying*: `Bool`, **unit-created?** *parent*, **unit-active?** *parent*, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
 ---
 
 > Beginning a nested unit is beginning a unit that also records its parent. Whether its boundary reifies failure is the opener's choice and stays fixed.
 
-∃ *unit*: `Unit`, ¬**unit-created?** *unit* · **unit-created?**′ *unit* ∧ **unit-active?**′ *unit* ∧ ¬**unit-succeeded?**′ *unit* ∧ ¬**unit-failed?**′ *unit* ∧ **unit-entry**′ *unit* = *entry* ∧ **unit-body**′ *unit* = *body* ∧ **unit-stack**′ *unit* = *entry* ∧ **unit-error**′ *unit* = **unit-error** *unit* ∧ **unit-nested?**′ *unit* ∧ **unit-parent**′ *unit* = *parent* ∧ (∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other* ∧ **unit-nested?**′ *other* = **unit-nested?** *other* ∧ **unit-parent**′ *other* = **unit-parent** *other* ∧ **unit-reifying?**′ *other* = **unit-reifying?** *other*).
+∃ *unit*: `Unit`, ¬**unit-created?** *unit* · **unit-created?**′ *unit* ∧ **unit-active?**′ *unit* ∧ ¬**unit-succeeded?**′ *unit* ∧ ¬**unit-failed?**′ *unit* ∧ **unit-entry**′ *unit* = *entry* ∧ **unit-body**′ *unit* = *body* ∧ **unit-stack**′ *unit* = *entry* ∧ **unit-error**′ *unit* = **unit-error** *unit* ∧ **unit-nested?**′ *unit* ∧ **unit-parent**′ *unit* = *parent* ∧ **unit-reifying?**′ *unit* = *reifying* ∧ (∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other* ∧ **unit-nested?**′ *other* = **unit-nested?** *other* ∧ **unit-parent**′ *other* = **unit-parent** *other* ∧ **unit-reifying?**′ *other* = **unit-reifying?** *other*).
 
 
 

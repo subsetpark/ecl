@@ -1241,8 +1241,8 @@ measured cost justifies fusion.
 
 ## 8. Scheduling and structured concurrency
 
-A `Fiber` is a green execution context. Only a submission, the prelude, and a
-task body get one. `@attempt`, `@load`, and module construction run as
+A `Fiber` is a green execution context. A submission, the prelude, a task body,
+or host-driven loading gets one. `@attempt`, `@load`, and module construction run as
 boundary frames inside the fiber, so one fiber carries a stack of nested units.
 A fiber's role is one tagged value: a root fiber may define, and a task fiber
 may not and records the constructor that built it. No fiber can be a defining
@@ -1328,7 +1328,7 @@ Scopes, fibers, and units are different granularities. A `TaskScope` exists
 in exactly two places: the session root, shared by every root fiber and closed
 only at exit, and each `TaskCell`. `@attempt` and module construction are
 boundary frames inside the fiber that runs them: a stack floor that failure
-truncates to, taking no checkpoint and owning nothing. `@load` opens the same
+truncates to, taking no checkpoint and owning no task scope. `@load` opens the same
 kind of boundary over a source file once it is read. Combinator applications
 open no scope and no boundary. A spawn
 registers under the nearest enclosing scope, so a task started inside an

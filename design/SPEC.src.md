@@ -463,7 +463,7 @@ the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success
 `{err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
 a script's boundary is the process. Cancellation propagates the same way but
-is never data: no boundary reifies a cancellation error, so cancelling a task
+is never data: no boundary inside the cancelled task reifies a cancellation error, so cancelling a task
 or the root fails every unit it has open, innermost first.
 
 Source-position and other diagnostic fields appear when known. Absence is
