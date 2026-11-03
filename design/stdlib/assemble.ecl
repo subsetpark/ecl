@@ -229,11 +229,22 @@
  "### " name escaped cat "\n" cat name qualifier entry-text cat
  swap dup empty? (pop) ("\n\n" swap cat cat) if) `render-entry def
 
+### def stray-heading?
+(lines -- bool : "Return 1 when any line outside fenced code is a `# ` or `## ` heading.")
+(|lines|
+ lines ("```" starts?) each 0 (+) scan 2 mod 0 =
+ lines ("~~~" starts?) each 0 (+) scan 2 mod 0 = and
+ lines ("# " starts?) each lines ("## " starts?) each or and
+ where empty? not) `stray-heading? def
+
 ### def module-header
 (header module -- header :
  "Place a module's documentation beneath its fragment's heading, refusing other prose there: the
-  rest of the header must open with a `#### ` subsection.")
+  rest of the header must open with a `#### ` subsection and hold no other heading outside fenced
+  code.")
 (|header module|
+ header "\n" split rest stray-heading? not
+ module ": a module fragment may hold no heading above #### level" cat check
  header "\n" split rest
  dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" join) if
  dup empty? over "#### " starts? or

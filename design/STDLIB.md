@@ -1116,7 +1116,7 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 
 An agent is a task whose stack is its state. Quotations sent to it run in arrival order, each as an isolated unit over that stack, so a failing quotation leaves the state exactly as it was. A `call` quotation is `( state... -- state... result )`: the top of its result stack is the reply and the rest is the new state. A `send` quotation is `( state... -- state... )` and keeps its whole result stack. This is how a program keeps state that outlives a word.
 
-A call to an agent that has ended raises `` `io ``. A call whose request was accepted waits forever if the agent ends before replying, unless it bounds the call with `call-for`. An agent ends only when it is cancelled.
+A call to an agent that has ended raises `` `io ``. A call whose request was accepted waits forever if the agent ends before replying, unless it bounds the call with `call-for`. An agent ends when it is cancelled, or when it receives a message that is not a quotation request, such as a bare value sent to its address with `task.send`; that message fails the agent.
 
 #### Examples
 

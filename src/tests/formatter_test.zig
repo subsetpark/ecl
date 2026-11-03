@@ -75,6 +75,12 @@ test "formatter keeps a module annotation with its registration" {
     try expectFormat(commented, commented);
 }
 
+test "formatter leaves a non-documentation list before a module registration as data" {
+    // `@defm` reads only `(: "text")` as documentation, so a stack-effect
+    // annotation with a docstring is caller data whose string must survive.
+    try expectParseEquivalent("(x -- y : \"a\\n  b\") [] () `m @defm\n");
+}
+
 test "formatter measures a module seed against its opening line" {
     const source = "[] ((1) `x def) `stats @defm\n";
     try expectFormat(

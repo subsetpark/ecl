@@ -871,6 +871,9 @@ const Formatter = struct {
             }
         }
         const colon_index = colon orelse return null;
+        // `@defm` reads only `(: "text")` as module documentation; any other
+        // list before a registration is the caller's data and stays verbatim.
+        if (!definitionFollows(parent, body_index) and separator != null) return null;
         if (separator) |index| if (index > colon_index) return null;
         if (separator == null and colon_index != 0) return null;
         if (forms.len != colon_index + 2 or forms[colon_index + 1].kind != .string) return null;
