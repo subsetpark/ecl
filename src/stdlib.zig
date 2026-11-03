@@ -7,7 +7,7 @@
 //! `ECL_PATH` and no readable working directory at all.
 //!
 //! These names are reserved: user registration, aliasing, and removal under
-//! one are `'domain` (Unit.refuseReservedModule).
+//! one are `'domain` (Fiber.refuseReservedModule).
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");

@@ -39,7 +39,7 @@ publication, reclamation, or architectural enforcement. The short rules in
 ## Ownership, lifetime, and capabilities
 
 - Define one lifetime protocol for provisional and published generations,
-  Units, tasks, scopes, descendants, drivers, pins, leases, and cursors. Do not
+  Fibers, tasks, scopes, descendants, drivers, pins, leases, and cursors. Do not
   duplicate teardown ordering assumptions between owners or rely on a
   unique-refcount assertion to stand in for quiescence.
 - Keep an embedded owner alive until every descendant has propagated its parent
@@ -56,7 +56,7 @@ publication, reclamation, or architectural enforcement. The short rules in
   cursors. They never expose raw homes, mutable scopes, ownership factories, or
   an implicit path to greater authority.
 - Give Session-facing and registered-native callers only opaque semantic
-  facades. Do not expose raw `Env`, `Registry`, Unit, module-home,
+  facades. Do not expose raw `Env`, `Registry`, Fiber, module-home,
   reclamation-domain, wake-control, queue, or manual-advancement aliases when a
   narrower operation can express the contract. A lower-level API is valid only
   when its caller explicitly owns the corresponding lifetime and reclamation
@@ -93,12 +93,12 @@ publication, reclamation, or architectural enforcement. The short rules in
   known results and fixed chunks plus one polled materialization pass for
   unknown results; do not introduce relocating or rehashing storage into
   cancellable paths.
-- Never mint a private allowance for unit work. A cursor takes the budget it is
-  lent and passes the same pointer to what it drives; it charges only its own
-  steps, never a hand-off, or a one-unit grain starves the nested cursor. A
+- Never mint a private allowance for a fiber's work. A cursor takes the budget
+  it is lent and passes the same pointer to what it drives; it charges only its
+  own steps, never a hand-off, or a one-unit grain starves the nested cursor. A
   driver reports `stepped` while it has work and the budget lasts, and
   `yielded` only when it must wait or must not observe cancellation. A cursor
-  that can wait on another unit reports `blocked` distinctly from `pending`.
+  that can wait on another fiber reports `blocked` distinctly from `pending`.
   Turn length is the kernel quantum; an expensive element charges more units
   rather than capping its driver's turn. The source audit owns who may create
   a budget and who may use `poll.unbounded()`.

@@ -12,7 +12,7 @@ const support = @import("kernel_support.zig");
 
 const Value = value.Value;
 const Header = value.ListHandle;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 const Application = machine.IsolatedApplication;
 const ApplicationStep = machine.ApplicationStep;
@@ -39,13 +39,13 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try core.installBuiltins(&definitions);
 }
 
-fn call(evaluator: *Unit) MachineError!void {
+fn call(evaluator: *Fiber) MachineError!void {
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     try evaluator.callOwned(quotation.take().list);
 }
 
-fn ifWord(evaluator: *Unit) MachineError!void {
+fn ifWord(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var otherwise = try evaluator.popValue();
     defer otherwise.deinit();
@@ -59,7 +59,7 @@ fn ifWord(evaluator: *Unit) MachineError!void {
     try evaluator.callOwned(if (selected_then) then.take().list else otherwise.take().list);
 }
 
-fn whileWord(evaluator: *Unit) MachineError!void {
+fn whileWord(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var body = try evaluator.popValue();
     defer body.deinit();
@@ -107,7 +107,7 @@ const WhileCheckpoint = struct {
         self.index = 0;
     }
     /// Advances the capture or restore in hand; true once it is finished.
-    fn advance(self: *WhileCheckpoint, evaluator: *Unit) error{OutOfMemory}!bool {
+    fn advance(self: *WhileCheckpoint, evaluator: *Fiber) error{OutOfMemory}!bool {
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.phase) {
             .release => {
@@ -195,7 +195,7 @@ const WhileState = struct {
     /// finishes it and resumes the loop in `pending`.
     fn finishWork(
         self: *WhileState,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         pending: @FieldType(WhileState, "phase"),
     ) MachineError!?ApplicationStep {
         if (try self.checkpoint.borrowMut().advance(evaluator)) return self.resumeAfter(pending);
@@ -213,7 +213,7 @@ const WhileState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *WhileState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -243,7 +243,7 @@ const WhileState = struct {
 const WhileStartDriver = struct {
     state: heap.Owned(*WhileState),
 
-    pub fn advance(evaluator: *Unit, self: *WhileStartDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *WhileStartDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         evaluator.active_word = state.word;
         try evaluator.pollKernel();
@@ -261,7 +261,7 @@ const WhileStartDriver = struct {
 const WhileWorkDriver = struct {
     state: *WhileState,
 
-    pub fn advance(evaluator: *Unit, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.state.word;
         try evaluator.pollKernel();
         return if (try self.state.checkpoint.borrowMut().advance(evaluator)) .completed else .stepped;
@@ -283,7 +283,7 @@ const TimesState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *TimesState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -297,7 +297,7 @@ const TimesState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn times(evaluator: *Unit) MachineError!void {
+fn times(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -322,7 +322,7 @@ fn times(evaluator: *Unit) MachineError!void {
 /// `(swap literal append call)` stays authoritative; matching it lets the
 /// protected value ride in a continuation instead of building a capture
 /// quotation and a composition on every application.
-pub fn dipForIdiom(evaluator: *Unit) MachineError!void {
+pub fn dipForIdiom(evaluator: *Fiber) MachineError!void {
     std.debug.assert(evaluator.available() >= 2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -354,7 +354,7 @@ const DipState = struct {
     /// application completes, so a failing quotation leaves it to this
     /// driver's field ownership rather than to the rolled-back stack.
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *DipState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -380,7 +380,7 @@ const GuardCheckpoint = struct {
     index: usize = 0,
     phase: enum { capture, ready, discard, reserve, restore } = .capture,
 
-    fn init(evaluator: *Unit) error{OutOfMemory}!heap.Owned(GuardCheckpoint) {
+    fn init(evaluator: *Fiber) error{OutOfMemory}!heap.Owned(GuardCheckpoint) {
         const depth = evaluator.available();
         return .init(.{
             .values = try .init(evaluator.releases, depth),
@@ -395,7 +395,7 @@ const GuardCheckpoint = struct {
             .phase = self.phase,
         };
     }
-    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Unit) bool {
+    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Fiber) bool {
         std.debug.assert(self.phase == .capture and evaluator.available() == self.depth);
         const end = self.index + evaluator.workBudget().take(self.depth - self.index);
         while (self.index != end) : (self.index += 1)
@@ -411,7 +411,7 @@ const GuardCheckpoint = struct {
     }
     fn advanceRestore(
         self: *GuardCheckpoint,
-        evaluator: *Unit,
+        evaluator: *Fiber,
     ) error{OutOfMemory}!bool {
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.phase) {
@@ -478,7 +478,7 @@ const GuardControl = struct {
 };
 
 fn beginGuardTarget(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     control: *heap.Owned(GuardControl),
     target: GuardTarget,
 ) MachineError!void {
@@ -501,7 +501,7 @@ const GuardSnapshotDriver = struct {
     control: heap.Owned(GuardControl),
     target: GuardTarget,
 
-    pub fn advance(evaluator: *Unit, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.control.borrow().word;
         try evaluator.pollKernel();
         if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(evaluator)) return .stepped;
@@ -519,7 +519,7 @@ const GuardRestoreDriver = struct {
     control: heap.Owned(GuardControl),
     target: GuardTarget,
 
-    pub fn advance(evaluator: *Unit, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.control.borrow().word;
         try evaluator.pollKernel();
         if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(evaluator)) return .stepped;
@@ -541,7 +541,7 @@ const GuardPredicateState = struct {
         return machine.typedApplication(self, quotation, control.site, 0);
     }
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *GuardPredicateState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -573,7 +573,7 @@ const GuardActionState = struct {
         return launched;
     }
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *GuardActionState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -674,7 +674,7 @@ const LinrecBranch = enum { base, recurse };
 const LinrecSnapshotDriver = struct {
     level: heap.Owned(LinrecLevel),
 
-    pub fn advance(evaluator: *Unit, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.level.borrow().word;
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
@@ -695,7 +695,7 @@ const LinrecRestoreDriver = struct {
     level: heap.Owned(LinrecLevel),
     branch: LinrecBranch,
 
-    pub fn advance(evaluator: *Unit, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.level.borrow().word;
         try evaluator.pollKernel();
         const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
@@ -731,7 +731,7 @@ const LinrecPredicateState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *LinrecPredicateState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -772,7 +772,7 @@ const LinrecApplicationState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *LinrecApplicationState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
@@ -805,7 +805,7 @@ const LinrecApplicationState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn linrec(evaluator: *Unit) MachineError!void {
+fn linrec(evaluator: *Fiber) MachineError!void {
     try evaluator.require(4);
     var post = try evaluator.popValue();
     defer post.deinit();
@@ -836,7 +836,7 @@ fn linrec(evaluator: *Unit) MachineError!void {
     }) });
 }
 
-fn cond(evaluator: *Unit) MachineError!void {
+fn cond(evaluator: *Fiber) MachineError!void {
     var clauses = try evaluator.popValue();
     defer clauses.deinit();
     if (clauses.borrow() != .list) {
@@ -861,7 +861,7 @@ const CondDriver = struct {
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *CondDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *CondDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const clauses = self.clauses.borrow();
         const count: usize = @intCast(clauses.list.length());
@@ -919,7 +919,7 @@ const IterationState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *IterationState,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -953,7 +953,7 @@ const IterationState = struct {
 
     fn resumeCollect(
         self: *IterationState,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -980,7 +980,7 @@ const IterationState = struct {
 
     fn resumeFor(
         self: *IterationState,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1001,7 +1001,7 @@ const IterationState = struct {
 
     fn resumeFold(
         self: *IterationState,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1036,12 +1036,12 @@ const IterationState = struct {
         return self.step(2);
     }
 
-    fn resumeInfra(evaluator: *Unit, base: usize) MachineError!?ApplicationStep {
+    fn resumeInfra(evaluator: *Fiber, base: usize) MachineError!?ApplicationStep {
         try InfraResultDriver.install(evaluator, base);
         return null;
     }
 
-    fn installCollected(self: *IterationState, evaluator: *Unit) error{OutOfMemory}!void {
+    fn installCollected(self: *IterationState, evaluator: *Fiber) error{OutOfMemory}!void {
         const values = self.results.?.take();
         self.results = null;
         try evaluator.startDriver(CollectedDriver{
@@ -1050,7 +1050,7 @@ const IterationState = struct {
         });
     }
 
-    fn pushInputs(self: *IterationState, evaluator: *Unit) MachineError!void {
+    fn pushInputs(self: *IterationState, evaluator: *Fiber) MachineError!void {
         const left = self.left.borrow();
         try evaluator.pushBorrowed(if (self.kind == .for_word and left == .dict)
             dict.valueAt(left.dict, self.index)
@@ -1120,7 +1120,7 @@ const UpdateApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *UpdateApplication,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -1168,7 +1168,7 @@ const UpdateWorkDriver = struct {
     state: heap.Owned(*UpdateState),
 
     fn launchApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *UpdateWorkDriver,
     ) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
@@ -1183,7 +1183,7 @@ const UpdateWorkDriver = struct {
         return .completed;
     }
 
-    fn listPosition(evaluator: *Unit, state: *const UpdateState, selector: Value) MachineError!usize {
+    fn listPosition(evaluator: *Fiber, state: *const UpdateState, selector: Value) MachineError!usize {
         if (selector != .int) return evaluator.typeError("an integer list index");
         if (selector.int < 0) return evaluator.fail(.domain, "update index is negative");
         const position = std.math.cast(usize, selector.int) orelse
@@ -1193,7 +1193,7 @@ const UpdateWorkDriver = struct {
         return position;
     }
 
-    pub fn advance(evaluator: *Unit, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *UpdateWorkDriver) MachineError!machine.WorkProgress {
         const state = self.state.borrow();
         evaluator.active_word = state.word;
         try evaluator.pollKernel();
@@ -1337,15 +1337,15 @@ const UpdateWorkDriver = struct {
     }
 };
 
-fn update(evaluator: *Unit) MachineError!void {
+fn update(evaluator: *Fiber) MachineError!void {
     return startUpdate(evaluator, .core_selector);
 }
 
-pub fn updateDictKeysForModule(evaluator: *Unit) MachineError!void {
+pub fn updateDictKeysForModule(evaluator: *Fiber) MachineError!void {
     return startUpdate(evaluator, .dictionary_key_list);
 }
 
-fn startUpdate(evaluator: *Unit, policy: UpdatePolicy) MachineError!void {
+fn startUpdate(evaluator: *Fiber, policy: UpdatePolicy) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -1364,7 +1364,7 @@ fn startUpdate(evaluator: *Unit, policy: UpdatePolicy) MachineError!void {
 }
 
 fn startUpdateOwned(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     policy: UpdatePolicy,
     collection_value: Value,
     selector_value: Value,
@@ -1462,7 +1462,7 @@ const CollectedDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
-    pub fn advance(evaluator: *Unit, self: *CollectedDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *CollectedDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
@@ -1523,7 +1523,7 @@ const StencilBootstrapDriver = struct {
 
     /// Copies the next granted run of a typed input's window straight into a
     /// window of the input's own representation; null when the input is boxed.
-    fn fillTyped(self: *StencilBootstrapDriver, evaluator: *Unit) MachineError!?bool {
+    fn fillTyped(self: *StencilBootstrapDriver, evaluator: *Fiber) MachineError!?bool {
         const control = self.control.borrow();
         const input = control.input.borrow().list;
         switch (input.kind()) {
@@ -1546,7 +1546,7 @@ const StencilBootstrapDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *StencilBootstrapDriver,
     ) MachineError!machine.WorkProgress {
         evaluator.active_word = self.control.borrow().word;
@@ -1579,7 +1579,7 @@ const StencilBootstrapDriver = struct {
     }
 
     /// Hands the finished window to the quotation; consumes `window`.
-    fn apply(self: *StencilBootstrapDriver, evaluator: *Unit, window: Value) MachineError!machine.WorkProgress {
+    fn apply(self: *StencilBootstrapDriver, evaluator: *Fiber, window: Value) MachineError!machine.WorkProgress {
         var window_owner = heap.OwnedValue.init(evaluator.releases, window);
         defer window_owner.deinit();
         const state = try evaluator.allocator.create(StencilApplication);
@@ -1615,7 +1615,7 @@ const StencilApplication = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *StencilApplication,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -1667,7 +1667,7 @@ const StencilApplication = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn stencil(evaluator: *Unit) MachineError!void {
+fn stencil(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
@@ -1749,7 +1749,7 @@ const UnfoldState = struct {
     }
 
     pub fn resumeApplication(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *UnfoldState,
         window: StackWindow,
         site: *machine.ApplicationContractSite,
@@ -1779,7 +1779,7 @@ const UnfoldState = struct {
 
     fn resumePredicate(
         self: *UnfoldState,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1814,7 +1814,7 @@ const UnfoldState = struct {
 
     fn resumeStep(
         self: *UnfoldState,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
@@ -1852,7 +1852,7 @@ const UnfoldCollectDriver = struct {
     count: usize,
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *UnfoldCollectDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1872,7 +1872,7 @@ const UnfoldCollectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn unfold(evaluator: *Unit) MachineError!void {
+fn unfold(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var step_quotation = try evaluator.popQuotation();
     defer step_quotation.deinit();
@@ -1922,14 +1922,14 @@ const InfraResultDriver = struct {
     materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
-    fn install(evaluator: *Unit, base: usize) error{OutOfMemory}!void {
+    fn install(evaluator: *Fiber, base: usize) error{OutOfMemory}!void {
         try evaluator.startDriver(InfraResultDriver{
             .base = base,
             .materializer = .init(.init(evaluator.allocator, evaluator.stack.items[base..])),
         });
     }
 
-    pub fn advance(evaluator: *Unit, self: *InfraResultDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *InfraResultDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
             switch (try self.materializer.borrowMut().advance(evaluator.workBudget())) {
@@ -1959,7 +1959,7 @@ const InfraBootstrapDriver = struct {
     stack: machine.StackReservation,
     index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const iteration = self.iteration.borrow();
         const end = self.index + evaluator.workBudget().take(iteration.count - self.index);
@@ -1978,18 +1978,18 @@ const InfraBootstrapDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn each(evaluator: *Unit) MachineError!void {
+fn each(evaluator: *Fiber) MachineError!void {
     return evaluator.continueWithIdiom(.each, statelessFallback(eachGeneric));
 }
-fn eachGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
+fn eachGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
     return startUnaryIteration(evaluator, .each);
 }
 
-fn forWord(evaluator: *Unit) MachineError!void {
+fn forWord(evaluator: *Fiber) MachineError!void {
     return startUnaryIteration(evaluator, .for_word);
 }
 
-fn startUnaryIteration(evaluator: *Unit, kind: IterationKind) MachineError!void {
+fn startUnaryIteration(evaluator: *Fiber, kind: IterationKind) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2052,10 +2052,10 @@ fn startUnaryIteration(evaluator: *Unit, kind: IterationKind) MachineError!void 
     try evaluator.beginIsolatedApplication(state.application(1));
 }
 
-fn zipWith(evaluator: *Unit) MachineError!void {
+fn zipWith(evaluator: *Fiber) MachineError!void {
     return evaluator.continueWithIdiom(.zip_with, statelessFallback(zipWithGeneric));
 }
-fn zipWithGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
+fn zipWithGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2101,32 +2101,32 @@ fn zipWithGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
     try evaluator.beginIsolatedApplication(state.application(2));
 }
 
-fn fold(evaluator: *Unit) MachineError!void {
+fn fold(evaluator: *Fiber) MachineError!void {
     return evaluator.continueWithIdiom(.fold, statelessFallback(foldGeneric));
 }
-fn foldGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
+fn foldGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
     return startFold(evaluator, .fold);
 }
 
-fn scan(evaluator: *Unit) MachineError!void {
+fn scan(evaluator: *Fiber) MachineError!void {
     return evaluator.continueWithIdiom(.scan, statelessFallback(scanGeneric));
 }
-fn scanGeneric(evaluator: *Unit, _: ?*anyopaque) MachineError!void {
+fn scanGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
     return startFold(evaluator, .scan);
 }
 
 fn statelessFallback(
-    comptime run: *const fn (*Unit, ?*anyopaque) MachineError!void,
+    comptime run: *const fn (*Fiber, ?*anyopaque) MachineError!void,
 ) machine.FallbackSource {
     return .{ .make_fn = struct {
-        fn make(_: ?*const anyopaque, _: *Unit) machine.IdiomFallback {
+        fn make(_: ?*const anyopaque, _: *Fiber) machine.IdiomFallback {
             return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
         }
     }.make };
 }
 fn deinitStatelessFallback(_: *heap.ReleaseDomain, _: std.mem.Allocator, _: ?*anyopaque) void {}
 
-fn startFold(evaluator: *Unit, kind: IterationKind) MachineError!void {
+fn startFold(evaluator: *Fiber, kind: IterationKind) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2168,7 +2168,7 @@ fn startFold(evaluator: *Unit, kind: IterationKind) MachineError!void {
     try evaluator.beginIsolatedApplication(state.application(2));
 }
 
-fn infra(evaluator: *Unit) MachineError!void {
+fn infra(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2190,7 +2190,7 @@ fn infra(evaluator: *Unit) MachineError!void {
 }
 
 fn createIteration(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     kind: IterationKind,
     left: *heap.OwnedValue,
     right: ?*heap.OwnedValue,
@@ -2217,7 +2217,7 @@ fn inputAt(input: Value, index: usize) Value {
     return if (input == .list) list.atUnchecked(input, index) else input;
 }
 
-fn pushGenericEmpty(evaluator: *Unit) error{OutOfMemory}!void {
+fn pushGenericEmpty(evaluator: *Fiber) error{OutOfMemory}!void {
     try evaluator.pushOwned(try list.fromValuesGeneric(evaluator.allocator, &.{}));
 }
 
@@ -2228,7 +2228,7 @@ fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{Ou
     return list.fromValuesGeneric(allocator, forms);
 }
 
-fn boolValue(evaluator: *Unit, item: *const heap.OwnedValue) MachineError!bool {
+fn boolValue(evaluator: *Fiber, item: *const heap.OwnedValue) MachineError!bool {
     return switch (item.borrow()) {
         .int => |integer| switch (integer) {
             0 => false,

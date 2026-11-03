@@ -452,7 +452,9 @@ storage is proportional to recursion depth rather than constant.
 ### Errors
 
 Errors are crash-only. There is no try/catch or handler quotation: an error
-propagates until the enclosing unit dies. `raise` initiates that propagation
+propagates outward through every unit it reaches until a boundary that reifies
+failure. Units nest strictly inside the task or root that opened them, so a
+unit cannot end while a unit nested in it is still running. `raise` initiates that propagation
 from an error value, and `fail` is sugar for raising an error whose kind is
 `` `user `` and whose message is the supplied string.
 
@@ -460,7 +462,9 @@ Failure is observed as data only outside an explicit boundary: `@attempt`, or
 the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success or
 `{err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
-a script's boundary is the process.
+a script's boundary is the process. Cancellation propagates the same way but
+is never data: no boundary inside the cancelled task reifies a cancellation error, so cancelling a task
+or the root fails every unit it has open, innermost first.
 
 Source-position and other diagnostic fields appear when known. Absence is
 represented by an absent field, never by a nil value. Runtime-assembled code
@@ -501,19 +505,25 @@ before unit failure survive. A unit boundary may additionally cancel child
 tasks as specified by the concurrency semantics. A unit is not a transaction
 over the whole execution state.
 
-#### Unit delimiters
+#### Where units begin
 
-Units are delimited by the reader or by semantic unit constructors:
+A *submission* is the source text a host hands the session at once. The reader
+delimits it, and each submission runs as one unit:
 
-- **REPL**: one logical line is one unit. The reader continues the line
-  (continuation prompt) while a delimiter or string is open, so a unit is
-  the complete forms of one possibly-continued line.
-- **Script file, `-e`, stdin**: the whole source is a single unit. A
+- **REPL**: one logical line is one submission. The reader continues the line
+  (continuation prompt) while a delimiter or string is open, so a submission
+  is the complete forms of one possibly-continued line.
+- **Script file, `-e`, stdin**: the whole source is a single submission. A
   failing script dies whole — error dict to stderr, nonzero exit.
-- **`load`**: the loaded file is one unit inside the calling session and
-  fails atomically.
+
+Running code begins further units through semantic unit constructors:
+
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
+- **`@load`**: runs a source file as a new unit on an isolated substack. The
+  file keeps its caller's authority to define, so a file loaded at the root
+  defines into the session, and like a module body it must leave its stack
+  empty. Its failure propagates to the enclosing unit.
 
 `@attempt` is a stack transaction, not a task scope: a task spawned inside it
 belongs to the enclosing scope and is unaffected by the `@attempt` succeeding or
@@ -576,13 +586,15 @@ constant-continuation choices for iterative and tail-recursive shapes.
 #### The `@` spelling convention
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
-— one unit per application for `@each`. The seeded constructors, `@attempt`,
-`@spawn`, `@give`, `@each`, and `@defm`, take an explicit seed-values list and
-a body quotation as separate operands. An empty seed list is written `[]`, or
-the operand is omitted by the constructor's seedless twin, spelled with a
-trailing `!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the
-ambient stack across its unit boundary. `@each` also places the iterated
-element deepest in each child stack, beneath the shared seed values.
+— one unit per application for `@each` — and `@load`, which runs a file's
+source the same way. The seeded constructors, `@attempt`, `@spawn`, `@give`,
+`@each`, `@defm`, and `@load`, take an explicit seed-values list and a body
+quotation, or for `@load` a path, as separate operands. An empty seed list is written `[]`, or the
+operand is omitted by the constructor's seedless twin, spelled with a trailing
+`!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the ambient stack
+across its unit boundary. `@each` also
+places the iterated element deepest in each child stack, beneath the shared
+seed values.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -590,7 +602,7 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `importp`, `load` — they publish without taking a quotation.
+- `import`, `importp` — they publish without taking a quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
@@ -622,6 +634,7 @@ values (q) @attempt
 values (q) @spawn
 list values (q) @each          ( element deepest in each child )
 values (body) `name @defm
+values path @load
 ```
 
 Both `values` and the body must be lists. The new unit's operand stack is
@@ -897,7 +910,7 @@ counter]`, and every draw is a pure function of it. `rand.int`, `rand.ints`,
 and `rand.float` each take a state and return the advanced state alongside the
 result, so a program's draws are reproducible by construction — running it
 twice from the same key produces the same values, and nothing hidden
-accumulates between units, tasks, or module loads.
+accumulates between submissions, tasks, or module loads.
 
 - `rand.entropy` is the only word that reads the host, and the only
   nondeterministic word in the language. A program is reproducible unless
@@ -906,7 +919,7 @@ accumulates between units, tasks, or module loads.
 - `rand.shuffle` and `rand.deal` thread the same state through a permutation
   and a draw without replacement. Code that wants an ambient generator keeps
   the state in an agent: ``[0 0] agent.start `rng set`` then
-  `(5 rand.int) rng agent.call` (see The standard library).
+  `rng (5 rand.int) agent.call` (see The standard library).
 
 ## Chars and strings
 
@@ -970,7 +983,7 @@ that name.
   defines words and keeps no state. Publication is an upsert: a missing name
   creates its registration, and an existing name installs the new image as the
   current generation and carries nothing else over; the latter is a reload,
-  whether `@defm` or `load` performs it. A body failure publishes
+  whether `@defm` or `@load` performs it. A body failure publishes
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
@@ -1047,7 +1060,8 @@ that name.
   handle, or executable capability.
 - `descriptor @test` validates and looks up the descriptor against the
   current canonical registration and its source when specified. A present test
-  runs in a fresh isolated Unit under that generation's private home. It
+  runs as a task under that generation's private home, spawned in the current
+  scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
   replaced-away test is a reified missing-test error. The runner's operand
   stack never seeds the test, registry changes persist between invocations in
@@ -1223,10 +1237,12 @@ that name.
 ### Task scopes and observation
 
 Task scopes exist at exactly two places: the session root and each spawned
-task. A spawn is owned by the task executing it, or by the session root when no
-task is executing. `@attempt`, combinator applications, `load`, and module
-construction open no scope; they are stack transactions inside the enclosing
-one. A task's attached unit cannot become terminal while a task it owns is
+task. Code runs either in a task, its *current task*, or at the session root,
+and the words that park, own, or observe bindings act on that one. A spawn is
+owned by the current task, or by the session root when no task is executing.
+`@attempt`, `@load`, and module construction open no scope; they are units
+nested inside the current task or the root. Combinator applications open
+neither a scope nor a unit. A task's attached unit cannot become terminal while a task it owns is
 active: its completion cancels the remaining owned tasks and waits for their
 complete descendant scopes to quiesce. The session root scope closes only at
 `exit` or session end. `task.pending` reports pending descendants in
@@ -1240,8 +1256,8 @@ The composition `(task.await) each` awaits every input,
 returns cached results in input order, preserves failures as data, and does not
 cancel siblings.
 
-`@each` starts one isolated unit per element and enforces exactly one result
-value from each unit. It returns results in input order. After the leftmost
+`@each` spawns one task per element and enforces exactly one result value
+from each. It returns results in input order. After the leftmost
 failure it cancels the remaining element tasks, waits for quiescence, and
 re-raises that failure. Selection of the leftmost failure is independent of
 schedule order. Element tasks have no simultaneous-progress guarantee; a
@@ -1252,7 +1268,7 @@ through I/O interleaving among concurrent tasks. I/O remains ordered within
 one task. Sequential combinators including `each`, `for`, and `fold` execute
 left to right.
 
-`exit` is available only to the root unit outside `@attempt`. Elsewhere it
+`exit` is available only at the root, outside `@attempt`. Elsewhere it
 raises `` `domain ``. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
 
@@ -1270,7 +1286,7 @@ views, and port messages exactly as task handles are.
 A handle reaches a task's result; an address does not. That is why a handle can
 never travel through a mailbox while an address can be sent, stored, and
 forwarded freely: a message holding a handle could close a reference cycle
-through the result it reaches. `task.send ( value address -- )` first checks
+through the result it reaches. `task.send ( address value -- )` first checks
 the value for handles, raising `` `type `` if it finds one, then queues it. A
 mailbox holds sixteen messages; a sender to a full mailbox parks until the
 receiver takes one. Sending to a closed mailbox raises `` `io `` with
@@ -1289,7 +1305,8 @@ helper, whose result is the reply; `task.await-for` bounds the exchange.
 
 ### External ports and processes
 
-An external port created by a unit belongs to that unit's task scope. The
+An external port belongs to the scope it was created in: the current task's,
+or the session root's. The
 scope, not the number or location of port values, owns the live external
 resource. Closing a scope stops new operations, requests cancellation, and
 does not complete until each owned resource has published a terminal state and
@@ -1299,10 +1316,11 @@ opaque handle to terminal state. Ownership moves only when a unit constructor
 moves it: `@give` makes the new child's scope the owner as part of
 constructing that child, so the resource is never unowned and is never
 reachable by the child before the child owns it. Ownership governs lifetime,
-not use: any unit holding a port value may operate on it, and a unit may give
-away only a port its own scope owns.
+not use: any code holding a port value may operate on it, but only code whose
+current scope owns a port may give it away.
 
-Port operations may suspend the current unit on external readiness. Such a
+Port operations may suspend the current task, or the root, on external
+readiness. Such a
 suspension is an ordinary scheduler park: it consumes no worker while waiting,
 participates in the same cancellation and deadline arbitration as task waits,
 and resumes a bounded continuation. Input and output queues are bounded, so a
@@ -1318,10 +1336,10 @@ publish atomically or leave the destination unchanged.
 
 The standard streams are endpoints of this kind, named by `fd.in`, `fd.out`,
 and `fd.err`. They belong to the Session rather than to a task scope: every
-unit shares the same three values, nothing closes them, and `@give` does not
+task and the root share the same three values, nothing closes them, and `@give` does not
 move them. Input reads return what the host has and `[]` at stable EOF, on
 every later read as well; one reader may be pending. Output writes from
-different units are served in the order they began, and each call's bytes
+different tasks are served in the order they began, and each call's bytes
 stay contiguous. When standard input is the program source there is no input
 device, and `fd.in` is `` `io ``. Text crosses these endpoints only through the
 `io` words, which encode and decode UTF-8 at the boundary. A file opened with
@@ -1357,16 +1375,16 @@ before binding and never resolved through a name service. Port zero requests
 an ephemeral port.
 
 A listener is a port. Binding and listening complete before the value is
-returned, the value belongs to the creating unit's task scope, and accepting a
+returned, the value belongs to the scope it was created in, and accepting a
 connection is the only listener operation that parks. The bound address and
 port are observable data; closing a listener, explicitly or through scope
 closure, is one idempotent transition after which the address is no longer
-observable, every unit parked in accept on it fails, and the same address and
+observable, every accept waiting on it fails, and the same address and
 port may be bound again. A host bind failure is `` `io `` carrying the requested
 address, the requested port, and one reason from a closed vocabulary.
 
 A connection is a port too, distinct from a listener and from a process port.
-It belongs to the task scope of the unit that accepted it, not to the
+It belongs to the scope that accepted it, not to the
 listener's scope: closing that scope aborts the connection even while its
 value is stored elsewhere, and closing the listener leaves accepted
 connections open. A connection not yet accepted stays in the host's backlog;
@@ -1379,14 +1397,14 @@ contiguous. Explicit close delivers the bytes already queued and then shuts
 the socket down; scope closure discards them and shuts down at once. Both
 ends' addresses are observable data while the connection is open. A peer
 failure is `` `io `` carrying the peer's address, the peer's port, and one reason
-from a closed vocabulary; a cancelled wait fails only the unit that was
-parked.
+from a closed vocabulary; a cancelled wait fails only the task, or the root,
+that was waiting.
 
 A serving word built over connections applies its handler in a fresh unit per
 request under the checked one-result contract. A request's framing failure,
 or its handler's failure or ill-formed result, is data to the serving word
-and affects only that request. The serving unit ends only by cancellation or
-by a fatal failure of accept; either ending quiesces its children by the
+and affects only that request. A serving word runs until it is cancelled or
+accept fails fatally; either ending quiesces its children by the
 ordinary scope rules, and the serving word never closes a listener it did not
 create.
 

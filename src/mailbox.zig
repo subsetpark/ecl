@@ -1,7 +1,7 @@
 //! A task's mailbox: the only thing an address names.
 //!
 //! Every task owns one mailbox, created with its cell and closed when the
-//! cell's unit becomes terminal. An address value holds a reference to the
+//! cell's fiber becomes terminal. An address value holds a reference to the
 //! mailbox and nothing else, so an address can travel through any mailbox
 //! without closing a reference cycle: the mailbox never points back at the
 //! cell, the cell's result, or any value that could hold an address. The

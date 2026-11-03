@@ -75,27 +75,27 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",         "swap",         "pop",            "over",           "rollup",   "rolldown",
-        "cons",        "match?",       "type",           "parse",          "chars",    "bytes",
-        "symbol",      "intern",       "int",            "float",          "char",     "@attempt",
-        "raise",       "args",         "exit",           "dip",            "call",     "if",
-        "while",       "times",        "cond",           "each",           "zip-with", "for",
-        "fold",        "scan",         "stencil",        "unfold",         "infra",    "def",
-        "set",         "defp",         "setp",           "test",           "tests",    "@test",
-        "effect",      "exports",      "doc",            "which",          "see",      "@defm",
-        "import",      "alias",        "words",          "load",           "@spawn",   "task.await",
-        "task.cancel", "task.pending", "task.await-any", "task.await-for", "@each",    "+",
-        "-",           "*",            "/",              "div",            "mod",      "pow",
-        "atan2",       "min",          "max",            "=",              "<>",       "<",
-        ">",           "<=",           ">=",             "and",            "or",       "neg",
-        "abs",         "sqrt",         "floor",          "ceil",           "round",    "exp",
-        "log",         "sin",          "cos",            "not",            "at",       "where",
-        "first-where", "in?",          "raze",           "cat",            "take",     "drop",
-        "reverse",     "first",        "rest",           "range",          "shape",    "len",
-        "flip",        "reshape",      "cmp",            "grade",          "distinct", "group",
-        "put",         "update",       "del",            "split",          "join",     "str",
-        "band",        "bor",          "bxor",           "bsl",            "bsr",      "bnot",
-        "stack",       "cut",          "+%",             "-%",             "*%",
+        "dup",        "swap",        "pop",          "over",           "rollup",         "rolldown",
+        "cons",       "match?",      "type",         "parse",          "chars",          "bytes",
+        "symbol",     "intern",      "int",          "float",          "char",           "@attempt",
+        "raise",      "args",        "exit",         "dip",            "call",           "if",
+        "while",      "times",       "cond",         "each",           "zip-with",       "for",
+        "fold",       "scan",        "stencil",      "unfold",         "infra",          "def",
+        "set",        "defp",        "setp",         "test",           "tests",          "@test",
+        "effect",     "exports",     "doc",          "which",          "see",            "@defm",
+        "import",     "alias",       "words",        "@load",          "@load!",         "@spawn",
+        "task.await", "task.cancel", "task.pending", "task.await-any", "task.await-for", "@each",
+        "+",          "-",           "*",            "/",              "div",            "mod",
+        "pow",        "atan2",       "min",          "max",            "=",              "<>",
+        "<",          ">",           "<=",           ">=",             "and",            "or",
+        "neg",        "abs",         "sqrt",         "floor",          "ceil",           "round",
+        "exp",        "log",         "sin",          "cos",            "not",            "at",
+        "where",      "first-where", "in?",          "raze",           "cat",            "take",
+        "drop",       "reverse",     "first",        "rest",           "range",          "shape",
+        "len",        "flip",        "reshape",      "cmp",            "grade",          "distinct",
+        "group",      "put",         "update",       "del",            "split",          "join",
+        "str",        "band",        "bor",          "bxor",           "bsl",            "bsr",
+        "bnot",       "stack",       "cut",          "+%",             "-%",             "*%",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -260,7 +260,7 @@ test "see retains source locals while execution uses their lowered body" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
 
-    // Define and reflect in separate units: the binding, rather than the
+    // Define and reflect in separate submissions: the binding, rather than the
     // already-retired input turn, owns the shared source slice.
     try expectOk(&runtime, "(n -- n : \"Increment.\") (|x| x 1 +) `inc def");
     try expectOk(&runtime, "`inc see");

@@ -552,7 +552,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
 /// the call. It records nothing: the body resolves each word again when it
 /// runs. Nested quotations and quoted words stay data. A qualified word whose
 /// module is not registered passes, and resolves, loading its module, when it
-/// is reached. One resolver step per unit of the unit's budget; abandoning
+/// is reached. One resolver step per unit of the fiber's budget; abandoning
 /// the cursor at any point is constant work.
 pub const ValidationCursor = struct {
     const Self = @This();

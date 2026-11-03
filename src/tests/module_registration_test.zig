@@ -48,8 +48,8 @@ fn expectErrorContains(
 }
 
 /// Run one source and assert the values it left, then drain them: the session
-/// stack persists across units, so every assertion starts from an empty stack
-/// and leaves one behind.
+/// stack persists across submissions, so every assertion starts from an empty
+/// stack and leaves one behind.
 fn expectStack(runtime: *session.Session, source: []const u8, expected: []const u8) !void {
     try expectOk(runtime, source);
     {
@@ -291,16 +291,16 @@ test "module registration: reload history grows no faster than registrations" {
         // Two registrations and a reload of one while a delayed call runs the
         // superseded generation. The Session keeps every published image, so
         // memory grows with registrations; nothing else may accumulate. The
-        // repetition lives inside one unit, so the measurement sees image and
-        // registration retention rather than the per-unit source provenance
+        // repetition lives inside one fiber, so the measurement sees image and
+        // registration retention rather than the per-fiber source provenance
         // every session accumulates.
         const cycle = "[] ((1) `bump def) `reuse-left @defm " ++
             "[] ((1) `bump def) `reuse-right @defm " ++
             "[] (reuse-left.bump) @spawn " ++
             "[] ((1) `bump def) `reuse-left @defm " ++
             "task.await pop [] (reuse-right.bump) @spawn task.await pop";
-        // Both batches are one unit each and differ only in the cycle count,
-        // so their fixed per-unit costs cancel and the only variable is how
+        // Both batches are one fiber each and differ only in the cycle count,
+        // so their fixed per-fiber costs cancel and the only variable is how
         // many define/reload cycles ran. Ten times the cycles may cost ten
         // times the retained images, and no more.
         const small = "[1] 20 take (pop " ++ cycle ++ ") for";

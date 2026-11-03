@@ -130,7 +130,7 @@ def main():
                     'git.snapshot [] port.open (|p| p git.fetch ' + req + ' port.begin (|x| '
                     'x git.output port.endpoint [] over 65536 fd.read '
                     '(dup empty? not) (cat over 65536 fd.read) while pop nip '
-                    "`cwd " + json.dumps(filename) + ' fs.create-bytes '
+                    "`cwd " + json.dumps(filename) + ' rolldown fs.create-bytes '
                     'x port.result x port.close) call p port.close) call'
                 )
 

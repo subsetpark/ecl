@@ -73,14 +73,14 @@
  (project record validator -- : "Validate the candidate and create an absent recovery record.")
  (|project record validator|
   project record validator check
-  record str "\n" cat project ".ecl/publication.ecl" fs.create-text) `prepare-checked defp
+  project ".ecl/publication.ecl" record str "\n" cat fs.create-text) `prepare-checked defp
 
  ### defp replay
  (project record validator -- : "Complete lock publication, activation, and journal retirement.")
  (|project record validator|
   project record validator check
-  record `lock-after at project "ecl.lock" fs.publish-text
-  record reference project "ecl.modules" fs.publish-text
+  project "ecl.lock" record `lock-after at fs.publish-text
+  project "ecl.modules" record reference fs.publish-text
   project ".ecl/publication.ecl" fs.remove-file) `replay defp
 
  ### def recover

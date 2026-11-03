@@ -66,7 +66,7 @@ const OwnedRoot = struct {
     dir: std.Io.Dir,
 };
 
-/// Session-owned authority. Units never receive this owner; they receive the
+/// Session-owned authority. Fibers never receive this owner; they receive the
 /// opaque `external.FilesystemAccess` and the narrow functions below.
 pub const FilesystemOwner = struct {
     host: *const heap.HostCleanup,

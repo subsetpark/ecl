@@ -29,34 +29,34 @@ const poll_api = @import("poll.zig");
 const support = @import("kernel_support.zig");
 const flat = @import("kernel_flat.zig");
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 /// The golden-ratio odd constant SplitMix64 advances by; reused here as the
 /// per-counter stride so consecutive counters land in unrelated sub-streams.
 const gamma: u64 = 0x9E3779B97F4A7C15;
 
-pub fn intForModule(evaluator: *Unit) MachineError!void {
+pub fn intForModule(evaluator: *Fiber) MachineError!void {
     return randInt(evaluator);
 }
 
-pub fn intsForModule(evaluator: *Unit) MachineError!void {
+pub fn intsForModule(evaluator: *Fiber) MachineError!void {
     return randInts(evaluator);
 }
 
-pub fn floatForModule(evaluator: *Unit) MachineError!void {
+pub fn floatForModule(evaluator: *Fiber) MachineError!void {
     return randFloat(evaluator);
 }
 
-pub fn entropyForModule(evaluator: *Unit) MachineError!void {
+pub fn entropyForModule(evaluator: *Fiber) MachineError!void {
     return entropy(evaluator);
 }
 
-pub fn dealForModule(evaluator: *Unit) MachineError!void {
+pub fn dealForModule(evaluator: *Fiber) MachineError!void {
     return randDeal(evaluator);
 }
 
-pub fn shuffleForModule(evaluator: *Unit) MachineError!void {
+pub fn shuffleForModule(evaluator: *Fiber) MachineError!void {
     return randShuffle(evaluator);
 }
 
@@ -101,7 +101,7 @@ fn floatDraw(state: State, index: u64) f64 {
     return @as(f64, @floatFromInt(stream.next() >> 11)) * 0x1.0p-53;
 }
 
-fn stateValue(evaluator: *Unit, state: State) error{OutOfMemory}!Value {
+fn stateValue(evaluator: *Fiber, state: State) error{OutOfMemory}!Value {
     const items = [2]Value{
         .{ .int = @bitCast(state.key) },
         .{ .int = @bitCast(state.counter) },
@@ -112,7 +112,7 @@ fn stateValue(evaluator: *Unit, state: State) error{OutOfMemory}!Value {
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 
-fn popState(evaluator: *Unit) MachineError!State {
+fn popState(evaluator: *Fiber) MachineError!State {
     var item = try evaluator.popValue();
     defer item.deinit();
     return State.decode(item.borrow()) orelse
@@ -121,7 +121,7 @@ fn popState(evaluator: *Unit) MachineError!State {
 
 /// The two rejections read differently: a non-integer never could have been a
 /// count, while an integer below the minimum is a count that is out of range.
-fn popCount(evaluator: *Unit, minimum: i64, what: []const u8) MachineError!u64 {
+fn popCount(evaluator: *Fiber, minimum: i64, what: []const u8) MachineError!u64 {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (item.borrow() != .int) return evaluator.typeError(what);
@@ -133,7 +133,7 @@ fn popCount(evaluator: *Unit, minimum: i64, what: []const u8) MachineError!u64 {
     return @intCast(item.borrow().int);
 }
 
-fn randInt(evaluator: *Unit) MachineError!void {
+fn randInt(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     const bound = try popCount(evaluator, 1, "a positive bound");
     const state = try popState(evaluator);
@@ -141,14 +141,14 @@ fn randInt(evaluator: *Unit) MachineError!void {
     try evaluator.pushOwned(.{ .int = @bitCast(boundedDraw(state, 0, bound)) });
 }
 
-fn randFloat(evaluator: *Unit) MachineError!void {
+fn randFloat(evaluator: *Fiber) MachineError!void {
     try evaluator.require(1);
     const state = try popState(evaluator);
     try evaluator.pushOwned(try stateValue(evaluator, state.advanced(1)));
     try evaluator.pushOwned(.{ .float = floatDraw(state, 0) });
 }
 
-fn randInts(evaluator: *Unit) MachineError!void {
+fn randInts(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     const bound = try popCount(evaluator, 1, "a positive bound");
     const count = try popCount(evaluator, 0, "a nonnegative draw count");
@@ -179,7 +179,7 @@ const DrawKernel = struct {
     pub const Output = support.LeafResult(.leaf_i64);
     pub const result: ?support.ResultShape = .{ .kind = .leaf_i64, .overwritable = &.{} };
 
-    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
+    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Fiber) MachineError!void {
         for (output.range(range.start, range.len()), range.start..) |*slot, index|
             slot.* = @bitCast(boundedDraw(params.state, index, params.bound));
     }
@@ -277,7 +277,7 @@ const DealOutput = struct {
 };
 
 /// `( state count pool -- state results )`: `count` distinct ints below `pool`.
-fn randDeal(evaluator: *Unit) MachineError!void {
+fn randDeal(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     const pool = try popCount(evaluator, 0, "a nonnegative pool size");
     const count = try popCount(evaluator, 0, "a nonnegative draw count");
@@ -297,13 +297,13 @@ const DealKernel = struct {
     pub const Params = struct { state: State, pool: u64 };
     pub const Output = DealOutput;
 
-    pub fn prepare(evaluator: *Unit, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
+    pub fn prepare(evaluator: *Fiber, _: [0]Value, _: Params, length: usize) error{OutOfMemory}!Output {
         var dealer = try Dealer.init(evaluator.allocator, length);
         errdefer dealer.deinit();
         return .{ .dealer = dealer, .writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator, length) };
     }
 
-    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
+    pub fn chunk(params: Params, _: [0]Value, output: *Output, range: flat.Chunk, _: *Fiber) MachineError!void {
         output.dealer.deal(params.state, params.pool, range, output.writer.unpublishedRange(range.start, range.len()));
     }
 
@@ -318,7 +318,7 @@ const DealKernel = struct {
 /// a gather of the elements through that permutation, so every element kind
 /// is permuted and a typed leaf keeps its representation. The state advances
 /// by the length.
-fn randShuffle(evaluator: *Unit) MachineError!void {
+fn randShuffle(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var values = try evaluator.popValue();
     defer values.deinit();
@@ -364,7 +364,7 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Unit, _: [1]Value, _: State, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, _: [1]Value, _: State, length: usize) error{OutOfMemory}!Output {
             var dealer = try Dealer.init(evaluator.allocator, length);
             errdefer dealer.deinit();
             const permutation = try evaluator.allocator.alloc(i64, length);
@@ -381,7 +381,7 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
             };
         }
 
-        pub fn chunk(state: State, operands: [1]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(state: State, operands: [1]Value, output: *Output, range: flat.Chunk, _: *Fiber) MachineError!void {
             const source = operands[0];
             switch (output.phase) {
                 .deal => output.dealer.deal(state, @intCast(source.list.length()), range, output.permutation[range.start..range.end]),
@@ -401,7 +401,7 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
 
         /// The deal is over when its cursor is; the gather then runs over
         /// the same length.
-        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(_: *Fiber, output: *Output) MachineError!?usize {
             switch (output.phase) {
                 .deal => {
                     output.phase = .gather;
@@ -420,7 +420,7 @@ fn ShuffleKernel(comptime kind: ?value.HeapKind) type {
 }
 
 /// The one impure word reads the process CSPRNG through runtime I/O.
-fn entropy(evaluator: *Unit) MachineError!void {
+fn entropy(evaluator: *Fiber) MachineError!void {
     const io = evaluator.inherited.runtime().host_io;
     var bytes: [8]u8 = undefined;
     std.Io.randomSecure(io, &bytes) catch

@@ -19,8 +19,8 @@ fn display(runtime: *session.Session) !session.RenderedText {
     return runtime.stackDisplay();
 }
 
-/// Runs a unit that is expected to fail and releases its error, so a test can
-/// observe what the failure left behind.
+/// Runs a submission that is expected to fail and releases its error, so a test
+/// can observe what the failure left behind.
 fn runErr(runtime: *session.Session, source: []const u8) !void {
     switch (try runtime.runUnit("concurrency.ecl", source)) {
         .ok => return error.ExpectedLanguageError,
@@ -360,7 +360,7 @@ test "concurrency: a large seeded construction cannot starve a peer task" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     // One worker, so the short task can only win if the long one yields. Both
-    // user-sized halves of opening a unit are in the long task: 70,000 seeds
+    // user-sized halves of opening a fiber are in the long task: 70,000 seeds
     // materialized onto a fresh substack, and a construction body re-scoped
     // against a new image. If either ran to completion inside one scheduler
     // step, the peer could not report first.

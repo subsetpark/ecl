@@ -739,7 +739,9 @@ storage is proportional to recursion depth rather than constant.
 ### Errors
 
 Errors are crash-only. There is no try/catch or handler quotation: an error
-propagates until the enclosing unit dies. `raise` initiates that propagation
+propagates outward through every unit it reaches until a boundary that reifies
+failure. Units nest strictly inside the task or root that opened them, so a
+unit cannot end while a unit nested in it is still running. `raise` initiates that propagation
 from an error value, and `fail` is sugar for raising an error whose kind is
 `` `user `` and whose message is the supplied string.
 
@@ -747,7 +749,9 @@ Failure is observed as data only outside an explicit boundary: `@attempt`, or
 the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success or
 `{err error}` after failure. Each envelope is an ordinary dictionary and is
 the boundary's only result value. The REPL is the implicit top-level boundary;
-a script's boundary is the process.
+a script's boundary is the process. Cancellation propagates the same way but
+is never data: no boundary inside the cancelled task reifies a cancellation error, so cancelling a task
+or the root fails every unit it has open, innermost first.
 
 Source-position and other diagnostic fields appear when known. Absence is
 represented by an absent field, never by a nil value. Runtime-assembled code
@@ -986,13 +990,13 @@ surviving execution state at the point of failure.
 
 ##### Contexts
 
-**`Units`**
+**`Units`**, **`Nesting`**
 
 #### Chapter 1
 
 ##### Action
 
-> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `task.await` later reifies the attached unit's terminal outcome through the same mapping. The two therefore agree on entry stack, result envelope, and failure mapping. They differ in ownership: `@spawn` creates a task, which owns the tasks spawned inside it, while `@attempt` is a stack transaction that owns nothing, so tasks spawned inside it belong to the enclosing task or the session root. Task lifetime, ownership, and waiting behavior are governed by the concurrency model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Reader-delimited units, `load`, and isolated unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics.
+> This model is normative for the lifecycle of a general ECL unit; its ordered entry and body values; successful completion with an ordered result stack; and failure with an error and restoration of the entry stack.  It deliberately abstracts over evaluation steps, name resolution, concrete values and error dictionaries, environment writes, I/O, randomness, and all other non-stack effects. The surrounding language specification governs those subjects and requires that unit failure does not roll back effects already performed. The model also omits launch and observation policy, task identity, task trees, scheduling, awaiting, deadlines, cancellation causes, and reclamation. In particular, cancellation reaches this model only as an evaluator-supplied failure error, while a waiting operation's timeout does not alter the target unit.  `@attempt` begins a unit, waits synchronously for one terminal transition, and reifies that outcome. `@spawn` begins the same kind of unit and returns a task capability immediately; `task.await` later reifies the attached unit's terminal outcome through the same mapping. The two therefore agree on entry stack, result envelope, and failure mapping. They differ in ownership: `@spawn` creates a task, which owns the tasks spawned inside it, while `@attempt` is a stack transaction that owns nothing, so tasks spawned inside it belong to the enclosing task or the session root. Task lifetime, ownership, and waiting behavior are governed by the concurrency model.  `Begin unit` receives the complete entry-stack list and exact quotation body as separate ECL list values. It selects one never-before-created unit identity, records those inputs unchanged, and makes that unit active. Submissions and unit constructors differ in how they supply these inputs and expose the eventual outcome; those policies do not change unit execution semantics. `Begin unit` starts a unit with no parent: a submission's or a task's. Units that running code opens inside another, such as `@attempt`, `@load`, and module construction, begin through `Begin nested unit`.
 
 **`Units`** ↝ Begin unit *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
@@ -1028,6 +1032,14 @@ surviving execution state at the point of failure.
 
 {**`Units`**} **unit-error** *unit*: `Unit` ⇒ `Value`.
 
+> Nesting is fixed when a unit begins. A unit without a parent is a submission's or a task's; its failure is observed by the Session or through `task.await`, never by another unit.
+
+{**`Nesting`**} **unit-nested?** *unit*: `Unit` ⇒ `Bool`.
+
+{**`Nesting`**} **unit-parent** *unit*: `Unit` ⇒ `Unit`.
+
+{**`Nesting`**} **unit-reifying?** *unit*: `Unit` ⇒ `Bool`.
+
 ---
 
 > An active unit is created and is neither successful nor failed.
@@ -1050,6 +1062,26 @@ surviving execution state at the point of failure.
 
 ∀ *candidate*: `Unit`, **unit-created?** *candidate* · **value-type** (**unit-entry** *candidate*) = **list-type** ∧ **value-type** (**unit-body** *candidate*) = **list-type** ∧ **value-type** (**unit-stack** *candidate*) = **list-type**.
 
+> Only a created unit is nested.
+
+∀ *candidate*: `Unit`, ¬**unit-created?** *candidate* · ¬**unit-nested?** *candidate*.
+
+> A nested unit's parent is another created unit.
+
+∀ *candidate*: `Unit`, **unit-created?** *candidate*, **unit-nested?** *candidate* · **unit-created?** (**unit-parent** *candidate*) ∧ **unit-parent** *candidate* ≠ *candidate*.
+
+> Units nest strictly: the parent of an active nested unit is active.
+
+∀ *candidate*: `Unit`, **unit-active?** *candidate*, **unit-nested?** *candidate* · **unit-active?** (**unit-parent** *candidate*).
+
+> A parent succeeds only if every failure nested in it was reified and was not a cancellation.
+
+∀ *candidate*: `Unit`, **unit-nested?** *candidate*, **unit-failed?** *candidate*, **unit-succeeded?** (**unit-parent** *candidate*) · **unit-reifying?** *candidate* ∧ ¬**cancelled-error?** (**unit-error** *candidate*).
+
+> Initially no unit is nested.
+
+initially ∀ *candidate*: `Unit` · ¬**unit-nested?** *candidate*.
+
 > Initially no unit identity has been created or entered a lifecycle phase.
 
 initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**unit-active?** *candidate* ∧ ¬**unit-succeeded?** *candidate* ∧ ¬**unit-failed?** *candidate*.
@@ -1060,7 +1092,7 @@ initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**uni
 
 > `Complete unit successfully` accepts the result produced by the omitted evaluator, makes the active unit terminal, and retains that result as the unit's terminal stack. The evaluator supplies the result; it is not chosen by the ECL operation that launched the unit.
 
-**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **value-type** *result* = **list-type**.
+**`Units`** ↝ Complete unit successfully *unit*: `Unit`, *result*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **value-type** *result* = **list-type**, (∀ *child*: `Unit`, **unit-nested?** *child*, **unit-parent** *child* = *unit* · ¬**unit-active?** *child* ∧ (¬**unit-failed?** *child* ∨ **unit-reifying?** *child* ∧ ¬**cancelled-error?** (**unit-error** *child*))).
 
 ---
 
@@ -1090,7 +1122,7 @@ initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**uni
 
 > `Complete unit with failure` accepts the error produced by the evaluator or by a facility such as concurrency cancellation. Errors are ordinary ECL values satisfying the imported `error-value?` schema. Completion makes the active unit terminal, records the error value, and restores the complete entry stack. The evaluator's partial stack is neither retained nor exposed. Every error kind follows this same unit transition; causes and concrete error data are outside the model.
 
-**`Units`** ↝ Complete unit with failure *unit*: `Unit`, *error*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **error-value?** *error*.
+**`Units`** ↝ Complete unit with failure *unit*: `Unit`, *error*: `Value`, **unit-created?** *unit*, **unit-active?** *unit*, **error-value?** *error*, (∀ *child*: `Unit`, **unit-nested?** *child*, **unit-parent** *child* = *unit* · ¬**unit-active?** *child*).
 
 ---
 
@@ -1114,6 +1146,20 @@ initially ∀ *candidate*: `Unit` · ¬**unit-created?** *candidate* ∧ ¬**uni
 
 ∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other*.
 
+#### Chapter 5
+
+##### Action
+
+> `Begin nested unit` opens a unit inside an active parent unit. Units nest strictly: a parent cannot become terminal while a unit nested in it is active. A reifying nested unit, as `@attempt` opens, turns its failure into data its parent continues with. Any other nested failure propagates, so its parent cannot succeed. Cancellation is never reified: a nested unit failed by a cancellation error prevents its parent's success whatever boundary opened it, so cancellation fails every unit of the cancelled task or root from the innermost out.
+
+**`Units`**, **`Nesting`** ↝ Begin nested unit *parent*: `Unit`, *entry*: `Value`, *body*: `Value`, *reifying*: `Bool`, **unit-created?** *parent*, **unit-active?** *parent*, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
+
+---
+
+> Beginning a nested unit is beginning a unit that also records its parent. Whether its boundary reifies failure is the opener's choice and stays fixed.
+
+∃ *unit*: `Unit`, ¬**unit-created?** *unit* · **unit-created?**′ *unit* ∧ **unit-active?**′ *unit* ∧ ¬**unit-succeeded?**′ *unit* ∧ ¬**unit-failed?**′ *unit* ∧ **unit-entry**′ *unit* = *entry* ∧ **unit-body**′ *unit* = *body* ∧ **unit-stack**′ *unit* = *entry* ∧ **unit-error**′ *unit* = **unit-error** *unit* ∧ **unit-nested?**′ *unit* ∧ **unit-parent**′ *unit* = *parent* ∧ **unit-reifying?**′ *unit* = *reifying* ∧ (∀ *other*: `Unit`, *other* ≠ *unit* · **unit-created?**′ *other* = **unit-created?** *other* ∧ **unit-active?**′ *other* = **unit-active?** *other* ∧ **unit-succeeded?**′ *other* = **unit-succeeded?** *other* ∧ **unit-failed?**′ *other* = **unit-failed?** *other* ∧ **unit-entry**′ *other* = **unit-entry** *other* ∧ **unit-body**′ *other* = **unit-body** *other* ∧ **unit-stack**′ *other* = **unit-stack** *other* ∧ **unit-error**′ *other* = **unit-error** *other* ∧ **unit-nested?**′ *other* = **unit-nested?** *other* ∧ **unit-parent**′ *other* = **unit-parent** *other* ∧ **unit-reifying?**′ *other* = **unit-reifying?** *other*).
+
 
 
 Environment writes, I/O, and other permitted non-stack effects performed
@@ -1121,19 +1167,25 @@ before unit failure survive. A unit boundary may additionally cancel child
 tasks as specified by the concurrency semantics. A unit is not a transaction
 over the whole execution state.
 
-#### Unit delimiters
+#### Where units begin
 
-Units are delimited by the reader or by semantic unit constructors:
+A *submission* is the source text a host hands the session at once. The reader
+delimits it, and each submission runs as one unit:
 
-- **REPL**: one logical line is one unit. The reader continues the line
-  (continuation prompt) while a delimiter or string is open, so a unit is
-  the complete forms of one possibly-continued line.
-- **Script file, `-e`, stdin**: the whole source is a single unit. A
+- **REPL**: one logical line is one submission. The reader continues the line
+  (continuation prompt) while a delimiter or string is open, so a submission
+  is the complete forms of one possibly-continued line.
+- **Script file, `-e`, stdin**: the whole source is a single submission. A
   failing script dies whole — error dict to stderr, nonzero exit.
-- **`load`**: the loaded file is one unit inside the calling session and
-  fails atomically.
+
+Running code begins further units through semantic unit constructors:
+
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
+- **`@load`**: runs a source file as a new unit on an isolated substack. The
+  file keeps its caller's authority to define, so a file loaded at the root
+  defines into the session, and like a module body it must leave its stack
+  empty. Its failure propagates to the enclosing unit.
 
 `@attempt` is a stack transaction, not a task scope: a task spawned inside it
 belongs to the enclosing scope and is unaffected by the `@attempt` succeeding or
@@ -1196,13 +1248,15 @@ constant-continuation choices for iterative and tail-recursive shapes.
 #### The `@` spelling convention
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
-— one unit per application for `@each`. The seeded constructors, `@attempt`,
-`@spawn`, `@give`, `@each`, and `@defm`, take an explicit seed-values list and
-a body quotation as separate operands. An empty seed list is written `[]`, or
-the operand is omitted by the constructor's seedless twin, spelled with a
-trailing `!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the
-ambient stack across its unit boundary. `@each` also places the iterated
-element deepest in each child stack, beneath the shared seed values.
+— one unit per application for `@each` — and `@load`, which runs a file's
+source the same way. The seeded constructors, `@attempt`, `@spawn`, `@give`,
+`@each`, `@defm`, and `@load`, take an explicit seed-values list and a body
+quotation, or for `@load` a path, as separate operands. An empty seed list is written `[]`, or the
+operand is omitted by the constructor's seedless twin, spelled with a trailing
+`!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the ambient stack
+across its unit boundary. `@each` also
+places the iterated element deepest in each child stack, beneath the shared
+seed values.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -1210,7 +1264,7 @@ Words that are isolated but *not* marked, with their reasons:
   apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `importp`, `load` — they publish without taking a quotation.
+- `import`, `importp` — they publish without taking a quotation.
 - `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
   they consume tasks rather than making them.
 
@@ -1242,6 +1296,7 @@ values (q) @attempt
 values (q) @spawn
 list values (q) @each          ( element deepest in each child )
 values (body) `name @defm
+values path @load
 ```
 
 Both `values` and the body must be lists. The new unit's operand stack is
@@ -1517,7 +1572,7 @@ counter]`, and every draw is a pure function of it. `rand.int`, `rand.ints`,
 and `rand.float` each take a state and return the advanced state alongside the
 result, so a program's draws are reproducible by construction — running it
 twice from the same key produces the same values, and nothing hidden
-accumulates between units, tasks, or module loads.
+accumulates between submissions, tasks, or module loads.
 
 - `rand.entropy` is the only word that reads the host, and the only
   nondeterministic word in the language. A program is reproducible unless
@@ -1526,7 +1581,7 @@ accumulates between units, tasks, or module loads.
 - `rand.shuffle` and `rand.deal` thread the same state through a permutation
   and a draw without replacement. Code that wants an ambient generator keeps
   the state in an agent: ``[0 0] agent.start `rng set`` then
-  `(5 rand.int) rng agent.call` (see The standard library).
+  `rng (5 rand.int) agent.call` (see The standard library).
 
 ## Chars and strings
 
@@ -1590,7 +1645,7 @@ that name.
   defines words and keeps no state. Publication is an upsert: a missing name
   creates its registration, and an existing name installs the new image as the
   current generation and carries nothing else over; the latter is a reload,
-  whether `@defm` or `load` performs it. A body failure publishes
+  whether `@defm` or `@load` performs it. A body failure publishes
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
@@ -1846,7 +1901,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   handle, or executable capability.
 - `descriptor @test` validates and looks up the descriptor against the
   current canonical registration and its source when specified. A present test
-  runs in a fresh isolated Unit under that generation's private home. It
+  runs as a task under that generation's private home, spawned in the current
+  scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
   replaced-away test is a reified missing-test error. The runner's operand
   stack never seeds the test, registry changes persist between invocations in
@@ -2027,7 +2083,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Domains
 
-> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal, and the lifecycle of the messages a task's mailbox holds.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at exactly two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Other units, such as `@attempt`, combinator applications, `load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently names one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
+> This model is normative for structured task identity, attachment to the general unit lifecycle, task ownership, cached terminal results, observation by `task.await`, deadline expiry, cancellation, the requirement that a task quiesce the tasks it owns before its attached unit becomes terminal, and the lifecycle of the messages a task's mailbox holds.  It abstracts over evaluator steps, scheduling policy, elapsed time, I/O interleaving, handle storage and lexical scope, and the selection algorithms used by `task.await-any`, sequential awaits, and `@each`. The surrounding language specification governs those operations. A conforming scheduler may run runnable tasks serially; the model promises lifetime and result semantics, without promising simultaneous progress or fairness. Task capabilities are immutable ECL values and may be shared. The mutable evaluation state of each task remains confined to its attached unit.  Task scopes exist at exactly two places: the session root and each spawned task. A spawn is owned by the task whose attached unit is executing it, or by the session root when no task is executing. Nested units, such as `@attempt`, `@load`, and module construction, are stack transactions and never owners: a task spawned inside one belongs to the enclosing scope and is unaffected by that unit's success or failure. The session root closes only at `exit` or session end, which this model leaves outside its actions.  A created task permanently names one attached unit and is owned either by the session root or by one other task. Its capability is an ECL value of the task kind. No two task identities attach to the same unit or expose the same capability value. `task-owner` is meaningful only for a task that is not root-owned; every proposition that reads it is guarded accordingly.
 
 `Task`.
 
@@ -2101,7 +2157,7 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 ##### Action
 
-> `Spawn task under root` is the same boundary when no task is executing: a root unit, or a stack transaction inside one, spawns into the session root scope.
+> `Spawn task under root` is the same boundary when no task is executing: code at the root, including a stack transaction there, spawns into the session root scope.
 
 **`Units`**, **`Concurrency`** ↝ Spawn task under root *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
@@ -2175,7 +2231,7 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 > `Complete spawned task successfully` is the concurrency-layer use of the general unit success transition. The evaluator supplies the final stack. The attached unit can become terminal only after its own task scope has quiesced.
 
-**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Complete spawned task successfully *task*: `Task`, *result*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **value-type** *result* = **list-type**, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)), (∀ *nested*: `Unit`, **unit-nested?** *nested*, **unit-parent** *nested* = **task-unit** *task* · ¬**unit-active?** *nested* ∧ (¬**unit-failed?** *nested* ∨ **unit-reifying?** *nested* ∧ ¬**cancelled-error?** (**unit-error** *nested*))).
 
 ---
 
@@ -2219,7 +2275,7 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 > `Complete spawned task with failure` is the concurrency-layer use of the general unit failure transition. The evaluator supplies the error. The attached unit restores its entry stack and becomes terminal after its own task scope has quiesced.
 
-**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Complete spawned task with failure *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **error-value?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)), (∀ *nested*: `Unit`, **unit-nested?** *nested*, **unit-parent** *nested* = **task-unit** *task* · ¬**unit-active?** *nested*).
 
 ---
 
@@ -2289,9 +2345,9 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 ##### Action
 
-> `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent.
+> `Cancel active task` is ordinary unit failure with a cancellation error. It restores the unit's entry stack and becomes terminal only after the task's own descendants are quiescent and every unit nested in its attached unit has failed, which no nested boundary reifies.
 
-**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)).
+**`Units`**, **`Concurrency`**, **`Mailboxes`** ↝ Cancel active task *task*: `Task`, *error*: `Value`, **task-created?** *task*, **unit-active?** (**task-unit** *task*), **cancelled-error?** *error*, (∀ *child*: `Task`, **task-created?** *child*, ¬**root-owned?** *child*, **task-owner** *child* = *task* · **unit-succeeded?** (**task-unit** *child*) ∨ **unit-failed?** (**task-unit** *child*)), (∀ *nested*: `Unit`, **unit-nested?** *nested*, **unit-parent** *nested* = **task-unit** *task* · ¬**unit-active?** *nested*).
 
 ---
 
@@ -2350,10 +2406,12 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 ### Task scopes and observation
 
 Task scopes exist at exactly two places: the session root and each spawned
-task. A spawn is owned by the task executing it, or by the session root when no
-task is executing. `@attempt`, combinator applications, `load`, and module
-construction open no scope; they are stack transactions inside the enclosing
-one. A task's attached unit cannot become terminal while a task it owns is
+task. Code runs either in a task, its *current task*, or at the session root,
+and the words that park, own, or observe bindings act on that one. A spawn is
+owned by the current task, or by the session root when no task is executing.
+`@attempt`, `@load`, and module construction open no scope; they are units
+nested inside the current task or the root. Combinator applications open
+neither a scope nor a unit. A task's attached unit cannot become terminal while a task it owns is
 active: its completion cancels the remaining owned tasks and waits for their
 complete descendant scopes to quiesce. The session root scope closes only at
 `exit` or session end. `task.pending` reports pending descendants in
@@ -2367,8 +2425,8 @@ The composition `(task.await) each` awaits every input,
 returns cached results in input order, preserves failures as data, and does not
 cancel siblings.
 
-`@each` starts one isolated unit per element and enforces exactly one result
-value from each unit. It returns results in input order. After the leftmost
+`@each` spawns one task per element and enforces exactly one result value
+from each. It returns results in input order. After the leftmost
 failure it cancels the remaining element tasks, waits for quiescence, and
 re-raises that failure. Selection of the leftmost failure is independent of
 schedule order. Element tasks have no simultaneous-progress guarantee; a
@@ -2379,7 +2437,7 @@ through I/O interleaving among concurrent tasks. I/O remains ordered within
 one task. Sequential combinators including `each`, `for`, and `fold` execute
 left to right.
 
-`exit` is available only to the root unit outside `@attempt`. Elsewhere it
+`exit` is available only at the root, outside `@attempt`. Elsewhere it
 raises `` `domain ``. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
 
@@ -2397,7 +2455,7 @@ views, and port messages exactly as task handles are.
 A handle reaches a task's result; an address does not. That is why a handle can
 never travel through a mailbox while an address can be sent, stored, and
 forwarded freely: a message holding a handle could close a reference cycle
-through the result it reaches. `task.send ( value address -- )` first checks
+through the result it reaches. `task.send ( address value -- )` first checks
 the value for handles, raising `` `type `` if it finds one, then queues it. A
 mailbox holds sixteen messages; a sender to a full mailbox parks until the
 receiver takes one. Sending to a closed mailbox raises `` `io `` with
@@ -2416,7 +2474,8 @@ helper, whose result is the reply; `task.await-for` bounds the exchange.
 
 ### External ports and processes
 
-An external port created by a unit belongs to that unit's task scope. The
+An external port belongs to the scope it was created in: the current task's,
+or the session root's. The
 scope, not the number or location of port values, owns the live external
 resource. Closing a scope stops new operations, requests cancellation, and
 does not complete until each owned resource has published a terminal state and
@@ -2426,10 +2485,11 @@ opaque handle to terminal state. Ownership moves only when a unit constructor
 moves it: `@give` makes the new child's scope the owner as part of
 constructing that child, so the resource is never unowned and is never
 reachable by the child before the child owns it. Ownership governs lifetime,
-not use: any unit holding a port value may operate on it, and a unit may give
-away only a port its own scope owns.
+not use: any code holding a port value may operate on it, but only code whose
+current scope owns a port may give it away.
 
-Port operations may suspend the current unit on external readiness. Such a
+Port operations may suspend the current task, or the root, on external
+readiness. Such a
 suspension is an ordinary scheduler park: it consumes no worker while waiting,
 participates in the same cancellation and deadline arbitration as task waits,
 and resumes a bounded continuation. Input and output queues are bounded, so a
@@ -2445,10 +2505,10 @@ publish atomically or leave the destination unchanged.
 
 The standard streams are endpoints of this kind, named by `fd.in`, `fd.out`,
 and `fd.err`. They belong to the Session rather than to a task scope: every
-unit shares the same three values, nothing closes them, and `@give` does not
+task and the root share the same three values, nothing closes them, and `@give` does not
 move them. Input reads return what the host has and `[]` at stable EOF, on
 every later read as well; one reader may be pending. Output writes from
-different units are served in the order they began, and each call's bytes
+different tasks are served in the order they began, and each call's bytes
 stay contiguous. When standard input is the program source there is no input
 device, and `fd.in` is `` `io ``. Text crosses these endpoints only through the
 `io` words, which encode and decode UTF-8 at the boundary. A file opened with
@@ -2484,16 +2544,16 @@ before binding and never resolved through a name service. Port zero requests
 an ephemeral port.
 
 A listener is a port. Binding and listening complete before the value is
-returned, the value belongs to the creating unit's task scope, and accepting a
+returned, the value belongs to the scope it was created in, and accepting a
 connection is the only listener operation that parks. The bound address and
 port are observable data; closing a listener, explicitly or through scope
 closure, is one idempotent transition after which the address is no longer
-observable, every unit parked in accept on it fails, and the same address and
+observable, every accept waiting on it fails, and the same address and
 port may be bound again. A host bind failure is `` `io `` carrying the requested
 address, the requested port, and one reason from a closed vocabulary.
 
 A connection is a port too, distinct from a listener and from a process port.
-It belongs to the task scope of the unit that accepted it, not to the
+It belongs to the scope that accepted it, not to the
 listener's scope: closing that scope aborts the connection even while its
 value is stored elsewhere, and closing the listener leaves accepted
 connections open. A connection not yet accepted stays in the host's backlog;
@@ -2506,14 +2566,14 @@ contiguous. Explicit close delivers the bytes already queued and then shuts
 the socket down; scope closure discards them and shuts down at once. Both
 ends' addresses are observable data while the connection is open. A peer
 failure is `` `io `` carrying the peer's address, the peer's port, and one reason
-from a closed vocabulary; a cancelled wait fails only the unit that was
-parked.
+from a closed vocabulary; a cancelled wait fails only the task, or the root,
+that was waiting.
 
 A serving word built over connections applies its handler in a fresh unit per
 request under the checked one-result contract. A request's framing failure,
 or its handler's failure or ill-formed result, is data to the serving word
-and affects only that request. The serving unit ends only by cancellation or
-by a fatal failure of accept; either ending quiesces its children by the
+and affects only that request. A serving word runs until it is cancelled or
+accept fails fatally; either ending quiesces its children by the
 ordinary scope rules, and the serving word never closes a listener it did not
 create.
 

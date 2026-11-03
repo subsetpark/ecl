@@ -17,7 +17,7 @@
    directory digest pkg.cache.read-at [] equal
    directory digest [1 2] pkg.cache.write-at
    directory digest pkg.cache.read-at [1 2] equal
-   [9] directory digest pkg.cache.filename fs.publish-bytes
+   directory digest pkg.cache.filename [9] fs.publish-bytes
    directory digest pkg.cache.read-at [] equal
    directory digest [1 2] pkg.cache.write-at
    directory digest pkg.cache.read-at [1 2] equal

@@ -26,7 +26,7 @@ fn expectOk(runtime: *session.Session, source: []const u8) !void {
 }
 
 /// Run one source, assert the values it left, then drain them: the session
-/// stack persists across units, so every case starts and ends empty.
+/// stack persists across submissions, so every case starts and ends empty.
 fn expectStack(runtime: *session.Session, source: []const u8, expected: []const u8) !void {
     try expectOk(runtime, source);
     {
@@ -226,7 +226,7 @@ test "unit inputs: a runtime-built body acquires no attribution" {
 
     // Rejected roots must also avoid the stable image ScopeId used only to
     // label rewritten occurrences. Define, execute, and replace runtime-built
-    // bodies in one Unit so the measurement excludes per-source archive
+    // bodies in one Fiber so the measurement excludes per-source archive
     // retention. A Session keeps every published image, so memory grows with
     // the registrations made; it must grow no faster than they do.
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;

@@ -622,7 +622,7 @@ pub const Owner = opaque {
         return ownerFromState(state_value);
     }
 
-    /// Derives the only native-image capability inherited by worker Units.
+    /// Derives the only native-image capability inherited by worker Fibers.
     /// Its surface can open/validate an image but cannot settle or destroy the
     /// Session-owned reclamation root.
     pub fn loader(self: *Owner) *Loader {

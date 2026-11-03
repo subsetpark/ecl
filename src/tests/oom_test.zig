@@ -47,17 +47,18 @@ fn requireSelectedOomTest(source: std.builtin.SourceLocation) !void {
 fn archiveSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
+    try source.writer.writeAll("`cwd \"archive\" ");
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" `cwd \"archive\" archive.unpack-tgz pop");
+    try source.writer.writeAll(" archive.unpack-tgz pop");
     return allocator.dupe(u8, source.written());
 }
 
 fn archiveResourceSource(allocator: std.mem.Allocator) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
-    try source.writer.writeAll("`cwd \"generation\" fs.stage-dir `stage set ");
+    try source.writer.writeAll("`cwd \"generation\" fs.stage-dir `stage set stage \"archive\" ");
     try appendFixtureBytes(&source.writer, archive_fixtures.valid);
-    try source.writer.writeAll(" stage \"archive\" archive.unpack-tgz pop stage fs.commit-dir");
+    try source.writer.writeAll(" archive.unpack-tgz pop stage fs.commit-dir");
     return allocator.dupe(u8, source.written());
 }
 
@@ -477,7 +478,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     defer runtime.deinit();
 
     // Cold dotted completion reaches the embedded builtin manifest before
-    // any Unit has loaded or published that module.
+    // any Fiber has loaded or published that module.
     var cold_completion = try runtime.completionCandidates("json.pa");
     cold_completion.deinit();
 
@@ -579,7 +580,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[] (1) @spawn dup pair task.await-any pop pop " ++
             "[] (1) @spawn dup task.await pop 0 task.await-for pop " ++
             "[] (1) @spawn 1000000 task.await-for pop " ++
-            "[] (task.receive) @spawn dup task.address 1 swap task.send task.await pop " ++
+            "[] (task.receive) @spawn dup task.address 1 task.send task.await pop " ++
             "[] ((1) () while) @spawn dup task.cancel task.await pop " ++
             "[(1) (missing) (2 3)] ([] swap @spawn) each (task.await) each pop " ++
             "[1 2 3] [] (dup *) @each pop",
@@ -860,7 +861,7 @@ fn stdlibSessionAllocationProbe(
                 "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup [a] dict.take " ++
                 "dup [a] dict.del dup [a] dict.split pop pop " ++
                 "{a 2} (|key left right| key pop left right +) dict.merge-with pop " ++
-                "[a b] 0 dict.from-keys pop 1 `one dict.associate pop",
+                "[a b] 0 dict.from-keys pop `one 1 dict.associate pop",
         ),
         .error_value => try runOk(
             &runtime,
@@ -944,7 +945,7 @@ fn stdlibSessionAllocationProbe(
         .directory_enumeration => try runOk(
             &runtime,
             "oom-enumeration.ecl",
-            "`cwd \"enumerated\" fs.mkdirs \"x\" `cwd \"enumerated/file\" fs.publish-text " ++
+            "`cwd \"enumerated\" fs.mkdirs `cwd \"enumerated/file\" \"x\" fs.publish-text " ++
                 "`cwd \"enumerated\" fs.open-list `cursor set cursor fs.next-entry pop " ++
                 "cursor fs.next-entry pop cursor port.close",
         ),
@@ -957,7 +958,7 @@ fn stdlibSessionAllocationProbe(
         .tree_operations => try runOk(
             &runtime,
             "oom-tree.ecl",
-            "`cwd \"a/b\" fs.mkdirs \"x\" `cwd \"a/b/file\" fs.publish-text `cwd \"a\" fs.remove-tree",
+            "`cwd \"a/b\" fs.mkdirs `cwd \"a/b/file\" \"x\" fs.publish-text `cwd \"a\" fs.remove-tree",
         ),
         .advisory_lock => try runOk(
             &runtime,
@@ -979,7 +980,7 @@ fn stdlibSessionAllocationProbe(
         .file_publication => try runOk(
             &runtime,
             "oom-publication.ecl",
-            "\"x\" `cwd \"published\" fs.publish-text [0 255] `cwd \"published\" fs.publish-bytes",
+            "`cwd \"published\" \"x\" fs.publish-text `cwd \"published\" [0 255] fs.publish-bytes",
         ),
         .filesystem => try runOk(
             &runtime,
@@ -987,9 +988,9 @@ fn stdlibSessionAllocationProbe(
             // Every fs word once, through the same root: encoders, the
             // resolver, staging, listing, metadata, and the structured
             // failure dictionary all have Session-only allocation paths.
-            "\"pr\\n\" `cwd \"p.txt\" fs.create-text " ++
+            "`cwd \"p.txt\" \"pr\\n\" fs.create-text " ++
                 "`cwd \"p.txt\" fs.read-text pop `cwd \"p.txt\" fs.read-bytes pop " ++
-                "[7 8] `cwd \"p.txt\" fs.replace-bytes \"z\" `cwd \"p.txt\" fs.replace-text " ++
+                "`cwd \"p.txt\" [7 8] fs.replace-bytes `cwd \"p.txt\" \"z\" fs.replace-text " ++
                 "`cwd \"p.txt\" fs.stat pop `cwd \"p.txt\" fs.lstat pop `cwd \"p.txt\" fs.exists? pop " ++
                 "`cwd \"d\" fs.mkdir `cwd \"d\" fs.list pop " ++
                 "`cwd \"p.txt\" `cwd \"d/c.txt\" fs.copy `cwd \"d/c.txt\" \"d/m.txt\" fs.rename " ++
@@ -1055,7 +1056,7 @@ fn stdlibSessionAllocationProbe(
                 "0 time.from-unix 1 time.from-unix time.cmp pop 3 time.seconds pop " ++
                 "[] (\"2024-02-30T00:00:00Z\" time.parse) @attempt pop",
         ),
-        // The pure words once each, then a serving unit with no peer that is
+        // The pure words once each, then a serving fiber with no peer that is
         // cancelled at once. Listener startup and cancellation can elide wait
         // allocations even without a live exchange.
         .http_server => try runOk(
@@ -1182,6 +1183,21 @@ test "oom: core: full-session surfaces propagate every allocation failure" {
         std.heap.smp_allocator,
         testSessionAllocationProbe,
     );
+}
+
+fn seededLoadAllocationProbe(allocator: std.mem.Allocator) !void {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    // The seed list waits on the caller's stack while the file is read, then
+    // moves above the new boundary: every allocation between must unwind.
+    try runOk(&runtime, "oom-load.ecl", "[41 1] \"test/acceptance/load-seeded.ecl\" @load");
+}
+
+test "oom: core: seeded @load propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkAllAllocationFailuresParallel(std.heap.smp_allocator, seededLoadAllocationProbe);
 }
 
 const admitted_construction_source = "[] () `oom-driver @defm";

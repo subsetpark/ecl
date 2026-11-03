@@ -679,7 +679,7 @@ test "session completion: dotted aliases expose only public exports" {
     try std.testing.expectEqual(@as(usize, 0), invalid.items().len);
 }
 
-test "loader: load is one unit and preserves file provenance" {
+test "loader: @load is one isolated unit and preserves file provenance" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -696,7 +696,7 @@ test "loader: load is one unit and preserves file provenance" {
     }), .default, .evaluate);
     defer runtime.deinit();
     try expectOk(&runtime, "10");
-    try expectErrorContains(&runtime, "\"test/acceptance/load-rollback.ecl\" load", &.{ "kind undefined-word", "word missing" });
+    try expectErrorContains(&runtime, "\"test/acceptance/load-rollback.ecl\" @load!", &.{ "kind undefined-word", "word missing" });
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings("side", output.written());
@@ -704,12 +704,17 @@ test "loader: load is one unit and preserves file provenance" {
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
     try expectOk(&runtime, "loaded.answer");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[2].int);
-    try expectOk(&runtime, "[] (\"test/acceptance/load-stack.ecl\" load) @attempt pop");
+    // The file's stack starts from the seeds alone and ends empty; the
+    // caller's stack is neither visible to it nor disturbed.
+    try expectOk(&runtime, "[41 1] \"test/acceptance/load-stack.ecl\" @load");
+    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
+    try expectErrorContains(&runtime, "\"test/acceptance/load-stack.ecl\" @load!", &.{ "kind underflow", "isolation @load" });
     // A definition that cannot bind fails where it is defined, at its source.
-    try expectErrorContains(&runtime, "\"test/acceptance/load-provenance.ecl\" load", &.{ "word missing", "source \"test/acceptance/load-provenance.ecl\"" });
-    try expectOk(&runtime, "\"test/acceptance/load-stack.ecl\" load");
-    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[3].int);
-    try std.testing.expectEqualStrings("side", output.written());
+    try expectErrorContains(&runtime, "\"test/acceptance/load-provenance.ecl\" @load!", &.{ "word missing", "source \"test/acceptance/load-provenance.ecl\"" });
+    // A file that keeps stack state is refused, as a module body is.
+    try expectErrorContains(&runtime, "[41 1 5] \"test/acceptance/load-stack.ecl\" @load", &.{ "kind domain", "left 1 value" });
+    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
+    try std.testing.expectEqualStrings("side42\n6\n", output.written());
 }
 
 test "loader: ECL_PATH loads first candidate and retries import" {
@@ -988,15 +993,14 @@ test "loader: explicit private-only artifacts retain file identity" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();
     try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [{path \"private.ecl\" kind ecl exports []}]}}}");
-    try writeInput(&inputs, "private.ecl", "[] ((42) `answer def) `hidden @defm hidden.answer");
+    try writeInput(&inputs, "private.ecl", "[] ((42) `answer def) `hidden @defm hidden.answer 42 = {kind user} assert");
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
-    const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}/private.ecl\" load", .{inputs.cwd});
+    const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}/private.ecl\" @load!", .{inputs.cwd});
     defer std.testing.allocator.free(source);
     try expectOk(&runtime, source);
-    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "hidden.answer", &.{"not exported"});
 }
 

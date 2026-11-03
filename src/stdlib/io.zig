@@ -19,7 +19,7 @@ const machine = @import("../machine.zig");
 const prims = @import("../prims.zig");
 const kernel_storage = @import("../kernel_storage.zig");
 
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 const Value = machine.Value;
 
@@ -68,14 +68,14 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn print(evaluator: *Unit) MachineError!void {
+fn print(evaluator: *Fiber) MachineError!void {
     return callWithNewline(evaluator, "io.core.prin", "io.core.prin");
 }
 
 /// Bounded like `prin`: the string is encoded under the kernel poll quantum
 /// and written once complete. There is no availability precondition because
 /// a missing diagnostics writer is not an error for this word.
-fn eprint(evaluator: *Unit) MachineError!void {
+fn eprint(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popString();
     defer item.deinit();
     const string = item.borrow();
@@ -90,7 +90,7 @@ const EprintDriver = struct {
     item: heap.Owned(Value),
     encoder: heap.Owned(kernel_storage.StringEncoder),
 
-    pub fn advance(evaluator: *Unit, self: *EprintDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *EprintDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -110,12 +110,12 @@ const EprintDriver = struct {
 };
 
 /// Diagnostics share the Session console's serialization with advisory output.
-fn writeDiagnosticsLine(evaluator: *Unit, bytes: []const u8) MachineError!void {
+fn writeDiagnosticsLine(evaluator: *Fiber, bytes: []const u8) MachineError!void {
     evaluator.inherited.runtime().console.writeDiagnostics(bytes, true) catch
         return evaluator.fail(.io, "diagnostics stream write failed");
 }
 
-fn inspect(evaluator: *Unit) MachineError!void {
+fn inspect(evaluator: *Fiber) MachineError!void {
     const quotation = try list.fromValues(evaluator.allocator, &.{
         .{ .symbol = try evaluator.coreWord(try intern.intern("dup")) },
         .{ .symbol = try evaluator.coreWord(try intern.intern("io.core.pp")) },
@@ -123,7 +123,7 @@ fn inspect(evaluator: *Unit) MachineError!void {
     try evaluator.callOwned(quotation.list);
 }
 
-fn debug(evaluator: *Unit) MachineError!void {
+fn debug(evaluator: *Fiber) MachineError!void {
     var separator = heap.OwnedValue.init(
         evaluator.releases,
         try machine.stringValue(evaluator.allocator, evaluator.releases, ": "),
@@ -142,7 +142,7 @@ fn debug(evaluator: *Unit) MachineError!void {
 /// body is fixed-size; its one heap value is retained by the quotation before
 /// the local owner releases it.
 fn callWithNewline(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     comptime first: []const u8,
     comptime last: []const u8,
 ) MachineError!void {

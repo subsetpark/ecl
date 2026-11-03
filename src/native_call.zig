@@ -468,7 +468,7 @@ const Transaction = struct {
     pub const ownership: heap.DriverOwnership = .self_owned;
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    active_evaluator: ?*machine.Unit = null,
+    active_evaluator: ?*machine.Fiber = null,
     instance: *native_module.ModuleInstance,
     definition: *const descriptor_api.ValidatedDefinition,
     host_table: abi.HostTable,
@@ -482,7 +482,7 @@ const Transaction = struct {
     yield_requested: bool = false,
 
     fn create(
-        evaluator: *machine.Unit,
+        evaluator: *machine.Fiber,
         callable: env.NativeCallable,
         definition: *const descriptor_api.ValidatedDefinition,
     ) error{ OutOfMemory, NativeCallsClosed }!*Transaction {
@@ -625,12 +625,12 @@ const Transaction = struct {
         return result;
     }
 
-    fn activeEvaluator(self: *Transaction) *machine.Unit {
+    fn activeEvaluator(self: *Transaction) *machine.Fiber {
         return self.active_evaluator.?;
     }
 
     pub fn advance(
-        evaluator: *machine.Unit,
+        evaluator: *machine.Fiber,
         self: *Transaction,
     ) machine.MachineError!machine.WorkProgress {
         self.active_evaluator = evaluator;
@@ -689,7 +689,7 @@ const Transaction = struct {
 };
 
 pub fn begin(
-    evaluator: *machine.Unit,
+    evaluator: *machine.Fiber,
     callable: env.NativeCallable,
 ) machine.MachineError!void {
     const definition = callable.instance.definition(callable.definition);

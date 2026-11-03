@@ -213,7 +213,7 @@ Use `wrap` for one value, `pair` for two, and `pack` when a literal count is
 itself the clearest description; do not retain a distant count solely to delimit a long
 computed region.
 
-Use `dict.associate` for one computed value and key. Use `dict.from-lists` when
+Use `dict.associate` for one key and computed value. Use `dict.from-lists` when
 keys and values already exist as parallel lists. Use `dict.from-flat` when the
 natural intermediate form is alternating key and value entries. Use
 `dict.from-pairs` when the natural form is a list of `[key value]` associations.

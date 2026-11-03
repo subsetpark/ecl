@@ -12,7 +12,7 @@ const poll = @import("poll.zig");
 const kernel_flat = @import("kernel_flat.zig");
 
 const Value = value.Value;
-const Unit = support.Unit;
+const Fiber = support.Fiber;
 const MachineError = support.MachineError;
 
 /// The operation family lives in `kernel_support`, beside the others.
@@ -36,7 +36,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             return switch (operation) {
                 .cmp => cmpPrimitive(evaluator),
                 .grade => gradePrimitive(evaluator),
@@ -48,7 +48,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
     }.run);
 }
 
-fn cmpPrimitive(evaluator: *Unit) MachineError!void {
+fn cmpPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
     defer right.deinit();
@@ -135,11 +135,11 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             pub fn retire(_: *Output, _: *heap.ReleaseDomain) void {}
         };
 
-        pub fn prepare(_: *Unit, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
+        pub fn prepare(_: *Fiber, operands: [2]Value, _: void, _: usize) error{OutOfMemory}!Output {
             return .{ .ordering = std.math.order(operands[0].list.length(), operands[1].list.length()) };
         }
 
-        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [2]Value, output: *Output, range: kernel_flat.Chunk, evaluator: *Fiber) MachineError!void {
             if (comptime !comparable) return incomparable(evaluator);
             const left = heap.leafElements(left_kind, operands[0].list);
             const right = heap.leafElements(right_kind, operands[1].list);
@@ -157,7 +157,7 @@ fn LexCompareKernel(comptime left_kind: value.HeapKind, comptime right_kind: val
             }
         }
 
-        fn incomparable(evaluator: *Unit) MachineError {
+        fn incomparable(evaluator: *Fiber) MachineError {
             return evaluator.typeError(incomparable_pair);
         }
 
@@ -197,7 +197,7 @@ fn lexKind(kind: value.HeapKind) bool {
 
 /// `( left right -- ordering )`: `cmp`, which is `(cmp) lex-cmp-with`, over
 /// two lists that `lexCompareCandidate` admits.
-pub fn lexCompare(evaluator: *Unit) MachineError!void {
+pub fn lexCompare(evaluator: *Fiber) MachineError!void {
     var right = try evaluator.popValue();
     defer right.deinit();
     var left = try evaluator.popValue();
@@ -205,7 +205,7 @@ pub fn lexCompare(evaluator: *Unit) MachineError!void {
     return startLexCompare(evaluator, &left, &right);
 }
 
-fn startLexCompare(evaluator: *Unit, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
+fn startLexCompare(evaluator: *Fiber, left: *heap.OwnedValue, right: *heap.OwnedValue) MachineError!void {
     const left_list = left.borrow().list;
     const right_list = right.borrow().list;
     const shared: usize = @intCast(@min(left_list.length(), right_list.length()));
@@ -223,11 +223,11 @@ fn startLexCompare(evaluator: *Unit, left: *heap.OwnedValue, right: *heap.OwnedV
     unreachable;
 }
 
-fn gradePrimitive(evaluator: *Unit) MachineError!void {
+fn gradePrimitive(evaluator: *Fiber) MachineError!void {
     return startGrade(evaluator, false);
 }
 
-fn startGrade(evaluator: *Unit, sorted_values: bool) MachineError!void {
+fn startGrade(evaluator: *Fiber, sorted_values: bool) MachineError!void {
     var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list) return evaluator.typeError("a comparable list");
@@ -289,7 +289,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Unit, _: [1]Value, sorted_values: bool, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, _: [1]Value, sorted_values: bool, length: usize) error{OutOfMemory}!Output {
             const pairs = try evaluator.allocator.alloc(Pair, length);
             errdefer evaluator.allocator.free(pairs);
             return .{
@@ -300,7 +300,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             };
         }
 
-        pub fn chunk(_: bool, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(_: bool, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
             const keys = heap.leafElements(kind, operands[0].list);
             switch (output.phase) {
                 .initialize => for (output.pairs[range.start..range.end], range.start..) |*pair, position| {
@@ -327,7 +327,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
             }
         }
 
-        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
             const count = output.pairs.len;
             switch (output.phase) {
                 .initialize => {
@@ -428,7 +428,7 @@ fn GradeKernel(comptime kind: value.HeapKind) type {
     };
 }
 
-fn startTypedGrade(evaluator: *Unit, collection: *heap.OwnedValue, sorted_values: bool) MachineError!bool {
+fn startTypedGrade(evaluator: *Fiber, collection: *heap.OwnedValue, sorted_values: bool) MachineError!bool {
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0 or collection.borrow().list.kind() == .generic_spine) return false;
     const kind = collection.borrow().list.kind();
@@ -441,7 +441,7 @@ fn startTypedGrade(evaluator: *Unit, collection: *heap.OwnedValue, sorted_values
     unreachable;
 }
 
-pub fn sortForIdiom(evaluator: *Unit) MachineError!void {
+pub fn sortForIdiom(evaluator: *Fiber) MachineError!void {
     try startGrade(evaluator, true);
 }
 
@@ -566,7 +566,7 @@ const CompareDriver = struct {
     left: heap.Owned(Value),
     right: heap.Owned(Value),
     cursor: heap.Owned(CompareCursor),
-    pub fn advance(evaluator: *Unit, self: *CompareDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator.workBudget())) {
             .pending => .stepped,
@@ -626,7 +626,7 @@ const GradeDriver = struct {
         }
     };
 
-    pub fn advance(evaluator: *Unit, self: *GradeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GradeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
@@ -749,7 +749,7 @@ const GradeDriver = struct {
     }
 };
 
-fn distinctPrimitive(evaluator: *Unit) MachineError!void {
+fn distinctPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
@@ -802,7 +802,7 @@ fn DistinctKernel(comptime kind: value.HeapKind) type {
             }
         };
 
-        pub fn prepare(evaluator: *Unit, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, _: [1]Value, _: void, length: usize) error{OutOfMemory}!Output {
             const allocator = evaluator.allocator;
             const capacity = std.math.ceilPowerOfTwo(usize, @max(8, length * 2)) catch return error.OutOfMemory;
             const slots = try allocator.alloc(usize, capacity);
@@ -811,12 +811,12 @@ fn DistinctKernel(comptime kind: value.HeapKind) type {
             return .{ .allocator = allocator, .slots = slots, .kept = try allocator.alloc(Element, length) };
         }
 
-        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Unit) MachineError!void {
+        pub fn chunk(_: void, operands: [1]Value, output: *Output, range: kernel_flat.Chunk, _: *Fiber) MachineError!void {
             if (output.writer) |*writer| return writer.writeRange(range.start, output.kept[range.start..range.end]);
             for (heap.leafElements(kind, operands[0].list)[range.start..range.end]) |item| output.keep(item);
         }
 
-        pub fn next(evaluator: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(evaluator: *Fiber, output: *Output) MachineError!?usize {
             if (output.writer != null) return null;
             output.writer = try .init(evaluator.allocator, output.kept_count);
             return output.kept_count;
@@ -850,7 +850,7 @@ const DistinctDriver = struct {
     matcher: ?heap.Owned(equal.MatchCursor) = null,
     materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
-    pub fn advance(evaluator: *Unit, self: *DistinctDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DistinctDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) {
@@ -904,13 +904,13 @@ const DistinctDriver = struct {
     }
 };
 
-fn groupPrimitive(evaluator: *Unit) MachineError!void {
+fn groupPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()) });
 }
 
-fn groupColumnsPrimitive(evaluator: *Unit) MachineError!void {
+fn groupColumnsPrimitive(evaluator: *Fiber) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()), .columns = true });
@@ -949,7 +949,7 @@ const GroupDriver = struct {
     dict_materializer: ?heap.Owned(dict.Materializer) = null,
     group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
-    fn allocate(self: *GroupDriver, evaluator: *Unit) error{OutOfMemory}!void {
+    fn allocate(self: *GroupDriver, evaluator: *Fiber) error{OutOfMemory}!void {
         const allocator = evaluator.allocator;
         const count = self.row_count;
         self.key_rows = .init(try allocator.alloc(usize, count));
@@ -1026,7 +1026,7 @@ const GroupDriver = struct {
         self.phase = .hash;
     }
 
-    pub fn advance(evaluator: *Unit, self: *GroupDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GroupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {

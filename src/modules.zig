@@ -872,7 +872,7 @@ pub const View = struct {
 };
 
 /// Session-owned authority required to turn observation state into frame
-/// execution state. Session and Unit storage own the seal; registered native
+/// execution state. Session and Fiber storage own the seal; registered native
 /// callbacks never receive it.
 pub const ExecutionAccess = opaque {};
 
@@ -1828,7 +1828,7 @@ pub const Registry = enum(usize) {
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
 
-    /// The Session's publication identity now, for keying units' resolutions.
+    /// The Session's publication identity now, for keying fibers' resolutions.
     pub fn currentPublication(self: *const Registry) u64 {
         return self.privateState().clock.load(.acquire);
     }

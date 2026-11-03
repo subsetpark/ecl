@@ -11,7 +11,7 @@ const mailbox = @import("mailbox.zig");
 const intern = @import("intern.zig");
 
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
@@ -33,19 +33,19 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "await-for", .primitive = awaitFor, .effect = "task milliseconds -- result", .doc = "`task.await` with a nonnegative int deadline; expiry returns `{err {kind timeout}}` without cancelling the task. A terminal task beats even a zero deadline. A deadline beyond any instant the scheduler clock can report is `` `overflow `` before the wait registers." },
     .{ .name = "address", .primitive = address, .effect = "task -- address", .doc = "The address of a task's mailbox. Two addresses of one task match. An address outlives its task; after the task ends it names a closed mailbox." },
     .{ .name = "self", .primitive = selfAddress, .effect = "-- address", .doc = "The executing task's own address. `` `domain `` outside a task: the session root owns tasks but has no mailbox." },
-    .{ .name = "send", .primitive = send, .effect = "value address --", .doc = "Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified." },
+    .{ .name = "send", .primitive = send, .effect = "address value --", .doc = "Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified." },
     .{ .name = "receive", .primitive = receive, .effect = "-- value", .doc = "Take the oldest message from the executing task's mailbox, parking until one arrives. `` `domain `` outside a task." },
     .{ .name = "receive-for", .primitive = receiveFor, .effect = "milliseconds -- result", .doc = "`task.receive` with a nonnegative int deadline: `{ok value}`, or `{err {kind timeout}}` when nothing arrives in time. A deadline beyond any instant the scheduler clock can report is `` `overflow ``. `` `domain `` outside a task." },
 };
 
 fn spawnTask(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     quotation: *value.ListHandle,
     initial_stack: machine.InitialStack,
-    constructor: machine.UnitConstructor,
+    constructor: machine.FiberConstructor,
 ) MachineError!Value {
     return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
-        .parent_unit = evaluator,
+        .parent_fiber = evaluator,
         .site = .{ .inherited = .{
             .scope = evaluator.currentScope(),
             .home = evaluator.currentHome(),
@@ -65,24 +65,24 @@ fn spawnTask(
 /// A module body defines words and starts no tasks. Refusing at the
 /// constructor, before any operand is consumed, keeps every task owned by a
 /// task or the session root and never by an image under construction.
-fn refuseDuringConstruction(evaluator: *Unit, comptime constructor: []const u8) MachineError!void {
+fn refuseDuringConstruction(evaluator: *Fiber, comptime constructor: []const u8) MachineError!void {
     if (evaluator.inModuleConstruction()) return evaluator.fail(
         .domain,
         constructor ++ " is legal only outside module construction: a module body defines words and starts no tasks",
     );
 }
 
-fn spawn(evaluator: *Unit) MachineError!void {
+fn spawn(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@spawn");
     try spawnInput(evaluator, try evaluator.popUnitInput());
 }
 
-fn spawnSeedless(evaluator: *Unit) MachineError!void {
+fn spawnSeedless(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@spawn!");
     try spawnInput(evaluator, try evaluator.popSeedlessUnitInput());
 }
 
-fn spawnInput(evaluator: *Unit, popped: machine.OwnedUnitInput) MachineError!void {
+fn spawnInput(evaluator: *Fiber, popped: machine.OwnedUnitInput) MachineError!void {
     var input = popped;
     defer input.deinit(evaluator.releases);
     const task = try spawnTask(
@@ -251,7 +251,7 @@ const GiveDriver = struct {
         releases.releaseValue(self.moved);
     }
 
-    pub fn advance(evaluator: *Unit, self: *GiveDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GiveDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.cursor.phase == .validating) {
             if (self.cursor.advance(evaluator.workBudget()) == .pending) return .stepped;
@@ -263,7 +263,7 @@ const GiveDriver = struct {
         return .{ .output = task };
     }
 
-    fn spawn(self: *GiveDriver, evaluator: *Unit) MachineError!Value {
+    fn spawn(self: *GiveDriver, evaluator: *Fiber) MachineError!Value {
         const moved_count = self.cursor.count;
         const seed_count: usize = if (self.seeds) |seeds| @intCast(seeds.list.length()) else 0;
         // The child starts on the given ports, deepest, then the ordinary
@@ -279,7 +279,7 @@ const GiveDriver = struct {
         else
             .{ .borrowed_pair = .{ .deep = self.moved.list, .seeds = self.seeds.?.list } };
         return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
-            .parent_unit = evaluator,
+            .parent_fiber = evaluator,
             .site = .{ .inherited = .{
                 .scope = evaluator.currentScope(),
                 .home = evaluator.currentHome(),
@@ -305,7 +305,7 @@ const GiveDriver = struct {
     }
 };
 
-fn give(evaluator: *Unit) MachineError!void {
+fn give(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@give");
     try evaluator.require(3);
     var body = try evaluator.popQuotation();
@@ -315,7 +315,7 @@ fn give(evaluator: *Unit) MachineError!void {
     try giveInput(evaluator, &body, &seeds);
 }
 
-fn giveSeedless(evaluator: *Unit) MachineError!void {
+fn giveSeedless(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@give!");
     try evaluator.require(2);
     var body = try evaluator.popQuotation();
@@ -325,7 +325,7 @@ fn giveSeedless(evaluator: *Unit) MachineError!void {
 
 /// Takes the body and seeds only once the driver owns them; on failure the
 /// callers' owners still release them.
-fn giveInput(evaluator: *Unit, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue) MachineError!void {
+fn giveInput(evaluator: *Fiber, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue) MachineError!void {
     var moved = try evaluator.popList();
     errdefer moved.deinit();
 
@@ -350,51 +350,51 @@ fn giveInput(evaluator: *Unit, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue)
     evaluator.adoptDriver(driver);
 }
 
-fn await(evaluator: *Unit) MachineError!void {
+fn await(evaluator: *Fiber) MachineError!void {
     var task = try evaluator.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
     try evaluator.park(.{ .task = task.take() });
 }
 
-fn cancel(evaluator: *Unit) MachineError!void {
+fn cancel(evaluator: *Fiber) MachineError!void {
     var task = try evaluator.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
     evaluator.scheduler.?.cancelOwned(task.take());
 }
 
-fn cancelSelf(evaluator: *Unit) MachineError!void {
+fn cancelSelf(evaluator: *Fiber) MachineError!void {
     if (!evaluator.scheduler.?.cancelScopeOwner(evaluator.task_scope.?))
         return evaluator.fail(.domain, "task.cancel-self is legal only inside a task");
 }
 
-fn address(evaluator: *Unit) MachineError!void {
+fn address(evaluator: *Fiber) MachineError!void {
     var task = try evaluator.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
     try evaluator.pushOwned(try evaluator.scheduler.?.taskAddress(task.borrow()));
 }
 
-fn selfAddress(evaluator: *Unit) MachineError!void {
+fn selfAddress(evaluator: *Fiber) MachineError!void {
     const own = try ownMailbox(evaluator, "task.self");
     try evaluator.pushOwned(try own.createAddress(evaluator.allocator));
 }
 
 /// The executing task's mailbox. The root has none: it owns tasks but is
 /// not one, so nothing could ever address it.
-fn ownMailbox(evaluator: *Unit, comptime word: []const u8) MachineError!*mailbox.Mailbox {
+fn ownMailbox(evaluator: *Fiber, comptime word: []const u8) MachineError!*mailbox.Mailbox {
     return evaluator.scheduler.?.currentMailbox(evaluator.task_scope.?) orelse
         evaluator.fail(.domain, word ++ " is legal only inside a task");
 }
 
-fn send(evaluator: *Unit) MachineError!void {
+fn send(evaluator: *Fiber) MachineError!void {
     const pair = try evaluator.popPair();
-    var payload = pair[0];
-    defer payload.deinit();
-    var target = pair[1];
+    var target = pair[0];
     defer target.deinit();
-    if (target.borrow() != .address) return evaluator.typeError("a value followed by an address");
+    var payload = pair[1];
+    defer payload.deinit();
+    if (target.borrow() != .address) return evaluator.typeError("an address followed by a value");
     const check = try mailbox.HandleCheck.init(evaluator.allocator, payload.borrow());
     try evaluator.startDriver(SendDriver{
         .payload = .init(payload.take()),
@@ -413,7 +413,7 @@ const SendDriver = struct {
     check: heap.Owned(mailbox.HandleCheck),
     checked: bool = false,
 
-    pub fn advance(evaluator: *Unit, self: *SendDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *SendDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.checked) {
             const progress = self.check.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
@@ -443,12 +443,12 @@ const SendDriver = struct {
     }
 };
 
-fn receive(evaluator: *Unit) MachineError!void {
+fn receive(evaluator: *Fiber) MachineError!void {
     _ = try ownMailbox(evaluator, "task.receive");
     try evaluator.startDriver(ReceiveDriver{ .deadline = null });
 }
 
-fn receiveFor(evaluator: *Unit) MachineError!void {
+fn receiveFor(evaluator: *Fiber) MachineError!void {
     var duration = try evaluator.popValue();
     defer duration.deinit();
     if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
@@ -467,7 +467,7 @@ const ReceiveDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     deadline: ?scheduler_api.Deadline,
 
-    pub fn advance(evaluator: *Unit, self: *ReceiveDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ReceiveDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const own = evaluator.scheduler.?.currentMailbox(evaluator.task_scope.?).?;
         if (own.dequeue()) |message| {
@@ -503,11 +503,11 @@ const ReceiveDriver = struct {
     }
 };
 
-fn tasks(evaluator: *Unit) MachineError!void {
+fn tasks(evaluator: *Fiber) MachineError!void {
     try evaluator.scheduler.?.installTasksDriver(evaluator, evaluator.task_scope.?);
 }
 
-fn awaitAny(evaluator: *Unit) MachineError!void {
+fn awaitAny(evaluator: *Fiber) MachineError!void {
     var tasks_value = try evaluator.popValue();
     defer tasks_value.deinit();
     const task_list = tasks_value.borrow();
@@ -521,7 +521,7 @@ fn awaitAny(evaluator: *Unit) MachineError!void {
     try evaluator.startDriver(AwaitAnyDriver{ .tasks = .init(tasks_value.take()) });
 }
 
-fn awaitFor(evaluator: *Unit) MachineError!void {
+fn awaitFor(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var duration = try evaluator.popValue();
     defer duration.deinit();
@@ -545,7 +545,7 @@ const AwaitAnyDriver = struct {
     index: usize = 0,
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *AwaitAnyDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();

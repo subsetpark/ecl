@@ -12,7 +12,7 @@ const support = @import("kernel_support.zig");
 const flat = @import("kernel_flat.zig");
 
 const Value = value.Value;
-const Unit = support.Unit;
+const Fiber = support.Fiber;
 const MachineError = support.MachineError;
 pub const BinaryOp = support.BinaryOp;
 pub const UnaryOp = support.UnaryOp;
@@ -57,7 +57,7 @@ fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
 
 fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             // Each operation already has its own specialized copy, so
             // inlining it removes only the trampoline.
             return @call(.always_inline, binaryPrimitive, .{ evaluator, operation });
@@ -87,7 +87,7 @@ fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
 
 fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {
     return support.headed(operation.spelling(), struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             return @call(.always_inline, unaryPrimitive, .{ evaluator, operation });
         }
     }.run);
@@ -103,7 +103,7 @@ fn isPervadeScalar(item: Value) bool {
     return item != .list and item != .dict;
 }
 
-fn binaryPrimitive(evaluator: *Unit, comptime operation: BinaryOp) MachineError!void {
+fn binaryPrimitive(evaluator: *Fiber, comptime operation: BinaryOp) MachineError!void {
     var left, var right = try evaluator.popPair();
     defer right.deinit();
     defer left.deinit();
@@ -134,7 +134,7 @@ fn binaryPrimitive(evaluator: *Unit, comptime operation: BinaryOp) MachineError!
     });
 }
 
-fn unaryPrimitive(evaluator: *Unit, comptime operation: UnaryOp) MachineError!void {
+fn unaryPrimitive(evaluator: *Fiber, comptime operation: UnaryOp) MachineError!void {
     var operand = try evaluator.popValue();
     defer operand.deinit();
     // As for binary operations, a scalar never takes a typed kernel.
@@ -162,7 +162,7 @@ const PervadeDriver = struct {
     right: ?heap.Owned(Value) = null,
     cursor: heap.Owned(PervadeCursor),
 
-    pub fn advance(evaluator: *Unit, self: *PervadeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *PervadeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
             .pending => .stepped,
@@ -394,7 +394,7 @@ pub const PervadeCursor = struct {
 
     pub fn advance(
         self: *PervadeCursor,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         work: *poll.WorkBudget,
     ) MachineError!PervadeProgress {
         while (true) {
@@ -439,7 +439,7 @@ pub const PervadeCursor = struct {
         return .pending;
     }
 
-    fn start(self: *PervadeCursor, evaluator: *Unit, child: Child) MachineError!Started {
+    fn start(self: *PervadeCursor, evaluator: *Fiber, child: Child) MachineError!Started {
         return switch (child) {
             .binary => |node| self.startBinary(evaluator, node),
             .unary => |node| self.startUnary(evaluator, node),
@@ -464,7 +464,7 @@ pub const PervadeCursor = struct {
         }
     }
 
-    fn startBinary(self: *PervadeCursor, evaluator: *Unit, node: BinaryNode) MachineError!Started {
+    fn startBinary(self: *PervadeCursor, evaluator: *Fiber, node: BinaryNode) MachineError!Started {
         if (node.depth >= support.max_depth and
             (node.left == .list or node.left == .dict or node.right == .list or node.right == .dict))
             return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
@@ -516,7 +516,7 @@ pub const PervadeCursor = struct {
         return root;
     }
 
-    fn startUnary(self: *PervadeCursor, evaluator: *Unit, node: UnaryNode) MachineError!Started {
+    fn startUnary(self: *PervadeCursor, evaluator: *Fiber, node: UnaryNode) MachineError!Started {
         if (node.depth >= support.max_depth and (node.operand == .list or node.operand == .dict))
             return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
         if (node.operand == .dict) {
@@ -564,7 +564,7 @@ pub const PervadeCursor = struct {
 
     fn advanceList(
         self: *PervadeCursor,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         frame: *ListFrame,
         work: *poll.WorkBudget,
     ) MachineError!FrameStep {
@@ -624,7 +624,7 @@ pub const PervadeCursor = struct {
     /// what `startBinary` would run for it, with the same conformance check
     /// and fault report. A kernel the turn cannot finish becomes the typed
     /// frame `runTyped` would push. Null leaves every other child to `start`.
-    fn startNumericRow(self: *PervadeCursor, evaluator: *Unit, node: BinaryNode) MachineError!?Started {
+    fn startNumericRow(self: *PervadeCursor, evaluator: *Fiber, node: BinaryNode) MachineError!?Started {
         // A leaf is still a list to the depth guard, which `startBinary` owns.
         if (node.depth >= support.max_depth) return null;
         const left_leaf = leafNumber(node.left);
@@ -688,7 +688,7 @@ pub const PervadeCursor = struct {
 
     fn advanceDict(
         self: *PervadeCursor,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         frame: *DictFrame,
         work: *poll.WorkBudget,
     ) MachineError!FrameStep {
@@ -817,7 +817,7 @@ pub const PervadeCursor = struct {
 
     /// A dict frame still pays for its own visit; this is the unit the child's
     /// node frame used to cost.
-    fn startDictChild(self: *PervadeCursor, evaluator: *Unit, frame: *DictFrame, child: Child, work: *poll.WorkBudget) MachineError!FrameStep {
+    fn startDictChild(self: *PervadeCursor, evaluator: *Fiber, frame: *DictFrame, child: Child, work: *poll.WorkBudget) MachineError!FrameStep {
         if (!work.spend()) return .pending;
         frame.matched = false;
         switch (try self.start(evaluator, child)) {
@@ -861,7 +861,7 @@ fn selectUnary(operation: UnaryOp) ScalarUnary {
 /// The element count a binary shape conforms to, or the conformance failure
 /// that shape reports. `leaf_only` is a unary shape and never reaches here.
 fn conformingLength(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     shape: Shape,
     left_item: Value,
     right_item: Value,
@@ -897,7 +897,7 @@ fn scalarDiagnostic(fault: ScalarError) ScalarDiagnostic {
     };
 }
 
-fn scalarFailure(evaluator: *Unit, fault: ScalarError, index: ?usize) MachineError {
+fn scalarFailure(evaluator: *Fiber, fault: ScalarError, index: ?usize) MachineError {
     const diagnostic = scalarDiagnostic(fault);
     if (index) |logical_index|
         return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, logical_index);
@@ -1358,7 +1358,7 @@ const NumericParams = struct {
 };
 
 fn failTypedScalar(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     report: FaultReport,
     fault: ScalarError,
     index: usize,
@@ -1720,7 +1720,7 @@ fn binaryKernelInto(
 
         /// The operation's range loop over these classes, as
         /// `BinaryKernel` calls it.
-        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             const left: Left = if (shape == .scalar_leaf)
                 left_class.unboxed(operands[0])
             else
@@ -1734,7 +1734,7 @@ fn binaryKernelInto(
                 return replayDirect(evaluator, params.report, left, right, faulted);
         }
 
-        noinline fn replayDirect(evaluator: *Unit, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
+        noinline fn replayDirect(evaluator: *Fiber, report: FaultReport, left: Left, right: Right, piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
                 const a = if (shape == .scalar_leaf) left else left[index];
                 const b = if (shape == .leaf_scalar) right else right[index];
@@ -1838,14 +1838,14 @@ fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, 
 
         /// The operation's range loop over this class, as `UnaryKernel`
         /// calls it.
-        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        fn chunk(params: NumericParams, operands: [1]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             const elements = heap.leafElements(operand_class.kind(), operands[0].list);
             const placement: flat.Placement = if (output.aliased()) .over_operands else .fresh;
             if (runPieces(elements, output, placement, range)) |faulted|
                 return replayDirect(evaluator, params.report, elements, faulted);
         }
 
-        noinline fn replayDirect(evaluator: *Unit, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
+        noinline fn replayDirect(evaluator: *Fiber, report: FaultReport, elements: []const operand_class.Element(), piece: flat.Chunk) MachineError {
             for (piece.start..piece.end) |index| {
                 _ = scalarUnary(operation, operand_class.boxed(elements[index])) catch |fault|
                     return failTypedScalar(evaluator, report, fault, index);
@@ -1910,7 +1910,7 @@ const KernelOutput = union(enum) {
 const BinaryChunk = *const anyopaque;
 
 fn BinaryLoop(comptime out: Number) type {
-    return *const fn (NumericParams, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, *Unit) MachineError!void;
+    return *const fn (NumericParams, [2]Value, *support.LeafResult(out.kind()), flat.Chunk, *Fiber) MachineError!void;
 }
 
 /// What a binary kernel runs with: the caller's parameters and the plan's
@@ -1936,7 +1936,7 @@ fn BinaryKernel(comptime out: Number) type {
             /// list and is passed over.
             pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{ 0, 1 } };
 
-            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(params: BinaryParams, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
                 const loop: BinaryLoop(out) = @ptrCast(@alignCast(params.chunk));
                 return loop(params.numeric, operands, output, range, evaluator);
             }
@@ -1954,7 +1954,7 @@ fn BinaryKernel(comptime out: Number) type {
 const UnaryChunk = *const anyopaque;
 
 fn UnaryLoop(comptime out: Number) type {
-    return *const fn (NumericParams, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, *Unit) MachineError!void;
+    return *const fn (NumericParams, [1]Value, *support.LeafResult(out.kind()), flat.Chunk, *Fiber) MachineError!void;
 }
 
 const UnaryParams = struct {
@@ -1973,7 +1973,7 @@ fn UnaryKernel(comptime out: Number) type {
 
             pub const result: ?support.ResultShape = .{ .kind = out.kind(), .overwritable = &.{0} };
 
-            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(params: UnaryParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
                 const loop: UnaryLoop(out) = @ptrCast(@alignCast(params.chunk));
                 return loop(params.numeric, operands, output, range, evaluator);
             }
@@ -1987,9 +1987,9 @@ fn UnaryKernel(comptime out: Number) type {
 }
 
 /// Runs a plan's operation through `support.Kernel`, inline or as a driver.
-const RunBinary = *const fn (*Unit, [2]*heap.OwnedValue, BinaryParams, usize) MachineError!void;
+const RunBinary = *const fn (*Fiber, [2]*heap.OwnedValue, BinaryParams, usize) MachineError!void;
 /// Runs a plan's operation for a leaf inside pervasion; see `support.Kernel`.
-const NestedBinary = *const fn (*Unit, [2]Value, ?*heap.OwnedValue, BinaryParams, usize) MachineError!support.NestedOutcome;
+const NestedBinary = *const fn (*Fiber, [2]Value, ?*heap.OwnedValue, BinaryParams, usize) MachineError!support.NestedOutcome;
 
 /// Static selection binds the element classes, output width, and kernel
 /// together, so no caller can pair a kernel with another storage contract.
@@ -2004,12 +2004,12 @@ const NumericBinaryPlan = opaque {
         chunk: BinaryChunk,
 
         /// Runs the operation inline or as a driver.
-        fn start(self: *const Data, evaluator: *Unit, owners: [2]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
+        fn start(self: *const Data, evaluator: *Fiber, owners: [2]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
             return self.run(evaluator, owners, .{ .numeric = params, .chunk = self.chunk }, length);
         }
 
         /// Runs the operation for a leaf inside pervasion.
-        fn startNested(self: *const Data, evaluator: *Unit, operands: [2]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
+        fn startNested(self: *const Data, evaluator: *Fiber, operands: [2]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
             return self.nested(evaluator, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
         }
     };
@@ -2083,7 +2083,7 @@ fn firstFlatElement(item: Value) ?Value {
 /// and no traversal. This closes the typed boundary for character/symbol and
 /// nonnumeric combinations without manufacturing a boxed fallback loop.
 fn rejectUnsupportedFlatBinary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: BinaryOp,
     left: Value,
     right: Value,
@@ -2109,7 +2109,7 @@ fn rejectUnsupportedFlatBinary(
 }
 
 fn rejectUnsupportedFlatUnary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: UnaryOp,
     operand: Value,
     report: FaultReport,
@@ -2121,7 +2121,7 @@ fn rejectUnsupportedFlatUnary(
 }
 
 fn startNestedNumericBinary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: BinaryOp,
     left_item: Value,
     right_item: Value,
@@ -2153,7 +2153,7 @@ fn startNestedNumericBinary(
 /// the operation's own operand, so its buffer may become the output; every
 /// other leaf is only borrowed from the structure being descended.
 fn startNestedBinary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: BinaryOp,
     left: Value,
     right: Value,
@@ -2165,8 +2165,8 @@ fn startNestedBinary(
     return null;
 }
 
-const RunUnary = *const fn (*Unit, [1]*heap.OwnedValue, UnaryParams, usize) MachineError!void;
-const NestedUnary = *const fn (*Unit, [1]Value, ?*heap.OwnedValue, UnaryParams, usize) MachineError!support.NestedOutcome;
+const RunUnary = *const fn (*Fiber, [1]*heap.OwnedValue, UnaryParams, usize) MachineError!void;
+const NestedUnary = *const fn (*Fiber, [1]Value, ?*heap.OwnedValue, UnaryParams, usize) MachineError!support.NestedOutcome;
 
 /// A closed operation/class pair binds the loop and its output representation.
 /// Top-level and nested operations share it.
@@ -2179,12 +2179,12 @@ const NumericUnaryPlan = opaque {
         chunk: UnaryChunk,
 
         /// Runs the operation inline or as a driver.
-        fn start(self: *const Data, evaluator: *Unit, owners: [1]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
+        fn start(self: *const Data, evaluator: *Fiber, owners: [1]*heap.OwnedValue, params: NumericParams, length: usize) MachineError!void {
             return self.run(evaluator, owners, .{ .numeric = params, .chunk = self.chunk }, length);
         }
 
         /// Runs the operation for a leaf inside pervasion.
-        fn startNested(self: *const Data, evaluator: *Unit, operands: [1]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
+        fn startNested(self: *const Data, evaluator: *Fiber, operands: [1]Value, root: ?*heap.OwnedValue, params: NumericParams, length: usize) MachineError!support.NestedOutcome {
             return self.nested(evaluator, operands, root, .{ .numeric = params, .chunk = self.chunk }, length);
         }
     };
@@ -2212,7 +2212,7 @@ const NumericUnaryPlan = opaque {
 };
 
 fn startNestedUnary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: UnaryOp,
     operand: Value,
     report: FaultReport,
@@ -2231,7 +2231,7 @@ fn startNestedUnary(
 /// driver. It classifies exactly as the numeric builder does, so a pair it
 /// declines reaches the builder unchanged.
 fn startNumericBinary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: BinaryOp,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
@@ -2265,7 +2265,7 @@ fn startNumericBinary(
 /// Dispatches one binary operation. Returns false when the operand shapes belong
 /// to the generic route, having consumed nothing.
 fn startTypedBinary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: BinaryOp,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
@@ -2279,7 +2279,7 @@ fn startTypedBinary(
 }
 
 fn startTypedUnary(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: UnaryOp,
     operand: *heap.OwnedValue,
     report: FaultReport,
@@ -2304,8 +2304,8 @@ fn startTypedUnary(
 /// applies its quotation to one element at a time and its fault carries no list
 /// position.
 pub const IdiomStart = struct {
-    pub const Unary = *const fn (*Unit, *heap.OwnedValue) MachineError!void;
-    pub const Binary = *const fn (*Unit, *heap.OwnedValue, *heap.OwnedValue) MachineError!void;
+    pub const Unary = *const fn (*Fiber, *heap.OwnedValue) MachineError!void;
+    pub const Binary = *const fn (*Fiber, *heap.OwnedValue, *heap.OwnedValue) MachineError!void;
 };
 
 /// A quotation compiled to a straight-line scalar function of one or two
@@ -2401,21 +2401,21 @@ pub fn programCandidate(operands: []const Value) bool {
 /// instruction before the next starts, so the first fault is the one that
 /// order meets, reported by its own word. An atom operand is the same at every
 /// element. The quotation is held as an operand for that report.
-pub fn startProgramEach(evaluator: *Unit, input: *heap.OwnedValue, phrase: *heap.OwnedValue, program: ScalarProgram) MachineError!void {
+pub fn startProgramEach(evaluator: *Fiber, input: *heap.OwnedValue, phrase: *heap.OwnedValue, program: ScalarProgram) MachineError!void {
     const count: usize = @intCast(input.borrow().list.length());
     return support.Kernel(ProgramKernel(1)).run(evaluator, .{ input, phrase }, try ownProgram(evaluator, program), count);
 }
 
 /// A program is too large to travel by value in a driver; the kernel's output
 /// owns this copy from `prepare` on.
-fn ownProgram(evaluator: *Unit, program: ScalarProgram) error{OutOfMemory}!*ScalarProgram {
+fn ownProgram(evaluator: *Fiber, program: ScalarProgram) error{OutOfMemory}!*ScalarProgram {
     const owned = try evaluator.allocator.create(ScalarProgram);
     owned.* = program;
     return owned;
 }
 
 pub fn startProgramZip(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     left: *heap.OwnedValue,
     right: *heap.OwnedValue,
     phrase: *heap.OwnedValue,
@@ -2768,7 +2768,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             }
         };
 
-        pub fn prepare(evaluator: *Unit, operands: [arity]Value, program: *ScalarProgram, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, operands: [arity]Value, program: *ScalarProgram, length: usize) error{OutOfMemory}!Output {
             const allocator = evaluator.allocator;
             errdefer allocator.destroy(program);
             const plan = try BlockPlan.create(allocator, program, operands[0..inputs], length);
@@ -2781,7 +2781,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             };
         }
 
-        pub fn chunk(program: *ScalarProgram, operands: [arity]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(program: *ScalarProgram, operands: [arity]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             if (output.builder) |*builder| {
                 if (output.plan) |plan| return plan.fill(builder, range);
                 return builder.writeValues(range.start, output.results[range.start..range.end]);
@@ -2802,7 +2802,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             output.profile = profile;
         }
 
-        fn runBlocks(plan: *BlockPlan, program: *ScalarProgram, operands: [arity]Value, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        fn runBlocks(plan: *BlockPlan, program: *ScalarProgram, operands: [arity]Value, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             var start = range.start;
             while (start != range.end) {
                 const length = @min(plan.block, range.end - start);
@@ -2822,7 +2822,7 @@ fn ProgramKernel(comptime inputs: usize) type {
             }
         }
 
-        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(_: *Fiber, output: *Output) MachineError!?usize {
             if (output.builder != null) return null;
             const length = if (output.plan) |plan| switch (plan.result) {
                 inline else => |items| items.len,
@@ -2856,7 +2856,7 @@ pub fn programReduceCandidate(input: Value, initial: ?Value) bool {
 /// order, so the first fault is the one the generic route meets. A null
 /// `initial` starts from the list's first element.
 pub fn startProgramReduce(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     input: *heap.OwnedValue,
     phrase: *heap.OwnedValue,
     program: ScalarProgram,
@@ -2906,7 +2906,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             }
         };
 
-        pub fn prepare(evaluator: *Unit, _: [2]Value, params: Params, length: usize) error{OutOfMemory}!Output {
+        pub fn prepare(evaluator: *Fiber, _: [2]Value, params: Params, length: usize) error{OutOfMemory}!Output {
             const allocator = evaluator.allocator;
             errdefer allocator.destroy(params.program);
             return .{
@@ -2917,7 +2917,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             };
         }
 
-        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        pub fn chunk(params: Params, operands: [2]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             if (output.builder) |*builder| return builder.writeValues(range.start, output.results[range.start..range.end]);
             const program = output.program;
             // SAFETY: `load` fills the constants; inputs and results are
@@ -2941,7 +2941,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
             output.profile = profile;
         }
 
-        pub fn next(_: *Unit, output: *Output) MachineError!?usize {
+        pub fn next(_: *Fiber, output: *Output) MachineError!?usize {
             if (!scan or output.builder != null) return null;
             const length = output.results.len;
             output.builder = try heap.AnyListBuilder.init(output.allocator, output.profile.heapKind(), length, length);
@@ -2960,7 +2960,7 @@ fn ProgramReduceKernel(comptime scan: bool) type {
 
 /// Reports a program's fault as the faulting word would: that word active, at
 /// its position in the quotation, with the shared scalar diagnostic.
-fn failProgram(evaluator: *Unit, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
+fn failProgram(evaluator: *Fiber, phrase: Value, instruction: ScalarProgram.Instruction, fault: ScalarError) MachineError {
     @setEvalBranchQuota(10_000);
     evaluator.active_word = .plain(instruction.word);
     const failure = scalarFailure(evaluator, fault, null);
@@ -2975,7 +2975,7 @@ fn failProgram(evaluator: *Unit, phrase: Value, instruction: ScalarProgram.Instr
 pub fn idiomUnaryStart(operation: UnaryOp) IdiomStart.Unary {
     return switch (operation) {
         inline else => |selected| struct {
-            fn run(evaluator: *Unit, operand: *heap.OwnedValue) MachineError!void {
+            fn run(evaluator: *Fiber, operand: *heap.OwnedValue) MachineError!void {
                 const started = try startTypedUnary(evaluator, selected, operand, .{ .index = false });
                 std.debug.assert(started);
             }
@@ -2987,7 +2987,7 @@ pub fn idiomBinaryStart(operation: BinaryOp) IdiomStart.Binary {
     return switch (operation) {
         inline else => |selected| struct {
             fn run(
-                evaluator: *Unit,
+                evaluator: *Fiber,
                 left: *heap.OwnedValue,
                 right: *heap.OwnedValue,
             ) MachineError!void {
@@ -3089,7 +3089,7 @@ const ReduceOutput = struct {
     }
 };
 
-const RunReduce = *const fn (*Unit, [1]*heap.OwnedValue, ReduceKernelParams, usize) MachineError!void;
+const RunReduce = *const fn (*Fiber, [1]*heap.OwnedValue, ReduceKernelParams, usize) MachineError!void;
 
 fn reduceKernel(
     comptime operation: BinaryOp,
@@ -3145,7 +3145,7 @@ fn reduceKernel(
         }
 
         /// Folds list indices `range` into the accumulator, in order.
-        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        fn accumulate(output: *ReduceOutput, elements: []const element_class.Element(), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             var block = Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
@@ -3194,7 +3194,7 @@ fn reduceKernel(
 
         /// The reduction's loop over these classes, as `ReduceKernel` calls
         /// it. Its positions are the list indices after the seed.
-        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+        fn chunk(operands: [1]Value, output: *ReduceOutput, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
             return accumulate(
                 output,
                 heap.leafElements(element_class.kind(), operands[0].list),
@@ -3207,7 +3207,7 @@ fn reduceKernel(
 
 /// One reduction's loop over one accumulator and element class; see
 /// `ReduceKernel`.
-const ReduceChunk = *const fn ([1]Value, *ReduceOutput, flat.Chunk, *Unit) MachineError!void;
+const ReduceChunk = *const fn ([1]Value, *ReduceOutput, flat.Chunk, *Fiber) MachineError!void;
 
 /// What a reduction kernel runs with: the caller's seed and start, the
 /// operation's scalar step for a seed that changes class, and the plan's
@@ -3242,7 +3242,7 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
 
             pub const prepare = if (scan) prepareScan else prepareFold;
 
-            fn prepareScan(evaluator: *Unit, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(accumulator_class.kind())) MachineError!Output {
+            fn prepareScan(evaluator: *Fiber, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(accumulator_class.kind())) MachineError!Output {
                 var output = try prepareFold(evaluator, operands, params, length);
                 output.scan = .wrap(accumulator_class, prepared);
                 if (seeded) output.scan.?.leaf(accumulator_class).store(params.reduce.cursor_start, &.{switch (output.accumulator) {
@@ -3252,7 +3252,7 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
                 return output;
             }
 
-            fn prepareFold(evaluator: *Unit, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
+            fn prepareFold(evaluator: *Fiber, operands: [1]Value, params: ReduceKernelParams, _: usize) MachineError!Output {
                 const input = operands[0];
                 const start = params.reduce.cursor_start;
                 const seed = if (seeded) first: {
@@ -3278,7 +3278,7 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
                 return output;
             }
 
-            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(params: ReduceKernelParams, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
                 return params.chunk(operands, output, range, evaluator);
             }
 
@@ -3380,7 +3380,7 @@ const NumericReducePlan = opaque {
     /// list's own element, valid while the list is held. The combinator
     /// handles empty folds/scans and singleton fold1 before entry, so
     /// cursor_start always identifies a remaining input element.
-    fn start(self: *const NumericReducePlan, evaluator: *Unit, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
+    fn start(self: *const NumericReducePlan, evaluator: *Fiber, input: Value, initial: Value, cursor_start: usize, consumed: usize) MachineError!void {
         const data: *const Data = @ptrCast(@alignCast(self));
         std.debug.assert(consumed >= 1 and consumed <= 3);
         var popped: [3]heap.OwnedValue = undefined;
@@ -3402,7 +3402,7 @@ const NumericReducePlan = opaque {
 /// Reached only if a guard and a dispatch disagreed, which the candidate
 /// predicate exists to prevent; it is a domain error rather than a silent
 /// second classification.
-fn unexpectedReduceShape(evaluator: *Unit) MachineError {
+fn unexpectedReduceShape(evaluator: *Fiber) MachineError {
     return evaluator.fail(.domain, "typed reduction reached an unclassified operand shape");
 }
 
@@ -3426,7 +3426,7 @@ pub const RowFold = union(enum) {
 /// machine turn. The whole row is charged before it runs, and a row larger
 /// than the remaining budget is declined rather than split.
 pub fn foldLeafRow(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     operation: BinaryOp,
     accumulator: Value,
     accumulator_owned: bool,
@@ -3497,7 +3497,7 @@ pub fn columnFoldCandidate(operation: BinaryOp, input: Value) bool {
 /// result is pushed; the caller releases `input` as on any decline. The
 /// caller guards with `columnFoldCandidate` and has checked that
 /// `rows · columns` is the input's length.
-pub fn foldColumns(evaluator: *Unit, operation: BinaryOp, input: *heap.OwnedValue, rows: usize, columns: usize) MachineError!void {
+pub fn foldColumns(evaluator: *Fiber, operation: BinaryOp, input: *heap.OwnedValue, rows: usize, columns: usize) MachineError!void {
     @setEvalBranchQuota(10_000);
     const shape: ColumnShape = .{ .rows = rows, .width = columns };
     return switch (operation) {
@@ -3532,7 +3532,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 return shape.width;
             }
 
-            pub fn chunk(_: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, _: *Unit) MachineError!void {
+            pub fn chunk(_: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, _: *Fiber) MachineError!void {
                 if (output.aliased()) return;
                 output.store(range.start, heap.leafElements(element.kind(), operands[0].list)[range.start..range.end]);
             }
@@ -3559,7 +3559,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
                 return shape.width;
             }
 
-            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Unit) MachineError!void {
+            pub fn chunk(shape: ColumnShape, operands: [1]Value, output: *Output, range: flat.Chunk, evaluator: *Fiber) MachineError!void {
                 const width = shape.width;
                 const elements = heap.leafElements(element.kind(), operands[0].list);
                 const columns = output.range(0, width);
@@ -3598,7 +3598,7 @@ fn columnFold(comptime operation: BinaryOp, comptime element: Number) type {
         /// `rowFoldStep` does.
         fn step(
             comptime left_class: Number,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             left: []const left_class.Element(),
             right: []const element.Element(),
             out: []Out,
@@ -3659,7 +3659,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
         const unchecked = accumulator_class == .real and row_class == .real and
             (operation == .add or operation == .sub or operation == .mul);
 
-        fn run(evaluator: *Unit, accumulator: Value, accumulator_owned: bool, row: Value, length: usize) MachineError!RowFold {
+        fn run(evaluator: *Fiber, accumulator: Value, accumulator_owned: bool, row: Value, length: usize) MachineError!RowFold {
             try evaluator.advanceKernel(length);
             var right = heap.LeafReader(row_class.kind()).acquire(row.list);
             defer right.release(evaluator.releases);
@@ -3682,7 +3682,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
 
         /// `out` may alias `left`: each block is computed from operands not
         /// yet stored over, then stored.
-        fn apply(evaluator: *Unit, left: []const Left, right: []const Right, out_items: []Element) MachineError!void {
+        fn apply(evaluator: *Fiber, left: []const Left, right: []const Right, out_items: []Element) MachineError!void {
             var block = Staging.init();
             var start: usize = 0;
             while (start != out_items.len) {
@@ -3723,7 +3723,7 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
     };
 }
 
-pub const IdiomReduceStart = *const fn (*Unit, Value, Value, bool, usize, usize) MachineError!void;
+pub const IdiomReduceStart = *const fn (*Fiber, Value, Value, bool, usize, usize) MachineError!void;
 
 /// Starts the typed reduction. The caller has guarded with
 /// `typedReduceCandidate`, so this asserts rather than reporting a second
@@ -3732,7 +3732,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
     return switch (operation) {
         inline else => |selected| struct {
             fn run(
-                evaluator: *Unit,
+                evaluator: *Fiber,
                 input: Value,
                 initial: Value,
                 scan: bool,
@@ -3750,7 +3750,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
 }
 
 /// Reducer symbols select fixed semantics independently of language bindings.
-pub fn reduceGroups(evaluator: *Unit) MachineError!void {
+pub fn reduceGroups(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var reducer = try evaluator.popValue();
     defer reducer.deinit();
@@ -3791,7 +3791,7 @@ const GroupReduceDriver = struct {
         self: *GroupReduceDriver,
         comptime value_kind: value.HeapKind,
         comptime index_kind: value.HeapKind,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         work: *poll.WorkBudget,
         indices: *heap.ListHandle,
     ) MachineError!void {
@@ -3828,7 +3828,7 @@ const GroupReduceDriver = struct {
 
     /// Reduces part of the current group through the typed run when both the
     /// values and its selectors are typed numeric leaves; false otherwise.
-    fn typedRun(self: *GroupReduceDriver, evaluator: *Unit, work: *poll.WorkBudget, indices: Value) MachineError!bool {
+    fn typedRun(self: *GroupReduceDriver, evaluator: *Fiber, work: *poll.WorkBudget, indices: Value) MachineError!bool {
         const values = self.values.borrow().list;
         switch (values.kind()) {
             inline .leaf_u8, .leaf_i64, .leaf_f64 => |value_kind| switch (indices.list.kind()) {
@@ -3842,7 +3842,7 @@ const GroupReduceDriver = struct {
         }
     }
 
-    pub fn advance(evaluator: *Unit, self: *GroupReduceDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *GroupReduceDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.groups.borrow().list.length());
         if (self.output == null and self.materializer == null) self.output = .init(try .init(evaluator.releases, count));

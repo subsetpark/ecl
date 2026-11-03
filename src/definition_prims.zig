@@ -16,13 +16,13 @@ const reader_types = @import("reader_types.zig");
 const modules = @import("modules.zig");
 const binder = @import("binder.zig");
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 const Mode = enum { def, defp, test_declaration };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
     return struct {
-        fn run(evaluator: *Unit) MachineError!void {
+        fn run(evaluator: *Fiber) MachineError!void {
             return define(evaluator, mode);
         }
     }.run;
@@ -36,7 +36,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``." },
         .{ .name = "effect", .primitive = declaredEffect, .effect = "name -- annotation", .doc = "Return the declared stack effect of a resolved binding as an annotation such as `(x y -- z)`, or `()` when it declares none." },
         .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition." },
-        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of their source unit, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors." },
+        .{ .name = "see", .primitive = see, .effect = "name --", .doc = "Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -54,7 +54,7 @@ const Annotation = struct {
     }
 };
 
-fn define(evaluator: *Unit, mode: Mode) MachineError!void {
+fn define(evaluator: *Fiber, mode: Mode) MachineError!void {
     try evaluator.require(2);
     const private = mode == .defp;
     const scope = try evaluator.definitionScope();
@@ -187,7 +187,7 @@ const DefineDriver = struct {
     /// A word in the body does not resolve. A definition never
     /// forward-references: a miss fails at that word.
     fn bindingMiss(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         code: *value.ListHandle,
         index: u32,
         word: value.Symbol,
@@ -198,11 +198,11 @@ const DefineDriver = struct {
         return failure;
     }
 
-    fn malformed(evaluator: *Unit) MachineError {
+    fn malformed(evaluator: *Fiber) MachineError {
         return evaluator.fail(.domain, "malformed definition annotation");
     }
 
-    pub fn advance(evaluator: *Unit, self: *DefineDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DefineDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.state.borrowMut().*) {
@@ -517,7 +517,7 @@ const DefineDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn doc(evaluator: *Unit) MachineError!void {
+fn doc(evaluator: *Fiber) MachineError!void {
     const requested = try evaluator.popWord();
     return installLookup(evaluator, requested);
 }
@@ -531,7 +531,7 @@ const ReflectionResolution = union(enum) {
 /// module, destroy the current driver and hand the symbol plus primitive call
 /// back to the machine's ordinary load/retry protocol.
 fn resolveForReflection(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     driver: anytype,
     requested: value.Symbol,
     outcome: binder.Outcome,
@@ -554,7 +554,7 @@ fn resolveForReflection(
 /// values. There is no counterpart for a binding's stored body: nothing lifts a
 /// published body out of the home it resolves against, which is what keeps a
 /// quotation's scope label impossible to re-site.
-fn installLookup(evaluator: *Unit, requested: value.Symbol) MachineError!void {
+fn installLookup(evaluator: *Fiber, requested: value.Symbol) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
         .resolution = .init(machine.ExplicitLookup.init(evaluator, requested)),
@@ -566,7 +566,7 @@ const DocumentNormalization = struct {
     document: heap.Owned(Value),
     normalizer: heap.Owned(doc_text.NormalizeCursor),
 
-    fn init(evaluator: *Unit, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
+    fn init(evaluator: *Fiber, document: *env.DocumentationString) error{OutOfMemory}!DocumentNormalization {
         const item: Value = .{ .list = env.documentationHeader(document) };
         const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator, item);
         heap.retainValue(item);
@@ -592,7 +592,7 @@ const LookupDriver = struct {
     requested: value.Symbol,
     resolution: heap.Owned(machine.ExplicitLookup),
     normalization: heap.Owned(DocumentNormalization) = .none,
-    pub fn advance(evaluator: *Unit, self: *LookupDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) {
@@ -622,7 +622,7 @@ const LookupDriver = struct {
     }
 };
 
-fn declaredEffect(evaluator: *Unit) MachineError!void {
+fn declaredEffect(evaluator: *Fiber) MachineError!void {
     const requested = try evaluator.popWord();
     try evaluator.startDriver(EffectDriver{
         .requested = requested,
@@ -638,7 +638,7 @@ const EffectDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: value.Symbol,
     resolution: heap.Owned(machine.ExplicitLookup),
-    pub fn advance(evaluator: *Unit, self: *EffectDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *EffectDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.resolution.borrowMut().advance()) {
@@ -659,7 +659,7 @@ const EffectDriver = struct {
     }
 };
 
-fn which(evaluator: *Unit) MachineError!void {
+fn which(evaluator: *Fiber) MachineError!void {
     const requested = try evaluator.popWord();
     try evaluator.startDriver(WhichDriver.init(evaluator, requested));
 }
@@ -720,7 +720,7 @@ const WhichDriver = struct {
         }
     };
 
-    fn init(evaluator: *Unit, requested: value.Symbol) WhichDriver {
+    fn init(evaluator: *Fiber, requested: value.Symbol) WhichDriver {
         return .{
             .requested = requested,
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
@@ -790,7 +790,7 @@ const WhichDriver = struct {
         }
         base.step += 1;
     }
-    pub fn advance(evaluator: *Unit, self: *WhichDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *WhichDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -854,7 +854,7 @@ const WhichDriver = struct {
     }
 };
 
-fn see(evaluator: *Unit) MachineError!void {
+fn see(evaluator: *Fiber) MachineError!void {
     const requested = try evaluator.popWord();
     try evaluator.startDriver(SeeDriver.init(evaluator, requested));
 }
@@ -917,7 +917,7 @@ const SeeDriver = struct {
         }
     };
 
-    fn init(evaluator: *Unit, requested: value.Symbol) SeeDriver {
+    fn init(evaluator: *Fiber, requested: value.Symbol) SeeDriver {
         return .{
             .requested = requested,
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator)),
@@ -1007,7 +1007,7 @@ const SeeDriver = struct {
         plan.step += 1;
     }
 
-    pub fn advance(evaluator: *Unit, self: *SeeDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *SeeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.state.borrowMut().*) {
@@ -1091,6 +1091,6 @@ const SeeDriver = struct {
     }
 };
 
-fn writeFailure(evaluator: *Unit) MachineError {
+fn writeFailure(evaluator: *Fiber) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }

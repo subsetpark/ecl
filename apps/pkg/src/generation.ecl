@@ -54,9 +54,10 @@
   "Record inspected exports after a successful confined extraction.")
  (|bundle state name bytes|
   state `lock at bundle `manifest at pkg.resolution.check-manifest
-  bytes state [work stage] at-path
-  "archives/" state `lock at `packages at name at `hash at pkg.cache.filename cat fs.create-bytes
-  bytes state [work stage] at-path "packages/" name cat archive.unpack-tgz pop
+  state [work stage] at-path
+  "archives/" state `lock at `packages at name at `hash at pkg.cache.filename cat bytes
+  fs.create-bytes
+  state [work stage] at-path "packages/" name cat bytes archive.unpack-tgz pop
   state `bundles state `bundles at name bundle put put) `install-bundle defp
 
  ### def finish
@@ -75,9 +76,9 @@
   manifest-text pkg.manifest.read lock-text pkg.resolution.read bundles
   work `location at pkg.layout.local-root pkg.map.build
   dup work `project at `path at work `location at "/ecl.modules" cat pair path.join pkg.map.validate
-  str "\n" cat work `stage at "ecl.modules" fs.create-text
-  manifest-text work `stage at "ecl.pkg" fs.create-text
-  lock-text work `stage at "ecl.lock" fs.create-text
+  str "\n" cat work `stage at "ecl.modules" rolldown fs.create-text
+  work `stage at "ecl.pkg" manifest-text fs.create-text
+  work `stage at "ecl.lock" lock-text fs.create-text
   work [context downloads] at-path port.close
   work `stage at "downloads" fs.remove-tree
   work `stage at fs.commit-dir) `publish defp

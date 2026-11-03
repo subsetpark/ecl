@@ -11,9 +11,9 @@ const machine = @import("machine.zig");
 const idioms = @import("idioms.zig");
 const native_module = @import("native_module.zig");
 const reader_types = @import("reader_types.zig");
-/// In-tree primitives use Unit's ergonomic error helpers. This binding
+/// In-tree primitives use Fiber's ergonomic error helpers. This binding
 /// kind is not part of the native-extension ABI.
-pub const PrimitiveImpl = *const fn (*machine.Unit) machine.MachineError!void;
+pub const PrimitiveImpl = *const fn (*machine.Fiber) machine.MachineError!void;
 
 /// A native definition together with the nominal image pin that owns its
 /// callback. Only the loader can construct the opaque `ModuleInstance`.
@@ -214,7 +214,7 @@ pub const DirectIdiom = struct {
 /// a module image's definitions live as long as the image, which the Session
 /// keeps until teardown once it is published. A top-level session definition
 /// is the one counted kind: replacement can make it unreachable from the
-/// directory while running frames and units' resolutions still hold it.
+/// directory while running frames and fibers' resolutions still hold it.
 pub const Lifetime = enum { static, counted };
 
 /// Where a definition's body was written: its activation resolves runtime
@@ -733,7 +733,7 @@ pub const Scope = struct {
     }
 
     /// Drops a root scope that was never really used: `replaceRoot`
-    /// overwriting a freshly built one before the unit executed anything.
+    /// overwriting a freshly built one before the fiber executed anything.
     pub fn releaseTrivial(self: *Scope) void {
         std.debug.assert(self.label_cell.load(.acquire) == null);
         const old = self.refs.fetchSub(1, .release);
@@ -1214,7 +1214,7 @@ pub const Env = enum(usize) {
     }
 
     /// One lookup in core's directory. Core is immutable once frozen, and
-    /// written only by the bootstrap unit before then.
+    /// written only by the bootstrap fiber before then.
     pub fn coreLookup(self: *const Env, name: intern.BindingName) NameMap.RawLookupCursor {
         return self.privateState().core.rawLookup(name);
     }
@@ -1390,13 +1390,13 @@ pub const BuildingEnv = enum(usize) {
         }
     }
 
-    /// The Env under construction, for the bootstrap Unit that evaluates the
+    /// The Env under construction, for the bootstrap Fiber that evaluates the
     /// prelude against it. It grants no core publication; that stays here.
     pub fn runtime(self: *const BuildingEnv) Env {
         return self.target();
     }
 
-    /// The root the bootstrap Unit evaluates the prelude in. Its storage is the
+    /// The root the bootstrap Fiber evaluates the prelude in. Its storage is the
     /// core publisher, which refuses once core is frozen.
     pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
         var environment = self.target();

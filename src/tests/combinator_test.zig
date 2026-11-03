@@ -1157,8 +1157,8 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // One `(+)`, offered three times in one unit: the later checks are cache
-    // hits. Redefining `+` must still reach the next application, while the
+    // One `(+)`, offered three times in one submission: the later checks are
+    // cache hits. Redefining `+` must still reach the next application, while the
     // prelude's `sum`, written in core, keeps core `+`.
     try expectStack(
         &runtime,

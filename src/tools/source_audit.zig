@@ -660,13 +660,13 @@ fn auditSourceBodies() bool {
         },
     ) or failed;
     const operand_stack_mutations = [_][]const []const u8{
-        &.{ "unit", ".", "stack", ".", "append" },
-        &.{ "unit", ".", "stack", ".", "appendAssumeCapacity" },
-        &.{ "unit", ".", "stack", ".", "appendSliceAssumeCapacity" },
-        &.{ "unit", ".", "stack", ".", "ensureUnusedCapacity" },
-        &.{ "unit", ".", "stack", ".", "clearRetainingCapacity" },
-        &.{ "unit", ".", "stack", ".", "shrinkRetainingCapacity" },
-        &.{ "unit", ".", "stack", ".", "pop" },
+        &.{ "fiber", ".", "stack", ".", "append" },
+        &.{ "fiber", ".", "stack", ".", "appendAssumeCapacity" },
+        &.{ "fiber", ".", "stack", ".", "appendSliceAssumeCapacity" },
+        &.{ "fiber", ".", "stack", ".", "ensureUnusedCapacity" },
+        &.{ "fiber", ".", "stack", ".", "clearRetainingCapacity" },
+        &.{ "fiber", ".", "stack", ".", "shrinkRetainingCapacity" },
+        &.{ "fiber", ".", "stack", ".", "pop" },
     };
     for (source_groups) |component| {
         if (!component.production) continue;
@@ -855,14 +855,14 @@ fn auditUnsafeCasts() bool {
 }
 
 /// A work budget is an owner's allowance, so only an owner may create one:
-/// the machine for a unit's turn, the scheduler and the port builder for their
+/// the machine for a fiber's turn, the scheduler and the port builder for their
 /// own steps, and `poll` itself. Everything else draws on a budget it was lent.
 /// A cursor cannot be handed a count, since every cursor takes `*WorkBudget`,
 /// but nothing in the type system stops a module from constructing a fresh
 /// budget and lending that instead; construction is the boundary this audit owns.
 const work_budget_issuers = [_][]const u8{ "poll.zig", "machine.zig", "scheduler.zig", "port_builder.zig" };
 
-/// `poll.unbounded()` is the allowance for work no unit owns, and the audit
+/// `poll.unbounded()` is the allowance for work no fiber owns, and the audit
 /// cannot tell a caller-bounded input from a user-sized one. The files below
 /// hold the blocking constructors and setup paths that use it today, each
 /// reviewed for a bounded input; a new use elsewhere needs the same review.
@@ -873,10 +873,10 @@ const unbounded_allowance_users = [_][]const u8{
     "task_prims.zig",
 };
 
-/// The kernel quantum is the length of a unit's turn. Code that meters its
+/// The kernel quantum is the length of a fiber's turn. Code that meters its
 /// own loop with it is minting a private allowance under another name, so the
 /// constant may appear only where a turn or an owner's step is defined, where
-/// typed kernels plan a range against the unit's remainder, and at the two
+/// typed kernels plan a range against the fiber's remainder, and at the two
 /// sites that use it as a size rather than a budget.
 const kernel_quantum_users = [_][]const u8{
     "machine.zig", "scheduler.zig", "kernel_support.zig", "prelude.zig", "native_call.zig",

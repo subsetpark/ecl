@@ -91,7 +91,8 @@
 
 ### def write-output
 (output document -- : "Create or strictly replace the assembled output beneath the build root.")
-(swap `cwd swap over over fs.exists? (fs.replace-text) (fs.create-text) if) `write-output def
+(|output document| `cwd output document `cwd output fs.exists? (fs.replace-text) (fs.create-text) if)
+`write-output def
 
 args first args rest
 dup first "--check" match?

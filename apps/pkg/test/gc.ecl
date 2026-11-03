@@ -11,7 +11,7 @@
   (|directory|
    directory [1 2] pkg.fetch.hash [1 2] pkg.cache.write-at
    directory [3 4] pkg.fetch.hash [3 4] pkg.cache.write-at
-   "unrelated" directory "keep.txt" fs.create-text
+   directory "keep.txt" "unrelated" fs.create-text
    directory [5 6] pkg.fetch.hash pkg.cache.filename fs.mkdir
    directory [1 2] pkg.fetch.hash wrap pkg.gc.collect-at 1 equal
    directory [1 2] pkg.fetch.hash pkg.cache.read-at [1 2] equal

@@ -166,7 +166,18 @@ const FailureSite = union(enum) {
         self.* = undefined;
     }
 };
-pub const UnitConstructor = enum { spawn, @"test" };
+pub const FiberConstructor = enum { spawn, @"test" };
+/// A fiber runs in one of two roles, and everything that differs between them
+/// follows from which. A root fiber runs a submission, the prelude, or host-driven loading and may
+/// define. A task fiber runs in its spawner's scope without being a root of
+/// its own, so it may not define; it records the word that constructed it.
+pub const FiberRole = union(enum) {
+    root,
+    task: struct {
+        /// The `@` word that constructed the task, for isolation diagnostics.
+        constructor: FiberConstructor,
+    },
+};
 
 const ErrorDataKey = enum {
     needed,
@@ -212,7 +223,7 @@ pub const FilesystemErrorData = struct {
         },
     },
 };
-/// Zig errors carry no payload. The unit owns this allocation-free payload
+/// Zig errors carry no payload. The fiber owns this allocation-free payload
 /// until an unwind materializes the language dict.
 pub const EclErr = struct {
     kind: ErrorKind,
@@ -1293,6 +1304,9 @@ const ModuleBoundary = struct {
 const BoundaryMode = union(enum) {
     attempt,
     module: ModuleBoundary,
+    /// `@load`: the loaded file's stack-isolated unit. Its failure is not
+    /// caught here; it propagates to the enclosing unit.
+    load,
 };
 const Boundary = struct {
     mode: BoundaryMode,
@@ -1306,7 +1320,7 @@ const Boundary = struct {
     fn deinit(self: Boundary) void {
         switch (self.mode) {
             .module => |boundary| boundary.deinit(),
-            .attempt => {},
+            .attempt, .load => {},
         }
     }
 };
@@ -1354,12 +1368,12 @@ const EffectCheck = struct {
             .source => self.provenance.source.candidate.replaceBorrowed(releases, code),
         }
     }
-    fn restoreActive(self: *const EffectCheck, unit: *Unit) void {
+    fn restoreActive(self: *const EffectCheck, fiber: *Fiber) void {
         switch (self.provenance) {
             .none, .invocation => {},
             .source => |source| {
-                std.debug.assert(unit.effect_check_index == source.frame_index);
-                unit.effect_check_index = source.previous;
+                std.debug.assert(fiber.effect_check_index == source.frame_index);
+                fiber.effect_check_index = source.previous;
             },
         }
     }
@@ -1406,7 +1420,7 @@ pub const ApplicationStep = union(enum) {
 };
 pub const ApplicationSuspension = opaque {};
 /// Opaque, non-dereferenced capability for one live application frame. The
-/// Unit encodes a process-unique nonce with the frame index and validates
+/// Fiber encodes a process-unique nonce with the frame index and validates
 /// both before use; ordinary callers can neither construct nor inspect it.
 pub const ApplicationProvenanceTarget = opaque {};
 
@@ -1456,15 +1470,15 @@ pub const ExecutionSite = struct {
     /// top level and is refused inside an `each`.
     defining: bool,
 
-    /// The base case: a unit's root activation, built from nothing.
-    pub fn root(unit: *Unit) ExecutionSite {
-        if (unit.root_execution_home) |home| return image(home, unit.module_access, unit.root_defining);
-        const scope = unit.lexicalScope();
+    /// The base case: a fiber's root activation, built from nothing.
+    pub fn root(fiber: *Fiber) ExecutionSite {
+        if (fiber.root_execution_home) |home| return image(home, fiber.module_access, fiber.role == .root);
+        const scope = fiber.lexicalScope();
         return .{
             .scope = scope,
             .home = null,
-            .defining = unit.root_defining,
-            .registration_provenance = if (unit.inherited.module_snapshot) |module_snapshot|
+            .defining = fiber.role == .root,
+            .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
                 .{ .root_scope = module_snapshot.localScope() }
             else
                 .ordinary,
@@ -1530,7 +1544,7 @@ pub const ApplicationSite = struct {
 pub const IsolatedApplication = struct {
     quotation: *Header,
     context: *anyopaque,
-    resume_fn: *const fn (*Unit, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
+    resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ApplicationSite,
     seeded: u32,
@@ -1545,7 +1559,7 @@ pub const IsolatedApplication = struct {
     }
 };
 
-/// What this unit's code has resolved each word to, all in one
+/// What this fiber's code has resolved each word to, all in one
 /// publication: every word resolves when it is reached, and reaching it again
 /// in the same publication reuses that resolution. Any publication in the Session
 /// invalidates every entry, so a redefinition reaches the next dispatch of
@@ -1557,7 +1571,7 @@ pub const IsolatedApplication = struct {
 /// expects one probe and every operation, including growth and invalidation,
 /// is bounded by that bound. Entries are placed by name alone: scope slots
 /// are numbered process-wide, so hashing them would make which entries
-/// collide, and so what a unit allocates, depend on unrelated Sessions.
+/// collide, and so what a fiber allocates, depend on unrelated Sessions.
 const WordResolutions = struct {
     const initial_capacity = 64;
     const max_capacity = 4096;
@@ -1663,7 +1677,7 @@ const WordResolutions = struct {
 fn ApplicationAdapters(comptime Driver: type) type {
     return struct {
         fn run(
-            evaluator: *Unit,
+            evaluator: *Fiber,
             raw: *anyopaque,
             window: StackWindow,
             site: *ApplicationContractSite,
@@ -1715,7 +1729,7 @@ const ApplicationMode = union(enum) {
 };
 const ApplicationFrame = struct {
     context: *anyopaque,
-    resume_fn: *const fn (*Unit, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
+    resume_fn: *const fn (*Fiber, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ApplicationSite,
     mode: ApplicationMode,
@@ -1836,7 +1850,7 @@ comptime {
     // A load-return frame owns the complete qualified-operation continuation
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
-    // on correlated Unit fields. Application frames likewise own the lexical scope
+    // on correlated Fiber fields. Application frames likewise own the lexical scope
     // provenance every sibling resumption must preserve.
     // File-owned execution provenance carries a Session-scoped source capability.
     if (@sizeOf(Frame) > 144) @compileError("machine frames must remain at most 144 bytes");
@@ -1863,9 +1877,9 @@ pub const IdiomFallback = struct {
     /// never frees storage.
     pub const storage_len = 96;
     storage: [storage_len]u8 align(@alignOf(usize)) = @splat(0),
-    run_fn: *const fn (*Unit, ?*anyopaque) MachineError!void,
+    run_fn: *const fn (*Fiber, ?*anyopaque) MachineError!void,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, ?*anyopaque) void,
-    pub fn run(self: *IdiomFallback, evaluator: *Unit) MachineError!void {
+    pub fn run(self: *IdiomFallback, evaluator: *Fiber) MachineError!void {
         return self.run_fn(evaluator, &self.storage);
     }
     pub fn deinit(self: *IdiomFallback, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
@@ -1873,7 +1887,7 @@ pub const IdiomFallback = struct {
     }
 };
 
-/// Configuration and semantic services inherited by every spawned Unit.
+/// Configuration and semantic services inherited by every spawned Fiber.
 /// Keeping this as one value makes addition of a new inherited service an
 /// atomic parent-to-child copy instead of a scheduler-site field checklist.
 pub const InheritedContext = struct {
@@ -1909,7 +1923,7 @@ pub const InheritedContext = struct {
 };
 
 /// Complete runtime services, borrowed from the Session that encloses every
-/// Unit and descendant. Bootstrap evaluation has no runtime services.
+/// Fiber and descendant. Bootstrap evaluation has no runtime services.
 pub const RuntimeContext = struct {
     native_loader: *native_module.Loader,
     console: *console_api.Console,
@@ -1930,8 +1944,8 @@ pub const WallClock = union(enum) {
     anchored: i64,
 };
 
-/// Immutable HTTPS verification inputs inherited by every Unit. The CA path
-/// borrows Session-owned storage, whose lifetime encloses all Units.
+/// Immutable HTTPS verification inputs inherited by every Fiber. The CA path
+/// borrows Session-owned storage, whose lifetime encloses all Fibers.
 pub const TlsTrust = struct {
     ca_file: []const u8,
     now: std.Io.Timestamp,
@@ -1950,7 +1964,7 @@ pub const StandardInput = struct {
 
 fn IdiomFallbackAdapters(comptime Payload: type) type {
     return struct {
-        fn run(evaluator: *Unit, raw: ?*anyopaque) MachineError!void {
+        fn run(evaluator: *Fiber, raw: ?*anyopaque) MachineError!void {
             const payload: *Payload = @ptrCast(@alignCast(raw.?));
             return Payload.run(evaluator, payload);
         }
@@ -1993,9 +2007,9 @@ pub fn typedIdiomFallback(payload: anytype) IdiomFallback {
 /// source, so the recognizer makes the fallback before it returns or not at all.
 pub const FallbackSource = struct {
     context: ?*const anyopaque = null,
-    make_fn: *const fn (?*const anyopaque, *Unit) IdiomFallback,
+    make_fn: *const fn (?*const anyopaque, *Fiber) IdiomFallback,
 
-    pub fn make(self: FallbackSource, evaluator: *Unit) IdiomFallback {
+    pub fn make(self: FallbackSource, evaluator: *Fiber) IdiomFallback {
         return self.make_fn(self.context, evaluator);
     }
 };
@@ -2108,7 +2122,7 @@ pub const MailboxResume = enum { ready, cancelled, io, out_of_memory };
 
 /// One family per park request, so a sleep cannot deliver a task outcome, a
 /// task wait cannot report that it slept, and each family's failure wording
-/// describes what the unit was actually doing.
+/// describes what the fiber was actually doing.
 pub const ParkResume = union(enum) {
     task_wait: TaskWaitResume,
     sleep: SleepResume,
@@ -2134,7 +2148,7 @@ pub const ParkResume = union(enum) {
         };
     }
 
-    /// The failure a request receives when its unit was cancelled before the
+    /// The failure a request receives when its fiber was cancelled before the
     /// wait registered.
     pub fn cancelledFor(request: ParkRequest) ParkResume {
         return switch (request) {
@@ -2173,19 +2187,19 @@ pub const CleanupProgress = struct { complete: bool, consumed: usize };
 /// The expected length makes stale copies fail before they can transfer a
 /// value twice.
 pub const StackReservation = struct {
-    unit: *Unit,
+    fiber: *Fiber,
     next_len: usize,
     remaining: usize,
 
-    fn init(unit: *Unit, count: usize) StackReservation {
-        std.debug.assert(unit.stack.capacity - unit.stack.items.len >= count);
-        return .{ .unit = unit, .next_len = unit.stack.items.len, .remaining = count };
+    fn init(fiber: *Fiber, count: usize) StackReservation {
+        std.debug.assert(fiber.stack.capacity - fiber.stack.items.len >= count);
+        return .{ .fiber = fiber, .next_len = fiber.stack.items.len, .remaining = count };
     }
 
     pub fn pushOwned(self: *StackReservation, item: Value) void {
         std.debug.assert(self.remaining != 0);
-        std.debug.assert(self.unit.stack.items.len == self.next_len);
-        self.unit.stack.appendAssumeCapacity(item);
+        std.debug.assert(self.fiber.stack.items.len == self.next_len);
+        self.fiber.stack.appendAssumeCapacity(item);
         self.next_len += 1;
         self.remaining -= 1;
     }
@@ -2211,17 +2225,17 @@ pub const StackReservation = struct {
 /// secured before this capability is returned; `commitOwned` is the only
 /// splice that releases the inputs and transfers the completed outputs.
 pub const StackReplacement = struct {
-    unit: *Unit,
+    fiber: *Fiber,
     base: usize,
     input_count: usize,
     output_count: usize,
 
     pub fn commitOwned(self: *StackReplacement, outputs: []const Value) void {
         std.debug.assert(outputs.len == self.output_count);
-        std.debug.assert(self.unit.stack.items.len == self.base + self.input_count);
-        for (self.unit.stack.items[self.base..]) |item| self.unit.releases.releaseValue(item);
-        self.unit.stack.items.len = self.base;
-        for (outputs) |item| self.unit.stack.appendAssumeCapacity(item);
+        std.debug.assert(self.fiber.stack.items.len == self.base + self.input_count);
+        for (self.fiber.stack.items[self.base..]) |item| self.fiber.releases.releaseValue(item);
+        self.fiber.stack.items.len = self.base;
+        for (outputs) |item| self.fiber.stack.appendAssumeCapacity(item);
     }
 };
 
@@ -2229,12 +2243,12 @@ pub const StackReplacement = struct {
 /// scheduler between bounded slices.
 pub const WorkDriver = struct {
     context: *anyopaque,
-    resume_fn: *const fn (*Unit, *anyopaque) MachineError!WorkProgress,
+    resume_fn: *const fn (*Fiber, *anyopaque) MachineError!WorkProgress,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ?ErrorSite,
     trace_parent: ?intern.TraceWord = null,
 
-    pub fn advance(self: WorkDriver, evaluator: *Unit) MachineError!WorkProgress {
+    pub fn advance(self: WorkDriver, evaluator: *Fiber) MachineError!WorkProgress {
         return self.resume_fn(evaluator, self.context);
     }
 
@@ -2243,7 +2257,7 @@ pub const WorkDriver = struct {
     }
 };
 
-/// The scheduler-visible native continuation owned by a unit. A work driver
+/// The scheduler-visible native continuation owned by a fiber. A work driver
 /// carries its wait request or delivered result in the same variant, so the
 /// evaluator cannot represent an unrelated driver and park at once.
 pub const NativeContinuation = union(enum) {
@@ -2257,7 +2271,7 @@ pub const NativeContinuation = union(enum) {
 
 fn WorkDriverAdapters(comptime Driver: type) type {
     return struct {
-        pub fn advance(evaluator: *Unit, raw: *anyopaque) MachineError!WorkProgress {
+        pub fn advance(evaluator: *Fiber, raw: *anyopaque) MachineError!WorkProgress {
             const driver: *Driver = @ptrCast(@alignCast(raw));
             return Driver.advance(evaluator, driver);
         }
@@ -2271,11 +2285,11 @@ fn WorkDriverAdapters(comptime Driver: type) type {
             heap.destroyDriver(releases, allocator, driver);
         }
 
-        /// Teardown for a driver living in the unit's inline slot: the same
+        /// Teardown for a driver living in the fiber's inline slot: the same
         /// field ownership, without the destroy that storage never had.
-        /// Releasing the slot belongs to the caller, which knows the unit:
-        /// `clearWorkDriver` frees it, and unit teardown does not bother
-        /// because it invalidates the unit immediately afterward.
+        /// Releasing the slot belongs to the caller, which knows the fiber:
+        /// `clearWorkDriver` frees it, and fiber teardown does not bother
+        /// because it invalidates the fiber immediately afterward.
         fn deinitInline(
             releases: *heap.ReleaseDomain,
             allocator: std.mem.Allocator,
@@ -2288,14 +2302,14 @@ fn WorkDriverAdapters(comptime Driver: type) type {
 }
 
 /// Opt-in inline driver storage. A driver declares `inline_driver` to be
-/// constructed in the unit's slot instead of the allocator; the declaration is
+/// constructed in the fiber's slot instead of the allocator; the declaration is
 /// checked here rather than assumed, so a driver that outgrows the slot or
 /// stops owning its fields fails the build instead of silently reverting to an
 /// allocation.
 ///
 /// What the compiler cannot check is the one rule that decides whether the
 /// annotation helps: **declare it on short-lived drivers, never on long-lived
-/// ones.** There is a single slot per unit and its holder keeps it until the
+/// ones.** There is a single slot per fiber and its holder keeps it until the
 /// driver is retired, so a driver that spans an iteration would hold the slot
 /// for the iteration's whole length and push every driver started inside it
 /// back to the allocator. That is worse than not declaring it at all, and it
@@ -2307,10 +2321,10 @@ fn inlineDriverCapable(comptime Driver: type) bool {
     if (!@hasDecl(Driver, "inline_driver")) return false;
     if (heap.validateDriverOwnership(Driver) != .fields)
         @compileError(@typeName(Driver) ++ " inline driver storage requires field ownership");
-    if (@sizeOf(Driver) > Unit.driver_slot_len)
-        @compileError(std.fmt.comptimePrint("{s} ({d} bytes) exceeds the unit inline driver slot ({d} bytes)", .{ @typeName(Driver), @sizeOf(Driver), Unit.driver_slot_len }));
-    if (@alignOf(Driver) > Unit.driver_slot_align)
-        @compileError(@typeName(Driver) ++ " exceeds the unit inline driver alignment");
+    if (@sizeOf(Driver) > Fiber.driver_slot_len)
+        @compileError(std.fmt.comptimePrint("{s} ({d} bytes) exceeds the fiber inline driver slot ({d} bytes)", .{ @typeName(Driver), @sizeOf(Driver), Fiber.driver_slot_len }));
+    if (@alignOf(Driver) > Fiber.driver_slot_align)
+        @compileError(@typeName(Driver) ++ " exceeds the fiber inline driver alignment");
     return true;
 }
 
@@ -2318,7 +2332,7 @@ comptime {
     if (@sizeOf(WorkDriver) > 80) @compileError("WorkDriver exceeds its fixed frame budget");
 }
 
-/// Opt-in root-Unit counters for release-mode runtime characterization.
+/// Opt-in root-Fiber counters for release-mode runtime characterization.
 /// Ordinary runtime and test modules compile every recording branch away; a
 /// separate benchmark module enables them so counters cannot perturb timing.
 pub const RootExecutionMetrics = struct {
@@ -2343,7 +2357,7 @@ pub const root_execution_metrics_enabled = session_options.instrument_root_execu
 /// path, take the value, retire, then act — is stated once here rather than
 /// copied per primitive.
 pub fn PathActionDriver(
-    comptime action: fn (*Unit, []u8, Value) MachineError!void,
+    comptime action: fn (*Fiber, []u8, Value) MachineError!void,
 ) type {
     return struct {
         const Self = @This();
@@ -2352,7 +2366,7 @@ pub fn PathActionDriver(
         encoder: heap.Owned(kernel_storage.StringEncoder),
         path: ?heap.Owned([]u8) = null,
 
-        pub fn advance(evaluator: *Unit, self: *Self) MachineError!WorkProgress {
+        pub fn advance(evaluator: *Fiber, self: *Self) MachineError!WorkProgress {
             try evaluator.pollKernel();
             if (self.path == null) switch (self.encoder.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -2371,7 +2385,7 @@ pub fn PathActionDriver(
     };
 }
 
-pub const Unit = struct {
+pub const Fiber = struct {
     const TerminalState = union(enum) {
         evaluating,
         pending: EclErr,
@@ -2401,7 +2415,7 @@ pub const Unit = struct {
             complete,
         };
         // Activations point at this address, so it must never move while the
-        // unit is alive. Teardown state moves around it instead.
+        // fiber is alive. Teardown state moves around it instead.
         root_scope: env.Scope,
         state: State,
 
@@ -2511,13 +2525,13 @@ pub const Unit = struct {
     arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
-    /// The unit's one allowance for logical kernel work in a turn. Cursors
-    /// doing this unit's work draw on it through `Unit.workBudget`, and
+    /// The fiber's one allowance for logical kernel work in a turn. Cursors
+    /// doing this fiber's work draw on it through `Fiber.workBudget`, and
     /// exhausting it ends the turn: only the start of the next turn refills it.
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    /// What this unit's code resolved its words to.
+    /// What this fiber's code resolved its words to.
     resolutions: WordResolutions = .{},
     max_frames: usize = 0,
     entry_base: usize,
@@ -2532,15 +2546,10 @@ pub const Unit = struct {
     phrase_hits: u64 = 0,
     scheduler: ?*const scheduler_api.WorkerScheduler = null,
     task_scope: ?*scheduler_api.TaskScope = null,
-    is_root_unit: bool = true,
-    /// For a child unit, the `@` word that constructed it.
-    constructor: UnitConstructor = .spawn,
+    role: FiberRole = .root,
     execution_scope: ?*env.Scope = null,
-    /// Whether this unit's root activation may define. False for a task,
-    /// which runs in its spawner's scope without being a root of its own.
-    root_defining: bool = true,
     /// Protected invocation may start this child at one selected registered
-    /// module generation. The Unit lifetime pins the home before installation.
+    /// module generation. The Fiber lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
     native: NativeContinuation = .idle,
     current: ?Eval = null,
@@ -2552,7 +2561,7 @@ pub const Unit = struct {
     /// every path; zeroed rather than left `undefined` so no default here can
     /// become a read of uninitialized bytes.
     word_scratch: [intern.trace_word_bytes]u8 = @splat(0),
-    /// Storage for the one work driver a unit runs at a time. `installDriver`
+    /// Storage for the one work driver a fiber runs at a time. `installDriver`
     /// accepts a driver only from `idle` or `yielded`, so a second live driver
     /// is not representable; a driver that has detached but not yet destroyed
     /// itself can still be holding the slot when the next one starts, and that
@@ -2577,7 +2586,7 @@ pub const Unit = struct {
         inherited: InheritedContext,
         arguments: Value,
         cancelled: *const std.atomic.Value(bool),
-    ) Unit {
+    ) Fiber {
         return .{
             .allocator = allocator,
             .releases = releases,
@@ -2599,22 +2608,22 @@ pub const Unit = struct {
         };
     }
 
-    /// Transfers the top operand out of the unit without interpreting stack
+    /// Transfers the top operand out of the fiber without interpreting stack
     /// boundaries. Scheduler teardown uses this after evaluation has stopped.
-    pub fn takeStackOwned(self: *Unit) ?Value {
+    pub fn takeStackOwned(self: *Fiber) ?Value {
         return self.stack.pop();
     }
 
-    pub fn replaceRootScope(self: *Unit, root: env.Scope) void {
+    pub fn replaceRootScope(self: *Fiber, root: env.Scope) void {
         self.lifetime.replaceRoot(root);
     }
 
-    pub fn executeRootAtModule(self: *Unit, home: *modules.ModuleHome) void {
+    pub fn executeRootAtModule(self: *Fiber, home: *modules.ModuleHome) void {
         self.root_execution_home = home;
         self.execution_scope = home.scope(self.module_access);
     }
 
-    fn rootScope(self: *Unit) *env.Scope {
+    fn rootScope(self: *Fiber) *env.Scope {
         return self.lifetime.rootScope();
     }
 
@@ -2622,13 +2631,13 @@ pub const Unit = struct {
     /// definition — resolves against. It is the session root over core, so
     /// session-level redefinition still reaches prelude bodies while a module
     /// body executing further down the stack does not.
-    pub fn lexicalScope(self: *Unit) *env.Scope {
+    pub fn lexicalScope(self: *Fiber) *env.Scope {
         return self.execution_scope orelse self.rootScope();
     }
 
-    /// Replaces a stopped root unit's operands from a stable borrowed
+    /// Replaces a stopped root fiber's operands from a stable borrowed
     /// checkpoint. Capacity was reserved by the checkpoint source.
-    pub fn restoreStackBorrowedAssumeCapacity(self: *Unit, checkpoint: []const Value) void {
+    pub fn restoreStackBorrowedAssumeCapacity(self: *Fiber, checkpoint: []const Value) void {
         for (self.stack.items) |item| self.releases.releaseValue(item);
         self.stack.clearRetainingCapacity();
         std.debug.assert(self.stack.capacity >= checkpoint.len);
@@ -2636,12 +2645,12 @@ pub const Unit = struct {
         for (checkpoint) |item| reservation.pushBorrowed(item);
         std.debug.assert(reservation.complete());
     }
-    pub fn takeStack(self: *Unit) std.ArrayList(Value) {
+    pub fn takeStack(self: *Fiber) std.ArrayList(Value) {
         const result = self.stack;
         self.stack = .empty;
         return result;
     }
-    pub fn takeError(self: *Unit) ?Value {
+    pub fn takeError(self: *Fiber) ?Value {
         return switch (self.terminal) {
             .failed => |item| result: {
                 self.terminal = .evaluating;
@@ -2650,7 +2659,7 @@ pub const Unit = struct {
             else => null,
         };
     }
-    pub fn takeSourceIncomplete(self: *Unit) ?reader.Incomplete {
+    pub fn takeSourceIncomplete(self: *Fiber) ?reader.Incomplete {
         return switch (self.terminal) {
             .incomplete => |value_incomplete| result: {
                 self.terminal = .evaluating;
@@ -2659,32 +2668,32 @@ pub const Unit = struct {
             else => null,
         };
     }
-    pub fn exitStatus(self: *const Unit) ?u8 {
+    pub fn exitStatus(self: *const Fiber) ?u8 {
         return switch (self.terminal) {
             .exit => |status| status,
             else => null,
         };
     }
-    pub fn hasRequestedExit(self: *const Unit) bool {
+    pub fn hasRequestedExit(self: *const Fiber) bool {
         return self.terminal == .exit;
     }
-    fn pendingFailureOptional(self: *Unit) ?*EclErr {
+    fn pendingFailureOptional(self: *Fiber) ?*EclErr {
         return switch (self.terminal) {
             .pending => |*failure| failure,
             else => null,
         };
     }
-    fn pendingFailure(self: *Unit) *EclErr {
+    fn pendingFailure(self: *Fiber) *EclErr {
         return self.pendingFailureOptional() orelse unreachable;
     }
-    fn hasPendingFailure(self: *const Unit) bool {
+    fn hasPendingFailure(self: *const Fiber) bool {
         return self.terminal == .pending;
     }
-    fn installPendingFailure(self: *Unit, failure: EclErr) void {
+    fn installPendingFailure(self: *Fiber, failure: EclErr) void {
         std.debug.assert(self.terminal == .evaluating);
         self.terminal = .{ .pending = failure };
     }
-    fn takePendingForUnwind(self: *Unit) EclErr {
+    fn takePendingForUnwind(self: *Fiber) EclErr {
         return switch (self.terminal) {
             .pending => |failure| result: {
                 self.terminal = .unwinding;
@@ -2693,33 +2702,33 @@ pub const Unit = struct {
             else => unreachable,
         };
     }
-    fn finishUnwindCaught(self: *Unit) void {
+    fn finishUnwindCaught(self: *Fiber) void {
         std.debug.assert(self.terminal == .unwinding);
         self.terminal = .evaluating;
     }
-    fn finishUnwindFailed(self: *Unit, error_value: Value) void {
+    fn finishUnwindFailed(self: *Fiber, error_value: Value) void {
         std.debug.assert(self.terminal == .unwinding);
         self.terminal = .{ .failed = error_value };
     }
-    fn finishIncomplete(self: *Unit, value_incomplete: reader.Incomplete) void {
+    fn finishIncomplete(self: *Fiber, value_incomplete: reader.Incomplete) void {
         std.debug.assert(self.terminal == .evaluating);
         self.terminal = .{ .incomplete = value_incomplete };
     }
-    fn requestExit(self: *Unit, status: u8) void {
+    fn requestExit(self: *Fiber, status: u8) void {
         std.debug.assert(self.terminal == .evaluating);
         self.terminal = .{ .exit = status };
     }
-    pub fn hasParkRequest(self: *const Unit) bool {
+    pub fn hasParkRequest(self: *const Fiber) bool {
         return self.native == .park_request or self.native == .work_park_request;
     }
-    pub fn parkRequest(self: *const Unit) ?ParkRequest {
+    pub fn parkRequest(self: *const Fiber) ?ParkRequest {
         return switch (self.native) {
             .park_request => |request| request,
             .work_park_request => |state| state.request,
             else => null,
         };
     }
-    pub fn takeParkRequest(self: *Unit) ?ParkRequest {
+    pub fn takeParkRequest(self: *Fiber) ?ParkRequest {
         return switch (self.native) {
             .park_request => |request| result: {
                 self.native = .idle;
@@ -2732,21 +2741,21 @@ pub const Unit = struct {
             else => null,
         };
     }
-    fn installParkRequest(self: *Unit, request: ParkRequest) void {
+    fn installParkRequest(self: *Fiber, request: ParkRequest) void {
         self.native = switch (self.native) {
             .idle => .{ .park_request = request },
             .work => |driver| .{ .work_park_request = .{ .driver = driver, .request = request } },
             else => unreachable,
         };
     }
-    pub fn installParkResume(self: *Unit, result: ParkResume) void {
+    pub fn installParkResume(self: *Fiber, result: ParkResume) void {
         self.native = switch (self.native) {
             .idle => .{ .park_resume = result },
             .work => |driver| .{ .work_park_resume = .{ .driver = driver, .result = result } },
             else => unreachable,
         };
     }
-    fn takeParkResume(self: *Unit) ?ParkResume {
+    fn takeParkResume(self: *Fiber) ?ParkResume {
         return switch (self.native) {
             .park_resume => |result| delivery: {
                 self.native = .idle;
@@ -2759,7 +2768,7 @@ pub const Unit = struct {
             else => null,
         };
     }
-    pub fn workDriver(self: *Unit) ?*WorkDriver {
+    pub fn workDriver(self: *Fiber) ?*WorkDriver {
         return switch (self.native) {
             .work => |*driver| driver,
             .work_park_request => |*state| &state.driver,
@@ -2767,7 +2776,7 @@ pub const Unit = struct {
             else => null,
         };
     }
-    pub fn takeWorkDriver(self: *Unit) ?WorkDriver {
+    pub fn takeWorkDriver(self: *Fiber) ?WorkDriver {
         return switch (self.native) {
             .work => |driver| result: {
                 self.native = .idle;
@@ -2787,26 +2796,26 @@ pub const Unit = struct {
         };
     }
     /// The kind of the innermost saved frame, or null with none saved.
-    fn topFrameTag(self: *const Unit) ?std.meta.Tag(Frame) {
+    fn topFrameTag(self: *const Fiber) ?std.meta.Tag(Frame) {
         const frames = self.frames.items;
         return if (frames.len == 0) null else std.meta.activeTag(frames[frames.len - 1]);
     }
     /// Removes the innermost saved frame, which is a `tag`, and returns its
     /// payload. Popping the whole frame copied the union's largest variant.
-    fn popFrame(self: *Unit, comptime tag: std.meta.Tag(Frame)) @FieldType(Frame, @tagName(tag)) {
+    fn popFrame(self: *Fiber, comptime tag: std.meta.Tag(Frame)) @FieldType(Frame, @tagName(tag)) {
         const payload = @field(self.frames.items[self.frames.items.len - 1], @tagName(tag));
         self.frames.items.len -= 1;
         return payload;
     }
-    pub fn hasWorkDriver(self: *const Unit) bool {
+    pub fn hasWorkDriver(self: *const Fiber) bool {
         return self.native == .work or self.native == .work_park_request or
             self.native == .work_park_resume;
     }
-    /// Scheduler-owned teardown of all user-sized evaluator cargo. Each unit
+    /// Scheduler-owned teardown of all user-sized evaluator cargo. Each fiber
     /// of budget retires at most one continuation, operand, native owner, or
     /// generation pin. Array storage is released by `deinit` after this cursor
     /// reports complete.
-    pub fn advanceSchedulerTeardown(self: *Unit, budget: usize) CleanupProgress {
+    pub fn advanceSchedulerTeardown(self: *Fiber, budget: usize) CleanupProgress {
         std.debug.assert(budget != 0);
         var consumed: usize = 0;
         while (consumed != budget) {
@@ -2865,7 +2874,7 @@ pub const Unit = struct {
         }
         return .{ .complete = false, .consumed = consumed };
     }
-    pub fn inAttempt(self: *const Unit) bool {
+    pub fn inAttempt(self: *const Fiber) bool {
         var index = self.boundary_index;
         while (index) |frame_index| {
             const boundary = self.frames.items[@backingInt(frame_index)].boundary;
@@ -2874,14 +2883,14 @@ pub const Unit = struct {
         }
         return false;
     }
-    /// Whether a module construction is open anywhere in this unit's frame
+    /// Whether a module construction is open anywhere in this fiber's frame
     /// stack. Unlike the direct-root test `testDeclarationCursor` applies, any
     /// depth counts: a helper word the body calls and an `@attempt` nested in
     /// the body are still construction, so a body cannot launder a task launch
     /// through code it defines first.
     /// The names `words` lists from where this activation runs: a session
     /// root's top-level directory, or a published image's.
-    pub fn visibleNameRoot(self: *Unit) reflection.VisibleNameRoot {
+    pub fn visibleNameRoot(self: *Fiber) reflection.VisibleNameRoot {
         const scope = self.currentScope();
         if (scope.isModuleRoot()) if (modules.homeForModuleRootScope(scope)) |home| {
             if (home.isPublished()) return .{ .image = .{
@@ -2896,7 +2905,7 @@ pub const Unit = struct {
 
     /// The image under construction whose root is `scope`, found through the
     /// open module boundaries: the one place its staged names are written.
-    pub fn stagingImage(self: *Unit, scope: *env.Scope) ?*modules.OwnedImage {
+    pub fn stagingImage(self: *Fiber, scope: *env.Scope) ?*modules.OwnedImage {
         var index = self.boundary_index;
         while (index) |frame_index| {
             const boundary = &self.frames.items[@backingInt(frame_index)].boundary;
@@ -2905,13 +2914,13 @@ pub const Unit = struct {
                     if (module.image.executionHome(self.module_access).scope(self.module_access) == scope)
                         return &module.image;
                 },
-                .attempt => {},
+                .attempt, .load => {},
             }
             index = boundary.previous_boundary;
         }
         return null;
     }
-    pub fn inModuleConstruction(self: *const Unit) bool {
+    pub fn inModuleConstruction(self: *const Fiber) bool {
         var index = self.boundary_index;
         while (index) |frame_index| {
             const boundary = self.frames.items[@backingInt(frame_index)].boundary;
@@ -2920,33 +2929,33 @@ pub const Unit = struct {
         }
         return false;
     }
-    pub fn pinGeneration(self: *Unit, generation: *modules.ModuleHome) error{OutOfMemory}!void {
+    pub fn pinGeneration(self: *Fiber, generation: *modules.ModuleHome) error{OutOfMemory}!void {
         try self.lifetime.pin(self.allocator, generation, self.module_access);
     }
 
     /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
-    /// Includes native registration authority and a reference to the Unit's
+    /// Includes native registration authority and a reference to the Fiber's
     /// bounded lexical observations for lookup and idiom recognition. Preserve the
     /// complete ownership state without allocating on ordinary resolution.
     pub const driver_slot_len = 736;
     pub const driver_slot_align = 16;
 
-    fn acquireInlineDriver(self: *Unit, comptime Driver: type) ?*Driver {
+    fn acquireInlineDriver(self: *Fiber, comptime Driver: type) ?*Driver {
         if (self.driver_slot_busy) return null;
         self.driver_slot_busy = true;
         return @ptrCast(@alignCast(&self.driver_slot));
     }
 
-    fn ownsInlineDriver(self: *const Unit, driver: *const anyopaque) bool {
+    fn ownsInlineDriver(self: *const Fiber, driver: *const anyopaque) bool {
         return @intFromPtr(driver) == @intFromPtr(&self.driver_slot);
     }
 
-    fn releaseInlineDriver(self: *Unit) void {
+    fn releaseInlineDriver(self: *Fiber) void {
         std.debug.assert(self.driver_slot_busy);
         self.driver_slot_busy = false;
     }
 
-    pub fn deinit(self: *Unit) void {
+    pub fn deinit(self: *Fiber) void {
         self.resolutions.deinit(self.allocator, self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
@@ -2974,13 +2983,13 @@ pub const Unit = struct {
         self.* = undefined;
     }
 
-    fn deinitPoppedFrame(self: *Unit, popped: Frame) void {
+    fn deinitPoppedFrame(self: *Fiber, popped: Frame) void {
         var frame = popped;
         if (frame == .effect_check) frame.effect_check.restoreActive(self);
         frame.deinit(self.releases, self.allocator);
     }
 
-    pub fn beginNativeTiming(self: *const Unit) ?i128 {
+    pub fn beginNativeTiming(self: *const Fiber) ?i128 {
         if (!self.inherited.native_diagnostics) return null;
         const io = self.inherited.runtime().host_io;
         return std.Io.Clock.awake.now(io).nanoseconds;
@@ -2996,7 +3005,7 @@ pub const Unit = struct {
     /// long slice after it returns; it provides no sandboxing or instruction
     /// reduction, and the default path does not sample the clock at all.
     pub fn finishNativeTiming(
-        self: *Unit,
+        self: *Fiber,
         instance: *native_module.ModuleInstance,
         started: ?i128,
     ) void {
@@ -3015,13 +3024,13 @@ pub const Unit = struct {
             settleAdvisoryDiagnostic(console.writeDiagnostics(line, false));
         }
     }
-    pub fn currentScope(self: *const Unit) *env.Scope {
+    pub fn currentScope(self: *const Fiber) *env.Scope {
         return self.current.?.scope();
     }
     /// Links words written into `scope`, a root, to that root. An image's
     /// cell carries its owner anchor, so a word that escapes the image proves
     /// the image live before reading its directory.
-    pub fn rootLinker(self: *Unit, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
+    pub fn rootLinker(self: *Fiber, scope: *env.Scope) error{OutOfMemory}!env.SymbolLinker {
         return switch (scope.storage) {
             .session => self.environment.linker(self.environment.sessionScopeId()),
             .core_build => self.environment.linker(self.environment.coreScopeId()),
@@ -3033,19 +3042,19 @@ pub const Unit = struct {
     }
     /// The word `name` linked to its slot in the running activation's root, as
     /// a word built at run time on that activation's behalf is.
-    pub fn linkedWord(self: *Unit, name: u32) error{OutOfMemory}!value.Symbol {
+    pub fn linkedWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
         const linker = try self.rootLinker(self.currentScope());
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The word `name` linked to its core slot, as a word the implementation
     /// builds for itself is: it means core's binding wherever it runs.
-    pub fn coreWord(self: *Unit, name: u32) error{OutOfMemory}!value.Symbol {
+    pub fn coreWord(self: *Fiber, name: u32) error{OutOfMemory}!value.Symbol {
         const linker = self.environment.linker(self.environment.coreScopeId());
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
     /// combinator application, an `@attempt`, or a task, which are not roots.
-    pub fn definitionScope(self: *Unit) MachineError!*env.Scope {
+    pub fn definitionScope(self: *Fiber) MachineError!*env.Scope {
         const scope = self.currentScope();
         if (!self.current.?.site.defining) return self.fail(
             .domain,
@@ -3057,22 +3066,22 @@ pub const Unit = struct {
     /// archive owns the returned bytes for at least as long as the current
     /// code header, which the activation retains across any driver this call
     /// starts. Runtime-built code has no entry and returns null.
-    pub fn activeSourceName(self: *const Unit) ?[]const u8 {
+    pub fn activeSourceName(self: *const Fiber) ?[]const u8 {
         const current = self.current orelse return null;
         const located = self.archive.locate(current.code, self.active_index) orelse
             return null;
         return located.source_name;
     }
-    pub fn currentHome(self: *const Unit) ?*modules.ModuleHome {
+    pub fn currentHome(self: *const Fiber) ?*modules.ModuleHome {
         return self.current.?.home();
     }
     /// Begin publishing one first-class test into the candidate owned by the
     /// immediately enclosing module-construction boundary. Requiring that
     /// boundary to be the top frame distinguishes the construction body's
-    /// direct root from quotations or child units that merely inherit its
+    /// direct root from quotations or child fibers that merely inherit its
     /// scope and private home.
     pub fn testDeclarationCursor(
-        self: *Unit,
+        self: *Fiber,
         name: intern.BindingName,
         body: *env.Quotation,
         effect: ?env.ValidatedEffect,
@@ -3095,7 +3104,7 @@ pub const Unit = struct {
             return .discard();
         return candidate.testDeclarationCursor(name, body, effect, doc);
     }
-    pub fn applicationSite(self: *const Unit) ApplicationSite {
+    pub fn applicationSite(self: *const Fiber) ApplicationSite {
         const current = self.current.?;
         return .{
             .parent_scope = current.scope(),
@@ -3106,7 +3115,7 @@ pub const Unit = struct {
             .defining = current.site.defining,
         };
     }
-    fn installDriver(self: *Unit, context: anytype) void {
+    fn installDriver(self: *Fiber, context: anytype) void {
         const Context = @TypeOf(context);
         const pointer = switch (@typeInfo(Context)) {
             .pointer => |info| info,
@@ -3133,7 +3142,7 @@ pub const Unit = struct {
     /// Consumes a fully initialized, heap-allocated continuation whose type
     /// explicitly requires address-stable construction. Ordinary drivers use
     /// `startDriver`, which owns allocation failure as well as installation.
-    pub fn adoptDriver(self: *Unit, context: anytype) void {
+    pub fn adoptDriver(self: *Fiber, context: anytype) void {
         const Driver = @typeInfo(@TypeOf(context)).pointer.child;
         if (!@hasDecl(Driver, "address_stable_driver"))
             @compileError("adoptDriver requires an address-stable driver declaration");
@@ -3144,7 +3153,7 @@ pub const Unit = struct {
     /// values accepted here opt into field-derived ownership, so allocation
     /// failure retires the still-uninstalled value without a bespoke cleanup
     /// path.
-    pub fn startDriver(self: *Unit, initial: anytype) error{OutOfMemory}!void {
+    pub fn startDriver(self: *Fiber, initial: anytype) error{OutOfMemory}!void {
         const Driver = @TypeOf(initial);
         switch (comptime heap.validateDriverOwnership(Driver)) {
             .fields, .bounded_retirement => {},
@@ -3173,14 +3182,14 @@ pub const Unit = struct {
     /// the turn costs no installation and no loop round trip. A driver started
     /// here completes or steps; it never detaches or parks, since it has not
     /// been installed.
-    pub fn runDriver(self: *Unit, initial: anytype) MachineError!void {
+    pub fn runDriver(self: *Fiber, initial: anytype) MachineError!void {
         var pending = initial;
         return self.runDriverAt(&pending);
     }
 
     /// `runDriver` over a driver its caller built in place, which consumes
     /// the driver's fields exactly as `runDriver` does without copying it.
-    pub fn runDriverAt(self: *Unit, pending: anytype) MachineError!void {
+    pub fn runDriverAt(self: *Fiber, pending: anytype) MachineError!void {
         const Driver = @typeInfo(@TypeOf(pending)).pointer.child;
         if (!turn_core.mayDispatch(self.kernel_budget)) return self.startDriver(pending.*);
         const progress = Driver.advance(self, pending) catch |err| {
@@ -3198,11 +3207,11 @@ pub const Unit = struct {
         }
     }
 
-    /// Destroy a driver that may be living in the unit's inline slot. A driver
+    /// Destroy a driver that may be living in the fiber's inline slot. A driver
     /// that opts into inline storage must retire itself through this rather
     /// than `heap.destroyDriver`, which would hand slot memory to the
     /// allocator.
-    pub fn finishDriver(self: *Unit, driver: anytype) void {
+    pub fn finishDriver(self: *Fiber, driver: anytype) void {
         const Driver = @typeInfo(@TypeOf(driver)).pointer.child;
         if (comptime inlineDriverCapable(Driver)) {
             if (self.ownsInlineDriver(driver)) {
@@ -3213,10 +3222,10 @@ pub const Unit = struct {
         }
         heap.destroyDriver(self.releases, self.allocator, driver);
     }
-    /// Moves the top `count` operands into the unit's locals, the
+    /// Moves the top `count` operands into the fiber's locals, the
     /// first declared local ending on top. The operand stack is machine-owned,
     /// so the move lives here and the primitive keeps only its validation.
-    pub fn bindLocals(self: *Unit, count: usize) error{OutOfMemory}!void {
+    pub fn bindLocals(self: *Fiber, count: usize) error{OutOfMemory}!void {
         try self.locals.ensureUnusedCapacity(self.allocator, count);
         const base = self.stack.items.len - count;
         var remaining = count;
@@ -3227,12 +3236,12 @@ pub const Unit = struct {
         self.stack.shrinkRetainingCapacity(base);
     }
 
-    pub fn readLocal(self: *Unit, index: usize) error{OutOfMemory}!void {
+    pub fn readLocal(self: *Fiber, index: usize) error{OutOfMemory}!void {
         const depth = self.locals.items.len;
         try self.pushBorrowed(self.locals.items[depth - 1 - index]);
     }
 
-    pub fn unbindLocals(self: *Unit, count: usize) void {
+    pub fn unbindLocals(self: *Fiber, count: usize) void {
         for (0..count) |_| {
             const item = self.locals.pop().?;
             self.releases.releaseValue(item);
@@ -3243,38 +3252,38 @@ pub const Unit = struct {
     /// finished its own work ends exactly this way, and routing every one of
     /// them through a single place is what keeps inline-slot storage from ever
     /// reaching the allocator.
-    pub fn retireDriver(self: *Unit, driver: anytype) void {
+    pub fn retireDriver(self: *Fiber, driver: anytype) void {
         self.detachWorkDriver(driver);
         self.finishDriver(driver);
     }
     /// Consumes the currently installed erased continuation without invoking
     /// its destructor. Self-replacing drivers use this before destroying their
     /// concrete state and installing the typed successor.
-    pub fn detachWorkDriver(self: *Unit, context: anytype) void {
+    pub fn detachWorkDriver(self: *Fiber, context: anytype) void {
         const driver = self.takeWorkDriver().?;
         std.debug.assert(driver.context == @as(*anyopaque, @ptrCast(context)));
     }
-    /// Charges one finished application continuation to the unit's dispatch
+    /// Charges one finished application continuation to the fiber's dispatch
     /// fuel, exactly as fetching a form does. A body that dispatches nothing
     /// still spends fuel here, so an empty iteration reaches the exhaustion
     /// safe point where cancellation is observed and the slice ends. The
     /// continuation itself never ends a slice: the same bound that limits a
     /// run of forms limits a run of resumed continuations.
-    pub fn chargeContinuationStep(self: *Unit) void {
+    pub fn chargeContinuationStep(self: *Fiber) void {
         self.fuel -|= 1;
     }
 
     /// Mints the nominal proof that this callback installed the work which
     /// will launch its nested inline child. The machine validates the proof
     /// against the still-installed driver before preserving the parent frame.
-    pub fn suspendInlineApplication(self: *Unit) ApplicationStep {
+    pub fn suspendInlineApplication(self: *Fiber) ApplicationStep {
         const driver = self.workDriver() orelse unreachable;
         return .{ .suspend_inline = @ptrCast(driver.context) };
     }
     /// Start the ordinary qualified-name loader without executing or importing
     /// an export. The caller supplies an initialized root and drives it through
     /// `runInitializedRoot`; reflection and completion use this same path.
-    pub fn loadModuleOnly(self: *Unit, name: intern.ModuleName) MachineError!void {
+    pub fn loadModuleOnly(self: *Fiber, name: intern.ModuleName) MachineError!void {
         self.active_word = .plain(intern.moduleId(name));
         try self.autoLoadModule(name, .{
             .qualified = intern.moduleId(name),
@@ -3287,7 +3296,7 @@ pub const Unit = struct {
     /// a cold qualified module. Restore that operand and rewind the primitive
     /// call, then use the same loader/retry protocol as executable dispatch.
     pub fn retryQualifiedOperandAfterLoad(
-        self: *Unit,
+        self: *Fiber,
         requested: value.Symbol,
         outcome: binder.Miss,
     ) MachineError!WorkProgress {
@@ -3321,7 +3330,7 @@ pub const Unit = struct {
     /// discovering a cold module. Restore both operands, rewind the primitive,
     /// and share the ordinary qualified-name auto-load/retry path.
     pub fn retryImportAfterLoad(
-        self: *Unit,
+        self: *Fiber,
         module_id: u32,
         requested: Value,
         module_name: intern.ModuleName,
@@ -3344,7 +3353,7 @@ pub const Unit = struct {
     /// failure. Keeping the exact stack commit outside the driver-returning
     /// retry function preserves the WorkProgress output boundary audited for
     /// every driver.
-    fn restoreImportOperands(self: *Unit, module_id: u32, requested: Value) error{OutOfMemory}!void {
+    fn restoreImportOperands(self: *Fiber, module_id: u32, requested: Value) error{OutOfMemory}!void {
         var owned = heap.Owned(Value).init(requested);
         defer owned.deinit(self.releases, self.allocator);
         var reservation = try self.reserveStack(2);
@@ -3356,7 +3365,7 @@ pub const Unit = struct {
     /// qualified operation. The requested spelling also identifies a
     /// misspelled export in the final undefined-word error.
     fn autoLoadModule(
-        self: *Unit,
+        self: *Fiber,
         name: intern.ModuleName,
         request: QualifiedLoadRequest,
     ) MachineError!void {
@@ -3366,7 +3375,7 @@ pub const Unit = struct {
             .state = .init(.{ .begin = registry.beginLoadingCursor(name, .of(self)) }),
         });
     }
-    pub fn loadSourceOnly(self: *Unit, source: *const map_state.SourceScope) MachineError!void {
+    pub fn loadSourceOnly(self: *Fiber, source: *const map_state.SourceScope) MachineError!void {
         const location = source.location();
         try self.startDriver(AutoLoadDriver{
             .request = .source,
@@ -3388,7 +3397,7 @@ pub const Unit = struct {
     /// registers them, so a stdlib name means the same module in every scope,
     /// whether or not it has loaded. User registration, aliasing, and removal
     /// under one are `'domain`.
-    pub fn refuseReservedModule(self: *Unit, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
+    pub fn refuseReservedModule(self: *Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) MachineError!void {
         if (provenance == .standard_library) return;
         if (self.inherited.libraries().find(name) == null) return;
         return self.failFmt(
@@ -3398,7 +3407,7 @@ pub const Unit = struct {
         );
     }
 
-    pub fn publicationRegistry(self: *const Unit, name: intern.ModuleName, provenance: modules.RegistrationProvenance) *modules.Registry {
+    pub fn publicationRegistry(self: *const Fiber, name: intern.ModuleName, provenance: modules.RegistrationProvenance) *modules.Registry {
         if (provenance == .source and !provenance.source.exports(name)) return provenance.source.registry();
         return self.inherited.registry;
     }
@@ -3557,7 +3566,7 @@ pub const Unit = struct {
 
         fn makeFilename(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             loading: *heap.Owned(modules.LoadingLease),
             kind: FileKind,
             target: FilenameTarget,
@@ -3578,7 +3587,7 @@ pub const Unit = struct {
             };
         }
         fn makeCandidate(
-            evaluator: *Unit,
+            evaluator: *Fiber,
             loading: *heap.Owned(modules.LoadingLease),
             filename: *heap.Owned([]u8),
             kind: FileKind,
@@ -3611,7 +3620,7 @@ pub const Unit = struct {
         /// value the load continuation reports as `'path`.
         fn beginEmbedded(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             loading: *heap.Owned(modules.LoadingLease),
             entry: stdlib.Entry,
         ) error{OutOfMemory}!void {
@@ -3634,13 +3643,13 @@ pub const Unit = struct {
         /// The module is already registered, so this driver publishes nothing.
         fn finishWithoutLoading(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             loading: *heap.Owned(modules.LoadingLease),
         ) MachineError!WorkProgress {
             loading.borrowMut().finish();
             return continueSourceRequest(evaluator, self, self.request);
         }
-        fn notFound(self: *AutoLoadDriver, evaluator: *Unit) MachineError {
+        fn notFound(self: *AutoLoadDriver, evaluator: *Fiber) MachineError {
             return evaluator.undefinedWordIn(self.request.module.operation.qualified, .qualified);
         }
         fn sourceCompletion(
@@ -3657,7 +3666,7 @@ pub const Unit = struct {
                 .artifact = artifact,
             } };
         }
-        pub fn advance(evaluator: *Unit, self: *AutoLoadDriver) MachineError!WorkProgress {
+        pub fn advance(evaluator: *Fiber, self: *AutoLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             const work = evaluator.workBudget();
             work: while (work.spend()) switch (self.state.borrowMut().*) {
@@ -3669,7 +3678,7 @@ pub const Unit = struct {
                             "recursive auto-load of module `{s}`",
                             .{intern.get(intern.moduleId(self.request.module.name))},
                         ),
-                        // Another unit is loading this name. Wait for it
+                        // Another fiber is loading this name. Wait for it
                         // rather than publishing a second copy; the recheck
                         // below is what makes the winner's work count.
                         .contended => {
@@ -4073,7 +4082,7 @@ pub const Unit = struct {
         /// image, with a no-op image pin.
         fn transferEmbedded(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             transfer: *@FieldType(State, "transfer"),
             entry: stdlib.Entry,
         ) MachineError!WorkProgress {
@@ -4090,7 +4099,7 @@ pub const Unit = struct {
         }
         fn transferBuiltin(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             transfer: *@FieldType(State, "transfer"),
             words: []const env.BuiltinWord,
         ) MachineError!WorkProgress {
@@ -4113,7 +4122,7 @@ pub const Unit = struct {
         }
         fn transferStatic(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             transfer: *@FieldType(State, "transfer"),
             descriptor: *const native_abi.Descriptor,
         ) MachineError!WorkProgress {
@@ -4140,7 +4149,7 @@ pub const Unit = struct {
         }
         fn transferNative(
             self: *AutoLoadDriver,
-            evaluator: *Unit,
+            evaluator: *Fiber,
             transfer: *@FieldType(State, "transfer"),
         ) MachineError!WorkProgress {
             const loader_authority = evaluator.inherited.runtime().native_loader;
@@ -4180,7 +4189,7 @@ pub const Unit = struct {
         publication: heap.Owned(modules.Registry.BuiltinCandidateCursor),
         commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
 
-        pub fn advance(evaluator: *Unit, self: *BuiltinLoadDriver) MachineError!WorkProgress {
+        pub fn advance(evaluator: *Fiber, self: *BuiltinLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             if (self.commit == null) {
                 switch (self.publication.borrowMut().advance() catch |err| switch (err) {
@@ -4275,13 +4284,13 @@ pub const Unit = struct {
             }
         };
 
-        fn failLoad(self: *NativeLoadDriver, evaluator: *Unit, message: []const u8) MachineError {
+        fn failLoad(self: *NativeLoadDriver, evaluator: *Fiber, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
             evaluator.pendingFailure().addData(.path, self.path.borrow());
             return failure;
         }
 
-        pub fn advance(evaluator: *Unit, self: *NativeLoadDriver) MachineError!WorkProgress {
+        pub fn advance(evaluator: *Fiber, self: *NativeLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             switch (self.state.borrowMut().*) {
                 .validate => |*loader| switch (try loader.borrowMut().advance(evaluator.workBudget())) {
@@ -4364,7 +4373,7 @@ pub const Unit = struct {
         pub const ownership: heap.DriverOwnership = .fields;
     };
     /// Consumes `source` on success and failure.
-    pub fn parseSourceOwned(self: *Unit, source: []u8) MachineError!void {
+    pub fn parseSourceOwned(self: *Fiber, source: []u8) MachineError!void {
         const source_name = self.allocator.dupe(u8, "<parse>") catch |err| {
             self.allocator.free(source);
             return err;
@@ -4378,6 +4387,14 @@ pub const Unit = struct {
         push,
         call: ?*const map_state.SourceScope,
         session: ?*const map_state.SourceScope,
+        /// `@load`: the source runs as a stack-isolated unit. When `seeded`,
+        /// its seed list waits on top of the caller's stack until activation
+        /// pops it, so reading the file carries no seed ownership.
+        load: struct {
+            source: ?*const map_state.SourceScope = null,
+            seeded: bool,
+            word: intern.TraceWord,
+        },
         /// Registration only: the source runs, then the loading lease and
         /// tagged qualified operation transfer to the return frame.
         register: struct {
@@ -4390,7 +4407,7 @@ pub const Unit = struct {
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
-                .push, .call, .session => {},
+                .push, .call, .session, .load => {},
                 .register => |*register| {
                     if (register.loading) |*loading| loading.deinit();
                     if (register.path) |path| releases.releaseValue(path);
@@ -4427,7 +4444,7 @@ pub const Unit = struct {
         }
     };
     fn sourceOwned(
-        self: *Unit,
+        self: *Fiber,
         source_name: []u8,
         source: []u8,
         completion: SourceCompletion,
@@ -4443,6 +4460,9 @@ pub const Unit = struct {
             locating: map_state.SourcePathCursor,
             ingesting: spans.SpanArchive.SourceIngestCursor,
             activating: *Header,
+            /// `@load` has opened its boundary and copies its seeds above it
+            /// before the file's first form runs.
+            seeding: SeedMaterializer,
             storage,
         };
 
@@ -4452,7 +4472,7 @@ pub const Unit = struct {
         diag: reader.Diag = .{},
         state: State = .start,
 
-        fn beginIngest(self: *SourceDriver, evaluator: *Unit) error{OutOfMemory}!void {
+        fn beginIngest(self: *SourceDriver, evaluator: *Fiber) error{OutOfMemory}!void {
             const ingestion = try evaluator.archive.sourceIngestCursor(
                 self.text.borrow().sourceName(),
                 self.text.borrow().source(),
@@ -4462,8 +4482,8 @@ pub const Unit = struct {
             self.state = .{ .ingesting = ingestion };
         }
 
-        pub fn advance(evaluator: *Unit, self: *SourceDriver) MachineError!WorkProgress {
-            // Preserve the established pre-cancelled-unit behavior for a
+        pub fn advance(evaluator: *Fiber, self: *SourceDriver) MachineError!WorkProgress {
+            // Preserve the established pre-cancelled-fiber behavior for a
             // source that fits in its first bounded slice: activate it first,
             // so evaluation can attach cancellation to the responsible word.
             // A source that needs another slice observes cancellation before
@@ -4472,7 +4492,8 @@ pub const Unit = struct {
             const work = evaluator.workBudget();
             while (work.spend()) switch (self.state) {
                 .start => {
-                    if ((self.completion.borrow() == .call or self.completion.borrow() == .session) and
+                    if ((self.completion.borrow() == .call or self.completion.borrow() == .session or
+                        self.completion.borrow() == .load) and
                         evaluator.inherited.module_snapshot != null)
                     {
                         const cursor = try evaluator.inherited.module_snapshot.?.sourcePathCursor(self.text.borrow().sourceName());
@@ -4487,6 +4508,7 @@ pub const Unit = struct {
                         switch (self.completion.borrowMut().*) {
                             .call => |*context| context.* = source,
                             .session => |*context| context.* = source,
+                            .load => |*load| load.source = source,
                             else => unreachable,
                         }
                         try self.beginIngest(evaluator);
@@ -4522,6 +4544,24 @@ pub const Unit = struct {
                 .activating => |root_header| {
                     switch (self.completion.borrowMut().*) {
                         .push => try evaluator.pushBorrowed(.{ .list = root_header }),
+                        .load => |load| {
+                            // The seed list the primitive left on top is the
+                            // only operand this unit takes from its caller.
+                            const seeds: ?Value = if (load.seeded) evaluator.takeStackOwned().? else null;
+                            const provenance: modules.RegistrationProvenance = if (load.source) |context|
+                                .{ .source = context }
+                            else
+                                .ordinary;
+                            heap.incRef(root_header);
+                            evaluator.openLoad(root_header, load.word, provenance) catch |err| {
+                                if (seeds) |item| evaluator.releases.releaseValue(item);
+                                return err;
+                            };
+                            if (seeds) |item| {
+                                self.state = .{ .seeding = .init(item.list) };
+                                return .stepped;
+                            }
+                        },
                         .call, .session => |source| {
                             heap.incRef(root_header);
                             try evaluator.callProgramOwned(root_header, .owned);
@@ -4570,6 +4610,13 @@ pub const Unit = struct {
                     }
                     return .completed;
                 },
+                .seeding => |*materializer| {
+                    if (!try materializer.advance(evaluator, work)) return .stepped;
+                    // An empty file has no later dispatch safe point. Settle
+                    // the final seed-copy charge before completion.
+                    try evaluator.pollCancellableCompletion();
+                    return .completed;
+                },
                 .storage => unreachable,
             };
             return .stepped;
@@ -4589,6 +4636,11 @@ pub const Unit = struct {
                     self.state = .storage;
                     break :result false;
                 },
+                .seeding => |*materializer| result: {
+                    materializer.deinit(releases, storage_allocator);
+                    self.state = .storage;
+                    break :result false;
+                },
                 .ingesting => |*ingestion| result: {
                     if (!ingestion.advanceRetirement()) break :result false;
                     self.state = .storage;
@@ -4604,11 +4656,23 @@ pub const Unit = struct {
         }
         pub const ownership: heap.DriverOwnership = .bounded_retirement;
     };
-    pub fn loadFileOwned(self: *Unit, path: []u8, path_value: Value) MachineError!void {
-        return self.fileTransferOwned(path, path_value, .{ .source = .{ .call = null } });
+    /// `path @load!`: the file runs as a stack-isolated unit on an empty stack.
+    pub fn loadFileSeedlessOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
+        return self.fileTransferOwned(path, path_value, .{ .source = .{ .load = .{
+            .seeded = false,
+            .word = self.active_word,
+        } } });
+    }
+    /// `values path @load`: as `@load!`, seeded from the list the primitive
+    /// left on top of the caller's stack.
+    pub fn loadFileSeededOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
+        return self.fileTransferOwned(path, path_value, .{ .source = .{ .load = .{
+            .seeded = true,
+            .word = self.active_word,
+        } } });
     }
     fn fileSourceOwned(
-        self: *Unit,
+        self: *Fiber,
         path: []u8,
         path_value: ?Value,
         completion: SourceCompletion,
@@ -4616,7 +4680,7 @@ pub const Unit = struct {
         return self.fileTransferOwned(path, path_value, .{ .source = completion });
     }
     fn fileTransferOwned(
-        self: *Unit,
+        self: *Fiber,
         path: []u8,
         path_value: ?Value,
         transfer: FileTransfer,
@@ -4647,7 +4711,7 @@ pub const Unit = struct {
             return switch (self) {
                 .source => |completion| switch (completion) {
                     .register => |register| register.path,
-                    .push, .call, .session => null,
+                    .push, .call, .session, .load => null,
                 },
             };
         }
@@ -4731,12 +4795,12 @@ pub const Unit = struct {
             if (context.path_value) |*item| return item.borrow();
             return context.transfer.borrow().diagnosticPath();
         }
-        fn failIo(context: *Context, evaluator: *Unit, message: []const u8) MachineError {
+        fn failIo(context: *Context, evaluator: *Fiber, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
             if (diagnosticPath(context)) |item| evaluator.pendingFailure().addData(.path, item);
             return failure;
         }
-        pub fn advance(evaluator: *Unit, self: *FileSourceDriver) MachineError!WorkProgress {
+        pub fn advance(evaluator: *Fiber, self: *FileSourceDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             const io = evaluator.inherited.runtime().host_io;
             switch (self.state.borrowMut().*) {
@@ -4828,18 +4892,18 @@ pub const Unit = struct {
     /// Records the offending path or url on the failure being raised, which is
     /// the shape every host-IO error reports. Keeps `ErrorDataKey` private
     /// while letting a builtin module attach the one datum it owns.
-    pub fn addErrorPath(self: *Unit, path: Value) void {
+    pub fn addErrorPath(self: *Fiber, path: Value) void {
         self.pendingFailure().addData(.path, path);
     }
     /// Tags the one absent-only publication conflict that an immutable
     /// caller may recover after independently confirming the winner.
-    pub fn addErrorDestinationExists(self: *Unit) void {
+    pub fn addErrorDestinationExists(self: *Fiber) void {
         self.pendingFailure().addData(.@"destination-exists", .{ .int = 1 });
     }
     /// The stable data dictionary every capability-gated filesystem failure
     /// carries: the public operation, the named root and path (or both ends of
     /// a transfer), and a closed portable reason symbol.
-    pub fn addErrorFilesystem(self: *Unit, data: FilesystemErrorData) void {
+    pub fn addErrorFilesystem(self: *Fiber, data: FilesystemErrorData) void {
         const failure = self.pendingFailure();
         failure.addData(.operation, data.operation);
         switch (data.target) {
@@ -4858,13 +4922,13 @@ pub const Unit = struct {
     }
     /// Attach the closed-vocabulary `'reason` symbol a capability refusal
     /// reports, so programs branch on the symbol rather than the message.
-    pub fn addErrorReason(self: *Unit, reason: Value) void {
+    pub fn addErrorReason(self: *Fiber, reason: Value) void {
         self.pendingFailure().addData(.reason, reason);
     }
     /// The one absence-is-absence failure for `getenv`: an unset variable is
     /// an error carrying the requested name, never an empty string.
     pub fn unsetEnvironVariable(
-        self: *Unit,
+        self: *Fiber,
         name: []const u8,
         name_value: Value,
     ) MachineError {
@@ -4873,12 +4937,12 @@ pub const Unit = struct {
         return failure;
     }
     /// Resolves one environment variable against the session snapshot.
-    pub fn environLookup(self: *Unit, name: []const u8) Environ.LookupCursor {
+    pub fn environLookup(self: *Fiber, name: []const u8) Environ.LookupCursor {
         const entries: []const Environ.Entry =
             self.inherited.runtime().environ.entries;
         return .{ .entries = entries, .name = name };
     }
-    pub fn undefinedModule(self: *Unit, name: u32) MachineError {
+    pub fn undefinedModule(self: *Fiber, name: u32) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
         self.pendingFailure().addData(.name, .{ .symbol = .{ .name = name } });
         return failure;
@@ -4886,7 +4950,7 @@ pub const Unit = struct {
     /// A resolution miss, reported as the reference the program actually
     /// wrote, including a dotted one whose module never loaded, with the
     /// lookup chain that was searched.
-    pub fn undefinedWordIn(self: *Unit, word: u32, chain: LookupChain) MachineError {
+    pub fn undefinedWordIn(self: *Fiber, word: u32, chain: LookupChain) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
         self.pendingFailure().addData(.name, .{ .symbol = .{ .name = word } });
         self.addLookupChain(chain) catch return error.OutOfMemory;
@@ -4895,21 +4959,21 @@ pub const Unit = struct {
     /// The same failure as `undefinedWordIn`, for a name that is not the word
     /// currently being traced: the active word becomes the requested name so
     /// the diagnostic reports what was asked for.
-    pub fn undefinedNameIn(self: *Unit, name: u32, chain: LookupChain) MachineError {
+    pub fn undefinedNameIn(self: *Fiber, name: u32, chain: LookupChain) MachineError {
         self.active_word = .plain(name);
         return self.undefinedWordIn(name, chain);
     }
-    fn addLookupChain(self: *Unit, chain: LookupChain) error{OutOfMemory}!void {
+    fn addLookupChain(self: *Fiber, chain: LookupChain) error{OutOfMemory}!void {
         const named = try intern.intern(chain.spelling());
         self.pendingFailure().addData(.scope, .{ .symbol = .{ .name = named } });
     }
-    pub fn available(self: *const Unit) usize {
+    pub fn available(self: *const Fiber) usize {
         return self.stack.items.len - self.stack_base;
     }
-    pub inline fn require(self: *Unit, count: usize) MachineError!void {
+    pub inline fn require(self: *Fiber, count: usize) MachineError!void {
         if (self.available() < count) return self.failUnderflow(count);
     }
-    noinline fn failUnderflow(self: *Unit, count: usize) MachineError {
+    noinline fn failUnderflow(self: *Fiber, count: usize) MachineError {
         @branchHint(.cold);
         return self.failUnderflowOf(self.activeWordName(), count);
     }
@@ -4920,7 +4984,7 @@ pub const Unit = struct {
     /// which never got past entry, is not repeated in the trace. Opening any
     /// other quotation, there is no word to blame, and the binding itself is
     /// what fails.
-    noinline fn failBinding(self: *Unit, count: usize) MachineError {
+    noinline fn failBinding(self: *Fiber, count: usize) MachineError {
         @branchHint(.cold);
         const current = &self.current.?;
         const owner = current.body_owner;
@@ -4929,7 +4993,7 @@ pub const Unit = struct {
         current.traced_word = no_word;
         return self.failUnderflowOf(self.activeWordName(), count);
     }
-    fn failUnderflowOf(self: *Unit, subject: []const u8, count: usize) MachineError {
+    fn failUnderflowOf(self: *Fiber, subject: []const u8, count: usize) MachineError {
         // Underflow against the floor of a unit constructor's substack is the
         // one underflow whose cause is invisible: the values the caller meant
         // to pass are right there and unreachable. Name the isolation and the
@@ -4965,7 +5029,7 @@ pub const Unit = struct {
     }
     const IsolationGuidance = struct { constructor: []const u8, advice: []const u8 };
     /// Which unit constructor, if any, owns the floor this underflow hit.
-    fn isolationGuidance(self: *Unit) ?IsolationGuidance {
+    fn isolationGuidance(self: *Fiber) ?IsolationGuidance {
         if (self.stack_base > 0) {
             const boundary = self.boundary_index orelse return null;
             // During an unwind the index momentarily names the frame that was
@@ -4986,10 +5050,18 @@ pub const Unit = struct {
                     .advice = "the substack is isolated from the caller's stack — " ++
                         "pass initial values in the constructor's values operand: `values (body) `name @defm`",
                 },
+                .load => .{
+                    .constructor = "@load",
+                    .advice = "the loaded file's stack is isolated from the caller's stack — " ++
+                        "pass initial values in the constructor's values operand: `values path @load`",
+                },
             };
         }
-        if (self.is_root_unit) return null;
-        return switch (self.constructor) {
+        const task = switch (self.role) {
+            .root => return null,
+            .task => |task| task,
+        };
+        return switch (task.constructor) {
             .spawn => .{
                 .constructor = "@spawn",
                 .advice = "the child unit's stack is isolated from the caller's stack — " ++
@@ -5001,19 +5073,19 @@ pub const Unit = struct {
             },
         };
     }
-    pub fn popValue(self: *Unit) MachineError!heap.OwnedValue {
+    pub fn popValue(self: *Fiber) MachineError!heap.OwnedValue {
         try self.require(1);
         return .init(self.releases, self.takeStackOwned().?);
     }
     /// The top two operands, the lower first, after one underflow check.
-    pub fn popPair(self: *Unit) MachineError!struct { heap.OwnedValue, heap.OwnedValue } {
+    pub fn popPair(self: *Fiber) MachineError!struct { heap.OwnedValue, heap.OwnedValue } {
         try self.require(2);
         const right = self.takeStackOwned().?;
         const left = self.takeStackOwned().?;
         return .{ .init(self.releases, left), .init(self.releases, right) };
     }
     fn popChecked(
-        self: *Unit,
+        self: *Fiber,
         comptime expected: []const u8,
         comptime accepts: fn (Value) bool,
     ) MachineError!heap.OwnedValue {
@@ -5022,21 +5094,21 @@ pub const Unit = struct {
         if (!accepts(item.borrow())) return self.typeError(expected);
         return item;
     }
-    pub fn popList(self: *Unit) MachineError!heap.OwnedValue {
+    pub fn popList(self: *Fiber) MachineError!heap.OwnedValue {
         return self.popChecked("a list", struct {
             fn accepts(item: Value) bool {
                 return item == .list;
             }
         }.accepts);
     }
-    pub fn popDict(self: *Unit) MachineError!heap.OwnedValue {
+    pub fn popDict(self: *Fiber) MachineError!heap.OwnedValue {
         return self.popChecked("a dict", struct {
             fn accepts(item: Value) bool {
                 return item == .dict;
             }
         }.accepts);
     }
-    pub fn popQuotation(self: *Unit) MachineError!heap.OwnedValue {
+    pub fn popQuotation(self: *Fiber) MachineError!heap.OwnedValue {
         return self.popChecked("a quotation/list", struct {
             fn accepts(item: Value) bool {
                 return item == .list;
@@ -5048,7 +5120,7 @@ pub const Unit = struct {
     /// separate without a wrapper value. The returned owner takes both stack
     /// references directly; an empty seed list is released here and represented
     /// internally by null so an unseeded construction needs no materializer.
-    pub fn popUnitInput(self: *Unit) MachineError!OwnedUnitInput {
+    pub fn popUnitInput(self: *Fiber) MachineError!OwnedUnitInput {
         try self.require(2);
         var body = try self.popQuotation();
         errdefer body.deinit();
@@ -5062,11 +5134,11 @@ pub const Unit = struct {
     }
     /// The `!` constructors take no values operand: the input is exactly the
     /// empty-seed representation `[] body` would decode to.
-    pub fn popSeedlessUnitInput(self: *Unit) MachineError!OwnedUnitInput {
+    pub fn popSeedlessUnitInput(self: *Fiber) MachineError!OwnedUnitInput {
         var body = try self.popQuotation();
         return OwnedUnitInput.init(null, body.take().list);
     }
-    pub fn popString(self: *Unit) MachineError!heap.OwnedValue {
+    pub fn popString(self: *Fiber) MachineError!heap.OwnedValue {
         return self.popChecked("a string", struct {
             fn accepts(item: Value) bool {
                 return item.isString();
@@ -5075,7 +5147,7 @@ pub const Unit = struct {
     }
     /// A symbol operand with its link, as written: what an explicit lookup
     /// resolves in its own root.
-    pub fn popWord(self: *Unit) MachineError!value.Symbol {
+    pub fn popWord(self: *Fiber) MachineError!value.Symbol {
         var item = try self.popValue();
         defer item.deinit();
         return switch (item.borrow()) {
@@ -5083,7 +5155,7 @@ pub const Unit = struct {
             else => self.typeError("a symbol name"),
         };
     }
-    pub fn popSymbol(self: *Unit) MachineError!u32 {
+    pub fn popSymbol(self: *Fiber) MachineError!u32 {
         var item = try self.popValue();
         defer item.deinit();
         return switch (item.borrow()) {
@@ -5091,16 +5163,16 @@ pub const Unit = struct {
             else => self.typeError("a symbol name"),
         };
     }
-    pub fn discard(self: *Unit, count: usize) void {
+    pub fn discard(self: *Fiber, count: usize) void {
         std.debug.assert(self.available() >= count);
         for (0..count) |_| self.releases.releaseValue(self.takeStackOwned().?);
     }
-    pub fn reserveStack(self: *Unit, count: usize) error{OutOfMemory}!StackReservation {
+    pub fn reserveStack(self: *Fiber, count: usize) error{OutOfMemory}!StackReservation {
         try self.stack.ensureUnusedCapacity(self.allocator, count);
         return .init(self, count);
     }
     pub fn reserveStackReplacement(
-        self: *Unit,
+        self: *Fiber,
         input_count: usize,
         output_count: usize,
     ) error{OutOfMemory}!StackReplacement {
@@ -5108,32 +5180,32 @@ pub const Unit = struct {
         const base = self.stack.items.len - input_count;
         try self.stack.ensureTotalCapacity(self.allocator, base + output_count);
         return .{
-            .unit = self,
+            .fiber = self,
             .base = base,
             .input_count = input_count,
             .output_count = output_count,
         };
     }
-    pub fn nativeInputBorrowed(self: *const Unit, input_count: usize, index: usize) Value {
+    pub fn nativeInputBorrowed(self: *const Fiber, input_count: usize, index: usize) Value {
         std.debug.assert(index < input_count and self.available() >= input_count);
         return self.stack.items[self.stack.items.len - input_count + index];
     }
     /// Observes one value in the currently visible operand window, bottom
     /// first. Checkpoint cursors retain the returned borrow before yielding;
     /// no raw stack storage escapes this boundary.
-    pub fn visibleOperandBorrowed(self: *const Unit, index: usize) Value {
+    pub fn visibleOperandBorrowed(self: *const Fiber, index: usize) Value {
         std.debug.assert(index < self.available());
         return self.stack.items[self.stack_base + index];
     }
     /// Consumes `item`. The stack owns it on success; the release domain owns
     /// its constant-time retirement if stack growth fails.
-    pub inline fn pushOwned(self: *Unit, item: Value) error{OutOfMemory}!void {
+    pub inline fn pushOwned(self: *Fiber, item: Value) error{OutOfMemory}!void {
         // A push is a capacity test and a store; only growth is a call.
         const stack = &self.stack;
         if (stack.items.len == stack.capacity) return self.pushOwnedGrowing(item);
         stack.appendAssumeCapacity(item);
     }
-    fn pushOwnedGrowing(self: *Unit, item: Value) error{OutOfMemory}!void {
+    fn pushOwnedGrowing(self: *Fiber, item: Value) error{OutOfMemory}!void {
         self.stack.append(self.allocator, item) catch {
             self.releases.releaseValue(item);
             return error.OutOfMemory;
@@ -5141,24 +5213,24 @@ pub const Unit = struct {
     }
     /// Consumes `item` into a slot this primitive freed by popping, which
     /// cannot grow the stack.
-    pub fn pushIntoFreed(self: *Unit, item: Value) void {
+    pub fn pushIntoFreed(self: *Fiber, item: Value) void {
         self.stack.appendAssumeCapacity(item);
     }
-    pub fn pushBorrowed(self: *Unit, item: Value) error{OutOfMemory}!void {
+    pub fn pushBorrowed(self: *Fiber, item: Value) error{OutOfMemory}!void {
         heap.retainValue(item);
         return self.pushOwned(item);
     }
     /// Places the pending failure at `code[index]`, the position the failing
     /// path ran in place of, unless an inner position already holds it.
-    pub fn setFailureSite(self: *Unit, code: *Header, index: u32) void {
+    pub fn setFailureSite(self: *Fiber, code: *Header, index: u32) void {
         if (self.pendingFailureOptional()) |pending| if (pending.site == null) {
             pending.site = .{ .token = .{ .code = code, .index = index } };
         };
     }
-    pub fn setWorkDriverSite(self: *Unit, code: *Header, index: u32) void {
+    pub fn setWorkDriverSite(self: *Fiber, code: *Header, index: u32) void {
         if (self.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
     }
-    pub fn setWorkDriverTraceParent(self: *Unit, word: intern.TraceWord) void {
+    pub fn setWorkDriverTraceParent(self: *Fiber, word: intern.TraceWord) void {
         if (self.workDriver()) |driver| driver.trace_parent = word;
     }
 
@@ -5168,30 +5240,30 @@ pub const Unit = struct {
     /// failures inside that quotation still trace through the word the caller
     /// wrote. Only the installing callback may claim an application this way:
     /// an unrelated enclosing application owns its own attribution.
-    pub fn setApplicationTraceParent(self: *Unit, word: intern.TraceWord) void {
+    pub fn setApplicationTraceParent(self: *Fiber, word: intern.TraceWord) void {
         const frame = &self.frames.items[self.frames.items.len - 1];
         std.debug.assert(frame.* == .application);
         frame.application.traced_word = word;
         self.current.?.traced_word = word;
     }
 
-    /// The single parking choke point. A parked unit would hold its slot's
+    /// The single parking choke point. A parked fiber would hold its slot's
     /// turn across an unbounded wait, so a state application refuses to park
     /// here — before any wait — rather than in each parking word, which is
     /// what makes the prohibition total as new parking words are added.
-    pub fn park(self: *Unit, request: ParkRequest) MachineError!void {
+    pub fn park(self: *Fiber, request: ParkRequest) MachineError!void {
         self.installParkRequest(request);
     }
 
     /// Whether the words after a phrase head continue a recognized phrase,
     /// which then ran in its place.
-    pub fn continuesPhrase(self: *Unit, first_entry: u16) MachineError!bool {
+    pub fn continuesPhrase(self: *Fiber, first_entry: u16) MachineError!bool {
         return idioms.applyHeaded(self, first_entry);
     }
     /// The forms after the dispatching word in its own code, when it was
     /// dispatched from a source position and `count` of them follow. A word
     /// reached any other way (an invocation, a replay) has no phrase after it.
-    pub fn followingForms(self: *const Unit, count: u32) ?FollowingForms {
+    pub fn followingForms(self: *const Fiber, count: u32) ?FollowingForms {
         const current = self.current orelse return null;
         const next = switch (current.position) {
             .source => |index| index,
@@ -5210,53 +5282,53 @@ pub const Unit = struct {
         }
     };
     /// Consumes `count` following forms that a recognized phrase executed.
-    pub fn skipFollowingForms(self: *Unit, count: u32) void {
+    pub fn skipFollowingForms(self: *Fiber, count: u32) void {
         const current = &self.current.?;
         current.position = .{ .source = current.position.source + count };
     }
-    pub fn commitDirectIdiomTrace(self: *Unit) intern.TraceWord {
+    pub fn commitDirectIdiomTrace(self: *Fiber) intern.TraceWord {
         const parent = self.active_word;
         if (self.current.?.nextIndex() >= self.current.?.code.length()) self.current.?.traced_word = no_word;
         return parent;
     }
     /// Traces the pending failure through `word`, the definition whose frame
     /// the failing path elided, unless an inner one already holds it.
-    pub fn setFailureTraceParent(self: *Unit, word: intern.TraceWord) void {
+    pub fn setFailureTraceParent(self: *Fiber, word: intern.TraceWord) void {
         if (self.pendingFailureOptional()) |pending| if (pending.trace_parent == null) {
             pending.trace_parent = word;
         };
     }
-    pub fn takePrimitiveFailure(self: *Unit) ?EclErr {
+    pub fn takePrimitiveFailure(self: *Fiber) ?EclErr {
         if (!self.hasPendingFailure()) return null;
         const failure = self.takePendingForUnwind();
         self.finishUnwindCaught();
         return failure;
     }
-    fn installPrimitiveFailure(self: *Unit, failure_value: EclErr) MachineError {
+    fn installPrimitiveFailure(self: *Fiber, failure_value: EclErr) MachineError {
         self.installPendingFailure(failure_value);
         if (self.pendingFailure().word == null and self.active_word != no_word) {
             self.pendingFailure().word = self.active_word;
         }
         return error.Ecl;
     }
-    pub fn continueWithIdiom(self: *Unit, request: IdiomRequest, source: FallbackSource) MachineError!void {
+    pub fn continueWithIdiom(self: *Fiber, request: IdiomRequest, source: FallbackSource) MachineError!void {
         return idioms.tryApply(self, request, source);
     }
     /// The active word as a diagnostic spells it. A module-local word has no
-    /// single interned spelling, so the rendering borrows the unit's scratch;
+    /// single interned spelling, so the rendering borrows the fiber's scratch;
     /// the returned slice is valid until the next call.
-    pub fn activeWordName(self: *Unit) []const u8 {
+    pub fn activeWordName(self: *Fiber) []const u8 {
         if (self.active_word == no_word) return "evaluation";
         return self.active_word.render(&self.word_scratch);
     }
-    pub fn fail(self: *Unit, kind: ErrorKind, message: []const u8) MachineError {
+    pub fn fail(self: *Fiber, kind: ErrorKind, message: []const u8) MachineError {
         self.installPendingFailure(EclErr.init(kind, message));
         if (self.active_word != no_word) self.pendingFailure().word = self.active_word;
         return error.Ecl;
     }
     /// Diagnostic views are bounded and capability-free. Retain their values
     /// before the observing driver releases its resource or exchange.
-    pub fn failWithErrorData(self: *Unit, observation: @import("port_error_data.zig").Observation) MachineError {
+    pub fn failWithErrorData(self: *Fiber, observation: @import("port_error_data.zig").Observation) MachineError {
         const report = switch (observation.report) {
             .out_of_memory => return error.OutOfMemory,
             .report => |report| report,
@@ -5276,7 +5348,7 @@ pub const Unit = struct {
         return failure;
     }
     fn failAtSource(
-        self: *Unit,
+        self: *Fiber,
         message: []const u8,
         source_name: []const u8,
         span: reader.Span,
@@ -5291,7 +5363,7 @@ pub const Unit = struct {
         return failure;
     }
     pub fn failFmt(
-        self: *Unit,
+        self: *Fiber,
         kind: ErrorKind,
         comptime format: []const u8,
         args: anytype,
@@ -5300,7 +5372,7 @@ pub const Unit = struct {
         if (self.active_word != no_word) self.pendingFailure().word = self.active_word;
         return error.Ecl;
     }
-    pub fn typeError(self: *Unit, expected: []const u8) MachineError {
+    pub fn typeError(self: *Fiber, expected: []const u8) MachineError {
         return self.failFmt(
             .type,
             "{s} expected {s}",
@@ -5310,7 +5382,7 @@ pub const Unit = struct {
     /// Raises a language error at a zero-based logical data index. Kernels
     /// call this only after locating the first failing element.
     pub fn failAtIndex(
-        self: *Unit,
+        self: *Fiber,
         kind: ErrorKind,
         message: []const u8,
         index: usize,
@@ -5320,7 +5392,7 @@ pub const Unit = struct {
         return failure;
     }
     /// Reports the two leading-axis lengths that failed to conform.
-    pub fn conformError(self: *Unit, left: usize, right: usize) MachineError {
+    pub fn conformError(self: *Fiber, left: usize, right: usize) MachineError {
         const failure = self.failFmt(
             .conform,
             "{s} cannot conform leading axes {d} and {d}",
@@ -5331,7 +5403,7 @@ pub const Unit = struct {
         return failure;
     }
     pub fn applicationContractError(
-        self: *Unit,
+        self: *Fiber,
         opaque_site: *ApplicationContractSite,
         quotation: *Header,
         expected: Value,
@@ -5375,49 +5447,49 @@ pub const Unit = struct {
     }
     /// Kernel safe point. A flat loop calls this between bounded chunks;
     /// kernels never create threads or make scheduling decisions themselves.
-    pub fn pollKernel(self: *Unit) MachineError!void {
+    pub fn pollKernel(self: *Fiber) MachineError!void {
         self.polls += 1;
         if (self.cancelled.load(.acquire)) {
             return self.fail(.cancelled, "unit cancelled");
         }
     }
-    /// Charges logical kernel work against the unit's one budget for the turn.
-    /// Keeping the remainder on Unit means ragged recursion and consecutive
+    /// Charges logical kernel work against the fiber's one budget for the turn.
+    /// Keeping the remainder on Fiber means ragged recursion and consecutive
     /// short loops cannot evade the 65,536-element cancellation bound by
     /// resetting a local index. Calls are bounded to one quantum; a block that
     /// reaches the boundary polls before executing and exhausts the turn.
-    pub fn advanceKernel(self: *Unit, amount: usize) MachineError!void {
+    pub fn advanceKernel(self: *Fiber, amount: usize) MachineError!void {
         _ = try self.chargeKernel(amount);
     }
     /// What a typed cursor may still charge before the interval ends. A loop
     /// bounds its next half-open range by this so the range it commits to is
     /// the range the budget can pay for, rather than discovering the boundary
     /// mid-chunk.
-    pub fn remainingKernelFuel(self: *const Unit) usize {
+    pub fn remainingKernelFuel(self: *const Fiber) usize {
         return self.kernel_budget.remaining;
     }
-    /// The unit's kernel allowance for work done on its behalf in this turn.
+    /// The fiber's kernel allowance for work done on its behalf in this turn.
     /// A cursor draws on it directly and hands the same pointer to any cursor
     /// it drives, so nested work cannot begin a quantum of its own. The
     /// machine settles exhaustion after the driver returns.
-    /// The result for a step that may have installed a park request: the unit
+    /// The result for a step that may have installed a park request: the fiber
     /// parks if it did, and otherwise has more of its own work to do.
-    pub fn afterStep(self: *const Unit) WorkProgress {
+    pub fn afterStep(self: *const Fiber) WorkProgress {
         return if (self.hasParkRequest()) .{ .yielded = .park } else .stepped;
     }
-    pub fn workBudget(self: *Unit) *poll_api.WorkBudget {
+    pub fn workBudget(self: *Fiber) *poll_api.WorkBudget {
         return &self.kernel_budget;
     }
     /// A cancellable completion settles its last charge before transferring
     /// execution. Committed delivery and failure cleanup must not use this.
-    pub fn pollCancellableCompletion(self: *Unit) MachineError!void {
+    pub fn pollCancellableCompletion(self: *Fiber) MachineError!void {
         if (turn_core.completionPolls(self.workBudget().*)) try self.pollKernel();
     }
     /// Charges work that has already been committed, such as an inline kernel
     /// block that cannot stop part way. A charge that reaches the end of the
     /// turn's allowance polls cancellation and leaves the allowance exhausted:
     /// it never begins a second quantum within the same turn.
-    fn chargeKernel(self: *Unit, amount: usize) MachineError!bool {
+    fn chargeKernel(self: *Fiber, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
         if (amount == 0) return false;
         if (comptime root_execution_metrics_enabled)
@@ -5428,12 +5500,12 @@ pub const Unit = struct {
     }
     /// Consumes a quotation header and applies it inline. Its words resolve
     /// as they are reached.
-    pub fn callOwned(self: *Unit, quotation: *Header) error{OutOfMemory}!void {
+    pub fn callOwned(self: *Fiber, quotation: *Header) error{OutOfMemory}!void {
         return self.callProgramOwned(quotation, .owned);
     }
 
     /// Runs `quotation` inline with the caller, resolving one form at a time.
-    pub fn callProgramOwned(self: *Unit, quotation: *Header, program: Program) error{OutOfMemory}!void {
+    pub fn callProgramOwned(self: *Fiber, quotation: *Header, program: Program) error{OutOfMemory}!void {
         std.debug.assert(program == .owned);
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
@@ -5463,7 +5535,7 @@ pub const Unit = struct {
     /// machinery deliberately does not call this helper:
     /// their continuation restarts once per element and must not add a pair of
     /// code-header atomics to that hot path.
-    fn replaceTailEffectCandidate(self: *Unit, code: *Header) ?EffectCheckIndex {
+    fn replaceTailEffectCandidate(self: *Fiber, code: *Header) ?EffectCheckIndex {
         const current = self.current orelse return null;
         const check_index = current.effect_tail orelse return null;
         if (!self.isSourceTailPosition(current)) return null;
@@ -5477,7 +5549,7 @@ pub const Unit = struct {
     /// Propagates one application's authority through ordinary tail word
     /// dispatch without changing its selected quotation. Only a dynamic
     /// `call` marks code for ownership transfer into the candidate.
-    fn tailApplicationIndex(self: *Unit) ?ApplicationFrameIndex {
+    fn tailApplicationIndex(self: *Fiber) ?ApplicationFrameIndex {
         const current = self.current orelse return null;
         const application_index = current.application_tail orelse return null;
         if (!self.isSourceTailPosition(current)) return null;
@@ -5485,7 +5557,7 @@ pub const Unit = struct {
     }
 
     fn validateApplicationProvenanceTarget(
-        self: *Unit,
+        self: *Fiber,
         target: *const ApplicationProvenanceTarget,
     ) ?ApplicationFrameIndex {
         const raw = @intFromPtr(target);
@@ -5505,7 +5577,7 @@ pub const Unit = struct {
     /// launch the semantically selected quotation. The frame owns the nonce;
     /// relocation preserves it and frame retirement makes the handle stale.
     pub fn applicationProvenanceTarget(
-        self: *Unit,
+        self: *Fiber,
     ) error{OutOfMemory}!?*const ApplicationProvenanceTarget {
         const index = self.tailApplicationIndex() orelse return null;
         const frame = &self.frames.items[@backingInt(index)];
@@ -5519,7 +5591,7 @@ pub const Unit = struct {
     /// already-owned header into the application frame; every other Eval uses
     /// the ordinary release. This delays one existing release but creates no
     /// additional retain/release pair.
-    fn retireCompletedEval(self: *Unit, current: Eval) void {
+    fn retireCompletedEval(self: *Fiber, current: Eval) void {
         if (current.application_selection) |application_index| {
             const frame = &self.frames.items[@backingInt(application_index)];
             std.debug.assert(frame.* == .application);
@@ -5533,7 +5605,7 @@ pub const Unit = struct {
     /// after the authored final form, but it does not make a final control
     /// transfer semantically non-tail. The exact reserved epilogue is the only
     /// continuation shape granted this exception.
-    fn isSourceTailPosition(self: *const Unit, current: Eval) bool {
+    fn isSourceTailPosition(self: *const Fiber, current: Eval) bool {
         const length = current.code.length();
         if (current.nextIndex() == length) return true;
         if (length - current.nextIndex() == 1) {
@@ -5549,7 +5621,7 @@ pub const Unit = struct {
     /// returns null (finished) or transfers that same ownership into the next
     /// application.
     pub fn beginIsolatedApplication(
-        self: *Unit,
+        self: *Fiber,
         application: IsolatedApplication,
     ) MachineError!void {
         return self.beginApplication(application, .isolated, null);
@@ -5557,7 +5629,7 @@ pub const Unit = struct {
     /// The inline counterpart keeps the current stack and scope visible with the same bounded,
     /// defunctionalized continuation representation.
     pub fn beginInlineApplication(
-        self: *Unit,
+        self: *Fiber,
         application: IsolatedApplication,
     ) MachineError!void {
         return self.beginApplication(application, .in_place, null);
@@ -5567,7 +5639,7 @@ pub const Unit = struct {
     /// unshared is parked for the next application over the same parent rather
     /// than retired; anything else takes the ordinary path.
     fn beginApplication(
-        self: *Unit,
+        self: *Fiber,
         application: IsolatedApplication,
         launch: ApplicationLaunch,
         inherited: ?intern.TraceWord,
@@ -5637,14 +5709,14 @@ pub const Unit = struct {
             .application_selection = if (select_initial) provenance_target else null,
         };
     }
-    pub fn attemptOwned(self: *Unit, input: OwnedUnitInput) error{OutOfMemory}!void {
+    pub fn attemptOwned(self: *Fiber, input: OwnedUnitInput) error{OutOfMemory}!void {
         return self.beginAttemptOwned(input);
     }
     /// Opens a construction boundary for `@defm`. The name has already been
     /// validated; the body evaluates against a fresh image, and completion
     /// publishes that image under the name.
     pub fn moduleOwned(
-        self: *Unit,
+        self: *Fiber,
         name: intern.ModuleName,
         input: OwnedUnitInput,
     ) MachineError!void {
@@ -5718,7 +5790,7 @@ pub const Unit = struct {
     /// boundary on success and released here on every failure, and the image is
     /// consumed only once the boundary owns it.
     fn openImageBoundary(
-        self: *Unit,
+        self: *Fiber,
         candidate: *modules.OwnedImage,
         word: intern.TraceWord,
         body_header: *Header,
@@ -5752,7 +5824,7 @@ pub const Unit = struct {
     }
     /// The context a binding or explicit lookup resolves under, over `view`,
     /// which the context then owns.
-    pub fn resolutionContext(self: *Unit, view: modules.View) binder.Context {
+    pub fn resolutionContext(self: *Fiber, view: modules.View) binder.Context {
         return .{
             .environment = self.environment,
             .view = view,
@@ -5764,12 +5836,12 @@ pub const Unit = struct {
         };
     }
 
-    /// What a plain word resolves to now, for idiom recognition: the unit's
+    /// What a plain word resolves to now, for idiom recognition: the fiber's
     /// remembered resolution when it has one, otherwise a fresh lookup that
     /// is not remembered. Only a static definition outlives the lookup, and
     /// recognition only ever declines, so anything else is simply not a
     /// match.
-    pub fn peekWord(self: *Unit, word: value.Symbol) ?PeekedWord {
+    pub fn peekWord(self: *Fiber, word: value.Symbol) ?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
         if (self.reusedResolution(word)) |definition| return peeked(definition, word);
         return self.resolveFresh(word, false);
@@ -5778,7 +5850,7 @@ pub const Unit = struct {
     /// `peekWord`, remembering what a fresh lookup resolves, so a word a
     /// recognized phrase consumes instead of dispatching is looked up once
     /// per publication rather than on every recognition.
-    pub fn resolveForRecognition(self: *Unit, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
+    pub fn resolveForRecognition(self: *Fiber, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
         if (self.reusedResolution(word)) |definition| return peeked(definition, word);
         return try self.resolveFresh(word, true);
@@ -5789,7 +5861,7 @@ pub const Unit = struct {
     /// lookup's lease is released, since a concurrent replacement may retire
     /// a counted definition afterwards.
     fn resolveFresh(
-        self: *Unit,
+        self: *Fiber,
         word: value.Symbol,
         comptime remember: bool,
     ) if (remember) error{OutOfMemory}!?PeekedWord else ?PeekedWord {
@@ -5817,7 +5889,7 @@ pub const Unit = struct {
 
     /// The plan of the finite iteration applying the running code, when that
     /// code is the combinator's own quotation.
-    fn applicationPlan(self: *Unit) ?*ResolutionPlan {
+    fn applicationPlan(self: *Fiber) ?*ResolutionPlan {
         const current = &self.current.?;
         const index = current.application_tail orelse return null;
         const plan = switch (self.frames.items[@backingInt(index)]) {
@@ -5829,7 +5901,7 @@ pub const Unit = struct {
 
     /// The running finite iteration's entry for the position executing now,
     /// made on first use, or null when no plan applies.
-    pub fn planEntry(self: *Unit) error{OutOfMemory}!?*PlanEntry {
+    pub fn planEntry(self: *Fiber) error{OutOfMemory}!?*PlanEntry {
         const plan = self.applicationPlan() orelse return null;
         return try plan.entry(self.allocator, self.active_index);
     }
@@ -5837,7 +5909,7 @@ pub const Unit = struct {
     /// Runs a lowered locals operation: bind the top `operand` values, read
     /// local `operand`, or drop `operand` locals. The lowerer computed the
     /// operand, so the checks only guard a word built or moved by hand.
-    fn localOperation(self: *Unit, name: u32, operand: u32) MachineError!void {
+    fn localOperation(self: *Fiber, name: u32, operand: u32) MachineError!void {
         const locals = self.environment.localsWords();
         self.active_word = .plain(name);
         if (name == locals.get) {
@@ -5859,7 +5931,7 @@ pub const Unit = struct {
     /// view: incremental top-level source, `execute`, and a word resumed after
     /// loading. `dispatch` pushes a quoted occurrence instead, and `execute`
     /// strips the quote before calling here.
-    pub fn executeWord(self: *Unit, word: value.Symbol) MachineError!void {
+    pub fn executeWord(self: *Fiber, word: value.Symbol) MachineError!void {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
@@ -5873,10 +5945,10 @@ pub const Unit = struct {
         });
     }
 
-    /// What this unit last resolved `word` to, if no publication has
+    /// What this fiber last resolved `word` to, if no publication has
     /// happened since. Bootstrap resolves every word afresh, since core's
     /// directory changes without a publication.
-    inline fn reusedResolution(self: *Unit, word: value.Symbol) ?*env.Definition {
+    inline fn reusedResolution(self: *Fiber, word: value.Symbol) ?*env.Definition {
         if (self.inherited.phase == .bootstrap) return null;
         return self.resolutions.find(
             word,
@@ -5886,7 +5958,7 @@ pub const Unit = struct {
     }
 
     /// Records what an explicit lookup resolved `word` to.
-    fn rememberResolution(self: *Unit, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance, definition: *env.Definition) error{OutOfMemory}!void {
+    fn rememberResolution(self: *Fiber, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance, definition: *env.Definition) error{OutOfMemory}!void {
         if (self.inherited.phase == .bootstrap) return;
         return self.resolutions.remember(
             self.allocator,
@@ -5899,7 +5971,7 @@ pub const Unit = struct {
     }
 
     /// The failure for a word that did not bind and will not after a load.
-    pub fn failUnbound(self: *Unit, word: value.Symbol, miss: binder.Unbound) MachineError {
+    pub fn failUnbound(self: *Fiber, word: value.Symbol, miss: binder.Unbound) MachineError {
         self.active_word = .plain(word.name);
         return switch (miss) {
             .unresolved => |chain| self.undefinedWordIn(word.name, chain),
@@ -5911,7 +5983,7 @@ pub const Unit = struct {
     /// Fails a lookup miss for `word`, starting a module load when one may
     /// make it resolvable. `continuation` says how to resume after the load.
     fn missOrLoad(
-        self: *Unit,
+        self: *Fiber,
         word: value.Symbol,
         miss: binder.Miss,
         continuation: QualifiedLoadContinuation,
@@ -5935,19 +6007,19 @@ pub const Unit = struct {
         }
     }
 
-    fn failRetiredWord(self: *Unit, name: u32) MachineError {
+    fn failRetiredWord(self: *Fiber, name: u32) MachineError {
         self.active_word = .plain(name);
         return self.fail(.domain, "the scope this word was written in has retired");
     }
 
-    pub fn raiseOwned(self: *Unit, raised: Value) MachineError {
+    pub fn raiseOwned(self: *Fiber, raised: Value) MachineError {
         self.installPendingFailure(EclErr.init(.user, "raised error"));
         if (self.active_word != no_word) self.pendingFailure().word = self.active_word;
         self.pendingFailure().raised = raised;
         return error.Ecl;
     }
     fn beginAttemptOwned(
-        self: *Unit,
+        self: *Fiber,
         input: OwnedUnitInput,
     ) error{OutOfMemory}!void {
         var owned = input;
@@ -5968,7 +6040,7 @@ pub const Unit = struct {
     }
     /// Opens one `@attempt` boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure.
-    fn openAttempt(self: *Unit, body: *Header) error{OutOfMemory}!void {
+    fn openAttempt(self: *Fiber, body: *Header) error{OutOfMemory}!void {
         const invoker = self.current.?;
         const word = self.active_word;
         _ = self.suspendCurrent() catch {
@@ -5997,6 +6069,36 @@ pub const Unit = struct {
             .traced_word = no_word,
         };
     }
+    /// Opens one `@load` boundary over a read source. Consuming: the body is
+    /// owned by the boundary on success and released here on every failure.
+    /// The body keeps its invoker's authority to define, so a file loaded at
+    /// the root defines into the session.
+    fn openLoad(
+        self: *Fiber,
+        body: *Header,
+        word: intern.TraceWord,
+        provenance: modules.RegistrationProvenance,
+    ) error{OutOfMemory}!void {
+        const invoker = self.current.?;
+        _ = self.suspendCurrent() catch {
+            self.releases.releaseHeader(body);
+            return error.OutOfMemory;
+        };
+        if (self.frames.items.len >= max_frame_count) {
+            self.releases.releaseHeader(body);
+            return error.OutOfMemory;
+        }
+        var site = ExecutionSite.inheriting(invoker, invoker.scope());
+        site.registration_provenance = provenance;
+        try self.openBoundary(.load, @intCast(self.stack.items.len), word, body);
+        self.current = .{
+            .code = body,
+            .program = .owned,
+            .position = .{ .source = 0 },
+            .site = site,
+            .traced_word = no_word,
+        };
+    }
     /// Opens one stack boundary: the frame recording where to return to, and
     /// the base its operands start from. The three boundary modes — a module
     /// body, a state application, and `@attempt` — differ in what they record
@@ -6006,7 +6108,7 @@ pub const Unit = struct {
     /// seed values are never handed in: they belong to the driver that
     /// materializes them after the boundary is open.
     fn openBoundary(
-        self: *Unit,
+        self: *Fiber,
         mode: BoundaryMode,
         stack_base: u32,
         word: intern.TraceWord,
@@ -6029,7 +6131,7 @@ pub const Unit = struct {
         self.boundary_index = index;
         self.stack_base = stack_base;
     }
-    fn appendFrame(self: *Unit, owned: *OwnedFrame) error{OutOfMemory}!void {
+    fn appendFrame(self: *Fiber, owned: *OwnedFrame) error{OutOfMemory}!void {
         try self.frames.append(self.allocator, owned.frame.?);
         _ = owned.take();
         self.max_frames = @max(self.max_frames, self.frames.items.len);
@@ -6040,7 +6142,7 @@ pub const Unit = struct {
     /// dispatch the caller's next form. Drivers, parks, and nested quotations
     /// therefore finish before the ordinary frame resumer checks outputs.
     /// Allocation failure leaves the caller unchanged.
-    fn beginInvocation(self: *Unit, effect: env.Effect, word: intern.TraceWord) MachineError!void {
+    fn beginInvocation(self: *Fiber, effect: env.Effect, word: intern.TraceWord) MachineError!void {
         if (self.current.?.position == .redispatch) {
             const index = self.current.?.position.redispatch;
             self.current.?.position = .{ .invocation = index };
@@ -6072,7 +6174,7 @@ pub const Unit = struct {
     /// Suspends a non-tail continuation. An exhausted anonymous quotation
     /// inherits its named trace owner so inline control does not erase the
     /// activation that selected it.
-    fn suspendCurrent(self: *Unit) error{OutOfMemory}!intern.TraceWord {
+    fn suspendCurrent(self: *Fiber) error{OutOfMemory}!intern.TraceWord {
         const current = &self.current.?;
         if (current.hasInstructions()) {
             // Built in place: an appended frame was a stack temporary copied
@@ -6092,7 +6194,7 @@ pub const Unit = struct {
     /// Preserve even an exhausted caller: after publication the qualified
     /// request still needs its resolution scope, home, and continuation, and
     /// only the eventual dispatched word may consume the tail position.
-    fn suspendCurrentForQualifiedLoad(self: *Unit) error{OutOfMemory}!intern.TraceWord {
+    fn suspendCurrentForQualifiedLoad(self: *Fiber) error{OutOfMemory}!intern.TraceWord {
         const current = self.current.?;
         try self.frames.append(self.allocator, .{ .eval = current });
         self.max_frames = @max(self.max_frames, self.frames.items.len);
@@ -6102,7 +6204,7 @@ pub const Unit = struct {
 };
 
 /// Why a slice returned. `exhausted` means the turn's quantum ran out with
-/// work still runnable: the unit can continue at once. `yielded` means it
+/// work still runnable: the fiber can continue at once. `yielded` means it
 /// stopped for something outside itself (a wait, settlement, unfinished
 /// cleanup, or backpressure), so its executor should let other work run.
 pub const RunStatus = enum { completed, exhausted, yielded, parked };
@@ -6142,7 +6244,7 @@ pub const OwnedUnitInput = enum(u128) {
     }
 
     /// The body, borrowed: the input stays alive until the scheduler has
-    /// retained it and the initial operands into the new Unit, so a child
+    /// retained it and the initial operands into the new Fiber, so a child
     /// launch never invents a second teardown protocol.
     pub fn quotation(self: *const OwnedUnitInput) *Header {
         std.debug.assert(self.* != .consumed);
@@ -6187,8 +6289,8 @@ pub const OwnedUnitInput = enum(u128) {
     }
 };
 
-/// What a constructed unit's stack starts with. Every reference here is a
-/// borrow the caller keeps through initialization; the Unit retains its own
+/// What a constructed fiber's stack starts with. Every reference here is a
+/// borrow the caller keeps through initialization; the Fiber retains its own
 /// independent stack-owned reference to each before returning.
 pub const InitialStack = union(enum) {
     empty,
@@ -6203,26 +6305,26 @@ pub const InitialStack = union(enum) {
     borrowed_pair: struct { deep: *Header, seeds: *Header },
 };
 
-/// Starts a unit on code that resolves one form at a time: top-level source,
+/// Starts a fiber on code that resolves one form at a time: top-level source,
 /// or a task's body.
-pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
+pub fn initialize(fiber: *Fiber, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
     const program: Program = .owned;
-    std.debug.assert(unit.frames.items.len == 0);
-    std.debug.assert(unit.terminal == .evaluating);
-    std.debug.assert(unit.current == null);
+    std.debug.assert(fiber.frames.items.len == 0);
+    std.debug.assert(fiber.terminal == .evaluating);
+    std.debug.assert(fiber.current == null);
     if (initial_stack == .borrowed_pair) {
         const pair = initial_stack.borrowed_pair;
         heap.incRef(pair.deep);
         heap.incRef(pair.seeds);
-        try unit.startDriver(ChildSeedDriver{
+        try fiber.startDriver(ChildSeedDriver{
             .materializer = .init(.initPair(pair.deep, pair.seeds)),
         });
         heap.incRef(code);
-        unit.current = .{
+        fiber.current = .{
             .code = code,
             .program = program,
             .position = .{ .source = 0 },
-            .site = .root(unit),
+            .site = .root(fiber),
             .traced_word = no_word,
         };
         return;
@@ -6235,77 +6337,77 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
         .borrowed_pair => unreachable,
     };
     // One element is O(1) and goes on now, deepest. Explicit seeds are
-    // user-sized, so the Unit is instead handed a driver that materializes them
+    // user-sized, so the Fiber is instead handed a driver that materializes them
     // in bounded slices: the evaluator services a driver before the
     // activation's code, so the body still starts on a fully seeded stack.
     if (element) |item| {
-        try unit.stack.append(unit.allocator, item);
+        try fiber.stack.append(fiber.allocator, item);
         heap.retainValue(item);
     }
     if (seeds) |items| {
         // The driver's field owns this reference on every exit: a failed
         // `startDriver` disposes the pending driver's fields for us.
         heap.incRef(items);
-        try unit.startDriver(ChildSeedDriver{
+        try fiber.startDriver(ChildSeedDriver{
             .materializer = .init(.init(items)),
         });
     }
     heap.incRef(code);
-    unit.current = .{
+    fiber.current = .{
         .code = code,
         .program = program,
         .position = .{ .source = 0 },
-        .site = .root(unit),
+        .site = .root(fiber),
         .traced_word = no_word,
     };
 }
 
-/// Installs one borrowed Session source as the root unit's first scheduled
+/// Installs one borrowed Session source as the root fiber's first scheduled
 /// work. The source bytes need only remain live until `runInitializedRoot`
 /// returns; driver teardown is completed before that blocking call exits.
 pub fn initializeSource(
-    unit: *Unit,
+    fiber: *Fiber,
     source_name: []const u8,
     source: []const u8,
 ) error{OutOfMemory}!void {
     var empty = heap.OwnedValue.init(
-        unit.releases,
-        try list.fromValuesGeneric(unit.allocator, &.{}),
+        fiber.releases,
+        try list.fromValuesGeneric(fiber.allocator, &.{}),
     );
     defer empty.deinit();
-    try initialize(unit, empty.borrow().list, .empty);
-    try unit.startDriver(Unit.SourceDriver{
+    try initialize(fiber, empty.borrow().list, .empty);
+    try fiber.startDriver(Fiber.SourceDriver{
         .text = .init(.{ .borrowed = .{ .source_name = source_name, .source = source } }),
         .completion = .init(.{ .session = null }),
     });
 }
 
-pub fn runSlice(unit: *Unit) MachineError!RunStatus {
+pub fn runSlice(fiber: *Fiber) MachineError!RunStatus {
     // Each turn begins with one full kernel quantum. The charge that exhausted
     // the previous one already polled cancellation, and every driver polls
     // before it draws.
-    unit.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
-    const status = loop(unit) catch |err| switch (err) {
+    fiber.kernel_budget = turn_core.beginTurn(kernel_poll_quantum);
+    const status = loop(fiber) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
     };
     if (comptime root_execution_metrics_enabled) {
-        if (status != .completed) unit.root_execution_metrics.scheduler_handoffs += 1;
+        if (status != .completed) fiber.root_execution_metrics.scheduler_handoffs += 1;
     }
     return status;
 }
 
 /// Makes the next evaluator entry observe cancellation before executing a
-/// ready unit's first form.
-pub fn armCancellationBeforeDispatch(unit: *Unit) void {
-    unit.fuel = 0;
+/// ready fiber's first form.
+pub fn armCancellationBeforeDispatch(fiber: *Fiber) void {
+    fiber.fuel = 0;
 }
 
-pub fn run(unit: *Unit, code: *Header) MachineError!void {
-    try initialize(unit, code, .empty);
+pub fn run(fiber: *Fiber, code: *Header) MachineError!void {
+    try initialize(fiber, code, .empty);
     while (true) {
-        const status = try runSlice(unit);
-        _ = unit.releases.advance(kernel_poll_quantum);
+        const status = try runSlice(fiber);
+        _ = fiber.releases.advance(kernel_poll_quantum);
         switch (status) {
             .completed => return,
             .exhausted, .yielded => {},
@@ -6314,7 +6416,7 @@ pub fn run(unit: *Unit, code: *Header) MachineError!void {
     }
 }
 
-fn loop(self: *Unit) MachineError!RunStatus {
+fn loop(self: *Fiber) MachineError!RunStatus {
     var first_step = true;
     while (true) {
         // Completion and output delivery may spend the last unit too. Never
@@ -6461,7 +6563,7 @@ fn loop(self: *Unit) MachineError!RunStatus {
         self.active_index = index;
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
-        // A word this unit has resolved in the current publication runs
+        // A word this fiber has resolved in the current publication runs
         // directly; a quoted or lowered occurrence is a form, as is
         // everything else, and an unresolved word resolves when dispatched.
         const dispatched = resolved: {
@@ -6482,18 +6584,18 @@ fn loop(self: *Unit) MachineError!RunStatus {
     }
 }
 
-fn clearWorkDriver(unit: *Unit) void {
-    const driver = unit.takeWorkDriver() orelse return;
-    const inline_storage = unit.ownsInlineDriver(driver.context);
-    driver.deinit(unit.releases, unit.allocator);
+fn clearWorkDriver(fiber: *Fiber) void {
+    const driver = fiber.takeWorkDriver() orelse return;
+    const inline_storage = fiber.ownsInlineDriver(driver.context);
+    driver.deinit(fiber.releases, fiber.allocator);
     // A driver that finishes by handing back a result is torn down here rather
     // than retiring itself, so this is the other place the slot comes free.
     // Without it an inline driver that completed this way would hold the slot
-    // for the rest of the unit's life and every later driver would allocate.
-    if (inline_storage) unit.releaseInlineDriver();
+    // for the rest of the fiber's life and every later driver would allocate.
+    if (inline_storage) fiber.releaseInlineDriver();
 }
 
-fn resumePark(self: *Unit) MachineError!void {
+fn resumePark(self: *Fiber) MachineError!void {
     const delivery = self.takeParkResume().?;
     switch (delivery) {
         .task_wait => |wait| return resumeTaskWait(self, wait),
@@ -6552,7 +6654,7 @@ fn resumePark(self: *Unit) MachineError!void {
     }
 }
 
-fn resumeTaskWait(self: *Unit, wait: TaskWaitResume) MachineError!void {
+fn resumeTaskWait(self: *Fiber, wait: TaskWaitResume) MachineError!void {
     switch (wait) {
         .outcome => |outcome| try self.pushOwned(outcome),
         .indexed => |indexed| {
@@ -6609,10 +6711,10 @@ fn formAt(code: *Header, index: u32) Value {
         list.atUnchecked(.{ .list = code }, index);
 }
 
-fn poll(self: *Unit) MachineError!void {
+fn poll(self: *Fiber) MachineError!void {
     self.fuel -= 1;
 }
-inline fn dispatch(self: *Unit, form: Value) MachineError!void {
+inline fn dispatch(self: *Fiber, form: Value) MachineError!void {
     const word = switch (form) {
         .symbol => |reference| reference,
         .int, .float, .char, .list, .dict, .task, .port, .address => return self.pushBorrowed(form),
@@ -6626,7 +6728,7 @@ inline fn dispatch(self: *Unit, form: Value) MachineError!void {
 
 /// Runs a builtin under `trace_word`, translating its failure payload the one
 /// way resolved execution does.
-fn invokeBuiltin(self: *Unit, trace_word: intern.TraceWord, primitive: env.PrimitiveImpl) MachineError!void {
+fn invokeBuiltin(self: *Fiber, trace_word: intern.TraceWord, primitive: env.PrimitiveImpl) MachineError!void {
     self.active_word = trace_word;
     primitive(self) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -6651,7 +6753,7 @@ const LookupDispatchDriver = struct {
     pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
 
-    pub fn advance(evaluator: *Unit, self: *LookupDispatchDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *LookupDispatchDriver) MachineError!WorkProgress {
         if (!self.resolver.isPresent()) self.resolver = .init(binder.Resolver.init(self.context.borrowMut(), self.word));
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.resolver.borrowMut().advance(self.context.borrowMut())) {
@@ -6717,7 +6819,7 @@ const QualifiedLoadPreparationDriver = struct {
     }
 
     pub fn advance(
-        evaluator: *Unit,
+        evaluator: *Fiber,
         self: *QualifiedLoadPreparationDriver,
     ) MachineError!WorkProgress {
         try evaluator.pollKernel();
@@ -6751,7 +6853,7 @@ const QualifiedLoadPreparationDriver = struct {
 /// Checking that is what bounds the operation: a source that registered
 /// nothing, or a different name, fails once here instead of starting another
 /// load when its tagged continuation resumes.
-fn continueSourceRequest(evaluator: *Unit, driver: anytype, request: SourceLoadRequest) MachineError!WorkProgress {
+fn continueSourceRequest(evaluator: *Fiber, driver: anytype, request: SourceLoadRequest) MachineError!WorkProgress {
     return switch (request) {
         .source => .completed,
         .module => |module| continueQualifiedRequest(evaluator, driver, module.operation),
@@ -6759,7 +6861,7 @@ fn continueSourceRequest(evaluator: *Unit, driver: anytype, request: SourceLoadR
 }
 
 fn continueQualifiedRequest(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     driver: anytype,
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
@@ -6786,7 +6888,7 @@ fn continueQualifiedRequest(
 }
 
 fn verifyPublishedModule(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     driver: anytype,
     name: intern.ModuleName,
     loading: *heap.Owned(modules.LoadingLease),
@@ -6813,7 +6915,7 @@ const QualifiedRegistrationDriver = struct {
     artifact: ?map_state.ArtifactId = null,
     module_index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         switch (self.acquisition.borrowMut().advance()) {
             .pending => return .stepped,
@@ -6883,7 +6985,7 @@ pub const ExplicitLookup = struct {
     context: binder.Context,
     resolver: binder.Resolver,
 
-    pub fn init(evaluator: *Unit, word: value.Symbol) ExplicitLookup {
+    pub fn init(evaluator: *Fiber, word: value.Symbol) ExplicitLookup {
         const context = evaluator.resolutionContext(evaluator.inherited.registry.view());
         return .{ .context = context, .resolver = binder.Resolver.init(&context, word) };
     }
@@ -6907,7 +7009,7 @@ pub const Reflected = struct {
     releases: *heap.ReleaseDomain,
 
     /// Holds a definition the lookup's view kept alive.
-    pub fn hold(evaluator: *Unit, definition: *env.Definition, name: u32) Reflected {
+    pub fn hold(evaluator: *Fiber, definition: *env.Definition, name: u32) Reflected {
         if (definition.lifetime == .counted) definition.retain();
         const home = modules.definitionHome(definition);
         return .{
@@ -6966,7 +7068,7 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 /// checked where a call crosses into its module, except a standard-library
 /// word's: its effects are reflective metadata, and its arity failures are
 /// those of the code it runs.
-fn invokeDefinition(self: *Unit, definition: *env.Definition, name: u32) MachineError!void {
+fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) MachineError!void {
     // A homeless builtin has no effect boundary and no recognition: the
     // common case, run directly.
     if (definition.home == null) switch (definition.code()) {
@@ -7047,7 +7149,7 @@ const DirectWordFallback = struct {
             return .{ .context = self, .make_fn = make };
         }
 
-        fn make(context: ?*const anyopaque, _: *Unit) IdiomFallback {
+        fn make(context: ?*const anyopaque, _: *Fiber) IdiomFallback {
             const self: *const Source = @ptrCast(@alignCast(context.?));
             std.debug.assert(self.definition.lifetime == .static);
             return typedIdiomFallback(DirectWordFallback{
@@ -7057,7 +7159,7 @@ const DirectWordFallback = struct {
             });
         }
     };
-    pub fn run(evaluator: *Unit, self: *DirectWordFallback) MachineError!void {
+    pub fn run(evaluator: *Fiber, self: *DirectWordFallback) MachineError!void {
         return scheduleWord(
             evaluator,
             self.definition.code().source,
@@ -7319,7 +7421,7 @@ pub const ModuleLookupCursor = struct {
         return self.registry.acquireCursor(self.name);
     }
 
-    pub fn atCurrent(evaluator: *Unit, name: intern.ModuleName) ModuleLookupCursor {
+    pub fn atCurrent(evaluator: *Fiber, name: intern.ModuleName) ModuleLookupCursor {
         return .init(evaluator.inherited.registry, evaluator.inherited.module_snapshot, evaluator.inherited.libraries(), evaluator.current.?.site.registration_provenance, name);
     }
 
@@ -7383,7 +7485,7 @@ pub const ModuleLookupCursor = struct {
 };
 
 fn scheduleWord(
-    self: *Unit,
+    self: *Fiber,
     executable: *const env.Executable,
     word: intern.TraceWord,
     resolved_home: ?*modules.ModuleHome,
@@ -7412,7 +7514,7 @@ fn scheduleWord(
 /// `site`, under its effect check if it has one. The callee's owner is secured
 /// before the caller can retire: in tail position the caller's executable may
 /// hold the callee's last reference.
-fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
+fn enterBody(self: *Fiber, executable: *const env.Executable, word: intern.TraceWord, site: ExecutionSite, effect: ?EffectCheck) MachineError!void {
     var check = effect;
     executable.owner().retain();
     var entered = false;
@@ -7442,7 +7544,7 @@ fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceW
     };
 }
 fn prepareEffectCheck(
-    self: *Unit,
+    self: *Fiber,
     effect: ?env.Effect,
     word: intern.TraceWord,
 ) MachineError!EffectCheck {
@@ -7471,7 +7573,7 @@ fn prepareEffectCheck(
         .word = word,
     };
 }
-fn resumeFrames(self: *Unit) MachineError!bool {
+fn resumeFrames(self: *Fiber) MachineError!bool {
     while (self.fuel != 0) switch (self.topFrameTag() orelse return false) {
         .eval => {
             const continuation = self.popFrame(.eval);
@@ -7488,7 +7590,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
             const continuation = self.popFrame(.application);
             var application_selection = continuation.selection;
             defer application_selection.deinit(self.releases);
-            const launch: Unit.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
+            const launch: Fiber.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
                     const window: StackWindow = @fromBackingInt(@intCast(@as(u32, @intCast(self.stack_base))));
@@ -7627,6 +7729,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                     return true;
                 },
                 .module => unreachable,
+                .load => try finishLoad(self, boundary.stack_base),
             }
         },
     };
@@ -7634,7 +7737,7 @@ fn resumeFrames(self: *Unit) MachineError!bool {
     // and yield before reporting completion.
     return true;
 }
-fn finishEffectCheck(self: *Unit, check: *EffectCheck) MachineError!void {
+fn finishEffectCheck(self: *Fiber, check: *EffectCheck) MachineError!void {
     check.restoreActive(self);
     if (check.row) return;
     const observed = self.stack.items.len;
@@ -7654,7 +7757,17 @@ fn finishEffectCheck(self: *Unit, check: *EffectCheck) MachineError!void {
         self.pendingFailure().site = .{ .contract_quotation = candidate };
     return failure;
 }
-fn finishAttempt(self: *Unit, base: u32) MachineError!void {
+/// Finishes one `@load` boundary. Like a module body, a loaded file defines
+/// and keeps no stack state, so a residual operand window is refused.
+fn finishLoad(self: *Fiber, base: u32) MachineError!void {
+    const observed = self.stack.items.len - base;
+    if (observed != 0) return self.failFmt(
+        .domain,
+        "@load file left {d} value{s} on its stack; a loaded file defines words and keeps no state",
+        .{ observed, if (observed == 1) "" else "s" },
+    );
+}
+fn finishAttempt(self: *Fiber, base: u32) MachineError!void {
     try self.startDriver(AttemptResultDriver.init(
         self.allocator,
         base,
@@ -7679,7 +7792,7 @@ const AttemptResultDriver = struct {
             .materializer = .init(.init(allocator, values)),
         };
     }
-    pub fn advance(evaluator: *Unit, self: *AttemptResultDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *AttemptResultDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (!work.exhausted()) switch (self.phase) {
@@ -7712,7 +7825,7 @@ const AttemptResultDriver = struct {
 };
 /// Drives one registry publication, mapping its refusals to language errors.
 fn advanceRegistration(
-    evaluator: *Unit,
+    evaluator: *Fiber,
     cursor: *modules.Registry.RegistrationCursor,
 ) MachineError!WorkProgress {
     return switch (cursor.advance() catch |err| switch (err) {
@@ -7726,10 +7839,10 @@ fn advanceRegistration(
 }
 
 /// The one bounded owner/progress state for explicit seed materialization. Both an
-/// in-machine construction boundary and a fresh child Unit embed this exact
+/// in-machine construction boundary and a fresh child Fiber embed this exact
 /// state machine. Capacity for a granted slice is secured before its first
 /// append, so allocation failure adds none of that slice; an earlier prefix is
-/// ordinary stack ownership and retires with its boundary or Unit.
+/// ordinary stack ownership and retires with its boundary or Fiber.
 /// Materializes one or two seed lists onto a fresh child's stack in bounded
 /// slices. `deep`, when present, is materialized first and therefore ends up
 /// beneath `seeds`: `@give` uses it for the ports it moves, so no caller has
@@ -7761,29 +7874,29 @@ const SeedMaterializer = struct {
 
     fn advance(
         self: *SeedMaterializer,
-        unit: *Unit,
+        fiber: *Fiber,
         work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!bool {
         if (!self.deep_done) {
-            if (!try self.copy(unit, self.deep.?.borrow(), work)) return false;
+            if (!try self.copy(fiber, self.deep.?.borrow(), work)) return false;
             self.deep_done = true;
             self.next = 0;
         }
-        return self.copy(unit, self.seeds.borrow(), work);
+        return self.copy(fiber, self.seeds.borrow(), work);
     }
 
     fn copy(
         self: *SeedMaterializer,
-        unit: *Unit,
+        fiber: *Fiber,
         source: *Header,
         work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!bool {
         const count: usize = @intCast(source.length());
         const end = self.next + work.take(count - self.next);
-        try unit.stack.ensureUnusedCapacity(unit.allocator, end - self.next);
+        try fiber.stack.ensureUnusedCapacity(fiber.allocator, end - self.next);
         for (self.next..end) |index| {
             const item = list.atUnchecked(.{ .list = source }, index);
-            unit.stack.appendAssumeCapacity(item);
+            fiber.stack.appendAssumeCapacity(item);
             heap.retainValue(item);
         }
         self.next = end;
@@ -7808,13 +7921,13 @@ const ConstructionTarget = union(enum) {
     }
 };
 
-/// The user-sized half of opening a unit: re-scoping a witnessed construction
+/// The user-sized half of opening a fiber: re-scoping a witnessed construction
 /// body, and materializing explicit seed values onto the construction stack.
 ///
 /// Both are proportional to what the program wrote, so neither may run to
 /// completion inside one scheduler step. Everything the boundary will need is
 /// held here meanwhile — the candidate image, the source body, the finished
-/// copy, and the seeds — so abandoning the unit at any point releases all of it
+/// copy, and the seeds — so abandoning the fiber at any point releases all of it
 /// through field ownership and publishes nothing.
 ///
 /// The driver stays installed across the open phase on purpose: the evaluator
@@ -7866,7 +7979,7 @@ const ConstructionDriver = struct {
     /// opened in a later step than the one that dispatched it.
     word: intern.TraceWord,
 
-    pub fn advance(evaluator: *Unit, self: *ConstructionDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ConstructionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         switch (self.state.borrowMut().*) {
             .rescope => |*rescope| {
@@ -7917,7 +8030,7 @@ const ConstructionDriver = struct {
     }
 };
 
-/// The child half of the same rule: a fresh Unit's own first slices put its
+/// The child half of the same rule: a fresh Fiber's own first slices put its
 /// input's seeds on its stack, so a spawn never copies a user-sized seed list
 /// inside the step that created it — and `@each` cannot multiply that copy by
 /// the number of children it starts per turn.
@@ -7926,7 +8039,7 @@ const ChildSeedDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     materializer: heap.Owned(SeedMaterializer),
 
-    pub fn advance(evaluator: *Unit, self: *ChildSeedDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ChildSeedDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         if (try self.materializer.borrowMut().advance(
             evaluator,
@@ -7948,7 +8061,7 @@ const ChildSeedDriver = struct {
 /// sealed: a module load in between restarts the seal against a view that
 /// holds the loaded module. A placeholder evaluation at the image's site is the
 /// caller such a load suspends and returns to.
-fn startModuleSeal(self: *Unit) MachineError!void {
+fn startModuleSeal(self: *Fiber) MachineError!void {
     const frame = &self.frames.items[self.frames.items.len - 1].boundary;
     const observed = self.stack.items.len - frame.stack_base;
     if (observed != 0) {
@@ -8024,7 +8137,7 @@ const FrozenGroup = struct {
 
 /// Records recognition for a standard-library group's trusted definitions,
 /// against bodies that are bound and directories that are sealed.
-fn recognizeGroup(evaluator: *Unit, image: *modules.OwnedImage) void {
+fn recognizeGroup(evaluator: *Fiber, image: *modules.OwnedImage) void {
     const home = image.executionHome(evaluator.module_access);
     const frozen: FrozenGroup = .{
         .environment = evaluator.environment,
@@ -8086,11 +8199,11 @@ const ModuleSealDriver = struct {
         }
     };
 
-    fn image(evaluator: *Unit) *modules.OwnedImage {
+    fn image(evaluator: *Fiber) *modules.OwnedImage {
         return &evaluator.frames.items[evaluator.frames.items.len - 1].boundary.mode.module.image;
     }
 
-    pub fn advance(evaluator: *Unit, self: *ModuleSealDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ModuleSealDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         while (work.spend()) switch (self.phase.borrowMut().*) {
@@ -8186,7 +8299,7 @@ const ModuleCompletionDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     cursor: heap.Owned(modules.Registry.RegistrationCursor),
 
-    pub fn advance(evaluator: *Unit, self: *ModuleCompletionDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *ModuleCompletionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         return advanceRegistration(evaluator, self.cursor.borrowMut());
     }
@@ -8201,7 +8314,7 @@ pub fn outcomeDict(
     const key = try intern.intern(name);
     return dict.fromUniquePairs(allocator, releases, &.{.{ .{ .symbol = .{ .name = key } }, payload }});
 }
-fn startFailure(self: *Unit) error{OutOfMemory}!void {
+fn startFailure(self: *Fiber) error{OutOfMemory}!void {
     std.debug.assert(self.hasPendingFailure());
     // Failure entry owns the native tail too: it must be detached before the
     // frame unwinder can replace it with the failure driver.
@@ -8326,7 +8439,7 @@ const FailureDriver = struct {
     outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
     state: State,
 
-    fn appendInitial(self: *FailureDriver, evaluator: *Unit) void {
+    fn appendInitial(self: *FailureDriver, evaluator: *Fiber) void {
         if (self.failure.word) |word| self.appendTrace(word);
         if (self.failure.trace_parent) |word| self.appendTrace(word);
         if (evaluator.current) |current|
@@ -8346,7 +8459,7 @@ const FailureDriver = struct {
         storage_allocator.free(self.trace);
         storage_allocator.free(self.resolved);
     }
-    fn beginLocation(self: *FailureDriver, evaluator: *Unit) void {
+    fn beginLocation(self: *FailureDriver, evaluator: *Fiber) void {
         if (self.failure.site) |site| {
             switch (site) {
                 .token => |token| {
@@ -8382,10 +8495,10 @@ const FailureDriver = struct {
     fn beginUnwind(self: *FailureDriver, error_value: Value, target: UnwindTarget) void {
         self.state = .{ .current = .{ .error_value = error_value, .target = target } };
     }
-    /// Draws on the unit's budget, but yields rather than stepping when it is
+    /// Draws on the fiber's budget, but yields rather than stepping when it is
     /// spent: a stepped driver's charge can observe cancellation, and an
     /// unwind already in progress must not start another failure.
-    pub fn advance(evaluator: *Unit, self: *FailureDriver) MachineError!WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *FailureDriver) MachineError!WorkProgress {
         const work = evaluator.workBudget();
         while (switch (self.state) {
             .value, .outcome => !work.exhausted(),
@@ -8450,7 +8563,7 @@ const FailureDriver = struct {
                     continue;
                 };
                 const boundary = evaluator.frames.items[@backingInt(boundary_index)].boundary;
-                if (boundary.mode == .attempt) {
+                if (boundary.mode == .attempt and !evaluator.cancelled.load(.acquire)) {
                     const item = nearest.error_value;
                     self.beginUnwind(item, .{ .caught = .{
                         .boundary_index = boundary_index,
@@ -8550,7 +8663,7 @@ const FailureDriver = struct {
         return .{ .yielded = .settle };
     }
 };
-fn releaseCurrent(self: *Unit) void {
+fn releaseCurrent(self: *Fiber) void {
     if (self.current) |current| current.release(self.releases);
     self.current = null;
 }

@@ -5,7 +5,7 @@ const help =
     \\ecl — a homoiconic concatenative array calculator
     \\
     \\USAGE:
-    \\    ecl                         Start a REPL (or read stdin as one unit)
+    \\    ecl                         Start a REPL (or read stdin as one submission)
     \\    ecl -e <SOURCE> [ARGS...]  Evaluate source and print the stack
     \\    ecl <FILE> [ARGS...]       Run a UTF-8 script
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
@@ -584,7 +584,7 @@ fn repl(init: Startup, worker_count: usize) AppError!u8 {
     defer if (history_path) |path| init.process.gpa.free(path);
     var editor = try ecl.line_editor.Editor.init(init.process.gpa, init.process.io, history_path);
     defer editor.deinit();
-    var pending = try ecl.reader.PendingUnit.init(init.process.gpa);
+    var pending = try ecl.reader.PendingSubmission.init(init.process.gpa);
     defer pending.deinit();
     while (true) {
         const result = editor.readLine(

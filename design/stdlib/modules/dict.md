@@ -16,7 +16,7 @@ failure inside a kernel reports its `dict.core` name.
 #### Examples
 
 ```ecl
-["inspect" "alpha"] `args dict.associate
+`args ["inspect" "alpha"] dict.associate
 # => {args ["inspect" "alpha"]}
 ```
 

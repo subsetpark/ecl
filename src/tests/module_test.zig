@@ -357,9 +357,9 @@ test "reflection failures are total" {
 /// through an inline `if` so each definition lands at root level.
 const redefinition_churn = "(dup 0 = (pop) ((1) `churned def 1 - churn) if) `churn def";
 
-/// Every unit retains a fixed amount of source provenance, so the batches are
-/// one unit each and differ only in their count: a small batch fixes the
-/// per-unit cost, and a large one must not retain anything per redefinition.
+/// Every fiber retains a fixed amount of source provenance, so the batches are
+/// one fiber each and differ only in their count: a small batch fixes the
+/// per-fiber cost, and a large one must not retain anything per redefinition.
 fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize) !void {
     try expectOk(runtime, redefinition_churn);
     try expectOk(runtime, "64 churn");
@@ -543,8 +543,8 @@ test "loader: failures and cycles are total" {
         "registered nothing under that name",
         "path \"test/acceptance/modules/orphan.ecl\"",
     });
-    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" load", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
-    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" load", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" @load!", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" @load!", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -553,7 +553,7 @@ test "loader: failures and cycles are total" {
     inline for (.{ "invalid.ecl", "incomplete.ecl" }) |filename| {
         const path = try temporary.dir.realPathFileAlloc(std.testing.io, filename, std.testing.allocator);
         defer std.testing.allocator.free(path);
-        const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" load", .{path});
+        const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" @load!", .{path});
         defer std.testing.allocator.free(source);
         try expectErrorContains(&runtime, source, &.{ "kind parse", path });
     }

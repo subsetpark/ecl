@@ -292,6 +292,6 @@ reason before selecting the matrix.
   declaration compiling without any caller is not proof that its public surface works.
 - Keep line-editor coverage claims aligned with the seam actually exercised. Fuzz the
   production edit buffer and viewport projection, and query Session completion before
-  the first Unit. Use the real Debug and ReleaseSafe artifacts under a PTY for redraw,
+  the first Fiber. Use the real Debug and ReleaseSafe artifacts under a PTY for redraw,
   raw-mode queue preservation, EOF/error handling, history, and terminal restoration;
   an in-process model cannot prove compiler-codegen or kernel termios behavior.

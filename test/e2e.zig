@@ -603,7 +603,7 @@ test "e2e: tests retain file-private module visibility" {
     defer script.deinit();
     try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
     var loaded = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "\"bar.ecl\" load [] (baz.answer) @attempt `err at `kind at" },
+        .argv = &.{ exe, "-e", "\"bar.ecl\" @load! [] (baz.answer) @attempt `err at `kind at" },
         .cwd = .{ .dir = scratch.dir },
     });
     defer loaded.deinit();
@@ -870,7 +870,7 @@ test "e2e: cancellation timeout and @each agree at one and eight workers" {
         defer cancel_timeout.deinit();
         try cancel_timeout.expect(.{
             .exit_code = 0,
-            .stdout = "cancelled\ntimeout\n",
+            .stdout = "cancelled\ntimeout\ncancelled\n",
             .stderr = "",
         });
 
@@ -1243,7 +1243,7 @@ test "e2e: optional module annotation acceptance" {
 }
 
 test "e2e: direct load and ECL_PATH acceptance" {
-    var direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load io.pp" });
+    var direct = try run(&.{ build_options.ecl_exe, "-e", "[41 1] \"test/acceptance/load-stack.ecl\" @load" });
     defer direct.deinit();
     try direct.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
@@ -1505,7 +1505,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "\"alpha\\nbeta\\n\" `cwd \"round-trip.txt\" fs.create-text " ++
+            "`cwd \"round-trip.txt\" \"alpha\\nbeta\\n\" fs.create-text " ++
                 "`cwd \"round-trip.txt\" fs.read-text io.pp " ++
                 "`cwd \"round-trip.txt\" fs.read-text \"\\n\" split io.pp " ++
                 "`cwd \".\" fs.list (`name at \"round-trip.txt\" match?) filter io.pp",

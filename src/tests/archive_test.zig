@@ -80,7 +80,7 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
     try writer.writeByte('"');
 }
 
-/// `[bytes] 'root "destination" archive.unpack-tgz` for a root-relative
+/// `'root "destination" [bytes] archive.unpack-tgz` for a root-relative
 /// destination path.
 fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
     return unpackSourceAt(bytes, "`root", destination);
@@ -89,14 +89,14 @@ fn unpackSource(bytes: []const u8, destination: []const u8) ![]u8 {
 fn unpackSourceAt(bytes: []const u8, root: []const u8, destination: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
-    try source.writer.writeByte('[');
+    try source.writer.print("{s} ", .{root});
+    try appendString(&source.writer, destination);
+    try source.writer.writeAll(" [");
     for (bytes, 0..) |byte, index| {
         if (index != 0) try source.writer.writeByte(' ');
         try source.writer.print("{d}", .{byte});
     }
-    try source.writer.print("] {s} ", .{root});
-    try appendString(&source.writer, destination);
-    try source.writer.writeAll(" archive.unpack-tgz");
+    try source.writer.writeAll("] archive.unpack-tgz");
     return allocator.dupe(u8, source.written());
 }
 

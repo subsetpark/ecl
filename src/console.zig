@@ -159,10 +159,10 @@ const escape_cells: usize = "\\xff".len;
 /// command. Malformed, truncated, C0, DEL, and C1 sequences all escape. C1 is
 /// the reason decodability cannot be the test: U+0080-U+009F is well-formed
 /// two-byte UTF-8 that a terminal in UTF-8 mode may still act on.
-const Unit = struct { len: usize, decoded: bool, escape: bool };
-const escaped_byte: Unit = .{ .len = 1, .decoded = false, .escape = true };
+const Fiber = struct { len: usize, decoded: bool, escape: bool };
+const escaped_byte: Fiber = .{ .len = 1, .decoded = false, .escape = true };
 
-fn unitAt(bytes: []const u8, index: usize) Unit {
+fn unitAt(bytes: []const u8, index: usize) Fiber {
     const length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch return escaped_byte;
     if (bytes.len - index < length) return escaped_byte;
     const codepoint = std.unicode.utf8Decode(bytes[index..][0..length]) catch return escaped_byte;

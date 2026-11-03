@@ -19,8 +19,8 @@ concurrency, cancellation, and live module reload.
 
 ## The system at a glance
 
-A host creates a `Session`, then submits source a unit at a time. The path
-through the implementation is:
+A host creates a `Session`, then hands it source one submission at a time: a
+REPL logical line, or a whole script. The path through the implementation is:
 
 ```text
 source bytes
@@ -61,7 +61,7 @@ The main components are these:
 | Names and modules | Resolution at dispatch, validated and immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
 | Bulk execution | Pervasive scalar semantics, typed flat loops, and guarded source-phrase recognition | `kernel_*.zig`, `kernels.zig`, `idioms.zig` |
-| Scheduler | Green units, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
+| Scheduler | Green fibers, structured task scopes, task and external waits, cancellation, timers, external membership, and retirement service | `scheduler_core.zig`, `scheduler.zig`, `external.zig`, `task_prims.zig` |
 | Port controllers | Typed job submission, FIFO admission and cancellation, independent execution, joined retirement, and shared scope lifetime | `port_controller.zig`, `port_transfer.zig` |
 | Process ports | POSIX process-group ownership, bounded pipe queues, and terminal publication | `extensions/proc/proc.zig`, `stdlib/proc.ecl` |
 | Network listeners and connections | Normalized IP literals, scope-owned listening sockets, demand-gated accept, bounded connection queues serviced by controller threads, and idempotent close | `extensions/net/net.zig`, `stdlib/net.ecl` |
@@ -80,7 +80,7 @@ concatenative array programs.
 | Data performance | Recursive semantic pervasion with specialized flat leaves and typed kernels | Applies the APL/J/K array instinct while preserving one semantics across physical representations |
 | Memory | Precise atomic reference counts, ownership passing, copy-on-write, and uniqueness reuse | Shares the reuse insight of precise-RC systems such as Perceus; structural acyclicity keeps precise counting sufficient |
 | Fast phrases | Guarded recognition of a closed set of source phrases | Shares the dispatch economics of interpreter superinstructions; each recognition is ephemeral and the source definition remains authoritative |
-| Concurrency | Green units in a structured task tree, serviced cooperatively or by a fixed worker pool | Gives tasks the nested lifetimes of structured concurrency |
+| Concurrency | Green fibers in a structured task tree, serviced cooperatively or by a fixed worker pool | Gives tasks the nested lifetimes of structured concurrency |
 | Live publication | Immutable directory snapshots, immutable definitions, and deferred reclamation | Combines the removal/reclamation separation of RCU with Erlang-like coexistence of old and current module code |
 | Authority | Opaque owners and narrow operation-specific capabilities | Uses object-capability attenuation inside a trusted native process whose extensions remain part of the memory-safety boundary |
 
@@ -121,11 +121,13 @@ advance bounded reclamation and cannot drain or destroy the root.
 
 ### Units are transactions on the persistent stack
 
-`Session.runUnit` evaluates one source unit. The Session checkpoints its
-operand stack, moves that stack into a root `Unit`, and gives the Unit a root
-scope plus inherited service capabilities. On success, the Unit's resulting
-stack becomes the Session's next persistent stack. A parse error, language
-error, or allocation failure restores the checkpoint.
+`Session.runUnit` evaluates one submission. A root unit is the only unit whose
+restored entry stack a program observes, so it is the only one that copies its
+entry: one `RootTransaction` checkpoints the Session's operand stack, moves it
+into a root `Fiber` with a root scope and inherited service capabilities, and
+on every exit hands the Fiber's stack back. A committed unit's resulting stack
+becomes the Session's next persistent stack; a parse error, language error, or
+allocation failure restores the checkpoint.
 
 The transaction covers the operand stack. Output already written, native side
 effects, filesystem changes, and other host effects remain committed. The
@@ -146,14 +148,14 @@ capabilities as core constructors; loading the module grants no additional autho
 
 A Session captures the host environment once, records whether standard input
 remains available as data, and owns any TLS or path overrides needed by its
-Units. The CLI captures its startup directory and environment snapshot once
+Fibers. The CLI captures its startup directory and environment snapshot once
 and shares those inputs across every execution entrypoint. One private CLI
 runtime owns writer buffers, writers, named-root storage, and its Session. It
 is initialized at its final address and remains there until Session teardown
 releases every borrow. Failed construction retains no live Session. Module-map
 discovery begins at that startup directory.
 
-Host operations are exposed to executing code through narrow facades. A Unit
+Host operations are exposed to executing code through narrow facades. A Fiber
 may enqueue work, write through the console, load through the module loader, or
 use immutable host configuration. It cannot reach the raw Session, allocator,
 registry, scheduler lifecycle, or reclamation root. Observation, execution,
@@ -187,14 +189,14 @@ The bundled process SDK instance independently owns its immutable startup
 configuration and queue, capture, and live-resource limits. Child environment
 maps apply per-request overrides without changing either captured snapshot.
 Executable and working-directory syntax is validated at the process boundary;
-the operating system determines access. Units obtain only ordinary registered
+the operating system determines access. Fibers obtain only ordinary registered
 process capabilities, never process-group identifiers or native owner access.
 
 The filesystem owner opens configured roots once and owns their handles and
 admission limits until all Session work and retirement have joined. Invalid
 roots or limits fail Session construction with `InvalidHostConfig`, distinctly
 from allocation failure. Root authority remains the retained descriptor after
-a rename. Units receive only an opaque access capability, never the owner.
+a rename. Fibers receive only an opaque access capability, never the owner.
 
 Direct filesystem drivers own validated inputs, descriptor leases, operation
 admission, and partial outputs. Directory, staging, enumeration, lock, and writer
@@ -298,9 +300,9 @@ list of those values is already executable code.
 ### Lexing and reading are resumable
 
 `lexer.zig` owns UTF-8 cursor movement, spans, token classification, and lexical
-diagnostics. `reader_cursor.zig` validates UTF-8, tokenizes the unit, recognizes
-delimited lists and dictionaries, interns symbols and words, and materializes
-the resulting values. Every stage is an explicit cursor. A heap work stack
+diagnostics. `reader_cursor.zig` validates UTF-8, tokenizes the submission,
+recognizes delimited lists and dictionaries, interns symbols and words, and
+materializes the resulting values. Every stage is an explicit cursor. A heap work stack
 carries nested source independently of the Zig call stack, and a scheduler
 caller may advance the reader a bounded amount at a time.
 
@@ -319,13 +321,13 @@ literals and string-to-number conversions share this classification boundary.
 The reader distinguishes three outcomes:
 
 - a complete root quotation;
-- an incomplete unit, used by the REPL to request more physical lines; or
+- an incomplete submission, used by the REPL to request more physical lines; or
 - a parse diagnostic.
 
-Lexical state belongs to the reader. `PendingUnit` carries accumulated bytes
-and the tokenizer state derived from exactly those bytes. The line editor asks
-that state whether a unit is complete and stays independent of quote, string,
-character, and comment recognition.
+Lexical state belongs to the reader. `PendingSubmission` carries accumulated
+bytes and the tokenizer state derived from exactly those bytes. The line editor
+asks that state whether a submission is complete and stays independent of
+quote, string, character, and comment recognition.
 
 ### Words resolve when they run
 
@@ -362,7 +364,7 @@ useful data work.
 
 Locals declarations are the one general source lowering. `locals.zig` validates
 local names and rewrites local loads into private core operations over a
-Unit-owned locals stack. A local may not cross into a nested quotation; source
+Fiber-owned locals stack. A local may not cross into a nested quotation; source
 must use explicit quotation construction such as `partial` when it wants value
 capture.
 
@@ -556,7 +558,7 @@ Graph destruction charges one unit per edge, and an object being destroyed
 stays with the drainer until it is finished or the slice's budget is spent.
 
 `HostOwner` is the only authority that can drain the domain synchronously.
-Executing Units receive a facade that can release, enqueue, and advance bounded
+Executing Fibers receive a facade that can release, enqueue, and advance bounded
 retirement, but cannot blockingly destroy the Session's graph. This keeps a
 nominally constant scheduler turn from hiding an unbounded recursive free.
 
@@ -577,9 +579,9 @@ Which scope holds that membership can change. A live external resource is a
 member of exactly one task scope at a time, and a closed one is a member of
 none; the membership a port holds is the whole of what its owning scope owns
 on its behalf. `@give` is the only thing that moves one, and it moves it as a
-transaction against the scope of a unit being constructed: the destination is
+transaction against the scope of a fiber being constructed: the destination is
 attached while the origin still holds its own membership, so the resource is
-never unowned and is never reachable by the new unit before that unit's scope
+never unowned and is never reachable by the new fiber before that fiber's scope
 owns it, and the swap becomes permanent only once the spawn can no longer
 fail. A refused or abandoned move detaches the destination's membership and
 leaves the origin's untouched. Every port kind implements this, which the heap
@@ -642,7 +644,7 @@ Ownership follows the root. Core's definitions live as long as the `Env`. A
 module image owns its definitions, and the Session keeps every published image
 until teardown, so words written in a replaced image keep their meaning. A
 top-level session definition is counted, because replacement removes it from
-the directory while running activations and units' resolutions may still hold
+the directory while running activations and fibers' resolutions may still hold
 it. An activation running a body holds its definition, and a tail call secures
 the callee before it retires the caller. Counted definitions are the only kind
 reclaimed during a Session; the retention of published images is a deliberate
@@ -700,13 +702,13 @@ path.
 
 Every publication also advances the Session's publication counter, which its
 main registry owns and each source-private registry shares. The counter is
-never reused and holds no snapshot; it only keys units' resolutions. It is
+never reused and holds no snapshot; it only keys fibers' resolutions. It is
 per Session so that one Session's publications never change what another's
-units reuse, and so what a unit allocates is a function of its own run.
+fibers reuse, and so what a fiber allocates is a function of its own run.
 
-### A unit remembers what it resolved
+### A fiber remembers what it resolved
 
-A unit keeps what its code resolved, keyed by word and the applying site's
+A fiber keeps what its code resolved, keyed by word and the applying site's
 registration provenance, for one publication: any publication in the Session
 empties it before its next use, which is what makes a replacement visible. It
 uses open addressing, is kept at most half full, and grows by doubling to a
@@ -716,7 +718,7 @@ definition it hands out outlives the dispatch that retains it. Repeating a
 word costs that probe, in a definition's body as anywhere; a quotation built
 at run time, as `cat` builds one, costs nothing more than a literal one,
 since nothing binds it. An iteration's applications borrow the quotation the
-combinator holds for the whole invocation. The bootstrap unit keeps no
+combinator holds for the whole invocation. The bootstrap fiber keeps no
 resolutions, because core's directory changes without a publication.
 
 ### An execution site correlates its contexts
@@ -899,7 +901,7 @@ retried invocation before returning to it. Failure and cancellation unwind
 the boundary without checking successful outputs; native transactions own no
 separate effect-check lifecycle.
 
-Because continuations are explicit, the machine can suspend, move a Unit to
+Because continuations are explicit, the machine can suspend, move a Fiber to
 another worker, unwind incrementally, and guarantee language tail calls without
 depending on Zig's calling convention.
 
@@ -963,7 +965,7 @@ the live evaluator carries a compact internal `EclErr`. On failure, one
 5. unwinds frames, locals, and operands in bounded steps.
 
 `@attempt` is an explicit catch boundary that converts the result to an
-`{ok ...}` or `{err ...}` envelope. Without such a boundary, the Unit fails
+`{ok ...}` or `{err ...}` envelope. Without such a boundary, the Fiber fails
 and the Session restores its stack checkpoint. No host exception or host stack
 frame becomes public error data.
 
@@ -1092,7 +1094,7 @@ Sequential reductions use the same separation: a static plan admits accumulator
 classes that stabilize after at most one scalar operation, and owns selection
 for both the recognition guard and entry. A transitioning seed participates in
 the first operation with its original type; its result, not a pre-conversion,
-establishes the stable accumulator. That step shares the unit's work budget and
+establishes the stable accumulator. That step shares the fiber's work budget and
 occupies its original scan position. The driver owns only stable state, without
 changing reduction order, scalar faults, or consumed inputs. Empty reductions
 and singleton `fold1` bypass this transition as they bypass the reducer itself.
@@ -1239,9 +1241,15 @@ measured cost justifies fusion.
 
 ## 8. Scheduling and structured concurrency
 
-A `Unit` is a green execution context. The scheduler may run Units
-cooperatively on the calling thread or on a fixed worker pool; both modes use
-the same machine, queues, wait protocol, task tree, and retirement domain.
+A `Fiber` is a green execution context. A submission, the prelude, a task body,
+or host-driven loading gets one. `@attempt`, `@load`, and module construction run as
+boundary frames inside the fiber, so one fiber carries a stack of nested units.
+A fiber's role is one tagged value: a root fiber may define, and a task fiber
+may not and records the constructor that built it. No fiber can be a defining
+task or a constructed root.
+The scheduler may run Fibers cooperatively on the calling thread or on a fixed
+worker pool; both modes use the same machine, queues, wait protocol, task tree,
+and retirement domain.
 Cooperative mode gives deterministic tests and allocation-failure testing
 the same semantics as worker execution.
 Ready work and retirement alternate when both are available. Seeded exploration
@@ -1250,12 +1258,12 @@ neither class can be passed over for more than two contested turns.
 
 ### The policy is a functional core with an imperative shell
 
-`scheduler_core.zig` defines closed state machines for Unit execution, waits,
+`scheduler_core.zig` defines closed state machines for Fiber execution, waits,
 registration, task scopes, evaluation admission, and the executor's choice
 between ready work and retirement. Given a state and an event, it returns the
 only legal decision. `scheduler.zig` owns mutexes, atomics, queues, workers,
 timer infrastructure, and the effects of those decisions. `turn_core.zig` does
-the same for a unit's turn: the budget charge, whether more work may start,
+the same for a fiber's turn: the budget charge, whether more work may start,
 whether a cancellable completion observes cancellation before handing
 execution onward, and what the evaluator does after a driver steps or yields,
 where every yield names whether the driver parked, waits on something outside
@@ -1268,12 +1276,12 @@ sanitizers.
 
 ### Fuel and drivers define safe points
 
-Each Unit has dispatch fuel. Fetching a form spends fuel, and so does resuming
+Each Fiber has dispatch fuel. Fetching a form spends fuel, and so does resuming
 a finished application continuation; a long primitive spends bounded work
 through its driver. At exhaustion the machine checks cancellation and yields.
 A scheduler slice therefore has a bound independent of the total source or
 collection size, including for a body that dispatches no form.
-A unit has one kernel budget per turn for its logical work. Every cursor takes
+A fiber has one kernel budget per turn for its logical work. Every cursor takes
 the budget it is lent and hands the same budget to the cursors it drives, so
 nested work cannot begin an allowance of its own, and a hand-off is charged
 by the cursor that does the work rather than ahead of it. Byte writes are
@@ -1285,17 +1293,17 @@ cancellable completion settles exhaustion with a cancellation poll before
 handing execution onward, even when the body to follow is empty. The next
 turn begins with a fresh quantum, and the charge that exhausts it polls
 cancellation. Only an owner creates a budget: the
-machine for a unit's turn, the scheduler and the port builder for their own
-steps, and a blocking helper, for work no unit owns, over an input its caller
+machine for a fiber's turn, the scheduler and the port builder for their own
+steps, and a blocking helper, for work no fiber owns, over an input its caller
 bounds.
 
 A driver distinguishes progress from waiting. An unfinished step keeps the turn
-while the budget lasts; a driver that must wait for another unit, the host, or
+while the budget lasts; a driver that must wait for another fiber, the host, or
 a slot's turn ends it. Bounded host I/O transfers explicitly end the turn even
 without parking; compute progress and host yields are distinct driver results.
 A cursor of many small steps therefore costs one turn rather than one per
 step, and a wait never spends the budget polling. A slice reports the two
-endings apart: an exhausted unit is still runnable, so the root starts its next
+endings apart: an exhausted fiber is still runnable, so the root starts its next
 turn without offering its host thread, while a root that stopped to wait,
 settle, or relieve backpressure yields the thread. Root fairness comes from
 releasing and re-acquiring admission each turn, not from the host yield. Work
@@ -1316,11 +1324,13 @@ closing a scope stops new children before teardown advances. This is the
 structured-concurrency rule that lets a parent own the resources its children
 borrow.
 
-Scopes and units are different granularities. A `TaskScope` exists in exactly
-two places: the session root, shared by every root unit and closed only at
-exit, and each `TaskCell`. `@attempt`, combinator applications, `load`, and
-module construction are boundary frames inside the unit that runs them: stack
-transactions that checkpoint and restore operands, owning nothing. A spawn
+Scopes, fibers, and units are different granularities. A `TaskScope` exists
+in exactly two places: the session root, shared by every root fiber and closed
+only at exit, and each `TaskCell`. `@attempt` and module construction are
+boundary frames inside the fiber that runs them: a stack floor that failure
+truncates to, taking no checkpoint and owning no task scope. `@load` opens the same
+kind of boundary over a source file once it is read. Combinator applications
+open no scope and no boundary. A spawn
 registers under the nearest enclosing scope, so a task started inside an
 `@attempt` outlives it. The constructor primitives refuse while a
 module-construction boundary is open anywhere in the frame stack, so an image
@@ -1333,7 +1343,7 @@ ready task is prevented from dispatching, and cancellation itself performs no
 allocation.
 
 Every `TaskCell` owns a `Mailbox`: a separately counted object created with
-the cell and closed in the terminal transition, before the unit's stack is
+the cell and closed in the terminal transition, before the fiber's stack is
 released. The mailbox never points back at the cell or its result, and an
 `` `address `` value holds a mailbox reference and nothing else, so addresses
 travel through mailboxes without closing a cycle. Handles are refused on
@@ -1362,7 +1372,7 @@ handles whose callbacks state ownership on registration, failed registration,
 wake loss, cancellation, and detach; a scope membership is the scheduler's own
 member node, the one consuming detach authority. Ports and resources compare
 owning scopes through an opaque scope identity and never name the scope type.
-A process pipe or terminal event may wake a Unit, but scheduler code never
+A process pipe or terminal event may wake a Fiber, but scheduler code never
 imports process backend types. Detaching an
 external member first unlinks it, then releases every list, token, and
 cancellation-cursor reference and the member capability itself; only that
@@ -1583,7 +1593,7 @@ cancelled readiness wait say it was awaiting host readiness rather than
 borrowing the task-wait wording. Cancellation, `Io`, and allocation failure
 flow through the identical arbitration, and delivery retires the timer entry
 through the same `removeTimer` before the owner is woken. A zero duration is
-already expired when the deadline is captured, so the unit parks and is
+already expired when the deadline is captured, so the fiber parks and is
 re-enqueued without the timer thread.
 
 Every clock read inside the scheduler goes through `WorkerScheduler.now`.
@@ -1597,7 +1607,7 @@ destroyed only after the timer thread has joined.
 
 ### Scheduling is nondeterministic; joins define deterministic observations
 
-Workers may execute ready Units in any order. Determinism is restored where
+Workers may execute ready Fibers in any order. Determinism is restored where
 the language specifies an order: join materialization, indexed `any` results,
 and collection assembly. A cooperative executor can choose its ready order
 from a seed, so that a result which should not depend on scheduling can be
@@ -2505,9 +2515,9 @@ completeness; the Session owns name observation; and the console owns terminal
 effects. Opaque capabilities join those layers without exposing the Session or
 pairing unrelated bytes and offsets.
 
-The REPL accumulates physical lines into one `PendingUnit`, calls the same
+The REPL accumulates physical lines into one `PendingSubmission`, calls the same
 `Session.runUnit` used by scripts, and prints the same display rendering a host
-could request. Ctrl-C discards the pending unit while preserving the Session;
+could request. Ctrl-C discards the pending submission while preserving the Session;
 stack values, definitions, modules, and history survive into the next
 successful turn.
 

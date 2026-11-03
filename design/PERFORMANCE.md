@@ -341,7 +341,7 @@ retains the full 101 repetitions.
 All values below are wall-clock microseconds. The complete command output is
 versioned CSV: the uninstrumented timing pass reports polls, CPU p50/p95, and
 wall p50/p95/p99, while the counter pass reports allocation count, peak
-temporary bytes, and root-Unit execution counters. Values are untrimmed; the
+temporary bytes, and root-Fiber execution counters. Values are untrimmed; the
 ReleaseFast task/cancellation tails below include host-scheduling outliers and
 must be reproduced before attributing them to a runtime change.
 
@@ -486,7 +486,7 @@ the focused workload remains in schema `ecl.workdrivers.*.v6`.
 
 The fourth intervention tested repeated qualified dispatch from one source call
 site. The control performed the complete module-prefix, registry-generation,
-and export lookup on every call. The treatment gives each Unit a fixed
+and export lookup on every call. The treatment gives each Fiber a fixed
 16-entry, allocation-free lookaside keyed by owned code root, instruction
 index, and word id. An entry owns a generation guard and stable binding cell;
 every hit first proves that exact generation is still current and then reloads
@@ -519,7 +519,7 @@ Public behavior counterfactuals reuse a call site across canonical reload,
 alias retarget, and module removal. They prove that reload observes the new
 generation, aliases remain late-bound, and removal heals to `undefined-word`
 rather than executing a retained generation. Fixed capacity bounds retained
-code, generations, and cells per Unit; collisions affect performance only.
+code, generations, and cells per Fiber; collisions affect performance only.
 The accepted path retains no experimental or legacy control branch, while the
 focused workload and hit/miss/heal counters remain in schema
 `ecl.workdrivers.*.v6`.
@@ -530,7 +530,7 @@ The fifth intervention tested a plain word whose stamped scope is exactly the
 module root the running activation already owns. The control retained the
 canonical-qualified cache but drove the module environment's generic direct
 lookup on every local call. The treatment stores that direct lookup's stable
-binding cell in the same fixed 16-entry per-Unit cache. It also arranges those
+binding cell in the same fixed 16-entry per-Fiber cache. It also arranges those
 entries as eight two-way sets: an initial direct-mapped treatment showed one
 timing repetition where the caller's qualified site and callee's local site
 continually evicted each other. Two ways removed that collision without raising
@@ -667,7 +667,7 @@ milliseconds:
 
 Every finished application continuation (`each`, `times`, `fold`, `scan`,
 `dip`, `linrec`, `stencil`, dictionary `each`, `dict.merge-with`) used to mark
-the unit as yielded, so the machine loop ended its slice and the scheduler took
+the fiber as yielded, so the machine loop ended its slice and the scheduler took
 one handoff per element or iteration. The marker predated any measurement. The
 continuation now charges one unit of dispatch fuel instead, the same charge a
 fetched form pays, and the loop's exhaustion check runs before an exhausted
@@ -787,7 +787,7 @@ per matrix row, checked the quotation against the idiom registry from scratch:
   keyed by the quotation and the word's position.
 - **Prelude words never cached.** A word written in core was never
   plain-cached, so `partial` cost one full resolution per row. Core is frozen
-  before any unit runs, so a core-stamped word now caches as well, from no
+  before any fiber runs, so a core-stamped word now caches as well, from no
   starting scope.
 - **A 728-byte driver.** It carried a resolution cursor inline and was zeroed
   and copied on every application. Matching is bounded by the registry's

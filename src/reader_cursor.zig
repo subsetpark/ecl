@@ -333,13 +333,13 @@ pub const LexicalContext = union(enum) {
     boundary,
 };
 
-/// The tokenizer's state after some prefix of a unit. Private, because a
+/// The tokenizer's state after some prefix of a submission. Private, because a
 /// checkpoint is only meaningful beside the bytes that produced it; the pair
-/// is exposed as `PendingUnit` so the two cannot be supplied separately or
+/// is exposed as `PendingSubmission` so the two cannot be supplied separately or
 /// forged from a literal.
 const LexicalCheckpoint = union(enum) {
     lexing: struct { mode: Mode, string_escaped: bool, character_first: bool },
-    /// The unit already contains source the reader rejects.
+    /// The submission already contains source the reader rejects.
     rejected,
 
     pub const initial: LexicalCheckpoint = .{
@@ -367,9 +367,9 @@ fn snapshot(tokenizer: *const Tokenizer) LexicalCheckpoint {
     } };
 }
 
-/// Extend a checkpoint over more of the same unit. Callers append a physical
-/// line and advance once, so the cost across a whole unit is linear in the
-/// unit rather than quadratic in the number of lines.
+/// Extend a checkpoint over more of the same submission. Callers append a
+/// physical line and advance once, so the cost across a whole submission is
+/// linear in its length rather than quadratic in the number of lines.
 fn advanceLexical(checkpoint: LexicalCheckpoint, source: []const u8) LexicalCheckpoint {
     var diag: reader.Diag = .{};
     var tokenizer = resumed(checkpoint, source) orelse return .rejected;
@@ -380,7 +380,7 @@ fn advanceLexical(checkpoint: LexicalCheckpoint, source: []const u8) LexicalChec
     return snapshot(&tokenizer);
 }
 
-/// Where a cursor at the end of `source` sits, given the unit's checkpoint.
+/// Where a cursor at the end of `source` sits, given the submission's checkpoint.
 /// The tokenizer finishes an in-progress atom when it runs out of input, so
 /// the walk stops on the step before that and reads the live mode instead.
 fn lexicalContext(checkpoint: LexicalCheckpoint, source: []const u8) LexicalContext {
@@ -399,58 +399,58 @@ fn lexicalContext(checkpoint: LexicalCheckpoint, source: []const u8) LexicalCont
     };
 }
 
-const PendingUnitBacking = struct {
+const PendingSubmissionBacking = struct {
     text: text_buffer.TextBuffer,
     checkpoint: LexicalCheckpoint = .initial,
 };
 
-/// The source accumulated for the unit being typed, together with the
+/// The source accumulated for the submission being typed, together with the
 /// tokenizer state at its end. The two are one opaque value because a state
 /// paired with the wrong bytes is exactly the defect this replaces, and
 /// because only the reader can produce a state that describes them.
-pub const PendingUnit = enum(usize) {
+pub const PendingSubmission = enum(usize) {
     _,
 
-    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!PendingUnit {
-        const backing = try allocator.create(PendingUnitBacking);
+    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!PendingSubmission {
+        const backing = try allocator.create(PendingSubmissionBacking);
         backing.* = .{ .text = .init(allocator) };
         return @fromBackingInt(@intCast(@intFromPtr(backing)));
     }
-    fn state(self: PendingUnit) *PendingUnitBacking {
+    fn state(self: PendingSubmission) *PendingSubmissionBacking {
         return @ptrFromInt(@backingInt(self));
     }
-    pub fn deinit(self: *PendingUnit) void {
+    pub fn deinit(self: *PendingSubmission) void {
         const owned = self.state();
         const allocator = owned.text.allocator;
         owned.text.deinit();
         allocator.destroy(owned);
         self.* = undefined;
     }
-    pub fn source(self: PendingUnit) []const u8 {
+    pub fn source(self: PendingSubmission) []const u8 {
         return self.state().text.items();
     }
-    pub fn isEmpty(self: PendingUnit) bool {
+    pub fn isEmpty(self: PendingSubmission) bool {
         return self.state().text.len() == 0;
     }
     /// Append a physical line and its newline, then extend the state over
     /// exactly those bytes. The storage owns and reserves before it writes, so
-    /// `line` may be a slice of this unit's own source and a failure leaves
-    /// the state describing exactly the bytes the unit still holds.
-    pub fn appendLine(self: PendingUnit, line: []const u8) error{OutOfMemory}!void {
+    /// `line` may be a slice of this submission's own source and a failure
+    /// leaves the state describing exactly the bytes the submission still holds.
+    pub fn appendLine(self: PendingSubmission, line: []const u8) error{OutOfMemory}!void {
         const owned = self.state();
         const start = owned.text.len();
         try owned.text.splice(start, start, &.{ line, "\n" });
         owned.checkpoint = advanceLexical(owned.checkpoint, owned.text.items()[start..]);
     }
-    pub fn clear(self: PendingUnit) void {
+    pub fn clear(self: PendingSubmission) void {
         const owned = self.state();
         owned.text.remove(0, owned.text.len());
         owned.checkpoint = .initial;
     }
     /// Where a cursor at the end of `line_prefix` sits, continuing from this
-    /// unit. Only the new bytes are scanned, so asking costs the line rather
+    /// submission. Only the new bytes are scanned, so asking costs the line rather
     /// than everything typed before it.
-    pub fn contextAfter(self: PendingUnit, line_prefix: []const u8) LexicalContext {
+    pub fn contextAfter(self: PendingSubmission, line_prefix: []const u8) LexicalContext {
         return lexicalContext(self.state().checkpoint, line_prefix);
     }
 };
@@ -464,7 +464,7 @@ const AtomBuilder = struct {
     /// delimiters.
     delimited: bool,
     /// The scope the symbols this atom yields were written in — the reading
-    /// unit's.
+    /// fiber's.
     symbol_linker: ?env.SymbolLinker,
     classifier: ?lexer.ClassifyCursor = null,
     classification: ?lexer.Classification = null,
@@ -569,7 +569,7 @@ const AtomBuilder = struct {
         };
         return switch (try self.inserter.?.advance()) {
             .pending => .pending,
-            // The unit that read this text is the scope the symbol was
+            // The fiber that read this text is the scope the symbol was
             // written in, whichever position it ends up occupying.
             .complete => |id| result: {
                 const link = if (self.symbol_linker) |linker| try linker.link(id) else 0;

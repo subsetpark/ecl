@@ -32,6 +32,22 @@ Conventions:
 - Indexing is 0-based throughout: `range` counts from 0, `at` indexes
   from 0, `where` and `grade` produce 0-based indices, and `find` returns
   the length on a miss.
+- Operands are ordered subject first. The subject is the operand the word
+  acts on or the result describes, and it is deepest: a collection, string,
+  state, task, address, port, or a filesystem root and path. What the word
+  does with it comes above: a key, count, or payload to write or send, then
+  any quotation, then any deadline on top. Thus `dict key value put`,
+  `connection bytes net.write`, `root path text fs.publish-text`, and
+  `address quotation milliseconds agent.call-for`. A search is about
+  whichever operand its result describes: `find` returns an index into its
+  sequence, so `sequence needle find`, while `in?` returns a mask shaped
+  like the sought value, so `value list in?`.
+- Constructors take their operands in the order they appear in the result:
+  `value list cons` puts the value first and `list value append` puts it
+  last, as `pair` and `cat` do; `key value dict.associate` builds
+  `{key value}`.
+- Naming words are the exception to both: `set`, `def`, and `@defm` take the
+  name on top of what it binds.
 - Booleans are the ints 0 and 1; a word requiring a boolean rejects every
   other value.
 - Predicate words end in `?`. Symbolic comparisons (`=`, `<>`, `<`, `<=`,

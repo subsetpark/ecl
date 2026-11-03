@@ -19,7 +19,7 @@ const machine = @import("../machine.zig");
 const kernel_storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const Value = value.Value;
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -49,19 +49,19 @@ pub const words = [_]env.BuiltinWord{
     },
 };
 
-fn get(evaluator: *Unit) MachineError!void {
+fn get(evaluator: *Fiber) MachineError!void {
     return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .text);
 }
 
-fn getBytes(evaluator: *Unit) MachineError!void {
+fn getBytes(evaluator: *Fiber) MachineError!void {
     return begin(evaluator, .{ .method = .GET, .follow_redirects = true }, .bytes);
 }
 
-fn post(evaluator: *Unit) MachineError!void {
+fn post(evaluator: *Fiber) MachineError!void {
     return begin(evaluator, .{ .method = .POST }, .text);
 }
 
-fn send(evaluator: *Unit) MachineError!void {
+fn send(evaluator: *Fiber) MachineError!void {
     return begin(evaluator, .{}, .text);
 }
 
@@ -80,7 +80,7 @@ const RequestFields = struct {
     params: ?Value = null,
 };
 
-fn begin(evaluator: *Unit, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
+fn begin(evaluator: *Fiber, defaults: RequestDefaults, response_mode: ResponseMode) MachineError!void {
     const access = evaluator.inherited.runtime().http_access;
     const deadline = evaluator.scheduler.?.deadlineAfter(access.limits().deadline_ms) catch
         return evaluator.fail(.overflow, "HTTP deadline lies beyond the clock's range");
@@ -121,7 +121,7 @@ fn begin(evaluator: *Unit, defaults: RequestDefaults, response_mode: ResponseMod
     });
 }
 
-fn requestFields(evaluator: *Unit, request: Value) MachineError!RequestFields {
+fn requestFields(evaluator: *Fiber, request: Value) MachineError!RequestFields {
     if (request != .dict) return evaluator.typeError("a request dict");
     if (request.dict.length() > 8)
         return evaluator.typeError("a request dict with only recognized fields");
@@ -265,7 +265,7 @@ const RequestDriver = struct {
         cleanup_destroy,
     };
 
-    pub fn advance(evaluator: *Unit, self: *RequestDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *RequestDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.deadline.reachedBy(evaluator.scheduler.?.now())) {
             self.admitted.cancel();
@@ -658,7 +658,7 @@ const RequestDriver = struct {
         self.state = .{ .url = .init(self.allocator, self.fields.target.?) };
     }
 
-    fn beginBody(self: *RequestDriver, evaluator: *Unit, input: RequestData) MachineError!void {
+    fn beginBody(self: *RequestDriver, evaluator: *Fiber, input: RequestData) MachineError!void {
         var request = input;
         if (self.fields.body) |body| {
             const count: usize = @intCast(body.list.length());
@@ -670,13 +670,13 @@ const RequestDriver = struct {
         } else self.state = .{ .exchange = .{ .request = request } };
     }
 
-    fn overflow(self: *RequestDriver, evaluator: *Unit) MachineError {
+    fn overflow(self: *RequestDriver, evaluator: *Fiber) MachineError {
         const failure = evaluator.fail(.overflow, "HTTP transfer limit exceeded");
         evaluator.addErrorPath(self.fields.target.?);
         return failure;
     }
 
-    fn failResult(self: *RequestDriver, evaluator: *Unit, failure: service.Failure) MachineError {
+    fn failResult(self: *RequestDriver, evaluator: *Fiber, failure: service.Failure) MachineError {
         return switch (failure) {
             .out_of_memory => error.OutOfMemory,
             .report => |report| blk: {
@@ -690,7 +690,7 @@ const RequestDriver = struct {
 
     fn advanceEncoder(
         self: *RequestDriver,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         encoder: *kernel_storage.StringEncoder,
     ) MachineError!kernel_storage.StringEncodeResult {
         const limit = switch (self.state) {
@@ -710,7 +710,7 @@ const RequestDriver = struct {
 
     fn failIo(
         self: *RequestDriver,
-        evaluator: *Unit,
+        evaluator: *Fiber,
         url: []const u8,
         name: []const u8,
     ) MachineError {

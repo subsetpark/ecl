@@ -25,7 +25,7 @@ const heap = @import("heap.zig");
 const support = @import("kernel_support.zig");
 
 const MachineError = support.MachineError;
-const Unit = support.Unit;
+const Fiber = support.Fiber;
 
 /// One half-open range of logical element positions.
 pub const Chunk = struct {
@@ -129,7 +129,7 @@ pub const FlatCursor = struct {
     /// so cancellation surfaces here as an error rather than as a missed check.
     /// Element accounting is deliberately conservative: a copied or gathered
     /// element is charged like a computed one.
-    pub fn nextRange(self: *FlatCursor, evaluator: *Unit) MachineError!?Chunk {
+    pub fn nextRange(self: *FlatCursor, evaluator: *Fiber) MachineError!?Chunk {
         const plan = planRange(
             self.index,
             self.length,

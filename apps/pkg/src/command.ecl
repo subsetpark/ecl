@@ -85,9 +85,9 @@
  (|lock manifest project|
   manifest lock {} "." pkg.map.build
   dup project `path at "ecl.modules" pair path.join pkg.map.validate
-  manifest pkg.manifest.write project `directory at "ecl.pkg" fs.create-text
-  lock pkg.resolution.write project `directory at "ecl.lock" fs.create-text
-  str "\n" cat project `directory at "ecl.modules" fs.create-text
+  project `directory at "ecl.pkg" manifest pkg.manifest.write fs.create-text
+  project `directory at "ecl.lock" lock pkg.resolution.write fs.create-text
+  str "\n" cat project `directory at "ecl.modules" rolldown fs.create-text
   manifest `name at wrap "initialized ecl.pkg for {}" str.format io.print) `initialize-lock defp
 
  ### defp tree
@@ -162,7 +162,7 @@
   pkg.project.cache-path requirement `hash at bytes pkg.cache.write
   project pkg.project.manifest
   `requires over `requires at requirement `package at requirement put put
-  pkg.manifest.write project `directory at "ecl.pkg" fs.publish-text
+  pkg.manifest.write project `directory at "ecl.pkg" rolldown fs.publish-text
   requirement `package at requirement `version at pair "added {} {}; run pkg update to resolve"
   str.format io.print)
  `record defp

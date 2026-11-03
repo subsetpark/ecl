@@ -46,13 +46,13 @@
   ["pkg" "sync" "--offline"] invoke `term at `code at 1 equal
   seed-archive ["update" "--offline"] command
   args 2 at check-commit 42 runnable
-  "[] ((999) `answer def) `pkg.command @defm" `cwd "src/conflict.ecl" fs.publish-text
-  "broken map" `cwd "ecl.modules" fs.publish-text
+  `cwd "src/conflict.ecl" "[] ((999) `answer def) `pkg.command @defm" fs.publish-text
+  `cwd "ecl.modules" "broken map" fs.publish-text
   ["sync" "--offline"] command
   ["verify"] command
   args 2 at check-commit 42 runnable
   `cwd "ecl.lock" fs.read-text `cwd "ecl.modules" fs.read-text
-  "corrupt lock" `cwd "ecl.lock" fs.publish-text
+  `cwd "ecl.lock" "corrupt lock" fs.publish-text
   ["pkg" "sync" "--offline"] invoke `term at `code at 1 equal
   `cwd "ecl.modules" fs.read-text equal
   ["update" "--offline"] command

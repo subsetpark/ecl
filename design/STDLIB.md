@@ -34,6 +34,22 @@ Conventions:
 - Indexing is 0-based throughout: `range` counts from 0, `at` indexes
   from 0, `where` and `grade` produce 0-based indices, and `find` returns
   the length on a miss.
+- Operands are ordered subject first. The subject is the operand the word
+  acts on or the result describes, and it is deepest: a collection, string,
+  state, task, address, port, or a filesystem root and path. What the word
+  does with it comes above: a key, count, or payload to write or send, then
+  any quotation, then any deadline on top. Thus `dict key value put`,
+  `connection bytes net.write`, `root path text fs.publish-text`, and
+  `address quotation milliseconds agent.call-for`. A search is about
+  whichever operand its result describes: `find` returns an index into its
+  sequence, so `sequence needle find`, while `in?` returns a mask shaped
+  like the sought value, so `value list in?`.
+- Constructors take their operands in the order they appear in the result:
+  `value list cons` puts the value first and `list value append` puts it
+  last, as `pair` and `cat` do; `key value dict.associate` builds
+  `{key value}`.
+- Naming words are the exception to both: `set`, `def`, and `@defm` take the
+  name on top of what it binds.
 - Booleans are the ints 0 and 1; a word requiring a boolean rejects every
   other value.
 - Predicate words end in `?`. Symbolic comparisons (`=`, `<>`, `<`, `<=`,
@@ -162,6 +178,12 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 
 ### @give!
 `( ports quotation -- task )` — *Unit constructor.* `@give` with no values operand: the child stack is the given ports alone, exactly as `ports [] (q) @give`.
+
+### @load
+`( values path -- )` — *Unit constructor.* Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
+
+### @load!
+`( path -- )` — *Unit constructor.* `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`.
 
 ### @spawn
 `( values quotation -- task )` — *Unit constructor.* Initialize a child stack from the explicit values list and run the quotation concurrently. Use `[]` for no initial values; the ambient stack never crosses the boundary. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
@@ -544,9 +566,6 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 # => x
 ```
 
-### load
-`( path -- )` — Read and evaluate a source file as one transactional unit in the calling session.
-
 ### log
 `( x -- y )` — **Pervasive.** Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
 
@@ -692,7 +711,7 @@ Takes `x₁ … xₙ n` and leaves a list. Collect the top `n` values into a lis
 ```
 
 ### see
-`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of their source unit, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
+`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything).
@@ -1098,7 +1117,7 @@ a word, for example an ambient random generator:
 
 ```ecl
 [0 0] agent.start `rng set
-(5 rand.int) rng agent.call
+rng (5 rand.int) agent.call
 # => 0
 ```
 
@@ -1107,24 +1126,24 @@ accepted waits forever if the agent ends before replying, unless it bounds the
 call with `call-for`.
 
 ### send
-`( quotation address -- )` — Apply a quotation to the agent's stack without waiting for a reply. The whole result stack becomes the new state; a failing quotation changes nothing and reports nothing.
+`( address quotation -- )` — Apply a quotation to the agent's stack without waiting for a reply. The whole result stack becomes the new state; a failing quotation changes nothing and reports nothing.
 
 ### call
-`( quotation address -- result )` — Apply a quotation to the agent's stack and return the top of the result stack; the agent keeps the rest. The quotation's own error is re-raised here and leaves the agent unchanged. A result stack with nothing on it is `` `domain ``. Replies travel through a helper task. A call to an agent that has ended raises `` `io ``; a call whose request was accepted never returns if the agent ends before replying.
+`( address quotation -- result )` — Apply a quotation to the agent's stack and return the top of the result stack; the agent keeps the rest. The quotation's own error is re-raised here and leaves the agent unchanged. A result stack with nothing on it is `` `domain ``. Replies travel through a helper task. A call to an agent that has ended raises `` `io ``; a call whose request was accepted never returns if the agent ends before replying.
 
 #### Examples
 
 ```ecl
 [0 0] agent.start `g set
-(100 rand.int) g agent.call (100 rand.int) g agent.call pair
+g (100 rand.int) agent.call g (100 rand.int) agent.call pair
 # => [35 0]
 [7 0] agent.start `g set
-[] ((1 0 div) g agent.call) @attempt `err at `kind at (dup) g agent.call pair
+[] (g (1 0 div) agent.call) @attempt `err at `kind at g (dup) agent.call pair
 # => (domain [7 0])
 ```
 
 ### call-for
-`( quotation address milliseconds -- result )` — `agent.call` with a nonnegative int deadline in milliseconds, checked before anything is sent: a negative duration is `` `domain `` and a non-int is `` `type ``. When no reply arrives in time the call raises `` `timeout ``, whether the deadline passed while waiting for room in a full mailbox or for the reply; the quotation, if it was sent, still runs on the agent when its turn comes, and its reply is discarded.
+`( address quotation milliseconds -- result )` — `agent.call` with a nonnegative int deadline in milliseconds, checked before anything is sent: a negative duration is `` `domain `` and a non-int is `` `type ``. When no reply arrives in time the call raises `` `timeout ``, whether the deadline passed while waiting for room in a full mailbox or for the reply; the quotation, if it was sent, still runs on the agent when its turn comes, and its reply is discarded.
 
 ### serve
 Stack-polymorphic. Turn the current task into an agent whose state is the stack it has now, then serve until cancelled: receive a message, apply its quotation to the state as a unit, and reply when the message asks. Spawn it directly to keep the handle: `[[7 0]] (agent.serve) @spawn` serves `[7 0]`, and `task.cancel` on the handle ends it with `` `cancelled ``.
@@ -1154,7 +1173,7 @@ Stack-polymorphic. Turn the current task into an agent whose state is the stack 
 ```
 
 ### unpack-tgz
-`( bytes root destination -- regular-file-paths )` — Validate and atomically unpack a gzip-compressed tar byte list beneath a previously absent `destination`, a canonical relative path under a named Session filesystem root or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its directory lease until publication or rollback completes. The destination must name a child entry, not `.`. Return normalized regular-file paths in archive order. Unsafe, linked, special, duplicate, malformed, or over-limit members are `` `domain ``; invalid byte items are `` `domain ``; wrong container kinds are `` `type ``; an unknown root or a non-canonical destination is `` `domain `` carrying the `fs` failure data; an exhausted operation quota is `` `overflow ``; filesystem and destination conflicts are `` `io ``. Failure never publishes a partial destination. See the environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives) for the complete format, limit, containment, and publication contract.
+`( root destination bytes -- regular-file-paths )` — Validate and atomically unpack a gzip-compressed tar byte list beneath a previously absent `destination`, a canonical relative path under a named Session filesystem root or scope-owned directory resource (see [`fs`](#fs)). Extraction owns its directory lease until publication or rollback completes. The destination must name a child entry, not `.`. Return normalized regular-file paths in archive order. Unsafe, linked, special, duplicate, malformed, or over-limit members are `` `domain ``; invalid byte items are `` `domain ``; wrong container kinds are `` `type ``; an unknown root or a non-canonical destination is `` `domain `` carrying the `fs` failure data; an exhausted operation quota is `` `overflow ``; filesystem and destination conflicts are `` `io ``. Failure never publishes a partial destination. See the environment's [`archive` contract](ENVIRONMENT.md#byte-lists-and-archives) for the complete format, limit, containment, and publication contract.
 
 ## clock
 
@@ -1234,12 +1253,12 @@ a list of whole keys: strings and composite keys remain atomic. The public
 failure inside a kernel reports its `dict.core` name.
 
 ### associate
-`( value key -- dict )` — Build a one-entry dictionary associating `key` with `value`.
+`( key value -- dict )` — Build a one-entry dictionary associating `key` with `value`.
 
 #### Examples
 
 ```ecl
-["inspect" "alpha"] `args dict.associate
+`args ["inspect" "alpha"] dict.associate
 # => {args ["inspect" "alpha"]}
 ```
 
@@ -1476,10 +1495,10 @@ the source's permission bits under the umask.
 `( source-root source-path destination-root destination-path -- )` — Copy a regular file, following a final source link within its root, into an absent destination entry; the roots may differ. The copy is staged and published atomically without replacing; an existing destination of any kind fails with `` `io `` and reason `` `already-exists ``, a non-regular source fails with `` `io `` and reason `` `not-regular `` or `` `is-directory ``, and the copy keeps the source file's permissions.
 
 ### create-bytes
-`( bytes root path -- )` — Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry fails with `` `io `` and reason `` `already-exists ``; a missing parent fails with `` `io `` and reason `` `not-found ``.
+`( root path bytes -- )` — Atomically create an absent regular file holding exact bytes. Members are validated before any external state exists. An existing regular file, directory, symlink (including a dangling one), or other entry fails with `` `io `` and reason `` `already-exists ``; a missing parent fails with `` `io `` and reason `` `not-found ``.
 
 ### create-text
-`( string root path -- )` — Atomically create an absent regular file holding the string as UTF-8, with the same collision contract as `create-bytes`.
+`( root path string -- )` — Atomically create an absent regular file holding the string as UTF-8, with the same collision contract as `create-bytes`.
 
 ### exists?
 `( root path -- bool )` — Return 1 when the final entry exists and 0 when it is definitely absent, without following a final link: a dangling link is 1. Malformed paths, unknown roots, denial, traversal failures such as a missing or escaping intermediate component, and host failures are errors rather than 0.
@@ -1515,10 +1534,10 @@ the source's permission bits under the umask.
 `( root path -- writer )` — Open private storage for an absent regular file. The parent must exist and `.` is rejected. A writer is distinct from a directory. It retains root lifetime and operation admission until joined cleanup. Staging dependencies survive task transfer. Closing an uncommitted writer removes its private contents and publishes no destination.
 
 ### publish-bytes
-`( bytes root path -- )` — Atomically publish complete file contents, creating an absent destination or replacing one that exists. An entry observed before staging must be a regular file; a symlink, directory, or other entry is `` `not-regular ``. Use the observed file's permissions, or host defaults on first creation. Publication replaces the final directory entry without following it; concurrent publications each succeed and the last commit wins. An intervening directory causes failure. A failed operation preserves its destination, and cancellation before commit removes staging. Cancellation after commit does not roll back publication. Visibility is atomic; directory-entry durability across a crash is not promised.
+`( root path bytes -- )` — Atomically publish complete file contents, creating an absent destination or replacing one that exists. An entry observed before staging must be a regular file; a symlink, directory, or other entry is `` `not-regular ``. Use the observed file's permissions, or host defaults on first creation. Publication replaces the final directory entry without following it; concurrent publications each succeed and the last commit wins. An intervening directory causes failure. A failed operation preserves its destination, and cancellation before commit removes staging. Cancellation after commit does not roll back publication. Visibility is atomic; directory-entry durability across a crash is not promised.
 
 ### publish-text
-`( string root path -- )` — Publish UTF-8 text under the `publish-bytes` contract.
+`( root path string -- )` — Publish UTF-8 text under the `publish-bytes` contract.
 
 ### read-bytes
 `( root path -- bytes )` — Read one regular file, following a final link within the root, and return its exact bytes as an integer list. The size observed at open is the size read; growth or shrink meanwhile fails with `` `io `` and reason `` `changed ``. A directory fails with `` `io `` and reason `` `is-directory ``; a non-regular object fails with `` `io `` and reason `` `not-regular ``; a file over the transfer limit is `` `overflow ``.
@@ -1539,10 +1558,10 @@ the source's permission bits under the umask.
 `( root source-path destination-path -- )` — Rename an entry within one root without replacing. The source may be a regular file, symlink, or directory and is not followed; an existing destination fails with `` `io `` and reason `` `already-exists ``, and a destination on another device fails with `` `io `` and reason `` `cross-device `` rather than an emulated copy.
 
 ### replace-bytes
-`( bytes root path -- )` — Atomically replace an existing regular file with exact bytes. The final entry must be observed as a regular file without following: absence fails with `` `io `` and reason `` `not-found ``, and a symlink, directory, or other entry fails with `` `io `` and reason `` `not-regular ``. The replacement is a new inode published by an atomic exchange; the word never becomes create-or-replace.
+`( root path bytes -- )` — Atomically replace an existing regular file with exact bytes. The final entry must be observed as a regular file without following: absence fails with `` `io `` and reason `` `not-found ``, and a symlink, directory, or other entry fails with `` `io `` and reason `` `not-regular ``. The replacement is a new inode published by an atomic exchange; the word never becomes create-or-replace.
 
 ### replace-text
-`( string root path -- )` — Replace an existing regular file with UTF-8 text under the `replace-bytes` contract.
+`( root path string -- )` — Replace an existing regular file with UTF-8 text under the `replace-bytes` contract.
 
 ### reserve
 `( root -- reservation )` — Retain a selected directory root and one filesystem operation slot until joined closure. A reservation can be passed as a root; its derived operations share that slot and reject overlapping work with `` `overflow `` and reason `` `limit ``. Closure waits for admitted work. This supports compositions that must retain admission across inspection and publication.
@@ -2352,7 +2371,7 @@ Explicit-state pseudorandom draws are pure except for `entropy`; see
 [Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw
 returns the advanced state alongside its result. An ambient generator is an
 agent holding that state: ``[0 0] agent.start `rng set`` then
-`(5 rand.int) rng agent.call`.
+`rng (5 rand.int) agent.call`.
 
 ### deal
 `( state count pool -- state results )` — Draw `count` distinct ints in `[0, pool)` without replacement, advancing the state by `count`. Work and memory follow `count`, never `pool`. A negative count or pool, or a count above the pool, is `` `domain ``; a non-int count or pool is `` `type ``.
@@ -2676,8 +2695,8 @@ task, send its address with the request, and await the helper, whose result
 is the reply. `task.await-for` bounds the exchange.
 
 ```ecl
-(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a task.send task.await `ok at first) `ask def
-[] (task.receive dup `from at swap `value at 1 + swap task.send) @spawn task.address 41 ask
+(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def
+[] (task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask
 # => 42
 ```
 
@@ -2712,12 +2731,12 @@ is the reply. `task.await-for` bounds the exchange.
 `( -- address )` — The executing task's own address. `` `domain `` outside a task: the session root owns tasks but has no mailbox.
 
 ### send
-`( value address -- )` — Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified.
+`( address value -- )` — Queue a value in the mailbox an address names. Any value may be sent except one containing a task handle, which is `` `type ``; addresses and ports pass. A mailbox holds sixteen messages, and a sender to a full one parks until the receiver takes a message. Sending to a task that has ended is `` `io `` with `` `reason `closed ``. Messages from one sender arrive in order; order across senders is unspecified.
 
 #### Examples
 
 ```ecl
-[] (task.receive 1 +) @spawn dup task.address 41 swap task.send task.await
+[] (task.receive 1 +) @spawn dup task.address 41 task.send task.await
 # => {ok [42]}
 ```
 

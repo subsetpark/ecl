@@ -279,5 +279,6 @@ args len 0 >
  `cwd "design/STDLIB.md" fs.read-text document match?
  "design/STDLIB.md is stale; run `zig build stdlib`" check)
 (|document|
- document `cwd "design/STDLIB.md" over over fs.exists? (fs.replace-text) (fs.create-text) if)
+ `cwd "design/STDLIB.md" document `cwd "design/STDLIB.md" fs.exists? (fs.replace-text)
+ (fs.create-text) if)
 if

@@ -48,7 +48,7 @@ test "typed kernels: transitioning reduction seeds use bounded typed passes" {
             try std.testing.expectEqual(@as(usize, 1), items.len);
             try std.testing.expect(items[0] == .float);
             try std.testing.expectEqual(@as(f64, @floatFromInt(length)), items[0].float);
-            // Observe before cleanup starts another Unit. The lower bound
+            // Observe before cleanup starts another Fiber. The lower bound
             // protects polling; the upper bound catches generic per-element
             // dispatch even though it computes the same answer.
             const polls = runtime.lastPolls();

@@ -451,7 +451,7 @@ fn buildResult(status: abi.HostStatus, output: abi.Candidate) error{OutOfMemory}
 /// Typed cooperative continuation. State is host-owned, contains no pointers
 /// or ephemeral capabilities, and survives only while the native call's real
 /// scheduler WorkDriver is alive. The API exposes budget charging and yield,
-/// never an allocator, scheduler, Unit, or raw ECL storage.
+/// never an allocator, scheduler, Fiber, or raw ECL storage.
 pub fn Reschedule(comptime Spec: type) type {
     comptime validateContinuationSpec(Spec);
     return opaque {

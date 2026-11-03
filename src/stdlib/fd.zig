@@ -11,7 +11,7 @@ const port_words = @import("port.zig");
 const streams = @import("../standard_streams.zig");
 const Value = @import("../value.zig").Value;
 
-const Unit = machine.Unit;
+const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
@@ -40,7 +40,7 @@ pub const words = [_]env.BuiltinWord{
     .{ .name = "bytes?", .effect = "value -- bool", .doc = "Return 1 when the value is a list of integers in `0...255`, what `write` accepts as one piece, and 0 for anything else, including a string.", .primitive = bytesPredicate },
 };
 
-fn bytesPredicate(evaluator: *Unit) MachineError!void {
+fn bytesPredicate(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     const source = item.borrow();
@@ -62,7 +62,7 @@ const BytesPredicate = struct {
     source: heap.Owned(Value),
     index: usize = 0,
 
-    pub fn advance(evaluator: *Unit, self: *BytesPredicate) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *BytesPredicate) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const work = evaluator.workBudget();
         const source = self.source.borrow();
@@ -95,17 +95,17 @@ const BytesPredicate = struct {
     }
 };
 
-fn input(evaluator: *Unit) MachineError!void {
+fn input(evaluator: *Fiber) MachineError!void {
     return device(evaluator, .input);
 }
-fn output(evaluator: *Unit) MachineError!void {
+fn output(evaluator: *Fiber) MachineError!void {
     return device(evaluator, .output);
 }
-fn diagnostics(evaluator: *Unit) MachineError!void {
+fn diagnostics(evaluator: *Fiber) MachineError!void {
     return device(evaluator, .diagnostics);
 }
 
-fn device(evaluator: *Unit, which: streams.Device) MachineError!void {
+fn device(evaluator: *Fiber, which: streams.Device) MachineError!void {
     const item = evaluator.inherited.runtime().standard_streams.value(which) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.ProgramSource => return evaluator.fail(.io, "stdin is the program source"),
