@@ -107,7 +107,9 @@ contain no control characters.
 `ecl check-map FILE` validates a document using the same parser, limits,
 reference resolution, and inert source discovery as Session startup. It exits
 zero with no output on success, one with a diagnostic for an invalid map or
-usage, and two on allocation failure. The filename resolves against the
+usage, and two on allocation failure. An invalid map's diagnostic names the
+first rejected entry: the document, scope, path, or module at fault, and for a
+duplicate module both declaring files. The filename resolves against the
 caller's working directory; paths inside the document resolve against that
 document. Validation does not construct a Session, inspect the caller's map,
 execute source or native artifacts, or write files. An explicit

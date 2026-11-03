@@ -79,7 +79,11 @@ test "loader: map references relocate and malformed nearest maps fail closed" {
     try expectOk(&explicit, "mapped.answer");
     try dir.writeFile(std.testing.io, .{ .sub_path = "maps/chained", .data = "{format 1 map \"complete\"}" });
     try dir.writeFile(std.testing.io, .{ .sub_path = "maps/complete", .data = "{format 1 map \"chained\"}" });
-    try std.testing.expectError(error.InvalidHostConfig, session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .module_map = "maps/complete" }), .cooperative, .evaluate));
+    var diagnostic: session.InitDiagnostic = .{};
+    try std.testing.expectError(error.InvalidHostConfig, session.Session.initDiagnosed(backing.allocator(), &.{}, inputs.inputs(.{ .module_map = "maps/complete" }), .cooperative, .evaluate, &diagnostic));
+    // The innermost rejection is reported: the chained target, not its referrer.
+    try std.testing.expect(std.mem.startsWith(u8, diagnostic.message(), "invalid module map: referenced module map `"));
+    try std.testing.expect(std.mem.endsWith(u8, diagnostic.message(), "maps/chained` is itself a reference; it must be a complete map"));
 }
 
 test "loader: map validation and snapshot construction clean up every allocation failure" {
@@ -95,7 +99,8 @@ test "loader: map validation and snapshot construction clean up every allocation
             defer owner.cleanup().drain();
             var main = try @import("../modules.zig").Registry.init(owner.cleanup());
             defer main.deinit();
-            const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true);
+            var diagnostic: @import("../module_map.zig").Diagnostic = .{};
+            const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true, &diagnostic);
             const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), &main, map, cwd) catch |err| {
                 map.deinit();
                 return err;

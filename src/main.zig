@@ -1,6 +1,8 @@
 const std = @import("std");
 const ecl = @import("ecl-internal");
-const AppError = error{ OutOfMemory, Io, InvalidHostConfig };
+/// `HostConfigReported` means Session construction rejected its host
+/// configuration and `CliRuntime.init` has already printed the reason.
+const AppError = error{ OutOfMemory, Io, HostConfigReported };
 const help =
     \\ecl — a homoiconic concatenative array calculator
     \\
@@ -34,11 +36,7 @@ pub fn main(init: std.process.Init) void {
                 std.process.exit(1);
             break :failure 1;
         },
-        error.InvalidHostConfig => failure: {
-            writeFile(init.io, .stderr, "ecl: runtime directories, module map, or limits are invalid\n") catch
-                std.process.exit(1);
-            break :failure 1;
-        },
+        error.HostConfigReported => 1,
     };
     if (status != 0) std.process.exit(status);
 }
@@ -161,6 +159,7 @@ fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     defer init.process.gpa.free(path);
     var host = ecl.heap.HostOwner.init(init.process.gpa);
     defer host.cleanup().drain();
+    var diagnostic: ecl.module_map.Diagnostic = .{};
     const map = (if (from_stdin) input: {
         var buffer: [8192]u8 = undefined;
         var stream = std.Io.File.stdin().reader(init.process.io, &buffer);
@@ -169,10 +168,15 @@ fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
             else => return emitIoError(init, "cannot read bounded module map input", err),
         };
         defer init.process.gpa.free(source);
-        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true);
-    } else ecl.module_map.load(host.cleanup(), init.process.io, path)) catch |err| switch (err) {
+        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true, &diagnostic);
+    } else ecl.module_map.load(host.cleanup(), init.process.io, path, &diagnostic)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => return emitSyntheticError(init, .io, "invalid module map", null),
+        error.Invalid => {
+            var buffer: [512]u8 = undefined;
+            const message = std.fmt.bufPrint(&buffer, "invalid module map: {s}", .{diagnostic.message()}) catch
+                buffer[0..ecl.console.completeUtf8Len(&buffer)];
+            return emitSyntheticError(init, .io, message, null);
+        },
     };
     defer map.deinit();
     return 0;
@@ -285,7 +289,8 @@ const CliRuntime = struct {
         self.output_writer = std.Io.File.stdout().writerStreaming(startup.process.io, &self.output_buffer);
         self.diagnostic_writer = std.Io.File.stderr().writerStreaming(startup.process.io, &self.diagnostic_buffer);
         self.roots[0] = cwdRoot(startup.cwd);
-        self.session = try ecl.session.Session.init(
+        var diagnostic: ecl.session.InitDiagnostic = .{};
+        self.session = ecl.session.Session.initDiagnosed(
             startup.process.gpa,
             arguments,
             .{
@@ -302,7 +307,16 @@ const CliRuntime = struct {
             },
             .{ .worker_pool = worker_count },
             mode,
-        );
+            &diagnostic,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidHostConfig => {
+                try writeFile(startup.process.io, .stderr, "ecl: ");
+                try writeEscapedFile(startup.process.io, diagnostic.message());
+                try writeFile(startup.process.io, .stderr, "\n");
+                return error.HostConfigReported;
+            },
+        };
         self.session.setNativeDiagnostics(startup.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
     }
 
@@ -706,6 +720,14 @@ fn printSessionError(
     const rendered = try ecl.print.toOwnedString(init.process.gpa, error_value);
     defer init.process.gpa.free(rendered);
     session.writeDiagnosticsLine(rendered) catch return error.Io;
+}
+/// Diagnostics can quote host-supplied names, so terminal control bytes are
+/// shown as `\xNN` rather than handed to the terminal.
+fn writeEscapedFile(io: std.Io, bytes: []const u8) AppError!void {
+    var buffer: [4096]u8 = undefined;
+    var file_writer = std.Io.File.stderr().writerStreaming(io, &buffer);
+    ecl.console.writeDisplay(&file_writer.interface, bytes) catch return error.Io;
+    file_writer.interface.flush() catch return error.Io;
 }
 const Output = enum { stdout, stderr };
 fn writeFile(io: std.Io, output: Output, bytes: []const u8) AppError!void {

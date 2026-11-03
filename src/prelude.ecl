@@ -165,6 +165,14 @@
 (|value count quotation|
  value wrap count range value (pop) quotation cat scan cat) `iterations def
 
+### def parse-one
+(string -- x :
+ "Parse source text holding exactly one form and return that form unevaluated. No form or several
+  forms is `` `shape ``. Like `parse`, this is a load-class word for trusted source. Defined in ecl
+  over `parse`.")
+(parse dup len 1 = {kind shape msg "parse-one requires exactly one form"} assert first) `parse-one
+def
+
 ### def scan1
 (list quotation -- list :
  "*Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the

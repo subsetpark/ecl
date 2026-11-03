@@ -906,6 +906,9 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Declare a 
 # => [1 11 21 31]
 ```
 
+### parse-one
+`( string -- x )` — Parse source text holding exactly one form and return that form unevaluated. No form or several forms is `` `shape ``. Like `parse`, this is a load-class word for trusted source. Defined in ecl over `parse`.
+
 ### scan1
 `( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.
 
