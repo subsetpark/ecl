@@ -1,11 +1,12 @@
 ### module table
-# Tables are column dictionaries. Column names are nonempty strings, column
-# values are lists, and every column has the same length. A table has at least
-# one column and may have zero rows. Column order is dictionary insertion order.
-#
-# Tables remain ordinary dictionaries: `type`, `keys`, `at`, and `put` keep
-# their normal behavior. Exported table operations validate table arguments and
-# raise an error for invalid dictionaries.
+(: "Tables are column dictionaries. Column names are nonempty strings, column values are lists, and
+    every column has the same length. A table has at least one column and may have zero rows. Column
+    order is dictionary insertion order. Tables remain ordinary dictionaries: `type`, `keys`, `at`,
+    and `put` keep their normal behavior.
+
+    Every operation except `valid?` first validates the ordinary column dict as a table. See the
+    environment's [table contract](ENVIRONMENT.md#tables) for the table convention and frozen error
+    kinds.")
 []
 (
  ### defp text?

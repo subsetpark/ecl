@@ -1363,7 +1363,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
     // Publish through the production candidate/registration boundary. Only
     // setup uses the owning registry; assertions observe public Session output.
     const registry = &runtime.coreState().registry;
-    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try intern.internModuleName("probe"), .ordinary, &.{
+    var candidate = try modules.Registry.BuiltinCandidateCursor.init(registry, try intern.internModuleName("probe"), .ordinary, .{ .doc = "Scheduler probe words.", .words = &.{
         .{ .name = "immediate", .primitive = Probe.immediate, .effect = "-- n", .doc = "Return one number." },
         .{ .name = "host-yield", .primitive = Probe.hostYield, .effect = "-- n", .doc = "Yield without parking before returning a number." },
         .{ .name = "empty", .primitive = Probe.empty, .effect = "-- n", .doc = "Violate the output contract immediately." },
@@ -1379,7 +1379,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         .{ .name = "short-turn", .primitive = Probe.shortTurn, .doc = "Leave a small shared allowance for the next operation." },
         .{ .name = "nested", .primitive = Probe.nested, .effect = "quotation -- n", .doc = "Invoke a quotation." },
         .{ .name = "reflect", .primitive = Probe.reflect, .effect = "symbol --", .doc = "Reflect a word, loading its module if necessary." },
-    });
+    } });
     defer candidate.deinit();
     var image = while (true) switch (try candidate.advance()) {
         .pending => {},

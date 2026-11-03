@@ -1,12 +1,25 @@
 ### module result
-# Results have the same {ok values} or {err error} form produced by `@attempt`
-# and `task.await`.
-#
-# The success payload is a list containing the values left on the successful
-# stack. Operations that accept results validate their inputs before invoking a
-# caller quotation.
-#
-# `raise`, `fail`, and `assert` operate on errors directly and remain core words.
+(: "Results have the `{ok values}` or `{err error}` form produced by `@attempt` and `task.await`.
+    Every entry validates its result envelope before invoking a caller quotation. A success payload
+    is always a list representing a stack.
+
+    Each word has one role. Transformers return a result and run their quotation isolated under
+    `@attempt`, so a quotation that fails yields a failed result. Eliminators leave plain values and
+    run their quotations inline, so they can reach the stack beneath the result.
+
+    - Construct: `ok`, `err`.
+    - Test: `ok?`, `err?`.
+    - Transform the success: `map`.
+    - Transform the failure: `recover`, `recover-kinds`, `map-err`.
+    - Eliminate: `either`, `or-raise`, `or-default`.
+    - Combine: `all`, `partition`.
+
+    `map` replaces the success stack with what its quotation leaves, and a raising quotation turns
+    the success into a failure. `recover` may likewise turn a failure into a success; `map-err`
+    always keeps a failure and replaces only the error dict. `or-default` returns the success list
+    or, on failure, the fallback value as given.
+
+    `raise`, `fail`, and `assert` operate on errors directly and remain core words.")
 []
 (
  ### defp checked

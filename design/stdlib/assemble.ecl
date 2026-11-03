@@ -8,11 +8,15 @@
 # section per standard-library module (`stdlib`, less the `.core`
 # implementations its modules import), ordered by name. A section lists every
 # word `exports` reports, and each entry's effect and documentation are read
-# through `effect` and `doc`, so the code is the only place they are written.
-# A fragment (core.md, modules/<name>.md) supplies a section's `## name`
-# introduction and, under `### word` headings, examples for the words that have
-# them. A word needs no heading to be documented; a heading for a word the
-# section does not export, or a fragment for no module, is refused.
+# through `effect` and `doc`, so the code is the only place they are written. A
+# module section's introduction is likewise its `module-doc`. A fragment
+# (core.md, modules/<name>.md) supplies a section's `## name` heading, the core
+# section's introduction, and, under `### word` headings, examples for the words
+# that have them. A module fragment may add material under `#### ` headings
+# beneath its own; prose directly under the heading is refused, because that is
+# where the module's documentation goes. A word needs no heading to be
+# documented; a heading for a word the section does not export, or a fragment for
+# no module, is refused.
 #
 # Entries within a section are ordered by dependency rank, then by codepoint
 # name. A word's rank is zero when its definition uses no other word from the
@@ -225,12 +229,25 @@
  "### " name escaped cat "\n" cat name qualifier entry-text cat
  swap dup empty? (pop) ("\n\n" swap cat cat) if) `render-entry def
 
+### def module-header
+(header module -- header :
+ "Place a module's documentation beneath its fragment's heading, refusing other prose there: the
+  rest of the header must open with a `#### ` subsection.")
+(|header module|
+ header "\n" split rest
+ dup (len 0 >) each where dup empty? (pop pop "") (first drop "\n" join) if
+ dup empty? over "#### " starts? or
+ module ": a module's introduction is its module-doc; put fragment material under #### headings"
+ cat check
+ header "\n" split first "\n\n" cat module intern module-doc cat
+ swap dup empty? (pop) ("\n\n" swap cat cat) if) `module-header def
+
 ### def section
-(path title qualifier names ranks -- text :
- "Render one section: its fragment's introduction, then an entry for every exported word in rank
-  order, each from reflection plus its fragment examples.")
-(|path title qualifier names ranks|
- path title fragment names examples qualifier pair
+(path title qualifier names ranks introduce -- text :
+ "Render one section: its fragment's header passed through the introduce quotation, then an entry
+  for every exported word in rank order, each from reflection plus its fragment examples.")
+(|path title qualifier names ranks introduce|
+ path title fragment swap introduce call swap names examples qualifier pair
  names ranks rank-order names swap at
  swap (|name context| name context first context 1 at render-entry) partial each
  cons "\n\n" join) `section def
@@ -247,6 +264,7 @@
  module "." cat
  module intern exports (chars) each
  known module {} dict.get
+ module (module-header) partial
  section) `module-section def
 
 ### def module-sections
@@ -264,7 +282,7 @@
 ### def document
 (-- text : "Assemble the complete reference.")
 (module-sections
- "design/stdlib/core.md" "Prelude and core" "" `core exports (chars) each prelude-ranks section
+ "design/stdlib/core.md" "Prelude and core" "" `core exports (chars) each prelude-ranks () section
  swap cons
  `cwd "design/stdlib/preamble.md" fs.read-text "\n" split trim-trailing "\n" join swap cons
  "<!-- Generated from design/stdlib by design/stdlib/assemble.ecl; edit the fragments. -->" swap

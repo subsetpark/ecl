@@ -26,6 +26,12 @@ const max_path_bytes: usize = 4096;
 const member_slots = 1 << 18;
 const tar_block_bytes = 512;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Exact hashing, archive inspection, and hostile-input-safe extraction. Binary payloads are
+    \\ordinary lists of integers in `0...255`.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open-tgz", .effect = "bytes -- archive", .doc = "Validate a gzip tar with the same hostile-input parser and limits as `unpack-tgz`, then return a scope-owned archive resource without filesystem writes. No manifest or package identity is required. The resource retains the validated uncompressed document until `port.close` or scope exit; cleanup is joined and advances incrementally through member storage. The limits apply per document. Scope ownership governs lifetime and joined cleanup; it does not impose an aggregate heap budget on retained archives.", .primitive = openTgz },
     .{ .name = "next-member", .effect = "archive -- metadata", .doc = "Select the next archive member and return `{path string kind symbol size int}` in archive order. Kinds are `` `file `` and `` `directory ``; size is the content length in bytes. `{}` denotes stable end. Advancing skips unread contents of the previous member. Metadata owns its path independently of later cursor operations or closure.", .primitive = nextMember },

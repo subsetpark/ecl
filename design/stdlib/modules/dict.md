@@ -1,16 +1,5 @@
 ## dict
 
-These operations preserve the language's immutable, insertion-ordered
-dictionary semantics. The constructor family accepts one key/value association,
-flat adjacent entries, parallel key/value lists, association lists, or one
-shared value for a key list. All constructors reject duplicate keys instead of
-silently choosing a winner. Core `at`, `put`, `update`, and `del` treat a
-dictionary selector as one whole-value key. `dict.put` also assigns one whole key and value. Batch operations `dict.at`,
-`dict.at-or`, `dict.update`, `dict.take`, `dict.del`, and `dict.split` consume
-a list of whole keys: strings and composite keys remain atomic. The public
-`dict` module is ECL over the host kernels exported by `dict.core`, so a
-failure inside a kernel reports its `dict.core` name.
-
 ### associate
 
 #### Examples

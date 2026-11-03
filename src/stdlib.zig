@@ -20,6 +20,12 @@ const dict_module = @import("stdlib/dict.zig");
 const rand_module = @import("stdlib/rand.zig");
 const fs_module = @import("stdlib/fs.zig");
 const clock_module = @import("stdlib/clock.zig");
+const port_core = @import("stdlib/port.zig");
+const task_module = @import("task_prims.zig");
+const str_core = @import("stdlib/str.zig");
+const fd_core = @import("stdlib/fd.zig");
+const host_module = @import("stdlib/host.zig");
+const source_module = @import("stdlib/source.zig");
 
 /// One complete transport for one embedded module. Each arm carries
 //  everything its publication path needs, so no loader has to repair a
@@ -34,7 +40,7 @@ pub const Entry = union(enum) {
     /// Host primitives published under a module name. Reserved for authority
     /// the SDK deliberately withholds — an allocator, sockets, TLS — which no
     /// external module may hold and no ECL program can express.
-    builtin: []const env.BuiltinWord,
+    builtin: env.BuiltinModule,
 };
 
 /// Embedded ECL source plus the provenance name errors raised inside it
@@ -54,13 +60,13 @@ const modules = [_]Module{
         .name = "<stdlib:port>",
         .text = @embedFile("stdlib/port.ecl"),
     } } },
-    .{ .name = "port.core", .entry = .{ .builtin = &@import("stdlib/port.zig").words } },
-    .{ .name = "task", .entry = .{ .builtin = &@import("task_prims.zig").words } },
+    .{ .name = "port.core", .entry = .{ .builtin = .{ .words = &port_core.words, .doc = port_core.doc } } },
+    .{ .name = "task", .entry = .{ .builtin = .{ .words = &task_module.words, .doc = task_module.doc } } },
     .{ .name = "dict", .entry = .{ .source = .{
         .name = "<stdlib:dict>",
         .text = @embedFile("stdlib/dict.ecl"),
     } } },
-    .{ .name = "dict.core", .entry = .{ .builtin = &dict_module.words } },
+    .{ .name = "dict.core", .entry = .{ .builtin = .{ .words = &dict_module.words, .doc = dict_module.doc } } },
     .{ .name = "error", .entry = .{ .source = .{
         .name = "<stdlib:error>",
         .text = @embedFile("stdlib/error.ecl"),
@@ -73,26 +79,26 @@ const modules = [_]Module{
         .name = "<stdlib:str>",
         .text = @embedFile("stdlib/str.ecl"),
     } } },
-    .{ .name = "str.core", .entry = .{ .builtin = &@import("stdlib/str.zig").words } },
+    .{ .name = "str.core", .entry = .{ .builtin = .{ .words = &str_core.words, .doc = str_core.doc } } },
     .{ .name = "io", .entry = .{ .source = .{
         .name = "<stdlib:io>",
         .text = @embedFile("stdlib/io.ecl"),
     } } },
-    .{ .name = "io.core", .entry = .{ .builtin = &io_module.words } },
+    .{ .name = "io.core", .entry = .{ .builtin = .{ .words = &io_module.words, .doc = io_module.doc } } },
     .{ .name = "fd", .entry = .{ .source = .{
         .name = "<stdlib:fd>",
         .text = @embedFile("stdlib/fd.ecl"),
     } } },
-    .{ .name = "fd.core", .entry = .{ .builtin = &@import("stdlib/fd.zig").words } },
+    .{ .name = "fd.core", .entry = .{ .builtin = .{ .words = &fd_core.words, .doc = fd_core.doc } } },
     .{ .name = "csv", .entry = .{ .native = Csv.descriptor() } },
-    .{ .name = "json", .entry = .{ .builtin = &json_module.words } },
-    .{ .name = "host", .entry = .{ .builtin = &@import("stdlib/host.zig").words } },
-    .{ .name = "source", .entry = .{ .builtin = &@import("stdlib/source.zig").words } },
+    .{ .name = "json", .entry = .{ .builtin = .{ .words = &json_module.words, .doc = json_module.doc } } },
+    .{ .name = "host", .entry = .{ .builtin = .{ .words = &host_module.words, .doc = host_module.doc } } },
+    .{ .name = "source", .entry = .{ .builtin = .{ .words = &source_module.words, .doc = source_module.doc } } },
     .{ .name = "table", .entry = .{ .source = .{
         .name = "<stdlib:table>",
         .text = @embedFile("stdlib/table.ecl"),
     } } },
-    .{ .name = "http", .entry = .{ .builtin = &http_module.words } },
+    .{ .name = "http", .entry = .{ .builtin = .{ .words = &http_module.words, .doc = http_module.doc } } },
     .{ .name = "http.server", .entry = .{ .source = .{
         .name = "<stdlib:http.server>",
         .text = @embedFile("stdlib/http/server.ecl"),
@@ -110,7 +116,7 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/proc.ecl"),
     } } },
     .{ .name = "proc.core", .entry = .{ .native = @import("bundled-proc").Extension.descriptor() } },
-    .{ .name = "fs", .entry = .{ .builtin = &fs_module.words } },
+    .{ .name = "fs", .entry = .{ .builtin = .{ .words = &fs_module.words, .doc = fs_module.doc } } },
     .{ .name = "net", .entry = .{ .source = .{
         .name = "<stdlib:net>",
         .text = @embedFile("stdlib/net.ecl"),
@@ -120,8 +126,8 @@ const modules = [_]Module{
         .name = "<stdlib:path>",
         .text = @embedFile("stdlib/path.ecl"),
     } } },
-    .{ .name = "archive", .entry = .{ .builtin = &archive_module.words } },
-    .{ .name = "clock", .entry = .{ .builtin = &clock_module.words } },
+    .{ .name = "archive", .entry = .{ .builtin = .{ .words = &archive_module.words, .doc = archive_module.doc } } },
+    .{ .name = "clock", .entry = .{ .builtin = .{ .words = &clock_module.words, .doc = clock_module.doc } } },
     .{ .name = "time", .entry = .{ .source = .{
         .name = "<stdlib:time>",
         .text = @embedFile("stdlib/time.ecl"),
@@ -130,7 +136,7 @@ const modules = [_]Module{
         .name = "<stdlib:agent>",
         .text = @embedFile("stdlib/agent.ecl"),
     } } },
-    .{ .name = "rand", .entry = .{ .builtin = &rand_module.words } },
+    .{ .name = "rand", .entry = .{ .builtin = .{ .words = &rand_module.words, .doc = rand_module.doc } } },
     .{ .name = "test.default", .entry = .{ .source = .{
         .name = "<stdlib:test.default>",
         .text = @embedFile("stdlib/test/default.ecl"),
@@ -153,13 +159,7 @@ comptime {
                     @compileError("embedded module provenance is empty: " ++ module.name);
             },
             .native => {},
-            .builtin => |words| {
-                if (words.len == 0)
-                    @compileError("embedded builtin module has no words: " ++ module.name);
-                for (words) |word| {
-                    env.assertStaticBuiltin(word);
-                }
-            },
+            .builtin => |builtin| env.assertStaticBuiltinModule(module.name, builtin),
         }
     }
 }

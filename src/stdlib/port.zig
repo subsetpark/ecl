@@ -17,6 +17,11 @@ const factories = @import("../port_factory.zig");
 const endpoints = @import("../port_endpoint.zig");
 const exchanges = @import("../port_exchange.zig");
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Host primitives behind the `port` module, which composes them into its public words.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{ .name = "open", .effect = "factory config -- resource", .doc = "Initialize a registered resource in the calling scope.", .primitive = open },
     .{ .name = "begin", .effect = "resource operation request -- exchange", .doc = "Admit an operation with bounded structured parameters.", .primitive = begin },

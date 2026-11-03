@@ -679,16 +679,22 @@ const Formatter = struct {
             try body.append(self.allocator(), try self.docs.hardline());
         try body.append(self.allocator(), try self.docs.concat(closing.items));
         const registered_body = try self.docs.group(try self.docs.aligned(try self.docs.concat(body.items)));
-        if (start == registration.body) return registered_body;
-        const seed = try self.form(sequence, start);
-        const breaks = formBreakCount(sequence, start, registration.body);
-        if (breaks == 0) return self.docs.concat(&.{ seed, try self.docs.linePair(registered_body) });
-        var seeded: std.ArrayList(*const Doc) = .empty;
-        defer seeded.deinit(self.allocator());
-        try seeded.append(self.allocator(), seed);
-        for (0..breaks) |_| try seeded.append(self.allocator(), try self.docs.hardline());
-        try seeded.append(self.allocator(), registered_body);
-        return self.docs.concat(seeded.items);
+        const registered = if (registration.seed == registration.body)
+            registered_body
+        else seeded: {
+            const seed = try self.form(sequence, registration.seed);
+            const breaks = formBreakCount(sequence, registration.seed, registration.body);
+            if (breaks == 0) break :seeded try self.docs.concat(&.{ seed, try self.docs.linePair(registered_body) });
+            var seeded: std.ArrayList(*const Doc) = .empty;
+            defer seeded.deinit(self.allocator());
+            try seeded.append(self.allocator(), seed);
+            for (0..breaks) |_| try seeded.append(self.allocator(), try self.docs.hardline());
+            try seeded.append(self.allocator(), registered_body);
+            break :seeded try self.docs.concat(seeded.items);
+        };
+        // A module's documentation stands on its own line above the operands.
+        if (start == registration.seed) return registered;
+        return self.docs.concat(&.{ try self.form(sequence, start), try self.docs.hardline(), registered });
     }
     fn nested(self: *Formatter, sequence: Sequence) Error!NestedDoc {
         var output: std.ArrayList(*const Doc) = .empty;
@@ -830,7 +836,8 @@ const Formatter = struct {
         form_item: *Form,
     ) Error!?Annotation {
         const body_index = nextFormPart(parent, part_index) orelse return null;
-        if (!definitionFollows(parent, body_index)) return null;
+        if (!definitionFollows(parent, body_index) and
+            moduleRegistrationShape(parent, body_index) == null) return null;
         const delimited = switch (form_item.kind) {
             .delimited => |item| item,
             else => return null,
@@ -1105,10 +1112,23 @@ fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
 }
 const ModuleRegistration = struct {
     name: []const u8,
+    /// The values list, or the body of a seedless registration.
+    seed: usize,
     body: usize,
     terminator: usize,
 };
+/// A registration phrase, from a leading annotation when one documents it.
+/// The annotation claims the phrase's header, so the operands after it do not.
 fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration {
+    if (!sequence.definitions) return null;
+    if (isAnnotationCandidate(sequence.parts[start].form))
+        return moduleRegistrationShape(sequence, nextFormPart(sequence, start) orelse return null);
+    const registration = moduleRegistrationShape(sequence, start) orelse return null;
+    if (previousFormPart(sequence, start)) |previous|
+        if (isAnnotationCandidate(sequence.parts[previous].form)) return null;
+    return registration;
+}
+fn moduleRegistrationShape(sequence: Sequence, start: usize) ?ModuleRegistration {
     if (!sequence.definitions) return null;
     const head = sequence.parts[start].form;
     if (!isListForm(head) or isAnnotationCandidate(head)) return null;
@@ -1134,7 +1154,7 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
                 const seeded = std.mem.eql(u8, bytes, "@defm");
                 if (!seeded and !std.mem.eql(u8, bytes, "@defm!")) return null;
                 if (seeded != body_seen) return null;
-                return .{ .name = name, .body = body, .terminator = part_index };
+                return .{ .name = name, .seed = start, .body = body, .terminator = part_index };
             }
             if (bytes.len < 2 or bytes[0] != '`' or !lexer.validSymbolSource(bytes[1..])) return null;
             named = bytes[1..];

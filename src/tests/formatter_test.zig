@@ -57,6 +57,24 @@ fn expectParseEquivalent(source: []const u8) !void {
     }
 }
 
+test "formatter keeps a module annotation with its registration" {
+    // The annotation claims the registration's header and stands on its own
+    // line above the operands; the operands after it claim no second header.
+    const seeded = "(: \"Doc.\") [] ((1) `x def) `stats @defm\n";
+    try expectFormat(
+        seeded,
+        "### module stats\n(: \"Doc.\")\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n",
+    );
+    try expectParseEquivalent(seeded);
+    try expectFormat(
+        "(: \"Doc.\") (() `x def) `stats @defm!\n",
+        "### module stats\n(: \"Doc.\")\n(\n ### def x\n () `x def) `stats @defm!\n",
+    );
+    // An implementation comment beneath the header stays there.
+    const commented = "### module stats\n# Note.\n(: \"Doc.\")\n[]\n() `stats @defm\n";
+    try expectFormat(commented, commented);
+}
+
 test "formatter measures a module seed against its opening line" {
     const source = "[] ((1) `x def) `stats @defm\n";
     try expectFormat(

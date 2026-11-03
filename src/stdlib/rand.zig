@@ -2,6 +2,14 @@
 const env = @import("../env.zig");
 const random = @import("../kernel_random.zig");
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Explicit-state pseudorandom draws are pure except for `entropy`; see
+    \\[Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw returns the
+    \\advanced state alongside its result. An ambient generator is an agent holding that state:
+    \\``[0 0] agent.start `rng set`` then `rng (5 rand.int) agent.call`.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "int",

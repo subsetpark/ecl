@@ -1,6 +1,6 @@
 ### module str
-# String operations use ASCII case and whitespace rules. Case conversion leaves
-# non-ASCII characters unchanged.
+(: "All case and whitespace operations use the ASCII character classes; every non-ASCII scalar
+    passes through unchanged.")
 []
 (
  ### defp blanks

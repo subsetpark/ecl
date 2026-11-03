@@ -475,6 +475,10 @@ const ModuleImage = struct {
     names: ?env.NameMap = null,
     scope: env.Scope,
     tests: TestCatalog,
+    /// The module's documentation as written, one reference owned by the
+    /// image. A generation carries its own: reload replaces the text with the
+    /// code, and nothing carries it from one generation to the next.
+    doc: ?*env.DocumentationString = null,
     /// The authoritative count lives in this separately owned cell, so it can outlive this
     /// struct for the images a scope cell names.
     anchor: *RefAnchor,
@@ -610,6 +614,7 @@ const ModuleImage = struct {
                 .complete => self.names.?.deinit(),
             },
         }
+        if (self.doc) |doc| releases.releaseHeader(env.documentationHeader(doc));
         const anchor = self.anchor;
         const stamped = self.minted_cell;
         allocator.destroy(self);
@@ -1312,6 +1317,10 @@ pub const GenerationLease = enum(usize) {
     pub fn provenance(self: GenerationLease) RegistrationProvenance {
         return self.image().provenance;
     }
+    /// The generation's documentation as written, borrowed for the lease.
+    pub fn documentation(self: GenerationLease) ?*env.DocumentationString {
+        return self.image().doc;
+    }
     /// One name in this published generation's directory.
     pub fn lookupCursor(self: GenerationLease, binding: intern.BindingName) ModuleNameLookupCursor {
         const retained = self.image();
@@ -1378,6 +1387,15 @@ pub const OwnedImage = enum(usize) {
     }
     pub fn provenance(self: *const OwnedImage) RegistrationProvenance {
         return self.borrow().provenance;
+    }
+    /// Records the module's documentation, retaining it; the caller keeps its
+    /// own reference. Each construction documents its image at most once,
+    /// before publication.
+    pub fn document(self: *const OwnedImage, doc: *env.DocumentationString) void {
+        const image = self.borrow();
+        std.debug.assert(image.doc == null and !image.published.load(.acquire));
+        heap.incRef(env.documentationHeader(doc));
+        image.doc = doc;
     }
     /// Stages one definition of the construction group. The publication's
     /// values are retained by the staged definition; the caller keeps its own.
@@ -2201,10 +2219,13 @@ pub const Registry = enum(usize) {
             provenance: RegistrationProvenance,
             instance: *native_module.ModuleInstance,
         ) error{OutOfMemory}!NativeCandidateCursor {
+            const candidate = try registry.createImage(name, provenance);
+            // The descriptor's module documentation was validated with it.
+            candidate.document(instance.validated().documentation());
             return .{
                 .registry = registry,
                 .instance = instance,
-                .candidate = try registry.createImage(name, provenance),
+                .candidate = candidate,
             };
         }
 
@@ -2269,14 +2290,19 @@ pub const Registry = enum(usize) {
             registry: *Registry,
             name: intern.ModuleName,
             provenance: RegistrationProvenance,
-            words: []const env.BuiltinWord,
+            module: env.BuiltinModule,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
-            return .{
+            var result: BuiltinCandidateCursor = .{
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
-                .words = words,
+                .words = module.words,
                 .candidate = try registry.createImage(name, provenance),
             };
+            errdefer result.deinit();
+            const document = try result.buildDocumentation(module.doc);
+            defer result.releases.releaseHeader(env.documentationHeader(document));
+            result.candidate.?.document(document);
+            return result;
         }
 
         pub fn deinit(self: *BuiltinCandidateCursor) void {

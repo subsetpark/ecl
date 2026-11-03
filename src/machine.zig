@@ -4115,7 +4115,7 @@ pub const Fiber = struct {
             const text = switch (entry) {
                 .source => |source| try evaluator.allocator.dupe(u8, source.text),
                 .native => |descriptor| return self.transferStatic(evaluator, transfer, descriptor),
-                .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
+                .builtin => |module| return self.transferBuiltin(evaluator, transfer, module),
             };
             const source_name = transfer.candidate.take();
             const completion = self.sourceCompletion(transfer, .standard_library, null);
@@ -4127,12 +4127,12 @@ pub const Fiber = struct {
             self: *AutoLoadDriver,
             evaluator: *Fiber,
             transfer: *@FieldType(State, "transfer"),
-            words: []const env.BuiltinWord,
+            module: env.BuiltinModule,
         ) MachineError!WorkProgress {
             // The candidate is created before ownership moves: struct-literal
             // fields evaluate in order, so a failure here would otherwise
             // strand the lease and path this driver had already taken.
-            const publication = try modules.Registry.BuiltinCandidateCursor.init(evaluator.inherited.registry, self.request.module.name, .standard_library, words);
+            const publication = try modules.Registry.BuiltinCandidateCursor.init(evaluator.inherited.registry, self.request.module.name, .standard_library, module);
             // No errdefer: from here nothing fails until `startDriver`, which
             // disposes the whole uninstalled driver's owned fields itself.
             const next = BuiltinLoadDriver{
@@ -5749,11 +5749,13 @@ pub const Fiber = struct {
     }
     /// Opens a construction boundary for `@defm`. The name has already been
     /// validated; the body evaluates against a fresh image, and completion
-    /// publishes that image under the name.
+    /// publishes that image under the name. The image retains `doc`; the
+    /// caller keeps its own reference.
     pub fn moduleOwned(
         self: *Fiber,
         name: intern.ModuleName,
         input: OwnedUnitInput,
+        doc: ?*env.DocumentationString,
     ) MachineError!void {
         var owned = input;
         defer owned.deinit(self.releases);
@@ -5762,6 +5764,7 @@ pub const Fiber = struct {
         const provenance = self.current.?.site.registration_provenance;
         var candidate = try registry.createImage(name, provenance);
         errdefer candidate.deinit();
+        if (doc) |document| candidate.document(document);
         // Attribution asks one question, of the exact designated body. The
         // archive consumes that body into either an unchanged owner or an
         // opaque exact-root admission awaiting a target scope. Seeds are a

@@ -12,7 +12,8 @@ words precede letter-spelled ones. An entry gives the word's successful stack
 effect followed by its semantics. For a word defined in ecl, the entry is the
 definition's own annotation, the same effect and documentation that `which`,
 `see`, and `doc` reflect; words without a declared effect state their shape in
-documentation.
+documentation. A module section opens with the module's own documentation, the
+text `module-doc` returns.
 At module boundaries, declared output contracts are checked when the invocation
 completes, including any deferred work. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of

@@ -25,6 +25,12 @@ const Value = value.Value;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\RFC 8259 JSON. `parse` reads JSON text into ECL values and `emit` renders a value as JSON
+    \\text.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{
         .name = "parse",

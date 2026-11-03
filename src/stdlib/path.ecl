@@ -1,8 +1,10 @@
 ### module path
-# Lexical slash-path operations over Unicode strings. Nothing here reads the
-# filesystem, consults the working directory, or follows links, and a
-# normalized string is never proof of containment: `fs` enforces that at its
-# directory handles.
+(: "Lexical operations over slash-separated path strings. Every argument and result is a string of
+    Unicode scalar values; the separator is always `/`, and no word reads the filesystem, consults
+    the working directory, follows links, or applies drive-letter, backslash, case-folding, or
+    Unicode-normalization rules. Normalization is lexical: it never proves that a path stays within
+    a directory, which is why `fs` accepts only the canonical grammar and enforces containment at
+    its directory handles.")
 []
 (
  ### defp checked

@@ -17,6 +17,21 @@ const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 const Value = value.Value;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Scheduler-backed time. `now`, `elapsed`, and `sleep` read the one monotonic clock the
+    \\Session's scheduler owns, so a program's instants, its sleeps, and every `task.await-for`
+    \\deadline agree on the current time. `unix` reads the process realtime clock, which is always
+    \\available to CLI programs.
+    \\
+    \\Every quantity is a whole number of milliseconds. A monotonic instant is the one-key
+    \\dictionary `{monotonic ms}` counting from Session construction; a wall timestamp is `{unix
+    \\ms}` counting from 1970-01-01T00:00:00Z. The tag is the clock domain: an instant handed to a
+    \\`time` word, or a timestamp handed to `elapsed`, is `` `type ``. Monotonic instants are not
+    \\portable across Sessions and carry no date; wall time may jump and is not suitable for
+    \\scheduling.
+;
+
 pub const words = [_]env.BuiltinWord{
     .{ .name = "elapsed", .effect = "instant -- milliseconds", .doc = "Monotonic milliseconds from an instant produced by `now` to the present. Anything but `{monotonic int}` is `` `type ``.", .primitive = elapsed },
     .{ .name = "now", .effect = "-- instant", .doc = "Read the monotonic clock as `{monotonic ms}`. Successive reads never decrease. The first read of a fresh Session is close to `{monotonic 0}`.", .primitive = now },

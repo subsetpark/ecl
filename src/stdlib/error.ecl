@@ -1,9 +1,9 @@
 ### module error
-# Errors are immutable dictionaries with a required symbol at `kind and
-# optional, typed diagnostic fields. Constructors preserve that ordinary-data
-# representation; raising and catching remain core control effects.
 # This module's own contract failures use schema literals so constructor
 # validation cannot recursively call the constructor it is validating.
+(: "Errors are ordinary dictionaries with a required symbol at `` `kind `` and optional, typed
+    diagnostic fields. Construction and inspection do not raise unless an operation's own input
+    violates its contract; control effects remain core words.")
 []
 (
  ### defp text?

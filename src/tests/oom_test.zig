@@ -590,7 +590,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-reflection.ecl",
         "[] (( -- n ) (1) `f def) `reflection-module @defm " ++
             "`reflection-module (f) import words " ++
-            "`f which `reflection-module.f see",
+            "`f which `reflection-module.f see " ++
+            "(: \"D\") [] () `oom-documented @defm `oom-documented module-doc pop",
     );
     try runOk(&runtime, "oom-loader.ecl", "`stats (answer) import answer pop");
     try runOk(
@@ -601,7 +602,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1 2] sample.sum-list pop {a 1 b 2} sample.sum-dict pop " ++
             "`answer 42 sample.pair-dict pop sample.builder-budget pop " ++
             "sample.cooperative pop [] (9 sample.draft-fail) @attempt pop " ++
-            "[] (9 sample.yield-forever) @spawn dup task.cancel task.await pop",
+            "[] (9 sample.yield-forever) @spawn dup task.cancel task.await pop " ++
+            "`sample module-doc pop",
     );
     try runOk(
         &runtime,

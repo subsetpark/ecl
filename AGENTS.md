@@ -58,9 +58,10 @@ in those guides rather than expanding this index with incident-specific history.
   inputs. Its sections and entries come from the language: every module
   `stdlib` lists and every word `exports` reports, with each entry's effect and
   docstring read through `effect` and `doc` from the ECL annotation or the Zig
-  table. A fragment under `design/stdlib` holds only a section introduction and
-  examples; a new word needs no heading. Entry order within a section is
-  computed, not authored.
+  table, and each module section's introduction through `module-doc`. A
+  fragment under `design/stdlib` holds only the core section's introduction,
+  examples, and module material under `#### ` headings; a new word needs no
+  heading. Entry order within a section is computed, not authored.
 - Run every build, test, or script with stdin closed and under a bounded timeout.
   Capture the command's exit status immediately, before `tail`, `grep`, or any
   other helper. A silent command is not evidence that the intended test ran.

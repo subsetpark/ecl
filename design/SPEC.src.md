@@ -752,8 +752,9 @@ representations but expose the same binding model.
   and effect metadata, `doc` returns documentation, and `effect` returns the
   declared effect as an annotation list, or `()` when none was declared.
   `` `m exports `` returns module `m`'s public word names as sorted symbols
-  (`` `core exports `` lists core's), and `stdlib` returns the embedded
-  standard-library module names.
+  (`` `core exports `` lists core's), `` `m module-doc `` returns its
+  documentation, and `stdlib` returns the embedded standard-library module
+  names.
 - Names are introduced and replaced, never removed. No word removes a
   definition or a module registration during a Session: a shadowed core word
   stays reachable as `core.name`, and a new Session starts with no top-level
@@ -981,7 +982,7 @@ that name.
 
 ### Operations
 
-- `@defm` is ``( values body `module-name -- )``. It validates the name before
+- `@defm` is ``( annotation? values body `module-name -- )``. It validates the name before
   evaluating anything: a non-symbol is `` `type ``; a name that is not a valid
   module path, the reserved name `core`, or a standard-library module name is
   `` `domain ``, and in each case the body never runs. With a valid name it runs the
@@ -1001,6 +1002,17 @@ that name.
   extend them. The separate operands let attribution below name the body
   exactly. The body runs stack-isolated: it never sees or disturbs the
   caller's stack.
+- **A module documents itself with a documentation-only annotation.** A
+  module declares no stack effect, so the value beneath the operands is its
+  annotation exactly when it is `(: "text")`: a colon and one string. Any
+  other value there, including a list that would be a definition's annotation,
+  is the caller's data and stays on its stack. The documentation belongs to
+  the generation the construction publishes, so a reload states its own and a
+  reload without one leaves the module undocumented. A native module states its
+  documentation in its descriptor, and every embedded standard-library module
+  has one. `` `m module-doc `` returns the current generation's documentation in
+  canonical form, loading the module on first mention; a module without
+  documentation, or `` `core ``, is `` `domain ``.
 - Modules are constructible by building the body quotation programmatically
   and enumerable and diffable through their names.
 - **Module names are validated paths.** A canonical module name is one or

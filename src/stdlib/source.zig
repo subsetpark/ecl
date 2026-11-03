@@ -6,6 +6,12 @@ const machine = @import("../machine.zig");
 const reader = @import("../reader.zig");
 const Value = @import("../value.zig").Value;
 
+/// The module's documentation, which `module-doc` reflects.
+pub const doc =
+    \\Inert inspection of ECL source: what a source declares, found by the reader's discovery rule
+    \\without evaluating it.
+;
+
 pub const words = [_]env.BuiltinWord{.{
     .name = "declarations",
     .effect = "quotation -- list",

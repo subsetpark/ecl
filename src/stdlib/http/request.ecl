@@ -1,10 +1,12 @@
 ### module http.request
-# A request is a dict whose recognized fields are `method, `target, `path,
-# `query, `headers, `body, `peer, and `params. Every field is optional, so the
-# same value can describe overrides for an outbound http.get or http.post, a
-# complete request consumed by http.send, or the complete request http.server
-# hands a handler. These words build one, read its fields using empty defaults,
-# and return updated copies.
+(: "Words over partial or complete request dictionaries. Recognized optional fields are `` `method
+    ``, `` `target ``, `` `path ``, `` `query ``, `` `headers ``, `` `body ``, `` `peer ``, and ``
+    `params ``. `http.server` handlers receive every field except `` `params ``, which
+    `http.server.route` may add; outbound `http.get` and `http.post` accept partial values and apply
+    their documented defaults, while `http.send` consumes a complete value. The words here build a
+    complete request, read absent headers/query/body using empty defaults, and return updated
+    copies; the original is never changed. A word given a malformed request dictionary, or a name
+    that is not a string, is `` `type ``.")
 []
 (
  ### defp type-error
