@@ -121,11 +121,13 @@ advance bounded reclamation and cannot drain or destroy the root.
 
 ### Units are transactions on the persistent stack
 
-`Session.runUnit` evaluates one submission. The Session checkpoints its
-operand stack, moves that stack into a root `Fiber`, and gives the Fiber a root
-scope plus inherited service capabilities. On success, the Fiber's resulting
-stack becomes the Session's next persistent stack. A parse error, language
-error, or allocation failure restores the checkpoint.
+`Session.runUnit` evaluates one submission. A root unit is the only unit whose
+restored entry stack a program observes, so it is the only one that copies its
+entry: one `RootTransaction` checkpoints the Session's operand stack, moves it
+into a root `Fiber` with a root scope and inherited service capabilities, and
+on every exit hands the Fiber's stack back. A committed unit's resulting stack
+becomes the Session's next persistent stack; a parse error, language error, or
+allocation failure restores the checkpoint.
 
 The transaction covers the operand stack. Output already written, native side
 effects, filesystem changes, and other host effects remain committed. The
@@ -1240,8 +1242,12 @@ measured cost justifies fusion.
 ## 8. Scheduling and structured concurrency
 
 A `Fiber` is a green execution context. Only a submission, the prelude, and a
-task body get one; every other unit the language names is a boundary frame
-inside the fiber that runs it, so one fiber carries a stack of nested units.
+task body get one. `@attempt` and module construction run as boundary frames
+inside the fiber, so one fiber carries a stack of nested units; `load` opens no
+boundary, because its failure always reaches an enclosing unit that restores
+an older stack. A fiber's role is one tagged value: a root fiber may define,
+and a task fiber may not and records the constructor that built it. No fiber
+can be a defining task or a constructed root.
 The scheduler may run Fibers cooperatively on the calling thread or on a fixed
 worker pool; both modes use the same machine, queues, wait protocol, task tree,
 and retirement domain.
@@ -1321,10 +1327,10 @@ borrow.
 
 Scopes, fibers, and units are different granularities. A `TaskScope` exists
 in exactly two places: the session root, shared by every root fiber and closed
-only at exit, and each `TaskCell`. `@attempt`, combinator applications, `load`,
-and module construction are boundary frames inside the fiber that runs them:
-units in the language's sense, stack transactions that checkpoint and restore
-operands, owning nothing. A spawn
+only at exit, and each `TaskCell`. `@attempt` and module construction are
+boundary frames inside the fiber that runs them: a stack floor that failure
+truncates to, taking no checkpoint and owning nothing. Combinator applications
+and `load` open no scope and no boundary. A spawn
 registers under the nearest enclosing scope, so a task started inside an
 `@attempt` outlives it. The constructor primitives refuse while a
 module-construction boundary is open anywhere in the frame stack, so an image

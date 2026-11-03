@@ -557,32 +557,53 @@ pub const Session = enum(usize) {
     ) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
         defer core.scheduler.settleRootRetirement();
-        if (core.root_scope == null)
-            core.root_scope = try core.environment.createSessionRoot(core.allocator());
-        var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
-        defer checkpoint.deinit();
-        for (core.stack.items) |item| checkpoint.appendBorrowed(item);
-        var fiber = initRootFiber(core);
-        core.stack = .empty;
-        defer finishRootFiber(core, &fiber);
-        machine.initializeSource(&fiber, source_name, source) catch {
-            restoreCheckpoint(&fiber, checkpoint.values());
-            return error.OutOfMemory;
+        var transaction = try RootTransaction.begin(core);
+        defer transaction.finish();
+        const fiber = &transaction.fiber;
+        try machine.initializeSource(fiber, source_name, source);
+        core.scheduler.runInitializedRoot(fiber) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return .{ .err = fiber.takeError().? },
         };
-        core.scheduler.runInitializedRoot(&fiber) catch |err| switch (err) {
-            error.OutOfMemory => {
-                restoreCheckpoint(&fiber, checkpoint.values());
-                return error.OutOfMemory;
-            },
-            error.Ecl => {
-                restoreCheckpoint(&fiber, checkpoint.values());
-                return .{ .err = fiber.takeError().? };
-            },
-        };
+        transaction.commit();
         if (fiber.takeSourceIncomplete()) |incomplete|
             return .{ .incomplete = incomplete };
         return .ok;
     }
+
+    /// The one unit whose restored entry stack a program observes: a root
+    /// unit on the persistent Session stack. `begin` checkpoints that stack and
+    /// moves it into a root fiber; `finish` hands the fiber's stack back to the
+    /// Session, first restoring the checkpoint unless the unit committed. Every
+    /// way out of a root unit passes through `finish`, so no failure path can
+    /// forget the restore.
+    const RootTransaction = struct {
+        core: *SessionCore,
+        checkpoint: heap.OwnedValueBuffer,
+        fiber: machine.Fiber,
+        committed: bool = false,
+
+        fn begin(core: *SessionCore) error{OutOfMemory}!RootTransaction {
+            if (core.root_scope == null)
+                core.root_scope = try core.environment.createSessionRoot(core.allocator());
+            var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
+            for (core.stack.items) |item| checkpoint.appendBorrowed(item);
+            const fiber = initRootFiber(core);
+            core.stack = .empty;
+            return .{ .core = core, .checkpoint = checkpoint, .fiber = fiber };
+        }
+
+        fn commit(self: *RootTransaction) void {
+            self.committed = true;
+        }
+
+        fn finish(self: *RootTransaction) void {
+            if (!self.committed)
+                self.fiber.restoreStackBorrowedAssumeCapacity(self.checkpoint.values());
+            finishRootFiber(self.core, &self.fiber);
+            self.checkpoint.deinit();
+        }
+    };
 
     fn initRootFiber(core: *SessionCore) machine.Fiber {
         var fiber = machine.Fiber.init(
@@ -618,7 +639,6 @@ pub const Session = enum(usize) {
         );
         fiber.scheduler = core.scheduler.worker();
         fiber.task_scope = &core.root_tasks;
-        fiber.is_root_fiber = true;
         fiber.execution_scope = core.root_scope.?;
         return fiber;
     }
@@ -657,45 +677,29 @@ pub const Session = enum(usize) {
 
     fn loadTarget(self: *Session, target: LoadTarget) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
-        if (core.root_scope == null)
-            core.root_scope = try core.environment.createSessionRoot(core.allocator());
         var root = heap.OwnedValue.init(
             core.releaseDomain(),
             try list.fromValuesGeneric(core.allocator(), &.{}),
         );
         defer root.deinit();
-        var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
-        defer checkpoint.deinit();
-        for (core.stack.items) |item| checkpoint.appendBorrowed(item);
-        var fiber = initRootFiber(core);
-        core.stack = .empty;
-        defer finishRootFiber(core, &fiber);
-        try machine.initialize(&fiber, root.borrow().list, .empty);
+        // Loading publishes registrations and leaves the Session stack as it
+        // was, so this unit never commits.
+        var transaction = try RootTransaction.begin(core);
+        defer transaction.finish();
+        const fiber = &transaction.fiber;
+        try machine.initialize(fiber, root.borrow().list, .empty);
         const started = switch (target) {
             .module => |name| fiber.loadModuleOnly(name),
             .source => |source| fiber.loadSourceOnly(source),
         };
         started catch |err| switch (err) {
-            error.OutOfMemory => {
-                restoreCheckpoint(&fiber, checkpoint.values());
-                return error.OutOfMemory;
-            },
-            error.Ecl => {
-                restoreCheckpoint(&fiber, checkpoint.values());
-                return .{ .err = fiber.takeError().? };
-            },
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return .{ .err = fiber.takeError().? },
         };
-        core.scheduler.runInitializedRoot(&fiber) catch |err| switch (err) {
-            error.OutOfMemory => {
-                restoreCheckpoint(&fiber, checkpoint.values());
-                return error.OutOfMemory;
-            },
-            error.Ecl => {
-                restoreCheckpoint(&fiber, checkpoint.values());
-                return .{ .err = fiber.takeError().? };
-            },
+        core.scheduler.runInitializedRoot(fiber) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return .{ .err = fiber.takeError().? },
         };
-        restoreCheckpoint(&fiber, checkpoint.values());
         return .ok;
     }
 
@@ -1154,9 +1158,6 @@ fn materializeCompletion(
     return .fromBacking(backing);
 }
 
-fn restoreCheckpoint(fiber: *machine.Fiber, checkpoint: []const Value) void {
-    fiber.restoreStackBorrowedAssumeCapacity(checkpoint);
-}
 fn argumentsValue(
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,

@@ -167,6 +167,17 @@ const FailureSite = union(enum) {
     }
 };
 pub const FiberConstructor = enum { spawn, @"test" };
+/// A fiber runs in one of two roles, and everything that differs between them
+/// follows from which. A root fiber runs a submission or the prelude and may
+/// define. A task fiber runs in its spawner's scope without being a root of
+/// its own, so it may not define; it records the word that constructed it.
+pub const FiberRole = union(enum) {
+    root,
+    task: struct {
+        /// The `@` word that constructed the task, for isolation diagnostics.
+        constructor: FiberConstructor,
+    },
+};
 
 const ErrorDataKey = enum {
     needed,
@@ -1458,12 +1469,12 @@ pub const ExecutionSite = struct {
 
     /// The base case: a fiber's root activation, built from nothing.
     pub fn root(fiber: *Fiber) ExecutionSite {
-        if (fiber.root_execution_home) |home| return image(home, fiber.module_access, fiber.root_defining);
+        if (fiber.root_execution_home) |home| return image(home, fiber.module_access, fiber.role == .root);
         const scope = fiber.lexicalScope();
         return .{
             .scope = scope,
             .home = null,
-            .defining = fiber.root_defining,
+            .defining = fiber.role == .root,
             .registration_provenance = if (fiber.inherited.module_snapshot) |module_snapshot|
                 .{ .root_scope = module_snapshot.localScope() }
             else
@@ -2532,13 +2543,8 @@ pub const Fiber = struct {
     phrase_hits: u64 = 0,
     scheduler: ?*const scheduler_api.WorkerScheduler = null,
     task_scope: ?*scheduler_api.TaskScope = null,
-    is_root_fiber: bool = true,
-    /// For a child fiber, the `@` word that constructed it.
-    constructor: FiberConstructor = .spawn,
+    role: FiberRole = .root,
     execution_scope: ?*env.Scope = null,
-    /// Whether this fiber's root activation may define. False for a task,
-    /// which runs in its spawner's scope without being a root of its own.
-    root_defining: bool = true,
     /// Protected invocation may start this child at one selected registered
     /// module generation. The Fiber lifetime pins the home before installation.
     root_execution_home: ?*modules.ModuleHome = null,
@@ -4988,8 +4994,11 @@ pub const Fiber = struct {
                 },
             };
         }
-        if (self.is_root_fiber) return null;
-        return switch (self.constructor) {
+        const task = switch (self.role) {
+            .root => return null,
+            .task => |task| task,
+        };
+        return switch (task.constructor) {
             .spawn => .{
                 .constructor = "@spawn",
                 .advice = "the child unit's stack is isolated from the caller's stack — " ++

@@ -1977,11 +1977,9 @@ pub const WorkerScheduler = enum(usize) {
         // session, which outlives every task in it, or a module image, which
         // the generation pin below keeps alive. It may not define there.
         fiber.execution_scope = parent_scope;
-        fiber.root_defining = false;
+        fiber.role = .{ .task = .{ .constructor = request.constructor } };
         fiber.scheduler = self;
         fiber.task_scope = &cell.scope;
-        fiber.is_root_fiber = false;
-        fiber.constructor = request.constructor;
         switch (request.site) {
             .inherited => |site| if (site.home) |generation| try fiber.pinGeneration(generation),
             .module => |generation| {

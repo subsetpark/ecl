@@ -1038,7 +1038,7 @@ fn exit(evaluator: *Fiber) MachineError!void {
     if (status.borrow() != .int or status.borrow().int < 0 or status.borrow().int > 255) {
         return evaluator.typeError("an exit status from 0 through 255");
     }
-    if (!evaluator.is_root_fiber or evaluator.inAttempt()) {
+    if (evaluator.role != .root or evaluator.inAttempt()) {
         return evaluator.fail(.domain, "exit is available only to the root unit outside @attempt");
     }
     try evaluator.park(.{ .close_scope = @intCast(status.borrow().int) });
