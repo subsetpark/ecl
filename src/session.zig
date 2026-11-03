@@ -34,6 +34,26 @@ pub const Value = value.Value;
 /// allocation failure: a misnamed root, a relative or missing directory, or an
 /// unsupported target is a configuration error the caller must see.
 pub const InitError = error{ OutOfMemory, InvalidHostConfig };
+
+/// Why Session construction rejected its host configuration. The caller owns
+/// the storage; after `InvalidHostConfig` it holds one bounded reason naming
+/// the rejected input, so every embedder can report it without re-deriving it.
+pub const InitDiagnostic = struct {
+    buffer: [512]u8 = @splat(0),
+    len: usize = 0,
+
+    pub fn message(self: *const InitDiagnostic) []const u8 {
+        return self.buffer[0..self.len];
+    }
+
+    fn fail(self: *InitDiagnostic, comptime format: []const u8, args: anytype) error{InvalidHostConfig} {
+        var writer: std.Io.Writer = .fixed(&self.buffer);
+        // Truncation keeps the leading reason, which names the rejected input.
+        writer.print(format, args) catch {};
+        self.len = writer.end;
+        return error.InvalidHostConfig;
+    }
+};
 pub const UnitOutcome = union(enum) {
     ok,
     incomplete: reader.Incomplete,
@@ -332,8 +352,23 @@ pub const Session = enum(usize) {
         config: Config,
         mode: CommandMode,
     ) InitError!Session {
+        var diagnostic: InitDiagnostic = .{};
+        return initDiagnosed(allocator, arguments, host, config, mode, &diagnostic);
+    }
+
+    /// `init`, also reporting why host configuration was rejected. The
+    /// diagnostic is written only when construction fails with
+    /// `InvalidHostConfig`.
+    pub fn initDiagnosed(
+        allocator: std.mem.Allocator,
+        arguments: []const []const u8,
+        host: RuntimeInputs,
+        config: Config,
+        mode: CommandMode,
+        diagnostic: *InitDiagnostic,
+    ) InitError!Session {
         if (!std.fs.path.isAbsolute(host.initial_cwd) or std.mem.indexOfScalar(u8, host.initial_cwd, 0) != null)
-            return error.InvalidHostConfig;
+            return diagnostic.fail("startup directory `{s}` must be an absolute path without NUL bytes", .{host.initial_cwd});
         const scheduler_config = config.schedulerConfig();
         scheduler_config.validate() catch return error.OutOfMemory;
         const host_owner = try allocator.create(heap.HostOwner);
@@ -348,7 +383,7 @@ pub const Session = enum(usize) {
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
-        host.net_limits.validate() catch return error.InvalidHostConfig;
+        host.net_limits.validate() catch return diagnostic.fail("network limits are invalid", .{});
         const net_configuration = host.net_limits.encode();
         const native_configurations = try allocator.alloc(native_module.Configuration, host.native_instances.len + 2);
         defer allocator.free(native_configurations);
@@ -364,7 +399,7 @@ pub const Session = enum(usize) {
         };
         const process_configuration = bundled_proc.Configuration.encode(allocator, host.process_limits, host.initial_cwd, host.environ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidConfig => error.InvalidHostConfig,
+            error.InvalidConfig => diagnostic.fail("process limits or environment entries are invalid", .{}),
         };
         defer allocator.free(process_configuration);
         native_configurations[host.native_instances.len + 1] = .{
@@ -378,7 +413,8 @@ pub const Session = enum(usize) {
         };
         const native_owner = native_module.Owner.initConfigured(host_owner.cleanup(), host.native_port_limits, native_configurations) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidLimits, error.InvalidConfiguration => error.InvalidHostConfig,
+            error.InvalidLimits => diagnostic.fail("native port limits are invalid", .{}),
+            error.InvalidConfiguration => diagnostic.fail("native module configuration is invalid", .{}),
         };
         errdefer native_owner.closeCalls().settle().deinit();
         // A Session builds exactly one archive on its own reclamation root, so
@@ -403,22 +439,21 @@ pub const Session = enum(usize) {
         errdefer if (owned_tls_trust) |trust| allocator.free(trust.ca_file);
         const http_owner = http_service.Owner.init(host_owner.cleanup(), host.io, owned_tls_trust, host.http_limits) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidConfig => return error.InvalidHostConfig,
+            error.InvalidConfig => return diagnostic.fail("HTTP limits or TLS trust configuration are invalid", .{}),
         };
         errdefer http_owner.deinit();
         const owned_module_snapshot = discovery: {
             const maps = @import("module_map.zig");
-            const map_path = maps.discover(allocator, host.io, host.initial_cwd, host.module_map) catch |err| switch (err) {
+            var rejection: maps.Diagnostic = .{};
+            const map_path = maps.discover(allocator, host.io, host.initial_cwd, host.module_map, &rejection) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.Invalid => return error.InvalidHostConfig,
+                error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
             };
             if (map_path) |path| {
                 defer allocator.free(path);
-                // Startup reports every invalid host configuration alike.
-                var diagnostic: maps.Diagnostic = .{};
-                const map = maps.load(host_owner.cleanup(), host.io, path, &diagnostic) catch |err| switch (err) {
+                const map = maps.load(host_owner.cleanup(), host.io, path, &rejection) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.Invalid => return error.InvalidHostConfig,
+                    error.Invalid => return diagnostic.fail("invalid module map: {s}", .{rejection.message()}),
                 };
                 errdefer map.deinit();
                 break :discovery try map_state.Snapshot.fromMap(host_owner.cleanup(), &registry, map, host.initial_cwd);
@@ -436,7 +471,7 @@ pub const Session = enum(usize) {
             host.environ,
         ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidConfig => error.InvalidHostConfig,
+            error.InvalidConfig => diagnostic.fail("environment entries are invalid", .{}),
         };
         errdefer snapshot.deinit();
         const startup_cwd = try allocator.dupe(u8, host.initial_cwd);
@@ -446,7 +481,7 @@ pub const Session = enum(usize) {
             errdefer allocator.destroy(owned);
             owned.* = filesystem_port.FilesystemOwner.init(host_owner.cleanup(), host.io, host.filesystem) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidConfig => return error.InvalidHostConfig,
+                error.InvalidConfig => return diagnostic.fail("filesystem roots or limits are invalid", .{}),
             };
             break :owner owned;
         };

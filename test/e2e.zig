@@ -697,7 +697,7 @@ test "e2e: ecl test reports project and runner failures" {
     try invalid_result.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{"runtime directories, module map, or limits are invalid"},
+        .stderr_contains = &.{ "ecl: invalid module map: module map `", "ecl.modules` must contain exactly one dict" },
     });
 
     var project = std.testing.tmpDir(.{});

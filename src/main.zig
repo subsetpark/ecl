@@ -1,6 +1,8 @@
 const std = @import("std");
 const ecl = @import("ecl-internal");
-const AppError = error{ OutOfMemory, Io, InvalidHostConfig };
+/// `HostConfigReported` means Session construction rejected its host
+/// configuration and `CliRuntime.init` has already printed the reason.
+const AppError = error{ OutOfMemory, Io, HostConfigReported };
 const help =
     \\ecl — a homoiconic concatenative array calculator
     \\
@@ -34,11 +36,7 @@ pub fn main(init: std.process.Init) void {
                 std.process.exit(1);
             break :failure 1;
         },
-        error.InvalidHostConfig => failure: {
-            writeFile(init.io, .stderr, "ecl: runtime directories, module map, or limits are invalid\n") catch
-                std.process.exit(1);
-            break :failure 1;
-        },
+        error.HostConfigReported => 1,
     };
     if (status != 0) std.process.exit(status);
 }
@@ -290,7 +288,8 @@ const CliRuntime = struct {
         self.output_writer = std.Io.File.stdout().writerStreaming(startup.process.io, &self.output_buffer);
         self.diagnostic_writer = std.Io.File.stderr().writerStreaming(startup.process.io, &self.diagnostic_buffer);
         self.roots[0] = cwdRoot(startup.cwd);
-        self.session = try ecl.session.Session.init(
+        var diagnostic: ecl.session.InitDiagnostic = .{};
+        self.session = ecl.session.Session.initDiagnosed(
             startup.process.gpa,
             arguments,
             .{
@@ -307,7 +306,16 @@ const CliRuntime = struct {
             },
             .{ .worker_pool = worker_count },
             mode,
-        );
+            &diagnostic,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidHostConfig => {
+                try writeFile(startup.process.io, .stderr, "ecl: ");
+                try writeFile(startup.process.io, .stderr, diagnostic.message());
+                try writeFile(startup.process.io, .stderr, "\n");
+                return error.HostConfigReported;
+            },
+        };
         self.session.setNativeDiagnostics(startup.process.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
     }
 

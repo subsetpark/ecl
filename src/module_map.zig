@@ -77,24 +77,23 @@ pub const Validated = opaque {
 /// Find only the nearest map. Any error other than absence fails closed.
 /// The returned path belongs to the caller, including explicit relative paths
 /// resolved against the supplied startup directory.
-pub fn discover(allocator: std.mem.Allocator, io: std.Io, start: []const u8, explicit: ?[]const u8) Error!?[]u8 {
+pub fn discover(allocator: std.mem.Allocator, io: std.Io, start: []const u8, explicit: ?[]const u8, diagnostic: *Diagnostic) Error!?[]u8 {
     if (explicit) |path| return try std.fs.path.resolve(allocator, &.{ start, path });
     var directory = start;
     while (true) {
         const path = try std.fs.path.join(allocator, &.{ directory, "ecl.modules" });
+        defer allocator.free(path);
         const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| {
-            allocator.free(path);
-            if (err != error.FileNotFound) return error.Invalid;
+            if (err != error.FileNotFound)
+                return diagnostic.fail("cannot inspect module map `{s}`: {s}", .{ path, @errorName(err) });
             const parent = std.fs.path.dirname(directory) orelse return null;
             if (std.mem.eql(u8, parent, directory)) return null;
             directory = parent;
             continue;
         };
-        if (stat.kind != .file) {
-            allocator.free(path);
-            return error.Invalid;
-        }
-        return path;
+        if (stat.kind != .file)
+            return diagnostic.fail("module map `{s}` is a {s}, not a regular file", .{ path, @tagName(stat.kind) });
+        return try allocator.dupe(u8, path);
     }
 }
 
