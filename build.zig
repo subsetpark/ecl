@@ -446,8 +446,17 @@ pub fn build(b: *std.Build) void {
     const pkg_generation_step = b.step("test-pkg-generation", "Run offline generation, lock selection, and verification acceptance in ECL");
     pkg_generation_step.dependOn(&run_pkg_generations.step);
     test_step.dependOn(&run_pkg_generations.step);
-    const pkg_command_acceptance = b.addSystemCommand(&.{ "python3", "test/package_application.py" });
-    pkg_command_acceptance.addArtifactArg(exe);
+    // The command workflow initializes a project in its working directory, so
+    // it runs in a fresh build-owned temporary directory. The application
+    // resolves relative cache and temporary settings against that directory,
+    // which keeps every write out of the caller's real cache.
+    const pkg_command_acceptance = b.addRunArtifact(exe);
+    pkg_command_acceptance.addArg("--module-map");
+    pkg_command_acceptance.addFileArg(b.path("apps/pkg/test/acceptance/command.modules"));
+    pkg_command_acceptance.addArgs(&.{ "test", "--runner", "pkg.test.command.run" });
+    pkg_command_acceptance.setCwd(b.tmpPath());
+    pkg_command_acceptance.setEnvironmentVariable("ECL_CACHE", "cache");
+    pkg_command_acceptance.setEnvironmentVariable("TMPDIR", ".");
     const pkg_command_step = b.step("test-pkg-application", "Run the package application's command acceptance through ECL tests");
     pkg_command_step.dependOn(&pkg_command_acceptance.step);
     test_step.dependOn(&pkg_command_acceptance.step);
