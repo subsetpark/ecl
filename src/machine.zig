@@ -2995,6 +2995,32 @@ pub const Fiber = struct {
         return std.Io.Clock.awake.now(io).nanoseconds;
     }
 
+    /// Reports that a definition or import of `name` shadows the public core
+    /// word of that name: for top-level code, or within `module`. Advisory:
+    /// the binding stands either way, `core.name` still reaches core, and a
+    /// failed write changes nothing.
+    pub fn warnCoreShadowing(self: *Fiber, name: intern.BindingName, module: ?intern.ModuleName) void {
+        if (!self.environment.isPublicCoreName(name)) return;
+        const console = self.inherited.console() orelse return;
+        const spelling = intern.get(intern.bindingId(name));
+        const P = console_api.Console.Piece;
+        settleAdvisoryDiagnostic(if (module) |owner| console.writeDiagnosticPieces(&.{
+            P{ .literal = "warning: module `" },
+            P{ .untrusted = intern.get(intern.moduleId(owner)) },
+            P{ .literal = "` defines `" },
+            P{ .untrusted = spelling },
+            P{ .literal = "`, shadowing the core word within the module; `core." },
+            P{ .untrusted = spelling },
+            P{ .literal = "` still reaches it" },
+        }) else console.writeDiagnosticPieces(&.{
+            P{ .literal = "warning: `" },
+            P{ .untrusted = spelling },
+            P{ .literal = "` now shadows the core word for top-level code; `core." },
+            P{ .untrusted = spelling },
+            P{ .literal = "` still reaches it" },
+        }));
+    }
+
     fn settleAdvisoryDiagnostic(result: error{WriteFailed}!void) void {
         if (result) |_| {} else |err| switch (err) {
             error.WriteFailed => {},
@@ -4326,6 +4352,15 @@ pub const Fiber = struct {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.Duplicate, error.UnboundWord => return self.failLoad(evaluator, "native module declares an invalid word"),
                         };
+                        // Shadowing in a shipped module is deliberate.
+                        if (self.provenance != .standard_library) {
+                            var names = sealed.entries();
+                            while (true) switch (names.advance()) {
+                                .pending => {},
+                                .item => |entry| evaluator.warnCoreShadowing(entry.key, sealed.moduleName()),
+                                .complete => break,
+                            };
+                        }
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releases,
@@ -8248,12 +8283,18 @@ const ModuleSealDriver = struct {
                 }
                 switch (validate.entries.advance()) {
                     .pending => {},
-                    .item => |entry| switch (entry.value) {
-                        .reserved => |reservation| validate.current = .{
-                            .reservation = reservation,
-                            .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
-                        },
-                        .definition, .alias => {},
+                    .item => |entry| {
+                        const owned = image(evaluator);
+                        // Shadowing in a shipped module is deliberate.
+                        if (owned.provenance() != .standard_library)
+                            evaluator.warnCoreShadowing(entry.key, owned.moduleName());
+                        switch (entry.value) {
+                            .reserved => |reservation| validate.current = .{
+                                .reservation = reservation,
+                                .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
+                            },
+                            .definition, .alias => {},
+                        }
                     },
                     .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).sealCursor() },
                 }

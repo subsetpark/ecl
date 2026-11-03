@@ -181,6 +181,12 @@ pub const Console = struct {
         return .{ .output = output, .diagnostics = diagnostics };
     }
 
+    /// The mutex guarding the diagnostics writer. Aliased writers share one
+    /// mutex, so a write to either stream cannot overlap a write to the other.
+    fn diagnosticsMutex(self: *Console) *std.Io.Mutex {
+        return if (self.output == self.diagnostics) &self.output_mutex else &self.diagnostics_mutex;
+    }
+
     pub fn writeOutput(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
         const writer = self.output;
         std.Io.Threaded.mutexLockUncancelable(&self.output_mutex);
@@ -192,10 +198,29 @@ pub const Console = struct {
 
     pub fn writeDiagnostics(self: *Console, bytes: []const u8, newline: bool) error{WriteFailed}!void {
         const writer = self.diagnostics;
-        std.Io.Threaded.mutexLockUncancelable(&self.diagnostics_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.diagnostics_mutex);
+        std.Io.Threaded.mutexLockUncancelable(self.diagnosticsMutex());
+        defer std.Io.Threaded.mutexUnlock(self.diagnosticsMutex());
         writer.writeAll(bytes) catch return error.WriteFailed;
         if (newline) writer.writeByte('\n') catch return error.WriteFailed;
+        writer.flush() catch return error.WriteFailed;
+    }
+
+    /// One piece of a diagnostic line: fixed text, or text from a program
+    /// that is escaped like every other displayed byte.
+    pub const Piece = union(enum) { literal: []const u8, untrusted: []const u8 };
+
+    /// Writes `pieces` as one diagnostic line, so a concurrent writer cannot
+    /// interleave with it, escaping each untrusted piece so a name chosen
+    /// by a program cannot hand the terminal a control sequence.
+    pub fn writeDiagnosticPieces(self: *Console, pieces: []const Piece) error{WriteFailed}!void {
+        const writer = self.diagnostics;
+        std.Io.Threaded.mutexLockUncancelable(self.diagnosticsMutex());
+        defer std.Io.Threaded.mutexUnlock(self.diagnosticsMutex());
+        for (pieces) |piece| switch (piece) {
+            .literal => |text| writer.writeAll(text) catch return error.WriteFailed,
+            .untrusted => |text| try writeDisplay(writer, text),
+        };
+        writer.writeByte('\n') catch return error.WriteFailed;
         writer.flush() catch return error.WriteFailed;
     }
 
@@ -308,4 +333,17 @@ test "console accepts discard writers and propagates real write failures" {
     var failing = Console.init(&failed_output, &failed_diagnostics);
     try std.testing.expectError(error.WriteFailed, failing.writeOutput("output", false));
     try std.testing.expectError(error.WriteFailed, failing.writeDiagnostics("diagnostic", false));
+}
+
+test "diagnostic pieces escape untrusted text only" {
+    var output = std.Io.Writer.Discarding.init(&.{});
+    var bytes: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    var console = Console.init(&output.writer, &writer);
+    try console.writeDiagnosticPieces(&.{
+        .{ .literal = "m `" },
+        .{ .untrusted = "a\xc2\x9b2J" },
+        .{ .literal = "`" },
+    });
+    try std.testing.expectEqualStrings("m `a\\xc2\\x9b2J`\n", writer.buffered());
 }

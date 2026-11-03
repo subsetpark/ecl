@@ -417,8 +417,9 @@ test "module: import explicitly replaces requested bindings and preserves metada
         .ecl_path = null,
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (3 `mean set ( -- n : \"Count.\") (4) `count def 5 `other set) `stats @defm " ++
-        "1 `mean set `stats (mean count) import mean count " ++
+    // `average` and `count` name no core word, so replacing them is silent.
+    try expectOk(&runtime, "[] (3 `average set ( -- n : \"Count.\") (4) `count def 5 `other set) `stats @defm " ++
+        "1 `average set `stats (average count) import average count " ++
         "`count doc \"Count.\" match? `count see");
     try std.testing.expectEqualStrings("", diagnostics.written());
     // An import is a name alias: reflection shows the definition it selects.

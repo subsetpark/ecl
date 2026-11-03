@@ -1348,6 +1348,15 @@ invoking session. Core and prelude definitions resolve in core. There are no
 other scopes: combinator applications, `@attempt`, and tasks introduce no
 namespace of their own.
 
+Shadowing a core name is allowed but reported. When a `def`, `set`, or
+`import` at top level introduces a session name that is also a public core
+name, a warning naming it is written to the diagnostic stream; replacing that
+session name later writes nothing more. Sealing a module whose definitions or
+imports include a public core name writes one warning per such name, naming the
+module, since every word written in the module then means the module's binding.
+Standard-library modules shadow core names deliberately and are not reported.
+The binding takes effect either way, and `core.` still reaches the core word.
+
 `core` is a reserved qualifier, not a registration. A qualified word whose
 module segment is exactly `core` resolves its binding segment in core alone,
 skipping the session and every module image, so a shadowed core definition

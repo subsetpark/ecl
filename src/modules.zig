@@ -1657,6 +1657,13 @@ pub const SealedImage = enum(usize) {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@backingInt(self.*));
     }
+    /// The sealed directory's entries, for advisory checks before registration.
+    pub fn entries(self: *const SealedImage) env.NameMap.RawEntryCursor {
+        return self.borrow().names.?.rawEntries();
+    }
+    pub fn moduleName(self: *const SealedImage) intern.ModuleName {
+        return self.borrow().name;
+    }
     pub fn move(self: *SealedImage) SealedImage {
         const result = self.*;
         std.debug.assert(result != .consumed);
@@ -2343,7 +2350,10 @@ pub const Registry = enum(usize) {
 
     pub const CommitProgress = union(enum) { pending, complete: u64 };
     pub const AliasProgress = poll.Progress(void);
-    pub const DefineProgress = poll.Progress(void);
+    /// Whether a top-level publication introduced its name or replaced an
+    /// earlier binding of it.
+    pub const DefineOutcome = enum { introduced, replaced };
+    pub const DefineProgress = poll.Progress(DefineOutcome);
 
     const EditKind = enum { register, alias, define };
 
@@ -2422,6 +2432,12 @@ pub const Registry = enum(usize) {
                 build.directory.deinit();
             }
 
+            /// The top-level name a define edit publishes.
+            pub fn definedName(self: *const Self) intern.BindingName {
+                comptime std.debug.assert(kind == .define);
+                return self.request.name;
+            }
+
             fn requestedName(self: *const Self) intern.ModuleName {
                 return switch (kind) {
                     .register => self.request.borrow().name,
@@ -2443,6 +2459,15 @@ pub const Registry = enum(usize) {
                             return .pending;
                         }
                         const outcome = self.apply(build.target);
+                        // Read from the snapshot this edit replaces, which is
+                        // current under the lock.
+                        const defined = switch (kind) {
+                            .define => if (build.directory.directory) |old|
+                                if (old.names.find(self.request.name) == null) DefineOutcome.introduced else DefineOutcome.replaced
+                            else
+                                DefineOutcome.introduced,
+                            .register, .alias => {},
+                        };
                         build.candidate.previous = @constCast(build.directory.directory);
                         self.registry.privateState().directories.publish(build.candidate);
                         _ = self.registry.privateState().clock.fetchAdd(1, .acq_rel);
@@ -2452,7 +2477,8 @@ pub const Registry = enum(usize) {
                         published.directory.deinit();
                         return switch (kind) {
                             .register => .{ .complete = outcome },
-                            .alias, .define => .complete,
+                            .alias => .complete,
+                            .define => .{ .complete = defined },
                         };
                     },
                     .complete => unreachable,

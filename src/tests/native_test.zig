@@ -923,7 +923,7 @@ test "native: opaque ports survive forwarding and nested aggregate builders" {
         try std.testing.expectEqual(@as(usize, 0), port.releases);
         try expectOk(
             &runtime,
-            "sample.forward sample.split " ++
+            "sample.forward sample.twin " ++
                 "sample.singleton sample.nested-port " ++
                 "`key swap sample.pair-dict sample.nested-port match?",
         );
@@ -1114,7 +1114,7 @@ test "native: the SDK generates a descriptor the production validator accepts" {
 
     try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
     const expected_names = [_][]const u8{
-        "increment",          "discard",        "split",                 "forward",        "nested-port",    "fail-user",   "fail-kind",
+        "increment",          "discard",        "twin",                  "forward",        "nested-port",    "fail-user",   "fail-kind",
         "make-char",          "singleton",      "pair-dict",             "sum-list",       "sum-dict",       "cooperative", "draft-fail",
         "yield-forever",      "builder-budget", "forward-values-budget", "text-span",      "forward-stage",  "bulk-budget", "bulk-immediate",
         "bulk-values-budget", "large-list",     "large-dict",            "duplicate-dict", "noncooperative", "nan-scalar",  "nan-bulk",
@@ -1150,7 +1150,7 @@ test "native: a discovered artifact publishes its complete table atomically" {
     try std.testing.expectEqual(@as(i64, 43), runtime.stackItems()[2].int);
 
     const exports = [_][]const u8{
-        "sample.increment",      "sample.discard",            "sample.split",
+        "sample.increment",      "sample.discard",            "sample.twin",
         "sample.forward",        "sample.fail-user",          "sample.fail-kind",
         "sample.singleton",      "sample.pair-dict",          "sample.sum-list",
         "sample.sum-dict",       "sample.cooperative",        "sample.draft-fail",
@@ -1354,7 +1354,7 @@ test "native: only exact completion mutates the operand stack" {
         try std.testing.expectEqual(@as(i64, @intCast(index)), runtime.stackItems()[1].int);
         try expectOk(&runtime, "pop");
     }
-    try expectOk(&runtime, "sample.split");
+    try expectOk(&runtime, "sample.twin");
     try std.testing.expectEqual(@as(usize, 2), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);

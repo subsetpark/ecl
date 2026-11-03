@@ -872,3 +872,39 @@ fn aliasChain(comptime depth: usize) []const u8 {
     inline for (1..depth + 1) |i| source = source ++ std.fmt.comptimePrint("[] (`a{d} (x) import) `a{d} @defm ", .{ i - 1, i });
     return source ++ std.fmt.comptimePrint("a{d}.x", .{depth});
 }
+
+fn expectDiagnostics(source: []const u8, expected: []const u8) !void {
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .diagnostics = &diagnostics.writer }), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, source);
+    try std.testing.expectEqualStrings(expected, diagnostics.written());
+}
+
+test "shadowing: a top-level name that shadows a core word warns once when introduced" {
+    try expectDiagnostics(
+        "(pop 42) `each def (pop 7) `each def [1] (1 +) each pop pop",
+        "warning: `each` now shadows the core word for top-level code; `core.each` still reaches it\n",
+    );
+    // `set` and an import introduce names the same way.
+    try expectDiagnostics(
+        "1 `dup set [] ((2) `swap def) `m @defm `m (swap) import",
+        "warning: `dup` now shadows the core word for top-level code; `core.dup` still reaches it\n" ++
+            "warning: module `m` defines `swap`, shadowing the core word within the module; `core.swap` still reaches it\n" ++
+            "warning: `swap` now shadows the core word for top-level code; `core.swap` still reaches it\n",
+    );
+    try expectDiagnostics("(1) `not-a-core-word def", "");
+}
+
+test "shadowing: a module that shadows a core word warns, naming the module" {
+    try expectDiagnostics(
+        "( ((1 +) each) `f def (pop 42) `each defp ) `m @defm! [2 3] m.f pop pop",
+        "warning: module `m` defines `each`, shadowing the core word within the module; `core.each` still reaches it\n",
+    );
+    // Standard-library modules shadow core words deliberately: `dict` defines
+    // `at`, `filter`, and `put`.
+    try expectDiagnostics("{} dict.keys pop", "");
+}

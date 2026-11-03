@@ -2,7 +2,7 @@
 # metadata-preserving imports and by bare qualified reference.
 `result
 (ok err ok? err? or-raise or-else and-then map-err recover
- recover-kinds either all partition)
+ recover-kinds either all)
 import
 
 # Construction and observation. A success payload is always a stack.
@@ -51,8 +51,8 @@ import
 [1 2] ok [3] ok [] ok 3 pack all io.pp
 [1] ok {kind io} err [2] ok {kind type} err 4 pack all io.pp
 [] all io.pp
-[1] ok {kind io} err [2 3] ok {kind type} err 4 pack partition io.pp io.pp
-[] partition io.pp io.pp
+[1] ok {kind io} err [2 3] ok {kind type} err 4 pack result.partition io.pp io.pp
+[] result.partition io.pp io.pp
 
 # Malformed results are rejected before any supplied quotation runs: each
 # probe below would fail loudly on its own if it were ever executed.

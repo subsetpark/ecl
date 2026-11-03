@@ -604,7 +604,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\6 3 3
         \\stderr:
-        \\<empty>
+        \\warning: `dup` now shadows the core word for top-level code; `core.dup` still reaches it
         \\=== each ===
         \\source: [1 2 3] (dup *) each
         \\exit: 0

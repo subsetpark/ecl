@@ -27,7 +27,7 @@ fn runPath(source: []const u8, path: []const u8) !cli.Result {
 }
 
 test "native runtime: loaded artifacts behave identically at one and eight workers" {
-    const source = "40 sample.increment sample.split sample.singleton " ++
+    const source = "40 sample.increment sample.twin sample.singleton " ++
         "sample.cooperative `sample.increment which";
     var one = try run(source, "1", false);
     defer one.deinit();
