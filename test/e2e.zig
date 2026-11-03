@@ -74,6 +74,19 @@ test "e2e: proc direct execution preserves argv cwd environment and policy" {
     try isolated_result.expect(.{ .exit_code = 0, .stdout = isolated_expected, .stderr = "" });
 }
 
+test "e2e: host.executable ignores the argument-vector spelling of the program" {
+    const ecl_exe = try absoluteExe();
+    defer allocator.free(ecl_exe);
+    const expected = try std.fmt.allocPrint(allocator, "\"{s}\"\n", .{ecl_exe});
+    defer allocator.free(expected);
+    var result = try cli.runOptions(.{
+        .argv = &.{ "misleading-argv-zero", "host.executable" },
+        .exe = .{ .explicit = .{ .dir = std.Io.Dir.cwd(), .path = ecl_exe } },
+    });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = expected, .stderr = "" });
+}
+
 test "e2e: proc ports stream binary data with backpressure and EOF" {
     const process_exe = try absoluteProcessExe();
     defer allocator.free(process_exe);
