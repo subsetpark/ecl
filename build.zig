@@ -1331,25 +1331,18 @@ pub fn build(b: *std.Build) void {
         "sh", "-c", "command -v zlint >/dev/null || exit 0; " ++ lint_sources,
     });
 
-    const installed_apps = b.addSystemCommand(&.{ "python3", "test/installed_apps.py" });
-    installed_apps.addArtifactArg(exe);
-    const installed_apps_step = b.step("test-installed-apps", "Verify installation-only application dispatch through a relocated distribution");
-    installed_apps_step.dependOn(&installed_apps.step);
-
-    const package_transactions = b.addSystemCommand(&.{ "python3", "test/package_transactions.py" });
-    package_transactions.addArtifactArg(exe);
-    const package_transactions_step = b.step("test-package-transactions", "Verify application-owned lock and generation publication recovery");
-    package_transactions_step.dependOn(&package_transactions.step);
-
-    const host_metadata = b.addSystemCommand(&.{ "python3", "test/host_metadata.py" });
-    host_metadata.addArtifactArg(exe);
-    const host_metadata_step = b.step("test-host-metadata", "Verify host metadata independently of environment and invocation spelling");
-    host_metadata_step.dependOn(&host_metadata.step);
-
-    const module_maps = b.addSystemCommand(&.{ "python3", "test/module_maps.py" });
-    module_maps.addArtifactArg(exe);
-    const module_maps_step = b.step("test-module-maps", "Verify public inert module-map validation without project startup");
-    module_maps_step.dependOn(&module_maps.step);
+    // CLI acceptance launches copies of the binary under test from ECL, so it
+    // runs in a fresh build-owned directory where each test owns a subdirectory.
+    const cli_acceptance = b.addRunArtifact(exe);
+    cli_acceptance.addArg("--module-map");
+    cli_acceptance.addFileArg(b.path("test/cli-acceptance/ecl.modules"));
+    cli_acceptance.addArg("test");
+    cli_acceptance.setCwd(b.tmpPath());
+    const cli_acceptance_step = b.step(
+        "test-cli-acceptance",
+        "Verify installed dispatch, host metadata, module-map validation, and package publication through the public CLI",
+    );
+    cli_acceptance_step.dependOn(&cli_acceptance.step);
 
     const precommit_step = b.step(
         "precommit",
@@ -1368,10 +1361,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&run_precommit_tests.step);
     // A small isolated CLI fixture proves descriptor, cwd, argument, and stream
     // behavior without adding an external service or an ambient input stream.
-    precommit_step.dependOn(&installed_apps.step);
-    precommit_step.dependOn(&package_transactions.step);
-    precommit_step.dependOn(&module_maps.step);
-    precommit_step.dependOn(&host_metadata.step);
+    precommit_step.dependOn(&cli_acceptance.step);
     precommit_step.dependOn(&run_pkg_tests.step);
     precommit_step.dependOn(git_extension_step);
 }
