@@ -44,7 +44,7 @@
   "Recover the kind and message of the error dict `check-map` printed, so the reason is raised
    directly with this caller's trace rather than nested as text. Output that is not one error dict
    is kept verbatim as the message.")
- (dup wrap (parse-one) @attempt (pop 0) result.recover result.or-raise first
+ (dup wrap (parse-one) @attempt (first) (pop 0) result.either
   dup error.valid?
   ([kind msg] dict.take nip) (pop `io error.new swap str.trim error.with-message) if)
  `rejection defp
