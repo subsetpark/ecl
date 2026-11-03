@@ -22,10 +22,12 @@
     operations; closing the resource prevents new admission and joins backend cleanup.
 
     `proc.core.stdin`, `proc.core.stdout`, and `proc.core.stderr` are endpoint selectors for process
-    resources, and `proc.stdin`, `proc.stdout`, and `proc.stderr` are the endpoints they select,
-    usable with every `fd` and `io` word. `port.endpoint` with stdin grants writing and finishing;
-    stdout and stderr grant reading. Their byte, EOF, and single-reader contracts are shared with
-    the corresponding process words. Finishing stdin delivers accepted bytes before closing that
+    resources, and `proc.stdin`, `proc.stdout`, and `proc.stderr` are the endpoints they select.
+    `port.endpoint` with stdin grants writing and finishing, so `fd.write` and `fd.finish` apply;
+    stdout and stderr grant reading, so `fd.read`, `fd.read-line`, `fd.read-all`, and the `io`
+    readers apply. An endpoint is borrowed, so `fd.close` on it is `` `type ``; close the resource
+    with `port.close`. Their byte, EOF, and single-reader contracts are shared with the
+    corresponding process words. Finishing stdin delivers accepted bytes before closing that
     direction, is idempotent, and rejects subsequent writes, including empty writes. Endpoints share
     permitted use without owning the resource; they cannot be transferred with `@give`.
 
