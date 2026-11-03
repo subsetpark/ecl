@@ -7,8 +7,10 @@
 
  ### test command-workflow
  (-- :
-  "Initialize, synchronize, verify, and vendor a project through the application command entry.")
- (["init" "demo"] pkg.command.main
+  "Initialize, synchronize, verify, and vendor a project through the application command entry. The
+   host names `cache` as the download cache; an offline workflow must leave it empty.")
+ (`cwd "cache" fs.mkdir
+  ["init" "demo"] pkg.command.main
   `cwd "ecl.pkg" fs.read-text pkg.manifest.read `name at "demo" equal
   `cwd "ecl.lock" fs.read-text
   ["sync" "--offline"] pkg.command.main
