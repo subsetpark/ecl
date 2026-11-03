@@ -679,8 +679,9 @@ word fails the definition. Validation records nothing: the body resolves each
 word again whenever it runs. A module's definitions and imports are staged by
 its construction body and validated together when the module is sealed, so
 words in one module may refer forward and recurse mutually. A staged
-definition cannot run before its module is sealed; a construction body that
-calls one finds nothing by that name. Validation never loads a module: a
+definition is not visible to runtime lookup before its module is sealed, so
+a construction body that names one finds nothing by that name, or resolves a
+core word of the same name instead. Validation never loads a module: a
 qualified word naming a module that is not registered passes, and resolves
 when it is first reached, loading the module then, so an unknown module or a
 name it does not export fails there, as an undefined word.
@@ -1642,7 +1643,7 @@ that name.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so words written in it keep their meaning.
+> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration, and aliases follow it on later lookup.
 
 `Call`.
 
@@ -1986,8 +1987,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   definition `m.x` selects then, so an import never captures the definition it
   validated, and reflection reports that definition's metadata. A public
   import in a module re-exports the alias, which chains: `a.x` names `m.x`.
-  Aliases that never reach a definition are `` `domain `` when reached or
-  validated.
+  Alias cycles are `` `domain `` when reached or validated; an alias whose
+  target is missing is `` `undefined-word `` then.
   At top level, naming a binding that already exists replaces only that
   binding; in a module body an imported name, like a defined one, may be
   introduced once. Importing selected names never splices an entire module.

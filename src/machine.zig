@@ -5771,8 +5771,8 @@ pub const Unit = struct {
     /// match.
     pub fn peekWord(self: *Unit, word: value.Symbol) ?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
-        const definition = self.reusedResolution(word) orelse self.resolveFresh(word, false) orelse return null;
-        return peeked(definition, word);
+        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
+        return self.resolveFresh(word, false);
     }
 
     /// `peekWord`, remembering what a fresh lookup resolves, so a word a
@@ -5780,17 +5780,19 @@ pub const Unit = struct {
     /// per publication rather than on every recognition.
     pub fn resolveForRecognition(self: *Unit, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
-        const definition = self.reusedResolution(word) orelse (try self.resolveFresh(word, true)) orelse return null;
-        return peeked(definition, word);
+        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
+        return try self.resolveFresh(word, true);
     }
 
     /// Resolves `word` against the current view in one call, remembering the
-    /// result when `remember` is set.
+    /// result when `remember` is set. The definition is inspected before the
+    /// lookup's lease is released, since a concurrent replacement may retire
+    /// a counted definition afterwards.
     fn resolveFresh(
         self: *Unit,
         word: value.Symbol,
         comptime remember: bool,
-    ) if (remember) error{OutOfMemory}!?*env.Definition else ?*env.Definition {
+    ) if (remember) error{OutOfMemory}!?PeekedWord else ?PeekedWord {
         var context = self.resolutionContext(self.inherited.registry.view());
         defer context.deinit();
         var resolver = binder.Resolver.init(&context, word);
@@ -5800,7 +5802,7 @@ pub const Unit = struct {
             .missed => return null,
         };
         if (remember) try self.rememberResolution(word, context.view.publication, context.provenance, found);
-        return found;
+        return peeked(found, word);
     }
 
     fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {

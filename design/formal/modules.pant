@@ -69,7 +69,9 @@ where
 >
 > Retirement is monotonic: replacement retires the former current
 > image and no retired image becomes current again. A retired image stays
-> published, so words written in it keep their meaning.
+> published, so unqualified words whose occurrences retain it as their scope
+> keep their meaning; qualified words select the current registration, and
+> aliases follow it on later lookup.
 Call.
 Image.
 Definition.

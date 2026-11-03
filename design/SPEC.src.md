@@ -392,8 +392,9 @@ word fails the definition. Validation records nothing: the body resolves each
 word again whenever it runs. A module's definitions and imports are staged by
 its construction body and validated together when the module is sealed, so
 words in one module may refer forward and recurse mutually. A staged
-definition cannot run before its module is sealed; a construction body that
-calls one finds nothing by that name. Validation never loads a module: a
+definition is not visible to runtime lookup before its module is sealed, so
+a construction body that names one finds nothing by that name, or resolves a
+core word of the same name instead. Validation never loads a module: a
 qualified word naming a module that is not registered passes, and resolves
 when it is first reached, loading the module then, so an unknown module or a
 name it does not export fails there, as an undefined word.
@@ -1187,8 +1188,8 @@ that name.
   definition `m.x` selects then, so an import never captures the definition it
   validated, and reflection reports that definition's metadata. A public
   import in a module re-exports the alias, which chains: `a.x` names `m.x`.
-  Aliases that never reach a definition are `` `domain `` when reached or
-  validated.
+  Alias cycles are `` `domain `` when reached or validated; an alias whose
+  target is missing is `` `undefined-word `` then.
   At top level, naming a binding that already exists replaces only that
   binding; in a module body an imported name, like a defined one, may be
   introduced once. Importing selected names never splices an entire module.
