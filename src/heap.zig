@@ -721,7 +721,7 @@ pub fn kind(header: *const Header) HeapKind {
 /// labels key the scope a quotation's text was written in on it. Zero is
 /// reserved for runtime-built and copy-on-write headers, so those remain
 /// naturally absent from the source archive — and a quotation built at run
-/// time by `partial`, `cons`, or `compose` has no identity, hence no span and
+/// time by `partial`, `cons`, or `cat` has no identity, hence no span and
 /// no label, hence resolves where it is invoked.
 pub const CodeIdentity = enum(u32) { _ };
 pub const max_code_identity: u32 = std.math.maxInt(u24);

@@ -671,7 +671,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     try std.testing.expectEqualStrings("type", try errorKind(allocator, malformed));
 }
 
-test "over compose and at have exact stack effects" {
+test "over cat and at have exact stack effects" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -685,7 +685,7 @@ test "over compose and at have exact stack effects" {
         &.{ .{ .int = 1 }, .{ .int = 2 }, .{ .int = 1 } },
         runtime.stackItems(),
     );
-    try std.testing.expect((try execute(&runtime, "pop pop pop (1 2) (3 4) compose")) == null);
+    try std.testing.expect((try execute(&runtime, "pop pop pop (1 2) (3 4) cat")) == null);
     const composed = runtime.stackItems()[0];
     try std.testing.expect(composed == .list);
     try std.testing.expectEqual(@as(i64, 1), list.atUnchecked(composed, 0).int);

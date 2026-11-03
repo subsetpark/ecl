@@ -298,7 +298,7 @@
    that a segment beginning with `:` binds any nonempty path segment under its name in a string
    dictionary. The first row whose pattern and method both match has the request, with `` `params ``
    set to that dictionary, passed to its handler, which is applied inline with the contract `(
-   request -- response )`. Middleware is composition: wrap the handler quotation with `compose`.
+   request -- response )`. Middleware is composition: wrap the handler quotation with `cat`.
 
    When some pattern matches but no matching row's method does, the result is `405 \"method not
    allowed\" text` with an `allow` header joining the matching rows' methods with `,`; when no

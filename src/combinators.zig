@@ -319,7 +319,7 @@ fn times(evaluator: *Unit) MachineError!void {
 }
 
 /// The private callback behind `dip` recognition. The prelude definition
-/// `(swap literal compose call)` stays authoritative; matching it lets the
+/// `(swap literal append call)` stays authoritative; matching it lets the
 /// protected value ride in a continuation instead of building a capture
 /// quotation and a composition on every application.
 pub fn dipForIdiom(evaluator: *Unit) MachineError!void {

@@ -714,7 +714,7 @@ fixed bound beyond which it starts over, so a lookup expects one probe and
 every maintenance step is bounded. Each entry holds its definition, so a
 definition it hands out outlives the dispatch that retains it. Repeating a
 word costs that probe, in a definition's body as anywhere; a quotation built
-at run time, as `compose` builds one, costs nothing more than a literal one,
+at run time, as `cat` builds one, costs nothing more than a literal one,
 since nothing binds it. An iteration's applications borrow the quotation the
 combinator holds for the whole invocation. The bootstrap unit keeps no
 resolutions, because core's directory changes without a publication.
