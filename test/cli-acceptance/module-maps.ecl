@@ -32,7 +32,8 @@
  (|spec fragment label| spec label invalid? fragment label expect-contains) `diagnoses defp
 
  ### defp rejects
- (binary text detail -- : "Require a candidate document to be rejected with a diagnostic naming the fix.")
+ (binary text detail -- :
+  "Require a candidate document to be rejected with a diagnostic naming the fix.")
  (|binary text detail|
   binary "maps/candidate" text document detail "rejection detail" diagnoses) `rejects defp
 
@@ -70,7 +71,8 @@
   dup "{format 2 map \"complete\"}" "must declare `format 1`" rejects
   dup complete "local \"local\"" "local \"other\"" str.replace
   "local scope `other` is not declared" rejects
-  dup complete "visible []" "visible [\"ghost\"]" str.replace "lists undeclared scope `ghost`" rejects
+  dup complete "visible []" "visible [\"ghost\"]" str.replace "lists undeclared scope `ghost`"
+  rejects
   dup complete "[\"src/*.ecl\"]" "[\"../*.ecl\"]" str.replace "invalid source pattern `../*.ecl`"
   rejects
   dup "maps/unpublished" "{format 1 map \"chain\"}" document
