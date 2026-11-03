@@ -3003,20 +3003,21 @@ pub const Fiber = struct {
         if (!self.environment.isPublicCoreName(name)) return;
         const console = self.inherited.console() orelse return;
         const spelling = intern.get(intern.bindingId(name));
-        settleAdvisoryDiagnostic(if (module) |owner| console.writeDiagnosticLine(&.{
-            "warning: module `",
-            intern.get(intern.moduleId(owner)),
-            "` defines `",
-            spelling,
-            "`, shadowing the core word within the module; `core.",
-            spelling,
-            "` still reaches it",
-        }) else console.writeDiagnosticLine(&.{
-            "warning: `",
-            spelling,
-            "` now shadows the core word for top-level code; `core.",
-            spelling,
-            "` still reaches it",
+        const P = console_api.Console.Piece;
+        settleAdvisoryDiagnostic(if (module) |owner| console.writeDiagnosticPieces(&.{
+            P{ .literal = "warning: module `" },
+            P{ .untrusted = intern.get(intern.moduleId(owner)) },
+            P{ .literal = "` defines `" },
+            P{ .untrusted = spelling },
+            P{ .literal = "`, shadowing the core word within the module; `core." },
+            P{ .untrusted = spelling },
+            P{ .literal = "` still reaches it" },
+        }) else console.writeDiagnosticPieces(&.{
+            P{ .literal = "warning: `" },
+            P{ .untrusted = spelling },
+            P{ .literal = "` now shadows the core word for top-level code; `core." },
+            P{ .untrusted = spelling },
+            P{ .literal = "` still reaches it" },
         }));
     }
 
@@ -4351,6 +4352,15 @@ pub const Fiber = struct {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.Duplicate, error.UnboundWord => return self.failLoad(evaluator, "native module declares an invalid word"),
                         };
+                        // Shadowing in a shipped module is deliberate.
+                        if (self.provenance != .standard_library) {
+                            var names = sealed.entries();
+                            while (true) switch (names.advance()) {
+                                .pending => {},
+                                .item => |entry| evaluator.warnCoreShadowing(entry.key, sealed.moduleName()),
+                                .complete => break,
+                            };
+                        }
                         const instance = definitions.instance.take();
                         definitions.publication.deinit(
                             evaluator.releases,

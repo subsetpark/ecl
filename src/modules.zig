@@ -1657,6 +1657,13 @@ pub const SealedImage = enum(usize) {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@backingInt(self.*));
     }
+    /// The sealed directory's entries, for advisory checks before registration.
+    pub fn entries(self: *const SealedImage) env.NameMap.RawEntryCursor {
+        return self.borrow().names.?.rawEntries();
+    }
+    pub fn moduleName(self: *const SealedImage) intern.ModuleName {
+        return self.borrow().name;
+    }
     pub fn move(self: *SealedImage) SealedImage {
         const result = self.*;
         std.debug.assert(result != .consumed);
