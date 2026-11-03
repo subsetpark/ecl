@@ -17,6 +17,64 @@ const testing = std.testing;
 
 pub const std_options: std.Options = .{ .logFn = log };
 
+/// Seconds a crash may spend reporting before the process is killed.
+const crash_report_seconds = 30;
+
+/// Panics and faults report through Zig's default handlers under a watchdog.
+///
+/// The default handlers print a header, then unwind and symbolize the stack
+/// while other threads keep running. That report can block indefinitely (a
+/// lock held by the crashed thread, a parked sibling that is "also
+/// panicking", or an unwind through corrupted frames), and this runner runs
+/// in `zig build`'s simple mode, where `--test-timeout` does not apply. A
+/// crash must fail the run, not idle until CI's wall-clock limit, so the
+/// handlers arm a real-time alarm whose default action terminates the
+/// process if the report does not finish.
+pub const panic = std.debug.FullPanic(panicWithWatchdog);
+
+pub const debug = struct {
+    pub fn handleSegfault(addr: ?usize, name: []const u8, ctx: ?std.debug.CpuContextPtr) noreturn {
+        armCrashWatchdog();
+        std.debug.defaultHandleSegfault(addr, name, ctx);
+    }
+};
+
+fn panicWithWatchdog(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    armCrashWatchdog();
+    std.debug.defaultPanic(msg, first_trace_addr orelse @returnAddress());
+}
+
+/// Async-signal-safe: restores SIGALRM's terminating default, unblocks it on
+/// the crashing thread, and schedules it. Only the first arm takes effect, so
+/// a recursive panic cannot postpone the deadline.
+fn armCrashWatchdog() void {
+    const posix = std.posix;
+    if (comptime !(builtin.os.tag == .linux or builtin.link_libc)) return;
+    const S = struct {
+        var armed = std.atomic.Value(bool).init(false);
+    };
+    if (S.armed.swap(true, .seq_cst)) return;
+    const default_action: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(.ALRM, &default_action, null);
+    var alarm_set = posix.sigemptyset();
+    posix.sigaddset(&alarm_set, .ALRM);
+    posix.sigprocmask(posix.SIG.UNBLOCK, &alarm_set, null);
+    if (builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        const timer: linux.itimerspec = .{
+            .it_interval = .{ .sec = 0, .nsec = 0 },
+            .it_value = .{ .sec = crash_report_seconds, .nsec = 0 },
+        };
+        _ = linux.setitimer(@backingInt(linux.ITIMER.REAL), &timer, null);
+    } else {
+        _ = std.c.alarm(crash_report_seconds);
+    }
+}
+
 var logged_errors: usize = 0;
 
 /// Count error logs, which fail the running test as they do under Zig's

@@ -1536,7 +1536,7 @@ const DeclarationScan = struct {
     fn declare(self: *DeclarationScan, file: u32, name_token: u32, first: u32, last: u32, function: bool, type_like: bool, exported: bool) !void {
         const tree = &self.files.items[file].tree;
         const name = identifierName(tree.tokenSlice(name_token));
-        const entry_point = for ([_][]const u8{ "main", "build", "panic", "std_options" }) |root| {
+        const entry_point = for ([_][]const u8{ "main", "build", "panic", "std_options", "handleSegfault" }) |root| {
             if (std.mem.eql(u8, name, root)) break true;
         } else false;
         const index: u32 = @intCast(self.declarations.items.len);
