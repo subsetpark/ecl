@@ -839,7 +839,7 @@ test "module: a module word runs a caller's quotation in the caller's chain" {
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     // The stdlib higher-order words are the same case, and the second of
     // ticket ecl#4's two reproductions.
-    try expectOk(&runtime, "[1] result.ok (bump) result.and-then pop");
+    try expectOk(&runtime, "[1] result.ok (bump) result.map pop");
 }
 
 test "module: a quotation parameter carries the caller's scope" {

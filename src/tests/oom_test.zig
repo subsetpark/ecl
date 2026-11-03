@@ -872,7 +872,7 @@ fn stdlibSessionAllocationProbe(
         .result => try runOk(
             &runtime,
             "oom-result.ecl",
-            "[1 2] result.ok (+) result.and-then result.or-raise pop",
+            "[1 2] result.ok (+) result.map result.or-raise pop",
         ),
         .string => try runOk(
             &runtime,

@@ -2435,30 +2435,22 @@ reach the stack beneath the result.
 |---|---|
 | Construct | `ok`, `err` |
 | Test | `ok?`, `err?` |
-| Transform the success | `and-then` |
+| Transform the success | `map` |
 | Transform the failure | `recover`, `recover-kinds`, `map-err` |
 | Eliminate | `either`, `or-raise`, `or-default` |
 | Combine | `all`, `partition` |
 
-`recover` may turn a failure into a success; `map-err` keeps it a failure and
-replaces only the error dict. `or-default` returns the success list or, on
-failure, the fallback value as given.
+`map` replaces the success stack with what its quotation leaves, and a raising
+quotation turns the success into a failure. `recover` may likewise turn a
+failure into a success; `map-err` always keeps a failure and replaces only the
+error dict. `or-default` returns the success list or, on failure, the fallback
+value as given.
 
 ### err
 `( error -- result )` — Tag an error dict as a failed result.
 
 ### ok
 `( values -- result )` — Build an ok result from a list of successful stack values, representing the stack a successful computation left.
-
-### and-then
-`( result quotation -- result )` — For a success, use its payload as the explicit values list for `@attempt`, running the quotation on an isolated stack seeded with the success values. Return a failure unchanged.
-
-#### Examples
-
-```ecl
-[2 3] result.ok (+) result.and-then
-# => {ok [5]}
-```
 
 ### either
 `( result on-ok on-err -- ... )` — Eliminate a result exhaustively: call `on-ok` with the success list or `on-err` with the error dict. Neither branch is isolated; each runs inline and may leave any number of values.
@@ -2472,6 +2464,16 @@ failure, the fallback value as given.
 
 ### err?
 `( result -- bool )` — Return 1 when a well-formed result is a failure.
+
+### map
+`( result quotation -- result )` — For a success, use its payload as the explicit values list for `@attempt`, running the quotation on an isolated stack seeded with the success values. Return a failure unchanged.
+
+#### Examples
+
+```ecl
+[2 3] result.ok (+) result.map
+# => {ok [5]}
+```
 
 ### map-err
 `( result quotation -- result )` — Replace a failure's error dict with the one its isolated `( error -- error )` quotation returns. Return a success unchanged.

@@ -61,14 +61,14 @@
  (result fallback -- value : "Return a success list, or the fallback value for a failure.")
  (swap checked swap over `ok dict.has? (pop `ok at) (nip) if) `or-default def
 
- ### def and-then
+ ### def map
  (result quotation -- result :
   "For a success, use its payload as the explicit values list for `@attempt`, running the quotation
    on an isolated stack seeded with the success values. Return a failure unchanged.")
  (swap checked swap over `ok dict.has?
   (swap `ok at swap @attempt)
   (pop)
-  if) `and-then def
+  if) `map def
 
  ### def map-err
  (result quotation -- result :

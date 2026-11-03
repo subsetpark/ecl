@@ -24,12 +24,12 @@
 
  ### test composition
  (-- : "Compose success stacks and transform only failures.")
- ([2 3] result.ok (+) result.and-then {ok [5]} equal
-  [] result.ok (42) result.and-then {ok [42]} equal
-  {kind io msg "boom"} result.err (+) result.and-then
+ ([2 3] result.ok (+) result.map {ok [5]} equal
+  [] result.ok (42) result.map {ok [42]} equal
+  {kind io msg "boom"} result.err (+) result.map
   {err {kind io msg "boom"}} equal
-  [2 0] result.ok (div) result.and-then result.err? 1 equal
-  [2 3] result.ok (+) result.and-then (10 *) result.and-then
+  [2 0] result.ok (div) result.map result.err? 1 equal
+  [2 3] result.ok (+) result.map (10 *) result.map
   {ok [50]} equal
   {kind io} result.err (pop {kind domain}) result.map-err
   {err {kind domain}} equal
@@ -85,20 +85,20 @@
 
  ### test malformed-input
  (-- : "Reject malformed results before running caller quotations.")
- ((7 (missing) result.and-then) `type "must be a dict tagged" raises-containing
-  ({nope [1]} (missing) result.and-then)
+ ((7 (missing) result.map) `type "must be a dict tagged" raises-containing
+  ({nope [1]} (missing) result.map)
   `type
   "exactly one of `ok or `err"
   raises-containing
-  ({ok [1] err {kind io}} (missing) result.and-then)
+  ({ok [1] err {kind io}} (missing) result.map)
   `type
   "exactly one of `ok or `err"
   raises-containing
-  ({ok 5} (missing) result.and-then)
+  ({ok 5} (missing) result.map)
   `type
   "list of success values"
   raises-containing
-  ({err 5} (missing) result.and-then)
+  ({err 5} (missing) result.map)
   `type
   "must carry an error dict"
   raises-containing
@@ -142,7 +142,7 @@
  ### test documentation
  (-- : "Expose documentation for every result module export.")
  ([result.ok result.err result.ok? result.err? result.or-raise
-   result.or-default result.and-then result.map-err result.recover
+   result.or-default result.map result.map-err result.recover
    result.recover-kinds result.either result.all result.partition]
   documented)
  `documentation test

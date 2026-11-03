@@ -1,7 +1,7 @@
 # DoD-25a: the result module's whole contract, reached both through explicit
 # metadata-preserving imports and by bare qualified reference.
 `result
-(ok err ok? err? or-raise or-default and-then map-err recover
+(ok err ok? err? or-raise or-default map map-err recover
  recover-kinds either all)
 import
 
@@ -16,12 +16,12 @@ import
 # `@attempt` results are ordinary results, so the vocabularies compose.
 [] (2 3 +) @attempt ok? io.pp
 
-# and-then seeds the success stack and short-circuits an existing failure.
-[2 3] ok (+) and-then io.pp
-[] ok (42) and-then io.pp
-{kind io msg "boom"} err (+) and-then io.pp
-[2 3] ok (+) and-then (10 *) and-then io.pp
-[2 0] ok (div) and-then err? io.pp
+# map seeds the success stack and short-circuits an existing failure.
+[2 3] ok (+) map io.pp
+[] ok (42) map io.pp
+{kind io msg "boom"} err (+) map io.pp
+[2 3] ok (+) map (10 *) map io.pp
+[2 0] ok (div) map err? io.pp
 
 # Failure transformation leaves a success alone.
 {kind io} err (pop {kind domain msg "mapped"}) map-err io.pp
@@ -56,11 +56,11 @@ import
 
 # Malformed results are rejected before any supplied quotation runs: each
 # probe below would fail loudly on its own if it were ever executed.
-[] (7 (missing) result.and-then) @attempt `err at `kind at io.pp
-[] ({nope [1]} (missing) result.and-then) @attempt `err at `kind at io.pp
-[] ({ok [1] err {kind io}} (missing) result.and-then) @attempt `err at `kind at io.pp
-[] ({ok 5} (missing) result.and-then) @attempt `err at `kind at io.pp
-[] ({err 5} (missing) result.and-then) @attempt `err at `kind at io.pp
+[] (7 (missing) result.map) @attempt `err at `kind at io.pp
+[] ({nope [1]} (missing) result.map) @attempt `err at `kind at io.pp
+[] ({ok [1] err {kind io}} (missing) result.map) @attempt `err at `kind at io.pp
+[] ({ok 5} (missing) result.map) @attempt `err at `kind at io.pp
+[] ({err 5} (missing) result.map) @attempt `err at `kind at io.pp
 [] (7 result.ok?) @attempt `err at `kind at io.pp
 [] ({ok 5} wrap result.all) @attempt `err at `kind at io.pp
 [] ({nope 1} (missing) (missing) result.either) @attempt `err at `kind at io.pp

@@ -12,21 +12,23 @@ reach the stack beneath the result.
 |---|---|
 | Construct | `ok`, `err` |
 | Test | `ok?`, `err?` |
-| Transform the success | `and-then` |
+| Transform the success | `map` |
 | Transform the failure | `recover`, `recover-kinds`, `map-err` |
 | Eliminate | `either`, `or-raise`, `or-default` |
 | Combine | `all`, `partition` |
 
-`recover` may turn a failure into a success; `map-err` keeps it a failure and
-replaces only the error dict. `or-default` returns the success list or, on
-failure, the fallback value as given.
+`map` replaces the success stack with what its quotation leaves, and a raising
+quotation turns the success into a failure. `recover` may likewise turn a
+failure into a success; `map-err` always keeps a failure and replaces only the
+error dict. `or-default` returns the success list or, on failure, the fallback
+value as given.
 
-### and-then
+### map
 
 #### Examples
 
 ```ecl
-[2 3] result.ok (+) result.and-then
+[2 3] result.ok (+) result.map
 # => {ok [5]}
 ```
 
