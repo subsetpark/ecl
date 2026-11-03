@@ -5,10 +5,16 @@
  (actual expected -- : "Compare package behavior through public interfaces.")
  (match? {kind user msg "Git package command assertion failed"} assert) `equal defp
 
+ ### defp forwarded
+ (-- env : "Forward only the startup settings the installed application reads.")
+ (["ECL_CACHE" "XDG_CACHE_HOME" "HOME" "TMPDIR" "ECL_GIT_CA_FILE" "ECL_PATH" "ECL_WORKERS"] {}
+  (|acc name| acc name name pkg.project.environment dup empty? (pop pop) (put) if) fold)
+ `forwarded defp
+
  ### defp invoke
  (arguments -- result : "Launch an installed application with the caller's real project state.")
  (|arguments| {timeout-ms 180000 stdout-limit 65536 stderr-limit 65536}
-  `executable host.executable put `args arguments put proc.run) `invoke defp
+  `executable host.executable put `args arguments put `env forwarded put proc.run) `invoke defp
 
  ### defp command
  (arguments -- : "Require a successful installed package command.")

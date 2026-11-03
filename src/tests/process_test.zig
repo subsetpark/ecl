@@ -400,7 +400,7 @@ test "process: wait observes broken input after the final accepted write" {
     }, "[33] io", workers);
 }
 
-test "process: Sessions share captured values with children and isolate overrides" {
+test "process: children inherit no captured value the program did not forward" {
     const fixture_path = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, fixture.process_exe, allocator);
     defer allocator.free(fixture_path);
     var heap: test_heap.SessionHeap = .init;
@@ -422,8 +422,9 @@ test "process: Sessions share captured values with children and isolate override
             "[] (\"ECL_PROCESS_PROBE\" getenv) @spawn task.await `ok at first " ++
             "{{executable \"{s}\" args (\"inspect\") cwd \"/\"}} proc.run `stdout at chars " ++
             "{{executable \"{s}\" args (\"inspect\") cwd \"/\" env {{\"ECL_PROCESS_PROBE\" \"child\"}}}} proc.run `stdout at chars " ++
+            "{{executable \"{s}\" args (\"inspect\") cwd \"/\"}} `env {{}} \"ECL_PROCESS_PROBE\" dup getenv put put proc.run `stdout at chars " ++
             "\"ECL_PROCESS_PROBE\" getenv",
-        .{ fixture_path, fixture_path },
+        .{ fixture_path, fixture_path, fixture_path },
     );
     defer allocator.free(program);
     for ([_]*session.Session{ &first, &second }, [_][]const u8{ "first", "later" }) |runtime, expected| {
@@ -440,7 +441,7 @@ test "process: Sessions share captured values with children and isolate override
         }
         var display = try runtime.stackDisplay();
         defer display.deinit();
-        const wanted = try std.fmt.allocPrint(allocator, "\"{s}\" \"{s}\" \"cwd=/\\nprobe={s}\\n\" \"cwd=/\\nprobe=child\\n\" \"{s}\"", .{ expected, expected, expected, expected });
+        const wanted = try std.fmt.allocPrint(allocator, "\"{s}\" \"{s}\" \"cwd=/\\nprobe=<absent>\\n\" \"cwd=/\\nprobe=child\\n\" \"cwd=/\\nprobe={s}\\n\" \"{s}\"", .{ expected, expected, expected, expected });
         defer allocator.free(wanted);
         try std.testing.expectEqualStrings(wanted, display.bytes());
     }

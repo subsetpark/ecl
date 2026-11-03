@@ -362,7 +362,7 @@ pub const Session = enum(usize) {
                 .ring_capacity = @max(host.net_limits.receive_capacity, host.net_limits.send_capacity),
             },
         };
-        const process_configuration = bundled_proc.Configuration.encode(allocator, host.process_limits, host.initial_cwd, host.environ) catch |err| return switch (err) {
+        const process_configuration = bundled_proc.Configuration.encode(allocator, host.process_limits, host.initial_cwd) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidConfig => error.InvalidHostConfig,
         };

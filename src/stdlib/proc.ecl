@@ -10,8 +10,8 @@
    - `` `args ``: a list of argument strings, default `[]`; it excludes the executable name.
    - `` `cwd ``: an absolute path string without `.` or `..` components, default the host-configured
      starting directory.
-   - `` `env ``: a string-to-string dictionary overlaid on the host's environment base, default
-     `{}`.
+   - `` `env ``: a string-to-string dictionary that is the child's complete environment, default
+     `{}`. Nothing is inherited; forward host variables explicitly with `getenv`.
 
    Strings must not contain NUL, and environment names must be nonempty and contain no `=`. There is
    no shell expansion or `PATH` search. Unknown fields, invalid values, or denied authority are ``

@@ -1350,7 +1350,8 @@ it.
 
 The shipped `proc` module provides subprocess words. A process specification
 names one absolute executable path, an argument vector, an optional absolute
-working directory, and an explicit environment overlay. It never denotes a
+working directory, and the child's complete environment. A child inherits no
+host environment variable that the program did not pass it. It never denotes a
 shell command and never searches `PATH`. Process streams are byte lists; text
 encoding, stream merging, and line framing are user policy.
 

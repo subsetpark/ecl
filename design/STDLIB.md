@@ -2258,11 +2258,13 @@ following fields. The nested environment dictionary uses **string** keys.
 | `` `executable `` | Absolute executable path string; no `PATH` lookup | Required |
 | `` `args `` | List of argument strings, excluding the executable name | `[]` |
 | `` `cwd `` | Absolute directory path string without `.` or `..` components | Startup working directory |
-| `` `env `` | String-to-string dictionary, for example `{"LANG" "C"}` | `{}`; overlay on the captured process environment |
+| `` `env `` | String-to-string dictionary, for example `{"LANG" "C"}` | `{}`; the child's complete environment |
 
 Paths, arguments, and environment strings cannot contain NUL. Environment
-names must be nonempty and contain no `=`. An environment overlay replaces
-matching names and preserves other base entries; `{}` does not clear the base.
+names must be nonempty and contain no `=`. The child inherits nothing from the
+interpreter's environment: `` `env `` is exactly what it sees, and omitting it
+starts the child with an empty environment. Forward a host variable explicitly
+with `getenv`, for example `{} "HOME" dup getenv put`.
 There is no shell-command form, expansion, or `PATH` search: spaces and shell
 metacharacters in an argument are passed literally. Unknown fields and missing
 `` `executable `` are `` `domain ``; non-symbol keys and wrongly typed fields are
@@ -2315,7 +2317,7 @@ through JSON. Native words can view and forward its opaque identity.
 - `` `executable ``, required: an absolute path string.
 - `` `args ``: a list of argument strings, default `[]`; it excludes the executable name.
 - `` `cwd ``: an absolute path string without `.` or `..` components, default the host-configured starting directory.
-- `` `env ``: a string-to-string dictionary overlaid on the host's environment base, default `{}`.
+- `` `env ``: a string-to-string dictionary that is the child's complete environment, default `{}`. Nothing is inherited; forward host variables explicitly with `getenv`.
 
 Strings must not contain NUL, and environment names must be nonempty and contain no `=`. There is no shell expansion or `PATH` search. Unknown fields, invalid values, or denied authority are `` `domain ``; wrong field types are `` `type ``; launch failures are `` `io ``.
 

@@ -25,33 +25,19 @@ pub const Limits = struct {
 
 /// Serializes immutable startup inputs before a Session can observe subsequent
 /// host mutations. The returned bytes belong to the caller on success; failure
-/// retains every input. Entry collections need only name/value byte slices.
+/// retains every input. A child's environment is never part of this
+/// configuration: each specification supplies its child's complete environment.
 pub const Configuration = struct {
-    const header_bytes = 9 * 8;
-    pub fn encode(memory: std.mem.Allocator, limits: Limits, cwd: []const u8, environment: anytype) error{ OutOfMemory, InvalidConfig }![]u8 {
+    const header_bytes = 8 * 8;
+    const format = 2;
+    pub fn encode(memory: std.mem.Allocator, limits: Limits, cwd: []const u8) error{ OutOfMemory, InvalidConfig }![]u8 {
         try limits.validate();
         if (!cleanAbsolutePath(cwd)) return error.InvalidConfig;
-        var total = std.math.add(usize, header_bytes, cwd.len) catch return error.OutOfMemory;
-        for (environment) |entry| {
-            if (!std.process.Environ.Map.validateKeyForPut(entry.name) or std.mem.indexOfScalar(u8, entry.value, 0) != null) return error.InvalidConfig;
-            total = std.math.add(usize, total, 16) catch return error.OutOfMemory;
-            total = std.math.add(usize, total, entry.name.len) catch return error.OutOfMemory;
-            total = std.math.add(usize, total, entry.value.len) catch return error.OutOfMemory;
-        }
+        const total = std.math.add(usize, header_bytes, cwd.len) catch return error.OutOfMemory;
         const bytes = try memory.alloc(u8, total);
-        for ([_]usize{ 1, limits.max_live_ports, limits.stdin_capacity, limits.stdout_capacity, limits.stderr_capacity, limits.max_stdout_capture, limits.max_stderr_capture, cwd.len, environment.len }, 0..) |value, index|
+        for ([_]usize{ format, limits.max_live_ports, limits.stdin_capacity, limits.stdout_capacity, limits.stderr_capacity, limits.max_stdout_capture, limits.max_stderr_capture, cwd.len }, 0..) |value, index|
             std.mem.writeInt(u64, bytes[index * 8 ..][0..8], value, .little);
         @memcpy(bytes[header_bytes..][0..cwd.len], cwd);
-        var offset = header_bytes + cwd.len;
-        for (environment) |entry| {
-            std.mem.writeInt(u64, bytes[offset..][0..8], entry.name.len, .little);
-            std.mem.writeInt(u64, bytes[offset + 8 ..][0..8], entry.value.len, .little);
-            offset += 16;
-            @memcpy(bytes[offset..][0..entry.name.len], entry.name);
-            offset += entry.name.len;
-            @memcpy(bytes[offset..][0..entry.value.len], entry.value);
-            offset += entry.value.len;
-        }
         return bytes;
     }
 };
@@ -74,10 +60,7 @@ const Service = ecl.Instance(struct {
             start,
             copying: usize,
             header,
-            cwd: struct { index: usize, component: usize, entries: usize },
-            entry: struct { offset: usize, remaining: usize },
-            name: struct { index: usize, end: usize, value_end: usize, remaining: usize },
-            value: struct { index: usize, end: usize, remaining: usize },
+            cwd: struct { index: usize, component: usize },
             ready,
         } = .start,
 
@@ -109,7 +92,7 @@ const Service = ecl.Instance(struct {
                 state.phase = if (index + count == source.len) .header else .{ .copying = index + count };
             },
             .header => {
-                if (try state.readField(0) != 1) return error.Failed;
+                if (try state.readField(0) != Configuration.format) return error.Failed;
                 state.limits = .{
                     .max_live_ports = try state.readField(8),
                     .stdin_capacity = try state.readField(16),
@@ -120,10 +103,10 @@ const Service = ecl.Instance(struct {
                 };
                 state.limits.validate() catch return error.Failed;
                 const length = try state.readField(56);
-                if (length == 0 or length > state.bytes.?.len - Configuration.header_bytes) return error.Failed;
+                if (length == 0 or length != state.bytes.?.len - Configuration.header_bytes) return error.Failed;
                 state.cwd_end = Configuration.header_bytes + length;
                 if (!std.fs.path.isAbsolute(state.cwd())) return error.Failed;
-                state.phase = .{ .cwd = .{ .index = Configuration.header_bytes, .component = Configuration.header_bytes, .entries = try state.readField(64) } };
+                state.phase = .{ .cwd = .{ .index = Configuration.header_bytes, .component = Configuration.header_bytes } };
             },
             .cwd => |cursor| {
                 const end = cursor.index == state.cwd_end;
@@ -134,43 +117,10 @@ const Service = ecl.Instance(struct {
                     if ((length == 1 and state.bytes.?[cursor.component] == '.') or
                         (length == 2 and std.mem.eql(u8, state.bytes.?[cursor.component..cursor.index], ".."))) return error.Failed;
                 }
-                state.phase = if (end) .{ .entry = .{ .offset = state.cwd_end, .remaining = cursor.entries } } else .{ .cwd = .{
+                state.phase = if (end) .ready else .{ .cwd = .{
                     .index = cursor.index + 1,
                     .component = if (byte == '/' or byte == '\\') cursor.index + 1 else cursor.component,
-                    .entries = cursor.entries,
                 } };
-            },
-            .entry => |cursor| {
-                if (cursor.remaining == 0) {
-                    if (cursor.offset != state.bytes.?.len) return error.Failed;
-                    state.phase = .ready;
-                    continue;
-                }
-                if (cursor.offset > state.bytes.?.len or state.bytes.?.len - cursor.offset < 16) return error.Failed;
-                const name_length = try state.readField(cursor.offset);
-                const value_length = try state.readField(cursor.offset + 8);
-                const start = cursor.offset + 16;
-                if (name_length == 0 or name_length > state.bytes.?.len - start) return error.Failed;
-                const end = start + name_length;
-                if (value_length > state.bytes.?.len - end) return error.Failed;
-                state.phase = .{ .name = .{ .index = start, .end = end, .value_end = end + value_length, .remaining = cursor.remaining } };
-            },
-            .name => |cursor| {
-                if (cursor.index == cursor.end) {
-                    state.phase = .{ .value = .{ .index = cursor.end, .end = cursor.value_end, .remaining = cursor.remaining } };
-                    continue;
-                }
-                const byte = state.bytes.?[cursor.index];
-                if (byte == 0 or byte == '=') return error.Failed;
-                state.phase = .{ .name = .{ .index = cursor.index + 1, .end = cursor.end, .value_end = cursor.value_end, .remaining = cursor.remaining } };
-            },
-            .value => |cursor| {
-                if (cursor.index == cursor.end) {
-                    state.phase = .{ .entry = .{ .offset = cursor.end, .remaining = cursor.remaining - 1 } };
-                    continue;
-                }
-                if (state.bytes.?[cursor.index] == 0) return error.Failed;
-                state.phase = .{ .value = .{ .index = cursor.index + 1, .end = cursor.end, .remaining = cursor.remaining } };
             },
             .ready => {
                 try context.configureEndpoint(Process, .stdin, state.limits.stdin_capacity);
@@ -571,20 +521,10 @@ const Process = ecl.Port(.{
             const cwd = if (parser.directory) |directory| directory.bytes() else service.cwd();
             if (!cleanAbsolutePath(cwd)) return RequestParser.fail(context, .domain, "process specification is invalid");
             const memory = service.memory.?.allocator();
+            // The specification's dictionary is the child's whole environment;
+            // nothing is inherited from the host.
             var environment = std.process.Environ.Map.init(memory);
             defer environment.deinit();
-            var offset = service.cwd_end;
-            while (offset != service.bytes.?.len) {
-                if (context.cancelled()) return error.Cancelled;
-                const name_length = try service.readField(offset);
-                const value_length = try service.readField(offset + 8);
-                offset += 16;
-                const entry_name = service.bytes.?[offset..][0..name_length];
-                offset += name_length;
-                const value = service.bytes.?[offset..][0..value_length];
-                offset += value_length;
-                try environment.put(entry_name, value);
-            }
             for (parser.environment orelse &.{}) |entry| {
                 if (context.cancelled()) return error.Cancelled;
                 try environment.put(entry.name.bytes(), entry.value.bytes());
