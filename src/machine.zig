@@ -2999,7 +2999,7 @@ pub const Fiber = struct {
     /// word of that name: for top-level code, or within `module`. Advisory:
     /// the binding stands either way, `core.name` still reaches core, and a
     /// failed write changes nothing.
-    pub fn warnCoreShadowing(self: *Unit, name: intern.BindingName, module: ?intern.ModuleName) void {
+    pub fn warnCoreShadowing(self: *Fiber, name: intern.BindingName, module: ?intern.ModuleName) void {
         if (!self.environment.isPublicCoreName(name)) return;
         const console = self.inherited.console() orelse return;
         const spelling = intern.get(intern.bindingId(name));
