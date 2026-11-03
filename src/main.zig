@@ -173,7 +173,8 @@ fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
         error.OutOfMemory => return error.OutOfMemory,
         error.Invalid => {
             var buffer: [512]u8 = undefined;
-            const message = std.fmt.bufPrint(&buffer, "invalid module map: {s}", .{diagnostic.message()}) catch &buffer;
+            const message = std.fmt.bufPrint(&buffer, "invalid module map: {s}", .{diagnostic.message()}) catch
+                buffer[0..ecl.console.completeUtf8Len(&buffer)];
             return emitSyntheticError(init, .io, message, null);
         },
     };
@@ -311,7 +312,7 @@ const CliRuntime = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidHostConfig => {
                 try writeFile(startup.process.io, .stderr, "ecl: ");
-                try writeFile(startup.process.io, .stderr, diagnostic.message());
+                try writeEscapedFile(startup.process.io, diagnostic.message());
                 try writeFile(startup.process.io, .stderr, "\n");
                 return error.HostConfigReported;
             },
@@ -719,6 +720,14 @@ fn printSessionError(
     const rendered = try ecl.print.toOwnedString(init.process.gpa, error_value);
     defer init.process.gpa.free(rendered);
     session.writeDiagnosticsLine(rendered) catch return error.Io;
+}
+/// Diagnostics can quote host-supplied names, so terminal control bytes are
+/// shown as `\xNN` rather than handed to the terminal.
+fn writeEscapedFile(io: std.Io, bytes: []const u8) AppError!void {
+    var buffer: [4096]u8 = undefined;
+    var file_writer = std.Io.File.stderr().writerStreaming(io, &buffer);
+    ecl.console.writeDisplay(&file_writer.interface, bytes) catch return error.Io;
+    file_writer.interface.flush() catch return error.Io;
 }
 const Output = enum { stdout, stderr };
 fn writeFile(io: std.Io, output: Output, bytes: []const u8) AppError!void {

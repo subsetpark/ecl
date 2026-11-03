@@ -50,7 +50,7 @@ pub const InitDiagnostic = struct {
         var writer: std.Io.Writer = .fixed(&self.buffer);
         // Truncation keeps the leading reason, which names the rejected input.
         writer.print(format, args) catch {};
-        self.len = writer.end;
+        self.len = console_api.completeUtf8Len(self.buffer[0..writer.end]);
         return error.InvalidHostConfig;
     }
 };

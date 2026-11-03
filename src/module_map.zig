@@ -1,5 +1,6 @@
 //! Inert module-map validation and local source discovery. No package policy.
 const std = @import("std");
+const console = @import("console.zig");
 const heap = @import("heap.zig");
 const reader = @import("reader.zig");
 const data = @import("inert_data.zig");
@@ -114,7 +115,7 @@ pub const Diagnostic = struct {
             var writer: std.Io.Writer = .fixed(&self.buffer);
             // Truncation keeps the leading reason, which names the offender.
             writer.print(format, args) catch {};
-            self.len = writer.end;
+            self.len = console.completeUtf8Len(self.buffer[0..writer.end]);
         }
         return error.Invalid;
     }

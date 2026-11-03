@@ -254,7 +254,19 @@ pub const Console = struct {
     }
 };
 
-fn writeDisplay(writer: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!void {
+/// The longest prefix of `bytes` that does not end inside a scalar, so a
+/// bounded buffer cut by overflow never exposes half of a multibyte character.
+pub fn completeUtf8Len(bytes: []const u8) usize {
+    var start = bytes.len;
+    var back: usize = 0;
+    while (start > 0 and back < 3 and bytes[start - 1] & 0xC0 == 0x80) : (back += 1) start -= 1;
+    if (start == 0) return bytes.len;
+    const length = std.unicode.utf8ByteSequenceLength(bytes[start - 1]) catch return bytes.len;
+    return if (bytes.len - (start - 1) < length) start - 1 else bytes.len;
+}
+
+/// Write `bytes` with every byte a terminal would act on shown as `\xNN`.
+pub fn writeDisplay(writer: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!void {
     var index: usize = 0;
     while (index != bytes.len) {
         const unit = unitAt(bytes, index);
@@ -266,6 +278,13 @@ fn writeDisplay(writer: *std.Io.Writer, bytes: []const u8) error{WriteFailed}!vo
         }
         index += unit.len;
     }
+}
+
+test "completeUtf8Len cuts only at a scalar boundary" {
+    const text = "ab\u{e9}";
+    try std.testing.expectEqual(@as(usize, 4), completeUtf8Len(text));
+    try std.testing.expectEqual(@as(usize, 2), completeUtf8Len(text[0..3]));
+    try std.testing.expectEqual(@as(usize, 0), completeUtf8Len(""));
 }
 
 test "console serializes a complete writer use" {

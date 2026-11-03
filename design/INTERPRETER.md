@@ -194,10 +194,10 @@ process capabilities, never process-group identifiers or native owner access.
 
 The filesystem owner opens configured roots once and owns their handles and
 admission limits until all Session work and retirement have joined. Invalid
-roots or limits fail Session construction with `InvalidHostConfig` and a
-diagnostic naming the rejected input, distinctly
-from allocation failure. Root authority remains the retained descriptor after
-a rename. Fibers receive only an opaque access capability, never the owner.
+roots or limits fail Session construction with `InvalidHostConfig`, distinctly
+from allocation failure, with a diagnostic stating the reason. Root authority
+remains the retained descriptor after a rename. Fibers receive only an opaque
+access capability, never the owner.
 
 Direct filesystem drivers own validated inputs, descriptor leases, operation
 admission, and partial outputs. Directory, staging, enumeration, lock, and writer
