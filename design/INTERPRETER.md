@@ -186,8 +186,10 @@ The dependency-neutral `startup_environment.zig` owns validated environment
 entries and backing bytes together with their allocator. Session owns the
 read-only metadata snapshot and startup directory through evaluation shutdown.
 The bundled process SDK instance independently owns its immutable startup
-configuration and queue, capture, and live-resource limits. Child environment
-maps apply per-request overrides without changing either captured snapshot.
+configuration and queue, capture, and live-resource limits. That configuration
+holds no environment: a child's environment is exactly its specification's
+dictionary, so the Session snapshot reaches a child only through values a
+program read with `getenv`.
 Executable and working-directory syntax is validated at the process boundary;
 the operating system determines access. Fibers obtain only ordinary registered
 process capabilities, never process-group identifiers or native owner access.

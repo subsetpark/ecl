@@ -48,6 +48,30 @@ test "e2e: proc direct execution preserves argv cwd environment and policy" {
     });
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "1 1 1\n", .stderr = "" });
+
+    // The CLI's own environment still holds the probe, and `getenv` sees it,
+    // but a child receives only what its specification names.
+    const isolated = try std.fmt.allocPrint(
+        allocator,
+        "\"ECL_PROCESS_PROBE\" getenv " ++
+            "{{executable \"{s}\" args (\"inspect\")}} proc.run `stdout at chars " ++
+            "{{executable \"{s}\" args (\"inspect\")}} `env {{}} \"ECL_PROCESS_PROBE\" dup getenv put put proc.run `stdout at chars",
+        .{ process_exe, process_exe },
+    );
+    defer allocator.free(isolated);
+    var isolated_result = try cli.runOptions(.{
+        .argv = &.{ ecl_exe, isolated },
+        .cwd = .{ .dir = scratch.dir },
+        .environ_map = &environment,
+    });
+    defer isolated_result.deinit();
+    const isolated_expected = try std.fmt.allocPrint(
+        allocator,
+        "\"base\" \"cwd={s}\\nprobe=<absent>\\n\" \"cwd={s}\\nprobe=base\\n\"\n",
+        .{ cwd, cwd },
+    );
+    defer allocator.free(isolated_expected);
+    try isolated_result.expect(.{ .exit_code = 0, .stdout = isolated_expected, .stderr = "" });
 }
 
 test "e2e: proc ports stream binary data with backpressure and EOF" {
