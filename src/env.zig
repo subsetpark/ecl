@@ -1219,6 +1219,20 @@ pub const Env = enum(usize) {
         return self.privateState().core.rawLookup(name);
     }
 
+    /// Whether `name` is a public core word: what a definition of the same
+    /// name in another root shadows for the code written there. One probe of
+    /// core's frozen directory.
+    pub fn isPublicCoreName(self: *const Env, name: intern.BindingName) bool {
+        var cursor = self.coreLookup(name);
+        while (true) switch (cursor.advance()) {
+            .pending => {},
+            .complete => |found| return if (found) |entry| switch (entry) {
+                .definition => |definition| definition.visibility == .public,
+                .alias => |alias| alias.visibility == .public,
+            } else false,
+        };
+    }
+
     /// Core's names, for enumeration.
     pub fn coreEntries(self: *const Env) NameMap.RawEntryCursor {
         return self.privateState().core.rawEntries();

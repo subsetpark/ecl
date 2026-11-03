@@ -343,7 +343,8 @@ const ImportDriver = struct {
                 self.publisher = .init(evaluator.inherited.registry.defineCursor(requested.binding, .{ .alias = alias }));
             switch (try self.publisher.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => {
+                .complete => |outcome| {
+                    if (outcome == .introduced) evaluator.warnCoreShadowing(requested.binding, null);
                     self.publisher.?.deinit(evaluator.releases, evaluator.allocator);
                     self.publisher = null;
                     self.publish_index += 1;

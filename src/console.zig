@@ -199,6 +199,17 @@ pub const Console = struct {
         writer.flush() catch return error.WriteFailed;
     }
 
+    /// Writes `parts` as one diagnostic line, so a concurrent writer cannot
+    /// interleave with it.
+    pub fn writeDiagnosticLine(self: *Console, parts: []const []const u8) error{WriteFailed}!void {
+        const writer = self.diagnostics;
+        std.Io.Threaded.mutexLockUncancelable(&self.diagnostics_mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.diagnostics_mutex);
+        for (parts) |part| writer.writeAll(part) catch return error.WriteFailed;
+        writer.writeByte('\n') catch return error.WriteFailed;
+        writer.flush() catch return error.WriteFailed;
+    }
+
     /// A named terminal effect. There is no operation that takes control
     /// bytes, so no caller can compose a sequence of its own.
     pub fn signal(self: *Console, action: TerminalAction) error{WriteFailed}!void {

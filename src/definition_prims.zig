@@ -494,7 +494,10 @@ const DefineDriver = struct {
             },
             .publishing_session => |*cursor| switch (try cursor.borrowMut().advance()) {
                 .pending => _ = work.spend(),
-                .complete => return .completed,
+                .complete => |outcome| {
+                    if (outcome == .introduced) evaluator.warnCoreShadowing(cursor.borrow().definedName(), null);
+                    return .completed;
+                },
             },
             .published => return .completed,
             .publishing_test => |*cursor| {

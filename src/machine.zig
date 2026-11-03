@@ -2995,6 +2995,31 @@ pub const Fiber = struct {
         return std.Io.Clock.awake.now(io).nanoseconds;
     }
 
+    /// Reports that a definition or import of `name` shadows the public core
+    /// word of that name: for top-level code, or within `module`. Advisory:
+    /// the binding stands either way, `core.name` still reaches core, and a
+    /// failed write changes nothing.
+    pub fn warnCoreShadowing(self: *Unit, name: intern.BindingName, module: ?intern.ModuleName) void {
+        if (!self.environment.isPublicCoreName(name)) return;
+        const console = self.inherited.console() orelse return;
+        const spelling = intern.get(intern.bindingId(name));
+        settleAdvisoryDiagnostic(if (module) |owner| console.writeDiagnosticLine(&.{
+            "warning: module `",
+            intern.get(intern.moduleId(owner)),
+            "` defines `",
+            spelling,
+            "`, shadowing the core word within the module; `core.",
+            spelling,
+            "` still reaches it",
+        }) else console.writeDiagnosticLine(&.{
+            "warning: `",
+            spelling,
+            "` now shadows the core word for top-level code; `core.",
+            spelling,
+            "` still reaches it",
+        }));
+    }
+
     fn settleAdvisoryDiagnostic(result: error{WriteFailed}!void) void {
         if (result) |_| {} else |err| switch (err) {
             error.WriteFailed => {},
@@ -8248,12 +8273,18 @@ const ModuleSealDriver = struct {
                 }
                 switch (validate.entries.advance()) {
                     .pending => {},
-                    .item => |entry| switch (entry.value) {
-                        .reserved => |reservation| validate.current = .{
-                            .reservation = reservation,
-                            .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
-                        },
-                        .definition, .alias => {},
+                    .item => |entry| {
+                        const owned = image(evaluator);
+                        // Shadowing in a shipped module is deliberate.
+                        if (owned.provenance() != .standard_library)
+                            evaluator.warnCoreShadowing(entry.key, owned.moduleName());
+                        switch (entry.value) {
+                            .reserved => |reservation| validate.current = .{
+                                .reservation = reservation,
+                                .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
+                            },
+                            .definition, .alias => {},
+                        }
                     },
                     .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).sealCursor() },
                 }
