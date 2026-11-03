@@ -1472,12 +1472,12 @@ fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, c
 
 test "oom: standard-library and host: common resource process close" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.close").run);
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.close").run);
 }
 
 test "oom: standard-library and host: common resource process shutdown" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.shutdown").run);
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, BuiltinResourceLifecycleProbe(.process, "port.shutdown").run);
 }
 
 test "oom: standard-library and host: registered process operation results" {
