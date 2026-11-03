@@ -1182,14 +1182,15 @@ fn expectFreshStack(source: []const u8, expected: []const u8) !void {
 // against the definitions current then. What a definition already bound stays
 // fixed, so a task running a word reaches the targets that word was bound to
 // however the parent redefines its names afterwards.
-test "bindings: a task running bound code keeps that code's targets" {
-    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def task.await", "{ok [1]}");
-    // Through a caller: `body` still reaches the `g` it was bound to.
-    try expectFreshStack("(1) `g def (g) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `g def task.await", "{ok [1]}");
-    // Shadowing a core word after the spawn does not reach bound code.
-    try expectFreshStack("(20 clock.sleep 1 2 +) `work def [] (work) @spawn (pop pop 42) `+ def task.await", "{ok [3]}");
-    // Several replacements after the spawn change nothing either.
-    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [1]}");
+test "bindings: a running task sees definitions made after its spawn" {
+    // The task resolves `f` when it reaches it, after the root redefined it.
+    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def task.await", "{ok [2]}");
+    // Through a caller: `f` reaches the replaced `g`.
+    try expectFreshStack("(1) `g def (g) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `g def task.await", "{ok [2]}");
+    // Shadowing a core word after the spawn reaches the session's code too.
+    try expectFreshStack("(20 clock.sleep 1 2 +) `work def [] (work) @spawn (pop pop 42) `+ def task.await", "{ok [42]}");
+    // The last of several replacements is the one reached.
+    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [4]}");
     // A task body naming an undefined word fails before running anything.
     try expectFreshStack("[] (missing-word) @spawn task.await `err at `kind at", "undefined-word");
 }

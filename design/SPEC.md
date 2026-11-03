@@ -81,10 +81,9 @@ interpretation.
 
 Values are immutable. Bindings associate names with executable bodies and may
 be replaced without mutating either the old body or values that refer to its
-name. Word occurrences retain the root their names are resolved in. A
-quotation is bound before it runs: each of its top-level words is resolved
-once, in its own root, and the bound code keeps those targets whatever is
-defined later.
+name. Word occurrences retain the root their names are resolved in. Each word
+is resolved in its own root when it is reached, so a replacement reaches every
+later call, including calls from code defined before it.
 
 A unit is the boundary of failure and operand-stack rollback. Modules separate
 immutable code images from named registrations; a registration publishes an
@@ -654,7 +653,7 @@ elements in order.
 
 Ordinary word evaluation is one observable operation:
 
-1. Take the definition the occurrence was bound to.
+1. Resolve the occurrence to its current definition.
 2. Establish the definition's activation context.
 3. Evaluate the definition's executable body.
 
@@ -662,46 +661,48 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-**Binding.** Before a quotation is applied, each of its top-level unquoted
-words is resolved in the root that occurrence was written in (see Bindings
-and scope), against one coherent view of the current definitions and module
-registrations. A quotation executes nothing unless every one of its top-level
-words binds: an unresolved word fails the application at that word before any
-of its forms has run. Nested quotations and quoted words are data and bind
-only when they are themselves applied. A combinator binds a quotation at its
-first application and reuses that binding for the rest of its invocation;
-separate quotations, such as a predicate and a body, bind separately, and a
-quotation that is never applied is never bound. Binding never loads a module:
-a qualified word naming a module that is not registered binds without a
-target and resolves when it is first reached, loading the module then, so an
-unknown module or a name it does not export fails there, as an undefined word.
+**Resolution.** Every word is resolved when it is reached, in the root that
+occurrence was written in (see Bindings and scope), against the current
+definitions and module registrations. This holds alike for top-level source,
+for definition bodies, and for every quotation applied at run time, by
+`call`, a combinator, `@attempt`, or as a task's body. A quotation applied at
+run time is not checked before it runs: an unresolved word fails at that
+word, after the forms before it have run. Nested quotations and quoted words
+are data and resolve only when they are themselves applied.
 
-**Definitions bind when they are defined.** A top-level definition binds its
-body as `def` runs. Its own name, written in the root it is published into,
-calls the definition itself; every other word must already resolve, or name
-a module not yet registered, so a top-level body cannot refer forward to a
-later definition. A module's
-definitions and imports are staged by its construction body and bound together
-when the module is sealed, so words in one module may refer forward and recurse
-mutually. A staged definition cannot run before its module is sealed; a
-construction body that calls one finds nothing by that name.
+**Definitions are validated when they are defined.** A top-level definition
+checks its body as `def` runs. Its own name, written in the root it is
+published into, calls the definition itself; every other top-level word of
+the body must already resolve, or name a module not yet registered, so a
+top-level body cannot refer forward to a later definition and a misspelled
+word fails the definition. Validation records nothing: the body resolves each
+word again whenever it runs. A module's definitions and imports are staged by
+its construction body and validated together when the module is sealed, so
+words in one module may refer forward and recurse mutually. A staged
+definition is not visible to runtime lookup before its module is sealed, so
+a construction body that names one finds nothing by that name, or resolves a
+core word of the same name instead. Validation never loads a module: a
+qualified word naming a module that is not registered passes, and resolves
+when it is first reached, loading the module then, so an unknown module or a
+name it does not export fails there, as an undefined word.
 
 **Top-level source is incremental.** A file, a REPL line, or the prelude is
 evaluated form by form, and each top-level word is resolved when it is
-reached, so ``(1) `foo def foo`` defines `foo` and then calls it. This applies
-to the top level only; quotations still bind whole before they run.
+reached, so ``(1) `foo def foo`` defines `foo` and then calls it.
 
-**Bound code keeps its targets.** Replacing a definition or a module
-registration reaches code bound afterwards. Code already bound — an earlier
-definition, a running executable, a quotation a combinator has already
-applied — keeps the definition it was bound to. There is no historical view:
-a unit, a task, and an `@attempt` bind against the definitions current when
-they bind, so a task binds its body when it first runs, not when it is
-spawned. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
+**Replacements reach running code.** Replacing a definition or a module
+registration reaches every word dispatched afterwards: in definitions made
+earlier, in the remaining forms of a quotation already running, and in the
+later elements of an iteration already under way. A body running when a word
+it calls is replaced may run the old definition for earlier calls and the new
+one for later ones. There is no historical view: a unit, a task, and an
+`@attempt` see the definitions current as each word is reached.
+Explicit operations on names — `execute`, `doc`, `effect`, `which`,
 and `see` — resolve the supplied symbol in its own root against the current
-definitions each time they run. A module image that bound code or a word
-names keeps its meaning for the rest of the Session after its registration is
-replaced. Executing a word written in an image that was never published and
+definitions each time they run. A word written in a module image resolves in
+that image, so code written in an image keeps reaching that image's
+definitions after its registration is replaced, while a qualified name
+reaches the registration current when it runs. Executing a word written in an image that was never published and
 has since been discarded is a `` `domain `` error.
 
 The reader links each symbol occurrence to the root the source is read into:
@@ -1280,10 +1281,11 @@ module image   → core; sealed at the end of construction
 
 A word resolves in the root it was written in: the root's own definition for
 its name when there is one, and otherwise core's; with neither it is an
-`` `undefined-word `` error when the word is bound (see Core evaluation). Names are
-introduced and replaced, never removed. Which definition a name selects is
-decided when code is bound, so a word read before its name is defined finds
-that definition once it exists only if it is bound afterwards.
+`` `undefined-word `` error when the word is reached, or when a definition
+naming it is validated (see Core evaluation). Names are introduced and
+replaced, never removed. Which definition a name selects is decided each time
+the word runs, so a word read before its name is defined finds that
+definition once it exists.
 
 Session-authored code may therefore shadow core definitions. A module image
 sees its own public and private bindings followed by core and never sees the
@@ -1340,7 +1342,8 @@ representations but expose the same binding model.
   values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete definition: omitting an effect or docstring clears the old one.
-  Code bound to the old definition keeps it.
+  Every later call reaches the new definition, including calls from code
+  defined before it.
 - `see` prints the resolved binding's combined annotation, when present,
   followed by its body through the standard source formatter. It omits the
   navigation header, name, and `def`/`defp` terminator; `which` reports binding
@@ -1626,7 +1629,7 @@ that name.
 
 ##### Action
 
-> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action. Selection happens when the code holding the qualified word is bound, so bound code keeps the image it selected; selection afterward observes only the replacement. Explicit lookup performs a fresh selection each time it runs.
+> This model is normative for registry names, aliases, generations, and publication, including the construction of the images they publish; abstract definitions and visibility; and call contexts. Modules are pure code: a registration carries no operand stack and no state of its own, and a generation is nothing but an image published under a name.  It deliberately abstracts over source spelling and name validation, construction-body evaluation (including the refusal of a body that leaves values on its stack), concrete and nested values, error construction and propagation, task and unit ownership, scheduling and fairness, and storage reclamation. The surrounding language specification governs those subjects. Begin and complete actions expose semantic concurrency boundaries; they are not ECL words. Contexts grant formal write authority and do not denote runtime values or additional language state. An `InvocationContext` is either the top-level evaluator or identifies the exact active call performing a registry mutation.  A qualified call selects a registry name's current image and a public binding in it in one atomic action, when the call begins, so code written before a replacement reaches the replacement at its next call. Explicit lookup performs the same fresh selection each time it runs.
 
 **`Calls`** ↝ Begin qualified call *module-name*: `RegistryName`, *binding-name*: `BindingName`.
 
@@ -1640,7 +1643,7 @@ that name.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so code bound to it and words written in it keep their meaning.
+> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration, and aliases follow it on later lookup.
 
 `Call`.
 
@@ -1892,8 +1895,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   A session `def` shadows a name *for session code*. Adopting new behavior
   inside a prelude word is redefining that word: the replacement is a session
   definition, so it resolves in the session and shadows the prelude one for
-  session callers it binds afterwards; what is fixed is which root each word
-  resolves in. A quotation literal written
+  session callers from then on; what is fixed is which root each word resolves
+  in. A quotation literal written
   inside a body is sealed the way the body's own references are: it resolves in
   the scope its text was written in, whoever ends up applying it. `all?` is
   `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, but a
@@ -1907,9 +1910,9 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   Splicing or rearranging quotations preserves the roots of their existing
   word occurrences. A word the implementation builds for itself carries no
   root and resolves in core. Re-registering a module publishes a new image
-  under the module name, so code bound afterwards runs the new code. Bound
-  code is not re-pointed, and words written in the old image go on resolving
-  there. Seed values passed to unit constructors are not part
+  under the module name, so a qualified word reached afterwards runs the new
+  code, in code defined earlier too. Words written in the old image go on
+  resolving there. Seed values passed to unit constructors are not part
   of the construction body. Runtime-built captures retain their existing
   word scopes.
 - `@defm` is parameterized by the seed operand — ``values (body) `name @defm`` —
@@ -1962,8 +1965,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   word lives in a task and is reached through its mailbox (see
   [Mailboxes](#mailboxes)).
 - **Every published generation lasts the Session.** Reload publishes a new
-  generation under the name; code bound to the old one, and words written in
-  it, keep their meaning. Memory therefore grows with reload history within a
+  generation under the name; words written in the old one keep resolving
+  there. Memory therefore grows with reload history within a
   Session; how soon an unreachable generation is reclaimed is not part of the
   language.
 - Failed registration changes nothing: the previous generation, if any,
@@ -1984,7 +1987,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   definition `m.x` selects then, so an import never captures the definition it
   validated, and reflection reports that definition's metadata. A public
   import in a module re-exports the alias, which chains: `a.x` names `m.x`.
-  Aliases that never reach a definition are `` `domain `` when bound.
+  Alias cycles are `` `domain `` when reached or validated; an alias whose
+  target is missing is `` `undefined-word `` then.
   At top level, naming a binding that already exists replaces only that
   binding; in a module body an imported name, like a defined one, may be
   introduced once. Importing selected names never splices an entire module.
@@ -1994,7 +1998,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   import. `qualify` validates a module-name symbol, which may be `` `core ``,
   and an unqualified binding-name symbol and constructs the corresponding
   executable word; `execute` resolves that word when it runs, in the root the
-  symbol carries, and invokes it as bound code would, preserving its module
+  symbol carries, and invokes it as dispatch would, preserving its module
   home, private lookup, annotations, tracing, native/builtin path, and
   cancellation. `alias` registers a short registry name; aliases and module
   names may not collide in either direction. `which` shows any name's

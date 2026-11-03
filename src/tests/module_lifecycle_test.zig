@@ -226,17 +226,17 @@ test "modules: *module* reports the active canonical registration" {
     });
 }
 
-test "modules: a bound qualified call keeps its target across reload" {
+test "modules: a qualified call reaches the reloaded module" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    // `via` was bound to the first generation's `x`; a reload reaches code
-    // bound after it, and an explicit lookup.
+    // `via` resolves `m.x` each time it runs, so a reload reaches it as it
+    // reaches an explicit lookup.
     try expectOk(&runtime, "[] ((1) `x def) `m @defm (m.x) `via def");
     try expectStack(&runtime, "via", "1");
-    try expectStack(&runtime, "[] ((2) `x def) `m @defm via m.x", "1 2");
-    try expectStack(&runtime, "[] ((3) `x def) `m @defm via `m.x execute", "1 3");
+    try expectStack(&runtime, "[] ((2) `x def) `m @defm via m.x", "2 2");
+    try expectStack(&runtime, "[] ((3) `x def) `m @defm via `m.x execute", "3 3");
 }
 
 test "modules: explicit seeds initialize the @defm construction stack in order" {

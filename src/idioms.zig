@@ -493,7 +493,8 @@ const WordGuard = union(enum) {
             .frozen => |lookup| return frozenBindingMatches(lookup, word, binding, primitive, origin),
             .live => |evaluator| {
                 std.debug.assert(origin == .trusted);
-                return liveWord(evaluator, word, binding, primitive) != null;
+                if (!plainWord(word.slot)) return false;
+                return liveWord(evaluator.peekWord(word), binding, primitive) != null;
             },
         }
     }
@@ -508,12 +509,13 @@ const LiveWord = struct {
 };
 
 /// A following word, resolved as its own dispatch would resolve it: through
-/// the unit's dispatch cache, so a phrase that runs on every iteration pays
-/// one cache probe rather than a slot resolution. A word the cache does not
-/// hold is resolved in full. Either way it must be the trusted binding
-/// expected, from a slot on core or the running root.
+/// the unit's resolutions, so a phrase that runs on every iteration pays one
+/// probe rather than a full lookup. A word the unit has not resolved is
+/// looked up in full and remembered, since the phrase consumes it instead of
+/// dispatching it. Either way it must be the trusted binding expected.
 fn followingWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind) error{OutOfMemory}!?LiveWord {
-    return liveWord(evaluator, word, binding, null);
+    if (!plainWord(word.slot)) return null;
+    return liveWord(try evaluator.resolveForRecognition(word), binding, null);
 }
 
 /// Resolves `word` where the phrase runs and returns it only when it is the
@@ -521,9 +523,8 @@ fn followingWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind) err
 /// run, or whose root has retired, is simply not that binding; generic
 /// execution reports any error. A frozen binding outlives the call that
 /// matched it, so what it returns stays valid for the call.
-fn liveWord(evaluator: *Unit, word: value.Symbol, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
-    if (!plainWord(word.slot)) return null;
-    const resolved = evaluator.peekWord(word) orelse return null;
+fn liveWord(peeked: ?machine.PeekedWord, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
+    const resolved = peeked orelse return null;
     if (resolved.origin != .core and resolved.origin != .standard_library) return null;
     const definition = resolved.definition;
     const code = definition.code();

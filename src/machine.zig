@@ -1139,29 +1139,19 @@ pub fn stringValue(
     return poll_api.driveFallible(Value, &materializer, .{&work});
 }
 /// How an evaluation's words reach their targets.
+/// How an evaluation holds the code it runs. Every evaluation resolves each
+/// word when it is reached, against the definitions current then.
 const Program = union(enum) {
-    /// Top-level source: each word is resolved when it is reached, so a
-    /// definition made by one form is visible to the next. The evaluation
-    /// owns one reference to its code.
-    incremental,
-    /// A quotation application whose binding has not run yet. Nothing in it
-    /// executes until every top-level word is bound. The evaluation owns one
-    /// reference to its code.
-    unbound,
-    /// A sealed executable. Its code is borrowed from the executable, which
+    /// The evaluation owns one reference to its code: top-level source, or a
+    /// quotation applied at run time.
+    owned,
+    /// The enclosing application frame owns the code for its whole
+    /// invocation. The frame sits beneath this evaluation and outlives it, so
+    /// the evaluation borrows the code.
+    borrowed,
+    /// A definition's body. Its code is borrowed from the definition, which
     /// the evaluation keeps alive by holding the executable's owner.
-    bound: *const env.Executable,
-    /// A sealed executable the enclosing application frame owns for its
-    /// whole invocation. The frame sits beneath this evaluation and outlives
-    /// it, so the evaluation borrows the executable and its code.
-    borrowed: *const env.Executable,
-
-    fn executable(self: Program) ?*const env.Executable {
-        return switch (self) {
-            .bound, .borrowed => |sealed| sealed,
-            .incremental, .unbound => null,
-        };
-    }
+    definition: *const env.Executable,
 };
 
 const Eval = struct {
@@ -1208,8 +1198,8 @@ const Eval = struct {
     /// Releases what this evaluation owns.
     inline fn release(self: Eval, releases: *heap.ReleaseDomain) void {
         switch (self.program) {
-            .incremental, .unbound => releases.releaseHeader(self.code),
-            .bound => |executable| executable.owner().release(releases),
+            .owned => releases.releaseHeader(self.code),
+            .definition => |executable| executable.owner().release(releases),
             .borrowed => {},
         }
     }
@@ -1217,8 +1207,8 @@ const Eval = struct {
     /// Takes one more reference for a copy of this evaluation.
     fn retainCopy(self: Eval) void {
         switch (self.program) {
-            .incremental, .unbound => heap.incRef(self.code),
-            .bound => |executable| executable.owner().retain(),
+            .owned => heap.incRef(self.code),
+            .definition => |executable| executable.owner().retain(),
             .borrowed => {},
         }
     }
@@ -1227,8 +1217,8 @@ const Eval = struct {
     /// holder that keeps only the quotation.
     fn intoCode(self: Eval, releases: *heap.ReleaseDomain) *Header {
         switch (self.program) {
-            .incremental, .unbound => return self.code,
-            .bound => |executable| {
+            .owned => return self.code,
+            .definition => |executable| {
                 heap.incRef(self.code);
                 executable.owner().release(releases);
                 return self.code;
@@ -1548,170 +1538,124 @@ pub const IsolatedApplication = struct {
     /// Where a finite iteration keeps what its call has decided for its
     /// quotation's words.
     plan: ?*ResolutionPlan = null,
-    /// The executables this invocation has bound so far, carried from one
-    /// application to the next.
-    bound: ApplicationReuse = .{},
 
     /// Releases an application that never became a frame.
     fn discard(self: IsolatedApplication, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        var bound = self.bound;
-        bound.deinit(releases);
         self.deinit_fn(releases, allocator, self.context);
     }
 };
 
-/// The executables one combinator invocation bound for the quotations it
-/// applies, so each later application reuses them instead of binding again.
-/// A predicate and a body are separate quotations with separate bindings, so
-/// two slots cover every combinator. The invocation owns what it holds, so no
-/// cache eviction can disturb its remaining applications.
-const ApplicationReuse = struct {
-    slots: [2]?*env.AnonymousCode = .{ null, null },
+/// What this unit's code has resolved each word to, all in one
+/// publication: every word resolves when it is reached, and reaching it again
+/// in the same publication reuses that resolution. Any publication in the Session
+/// invalidates every entry, so a redefinition reaches the next dispatch of
+/// the word. An entry holds a counted definition, so a definition handed out
+/// here outlives the invocation that retains it.
+///
+/// Open addressing with linear probing, kept at most half full and grown by
+/// doubling up to a bound, beyond which it starts over empty; so a lookup
+/// expects one probe and every operation, including growth and invalidation,
+/// is bounded by that bound. Entries are placed by name alone: scope slots
+/// are numbered process-wide, so hashing them would make which entries
+/// collide, and so what a unit allocates, depend on unrelated Sessions.
+const WordResolutions = struct {
+    const initial_capacity = 64;
+    const max_capacity = 4096;
+    const Entry = struct {
+        word: value.Symbol,
+        provenance: u64,
+        definition: *env.Definition,
+    };
+    entries: []?Entry = &.{},
+    /// How many entries are present, for the load bound.
+    count: usize = 0,
+    /// The publication every present entry was resolved in.
+    publication: u64 = 0,
 
-    fn find(self: *const ApplicationReuse, code: *Header) ?*env.AnonymousCode {
-        for (self.slots) |slot| if (slot) |held| if (held.executable().code() == code) return held;
+    fn home(self: *const WordResolutions, name: u32) usize {
+        return @intCast((@as(u64, name) *% 0x9E3779B97F4A7C15 >> 32) & (self.entries.len - 1));
+    }
+
+    /// What `word` resolved to under `provenance` in `publication`.
+    inline fn find(self: *const WordResolutions, word: value.Symbol, publication: u64, provenance: u64) ?*env.Definition {
+        if (self.publication != publication or self.entries.len == 0) return null;
+        const mask = self.entries.len - 1;
+        var index = self.home(word.name);
+        while (self.entries[index]) |entry| : (index = (index + 1) & mask) {
+            if (entry.word.name == word.name and entry.word.slot == word.slot and entry.provenance == provenance)
+                return entry.definition;
+        }
         return null;
     }
 
-    fn remember(self: *ApplicationReuse, code: *env.AnonymousCode) void {
-        for (&self.slots) |*slot| if (slot.* == null) {
-            code.retain();
-            slot.* = code;
-            return;
-        };
-    }
-
-    fn deinit(self: *ApplicationReuse, releases: *heap.ReleaseDomain) void {
-        for (&self.slots) |*slot| if (slot.*) |held| {
-            held.release(releases);
-            slot.* = null;
-        };
-    }
-};
-
-/// The unit's bounded cache of explicit lookups: what a symbol resolved to,
-/// valid only in the publication and under the provenance it was resolved in.
-/// An entry holds a counted definition; static ones outlive the Session's
-/// units. Consulted only by explicit lookup, never by bound dispatch.
-const LookupReuse = struct {
-    const capacity = 16;
-    const Entry = struct {
-        word: value.Symbol,
-        publication: u64,
-        provenance: u64,
-        definition: *env.Definition,
-    };
-    entries: [capacity]?Entry = @splat(null),
-
-    /// By name alone: scope slots are numbered process-wide, so hashing them
-    /// would make which entries collide, and so what a unit allocates,
-    /// depend on unrelated Sessions.
-    fn index(word: value.Symbol) usize {
-        return @intCast((@as(u64, word.name) *% 0x9E3779B97F4A7C15 >> 32) % capacity);
-    }
-
-    fn find(self: *const LookupReuse, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance) ?*env.Definition {
-        const entry = self.entries[index(word)] orelse return null;
-        if (entry.word.name != word.name or entry.word.slot != word.slot or entry.publication != publication or
-            entry.provenance != BindingReuse.provenanceKey(provenance)) return null;
-        return entry.definition;
-    }
-
+    /// Records a resolution made in `publication`. Past `max_capacity` it
+    /// starts over empty rather than growing.
     fn remember(
-        self: *LookupReuse,
+        self: *WordResolutions,
+        allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
         word: value.Symbol,
         publication: u64,
-        provenance: modules.RegistrationProvenance,
+        provenance: u64,
         definition: *env.Definition,
-    ) void {
-        const slot = &self.entries[index(word)];
-        if (slot.*) |old| if (old.definition.lifetime == .counted) old.definition.release(releases);
+    ) error{OutOfMemory}!void {
+        if (self.publication != publication) {
+            self.clear(releases);
+            self.publication = publication;
+        }
+        if ((self.count + 1) * 2 > self.entries.len) {
+            const capacity = if (self.entries.len == 0) initial_capacity else self.entries.len * 2;
+            if (capacity > max_capacity) self.clear(releases) else try self.grow(allocator, capacity);
+        }
         if (definition.lifetime == .counted) definition.retain();
-        slot.* = .{ .word = word, .publication = publication, .provenance = BindingReuse.provenanceKey(provenance), .definition = definition };
+        self.place(.{ .word = word, .provenance = provenance, .definition = definition });
     }
 
-    fn deinit(self: *LookupReuse, releases: *heap.ReleaseDomain) void {
-        for (&self.entries) |*slot| if (slot.*) |entry| {
+    /// Puts `entry` in the first free place from its home. The caller keeps
+    /// the table under half full, so one exists.
+    fn place(self: *WordResolutions, entry: Entry) void {
+        const mask = self.entries.len - 1;
+        var index = self.home(entry.word.name);
+        while (self.entries[index] != null) index = (index + 1) & mask;
+        self.entries[index] = entry;
+        self.count += 1;
+    }
+
+    /// Moves every entry into a table of `capacity`. Bounded by
+    /// `max_capacity`. On failure the table is unchanged.
+    fn grow(self: *WordResolutions, allocator: std.mem.Allocator, capacity: usize) error{OutOfMemory}!void {
+        const grown = try allocator.alloc(?Entry, capacity);
+        @memset(grown, null);
+        const old = self.entries;
+        self.entries = grown;
+        self.count = 0;
+        for (old) |maybe| if (maybe) |entry| self.place(entry);
+        if (old.len != 0) allocator.free(old);
+    }
+
+    /// Bounded by `max_capacity`.
+    fn clear(self: *WordResolutions, releases: *heap.ReleaseDomain) void {
+        for (self.entries) |*slot| if (slot.*) |entry| {
             if (entry.definition.lifetime == .counted) entry.definition.release(releases);
             slot.* = null;
         };
+        self.count = 0;
     }
-};
 
-/// The unit's bounded cache of anonymous bindings. An entry owns its executable
-/// and, through it, its exact source quotation, so a pointer key cannot be
-/// reused by another quotation while the entry lives. It is consulted only
-/// where an application begins binding, and is valid only in the publication
-/// and under the provenance it was bound in: any publication anywhere
-/// conservatively invalidates it.
-const BindingReuse = struct {
-    const capacity = 16;
-    const Entry = struct {
-        code: *env.AnonymousCode,
-        publication: u64,
-        provenance: u64,
-    };
-    /// Searched by exact identity and replaced in rotation, never placed by
-    /// address: which quotations share a slot must not depend on the heap's
-    /// layout, or the unit's allocations would differ from run to run.
-    entries: [capacity]?Entry = @splat(null),
-    next: u8 = 0,
-    last: u8 = 0,
+    fn deinit(self: *WordResolutions, allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) void {
+        self.clear(releases);
+        if (self.entries.len != 0) allocator.free(self.entries);
+        self.* = .{};
+    }
 
+    /// The key a resolution depends on besides the word: where a qualified
+    /// name or an alias searches registries.
     fn provenanceKey(provenance: modules.RegistrationProvenance) u64 {
         return switch (provenance) {
             .ordinary => 0,
             .standard_library => 1,
             .root_scope => |scope| 2 | (@as(u64, @backingInt(scope)) << 2),
             .source => |source| @intFromPtr(source),
-        };
-    }
-
-    fn find(
-        self: *BindingReuse,
-        code: *Header,
-        publication: u64,
-        provenance: modules.RegistrationProvenance,
-    ) ?*env.AnonymousCode {
-        const key = provenanceKey(provenance);
-        const matches = struct {
-            fn at(entry: ?Entry, wanted: *Header, at_publication: u64, at_provenance: u64) bool {
-                const held = entry orelse return false;
-                return held.code.executable().code() == wanted and held.publication == at_publication and
-                    held.provenance == at_provenance;
-            }
-        }.at;
-        // A loop applies the same quotation again; try the last hit first.
-        const found: u8 = if (matches(self.entries[self.last], code, publication, key)) self.last else search: {
-            for (self.entries, 0..) |entry, slot| if (matches(entry, code, publication, key)) break :search @intCast(slot);
-            return null;
-        };
-        self.last = found;
-        const held = self.entries[found].?.code;
-        held.retain();
-        return held;
-    }
-
-    fn remember(
-        self: *BindingReuse,
-        releases: *heap.ReleaseDomain,
-        code: *env.AnonymousCode,
-        publication: u64,
-        provenance: modules.RegistrationProvenance,
-    ) void {
-        const slot = &self.entries[self.next];
-        if (slot.*) |old| old.code.release(releases);
-        code.retain();
-        slot.* = .{ .code = code, .publication = publication, .provenance = provenanceKey(provenance) };
-        self.last = self.next;
-        self.next = @intCast((@as(usize, self.next) + 1) % capacity);
-    }
-
-    fn deinit(self: *BindingReuse, releases: *heap.ReleaseDomain) void {
-        for (&self.entries) |*slot| if (slot.*) |entry| {
-            entry.code.release(releases);
-            slot.* = null;
         };
     }
 };
@@ -1780,13 +1724,9 @@ const ApplicationFrame = struct {
     provenance_nonce: ?ApplicationProvenanceNonce = null,
     /// Borrowed from the combinator state `context` names.
     plan: ?*ResolutionPlan = null,
-    /// Owned: what this invocation has bound for its quotations.
-    bound: ApplicationReuse = .{},
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
-        var bound = self.bound;
-        bound.deinit(releases);
         switch (self.mode) {
             .in_place, .isolated => {},
         }
@@ -2577,10 +2517,8 @@ pub const Unit = struct {
     kernel_budget: poll_api.WorkBudget = .init(kernel_poll_quantum),
     polls: u64 = 0,
     root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
-    /// Anonymous bindings this unit may reuse at an application boundary.
-    reuse: BindingReuse = .{},
-    /// Explicit lookups this unit may reuse.
-    lookups: LookupReuse = .{},
+    /// What this unit's code resolved its words to.
+    resolutions: WordResolutions = .{},
     max_frames: usize = 0,
     entry_base: usize,
     stack_base: usize,
@@ -3009,8 +2947,7 @@ pub const Unit = struct {
     }
 
     pub fn deinit(self: *Unit) void {
-        self.reuse.deinit(self.releases);
-        self.lookups.deinit(self.releases);
+        self.resolutions.deinit(self.allocator, self.releases);
         if (self.current) |current| current.release(self.releases);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
@@ -4587,7 +4524,7 @@ pub const Unit = struct {
                         .push => try evaluator.pushBorrowed(.{ .list = root_header }),
                         .call, .session => |source| {
                             heap.incRef(root_header);
-                            try evaluator.callProgramOwned(root_header, .incremental);
+                            try evaluator.callProgramOwned(root_header, .owned);
                             if (source) |context| {
                                 evaluator.current.?.site.registration_provenance = .{ .source = context };
                             } else if (self.completion.borrow() == .call) {
@@ -4624,7 +4561,7 @@ pub const Unit = struct {
                             };
                             evaluator.current = .{
                                 .code = root_header,
-                                .program = .incremental,
+                                .program = .owned,
                                 .position = .{ .source = 0 },
                                 .site = site,
                                 .traced_word = no_word,
@@ -5489,16 +5426,15 @@ pub const Unit = struct {
         try self.pollKernel();
         return true;
     }
-    /// Consumes a quotation header and applies it inline.
-    /// Applies a quotation dynamically: it binds before it runs.
+    /// Consumes a quotation header and applies it inline. Its words resolve
+    /// as they are reached.
     pub fn callOwned(self: *Unit, quotation: *Header) error{OutOfMemory}!void {
-        return self.callProgramOwned(quotation, .unbound);
+        return self.callProgramOwned(quotation, .owned);
     }
 
-    /// Runs `quotation` inline with the caller, as an application that binds
-    /// first or as top-level source resolved one form at a time.
+    /// Runs `quotation` inline with the caller, resolving one form at a time.
     pub fn callProgramOwned(self: *Unit, quotation: *Header, program: Program) error{OutOfMemory}!void {
-        std.debug.assert(program != .bound);
+        std.debug.assert(program == .owned);
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
         if (application_tail) |application_index| {
@@ -5672,7 +5608,6 @@ pub const Unit = struct {
             .traced_word = inherited_trace,
             .selection = .{},
             .plan = application.plan,
-            .bound = application.bound,
         } });
         defer continuation.deinit(self.releases, self.allocator);
         try self.appendFrame(&continuation);
@@ -5683,17 +5618,11 @@ pub const Unit = struct {
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(application.quotation);
         }
-        // An executable this invocation already bound for the quotation is
-        // reused; otherwise the application binds when it first runs.
-        const program: Program = if (application.bound.find(application.quotation)) |code| reused: {
-            break :reused .{ .borrowed = code.executable() };
-        } else unbound: {
-            heap.incRef(application.quotation);
-            break :unbound .unbound;
-        };
+        // The combinator state the frame holds keeps the quotation for the
+        // whole invocation, so each application borrows it.
         self.current = .{
             .code = application.quotation,
-            .program = program,
+            .program = .borrowed,
             .position = .{ .source = 0 },
             // An isolated body runs in its caller's scope but is not a root,
             // so nothing it calls may define there.
@@ -5815,7 +5744,7 @@ pub const Unit = struct {
         );
         self.current = .{
             .code = body_header,
-            .program = .unbound,
+            .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
@@ -5835,19 +5764,48 @@ pub const Unit = struct {
         };
     }
 
-    /// What a plain word resolves to now, for idiom recognition. Only a static
-    /// definition outlives the lookup, and recognition only ever declines, so
-    /// anything else is simply not a match.
+    /// What a plain word resolves to now, for idiom recognition: the unit's
+    /// remembered resolution when it has one, otherwise a fresh lookup that
+    /// is not remembered. Only a static definition outlives the lookup, and
+    /// recognition only ever declines, so anything else is simply not a
+    /// match.
     pub fn peekWord(self: *Unit, word: value.Symbol) ?PeekedWord {
         if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
+        return self.resolveFresh(word, false);
+    }
+
+    /// `peekWord`, remembering what a fresh lookup resolves, so a word a
+    /// recognized phrase consumes instead of dispatching is looked up once
+    /// per publication rather than on every recognition.
+    pub fn resolveForRecognition(self: *Unit, word: value.Symbol) error{OutOfMemory}!?PeekedWord {
+        if (binder.executableWord(.{ .symbol = word }) == null) return null;
+        if (self.reusedResolution(word)) |definition| return peeked(definition, word);
+        return try self.resolveFresh(word, true);
+    }
+
+    /// Resolves `word` against the current view in one call, remembering the
+    /// result when `remember` is set. The definition is inspected before the
+    /// lookup's lease is released, since a concurrent replacement may retire
+    /// a counted definition afterwards.
+    fn resolveFresh(
+        self: *Unit,
+        word: value.Symbol,
+        comptime remember: bool,
+    ) if (remember) error{OutOfMemory}!?PeekedWord else ?PeekedWord {
         var context = self.resolutionContext(self.inherited.registry.view());
         defer context.deinit();
         var resolver = binder.Resolver.init(&context, word);
         defer resolver.deinit();
-        const definition = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
-            .resolved => |found| found,
+        const found = switch (poll_api.drive(binder.Outcome, &resolver, .{&context})) {
+            .resolved => |definition| definition,
             .missed => return null,
         };
+        if (remember) try self.rememberResolution(word, context.view.publication, context.provenance, found);
+        return peeked(found, word);
+    }
+
+    fn peeked(definition: *env.Definition, word: value.Symbol) ?PeekedWord {
         if (definition.lifetime != .static) return null;
         const home = modules.definitionHome(definition);
         return .{
@@ -5905,10 +5863,7 @@ pub const Unit = struct {
         std.debug.assert(!env.isQuoted(word.slot));
         if (env.localOperand(word.slot)) |operand| return self.localOperation(word.name, operand);
         self.active_word = .plain(word.name);
-        if (self.inherited.phase != .bootstrap) {
-            if (self.lookups.find(word, self.inherited.registry.currentPublication(), self.current.?.site.registration_provenance)) |definition|
-                return invokeDefinition(self, definition, word.name);
-        }
+        if (self.reusedResolution(word)) |definition| return invokeDefinition(self, definition, word.name);
         const site: ?ErrorSite = if (self.current) |current| .{ .code = current.code, .index = self.active_index } else null;
         try self.startDriver(LookupDispatchDriver{
             .word = word,
@@ -5918,152 +5873,29 @@ pub const Unit = struct {
         });
     }
 
-    /// Starts binding the current evaluation, whose application has not run.
-    /// An executable this application or this unit already bound for the same
-    /// quotation in the same publication is reused instead.
-    fn bindCurrent(self: *Unit) MachineError!void {
-        const current = &self.current.?;
-        std.debug.assert(current.program == .unbound);
-        // A quotation only this evaluation references, such as one `compose`
-        // just built, is in no cache, since every cached executable holds its
-        // own quotation, and nothing can apply it again; so it is neither
-        // looked up nor remembered. Holding the only reference, the
-        // evaluation is the only party that could add another.
-        if (heap.isSoleReference(current.code)) {
-            if (try self.bindFromLookups(current.code)) |inline_binding| {
-                self.releases.releaseHeader(current.code);
-                // The evaluation holds the creation reference; no cache or
-                // application frame takes one.
-                current.program = .{ .bound = inline_binding.code.executable() };
-                return;
-            }
-            return self.startBinding(current);
-        }
-        if (self.applicationExecutable(current.code)) |executable| {
-            self.releases.releaseHeader(current.code);
-            current.program = .{ .borrowed = executable };
-            return;
-        }
-        if (self.reusableExecutable(current.code)) |code| {
-            self.releases.releaseHeader(current.code);
-            current.program = .{ .bound = code.executable() };
-            // The invocation must own what it runs, exactly as after a fresh
-            // binding: a publication before its next application must not
-            // send that application back to the binder.
-            self.rememberInApplication(code);
-            return;
-        }
-        if (try self.bindFromLookups(current.code)) |inline_binding| {
-            self.releases.releaseHeader(current.code);
-            current.program = .{ .bound = inline_binding.code.executable() };
-            // Cached like any binding, under the publication its targets were
-            // selected in: a literal quotation applied again then reuses this
-            // executable rather than rebinding each time.
-            self.rememberExecutable(inline_binding.code, inline_binding.publication);
-            return;
-        }
-        return self.startBinding(current);
-    }
-
-    fn startBinding(self: *Unit, current: *Eval) MachineError!void {
-        var context = self.resolutionContext(self.inherited.registry.view());
-        const cursor = binder.AnonymousBindingCursor.init(self.allocator, self.releases, current.code) catch |err| {
-            context.deinit();
-            return err;
-        };
-        try self.startDriver(BindingDriver{
-            .context = .init(context),
-            .cursor = .init(cursor),
-        });
-    }
-
-    /// Binds a short quotation inline when the unit has already resolved
-    /// every word it executes, in this publication and under this
-    /// provenance: a quotation built at run time, such as by `compose`, is new
-    /// every time, so only its words can be reused. Null sends it to the full
-    /// binder.
-    fn bindFromLookups(self: *Unit, code: *Header) error{OutOfMemory}!?InlineBinding {
+    /// What this unit last resolved `word` to, if no publication has
+    /// happened since. Bootstrap resolves every word afresh, since core's
+    /// directory changes without a publication.
+    inline fn reusedResolution(self: *Unit, word: value.Symbol) ?*env.Definition {
         if (self.inherited.phase == .bootstrap) return null;
-        const length: usize = @intCast(code.length());
-        if (length > binder.reused_binding_limit) return null;
-        const work = self.workBudget();
-        if (work.remaining < length) return null;
-        const Cache = struct {
-            lookups: *const LookupReuse,
-            publication: u64,
-            provenance: modules.RegistrationProvenance,
-            pub fn find(cache: @This(), word: value.Symbol) ?*env.Definition {
-                return cache.lookups.find(word, cache.publication, cache.provenance);
-            }
-        };
-        // Read once: every target is selected in this publication, and the
-        // executable is cached under it.
-        const publication = self.inherited.registry.currentPublication();
-        const anonymous = try binder.bindReused(self.allocator, code, Cache{
-            .lookups = &self.lookups,
-            .publication = publication,
-            .provenance = self.current.?.site.registration_provenance,
-        }) orelse return null;
-        _ = work.take(length);
-        return .{ .code = anonymous, .publication = publication };
+        return self.resolutions.find(
+            word,
+            self.inherited.registry.currentPublication(),
+            WordResolutions.provenanceKey(self.current.?.site.registration_provenance),
+        );
     }
 
-    const InlineBinding = struct {
-        code: *env.AnonymousCode,
-        /// The publication its targets were selected in.
-        publication: u64,
-    };
-
-    /// Records what a completed binding resolved its first words to, so a
-    /// later quotation built from the same words binds inline. Bounded by the
-    /// inline limit, not the body.
-    fn rememberLookups(self: *Unit, executable: *const env.Executable, publication: u64) void {
+    /// Records what an explicit lookup resolved `word` to.
+    fn rememberResolution(self: *Unit, word: value.Symbol, publication: u64, provenance: modules.RegistrationProvenance, definition: *env.Definition) error{OutOfMemory}!void {
         if (self.inherited.phase == .bootstrap) return;
-        // Only a generic spine holds words; a typed list is all data.
-        if (executable.code().kind() != .generic_spine) return;
-        const forms = heap.valuesConst(executable.code())[0..@intCast(executable.code().length())];
-        const provenance = self.current.?.site.registration_provenance;
-        const limit = @min(forms.len, binder.reused_binding_limit);
-        for (forms[0..limit], 0..) |form, index| {
-            const word = binder.executableWord(form) orelse continue;
-            const definition = executable.target(@intCast(index)) orelse continue;
-            self.lookups.remember(self.releases, word, publication, provenance, definition);
-        }
-    }
-
-    /// A retained executable for `code`, from the running application's own
-    /// bindings or the unit's reuse cache.
-    fn reusableExecutable(self: *Unit, code: *Header) ?*env.AnonymousCode {
-        if (self.inherited.phase == .bootstrap) return null;
-        return self.reuse.find(code, self.inherited.registry.currentPublication(), self.current.?.site.registration_provenance);
-    }
-
-    /// An executable the running application already bound for `code`,
-    /// borrowed from its frame, which lives beneath the evaluation.
-    fn applicationExecutable(self: *Unit, code: *Header) ?*const env.Executable {
-        const index = self.current.?.application_tail orelse return null;
-        return switch (self.frames.items[@backingInt(index)]) {
-            .application => |*application| if (application.bound.find(code)) |found| found.executable() else null,
-            else => null,
-        };
-    }
-
-    /// Records a fresh binding where later applications of the same
-    /// quotation will find it.
-    fn rememberExecutable(self: *Unit, code: *env.AnonymousCode, publication: u64) void {
-        self.rememberInApplication(code);
-        if (self.inherited.phase == .bootstrap) return;
-        self.reuse.remember(self.releases, code, publication, self.current.?.site.registration_provenance);
-    }
-
-    /// Gives the running application its own reference to `code`, so every
-    /// later application of the same quotation in this invocation runs it.
-    fn rememberInApplication(self: *Unit, code: *env.AnonymousCode) void {
-        const index = self.current.?.application_tail orelse return;
-        switch (self.frames.items[@backingInt(index)]) {
-            .application => |*application| application.bound.remember(code),
-            else => {},
-        }
+        return self.resolutions.remember(
+            self.allocator,
+            self.releases,
+            word,
+            publication,
+            WordResolutions.provenanceKey(provenance),
+            definition,
+        );
     }
 
     /// The failure for a word that did not bind and will not after a load.
@@ -6159,7 +5991,7 @@ pub const Unit = struct {
         );
         self.current = .{
             .code = body,
-            .program = .unbound,
+            .program = .owned,
             .position = .{ .source = 0 },
             .site = site,
             .traced_word = no_word,
@@ -6371,19 +6203,10 @@ pub const InitialStack = union(enum) {
     borrowed_pair: struct { deep: *Header, seeds: *Header },
 };
 
-/// Starts a unit on top-level source, which resolves one form at a time.
+/// Starts a unit on code that resolves one form at a time: top-level source,
+/// or a task's body.
 pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
-    return initializeProgram(unit, code, initial_stack, .incremental);
-}
-
-/// Starts a unit applying a quotation, which binds before it runs: a task's
-/// body.
-pub fn initializeApplication(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
-    return initializeProgram(unit, code, initial_stack, .unbound);
-}
-
-fn initializeProgram(unit: *Unit, code: *Header, initial_stack: InitialStack, program: Program) error{OutOfMemory}!void {
-    std.debug.assert(program != .bound);
+    const program: Program = .owned;
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.terminal == .evaluating);
     std.debug.assert(unit.current == null);
@@ -6623,17 +6446,6 @@ fn loop(self: *Unit) MachineError!RunStatus {
         // Eval which resumeFrames may also have restored.
         if (self.hasWorkDriver()) continue;
         const current = &self.current.?;
-        // An application binds every top-level word before any of them runs.
-        if (current.program == .unbound) {
-            self.bindCurrent() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Ecl => {
-                    try startFailure(self);
-                    continue;
-                },
-            };
-            continue;
-        }
         const index = current.takeInstruction() orelse {
             self.retireCompletedEval(current.*);
             self.current = null;
@@ -6649,14 +6461,16 @@ fn loop(self: *Unit) MachineError!RunStatus {
         self.active_index = index;
         if (comptime root_execution_metrics_enabled)
             self.root_execution_metrics.logical_transitions += 1;
-        // A bound word follows its fixed target; everything else is a form.
-        const dispatched = if (current.program.executable()) |executable| bound: {
-            if (executable.target(index)) |target| {
-                const name = heap.valuesConst(current.code)[index].symbol.name;
-                break :bound invokeDefinition(self, target, name);
-            }
-            break :bound dispatch(self, formAt(current.code, index));
-        } else dispatch(self, formAt(current.code, index));
+        // A word this unit has resolved in the current publication runs
+        // directly; a quoted or lowered occurrence is a form, as is
+        // everything else, and an unresolved word resolves when dispatched.
+        const dispatched = resolved: {
+            const form = formAt(current.code, index);
+            if (form == .symbol and form.symbol.slot & (env.quote_flag | env.local_operand_flag) == 0)
+                if (self.reusedResolution(form.symbol)) |definition|
+                    break :resolved invokeDefinition(self, definition, form.symbol.name);
+            break :resolved dispatch(self, form);
+        };
         dispatched catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
@@ -6851,8 +6665,7 @@ const LookupDispatchDriver = struct {
                         const counted = definition.lifetime == .counted;
                         if (counted) definition.retain();
                         defer if (counted) definition.release(evaluator.releases);
-                        if (evaluator.inherited.phase != .bootstrap) evaluator.lookups.remember(
-                            evaluator.releases,
+                        try evaluator.rememberResolution(
                             word,
                             self.context.borrow().view.publication,
                             self.context.borrow().provenance,
@@ -6872,52 +6685,6 @@ const LookupDispatchDriver = struct {
             },
         };
         return .stepped;
-    }
-};
-
-/// Binds the current evaluation's quotation before any of it runs. Success
-/// seals an anonymous executable and resumes the evaluation bound to it; a
-/// miss fails at the word it could not bind, having executed nothing.
-const BindingDriver = struct {
-    context: heap.Owned(binder.Context),
-    cursor: heap.Owned(binder.AnonymousBindingCursor),
-
-    pub const inline_driver = true;
-    pub const ownership: heap.DriverOwnership = .fields;
-
-    pub fn advance(evaluator: *Unit, self: *BindingDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        const progress = try self.cursor.borrowMut().advance(self.context.borrowMut(), evaluator.workBudget());
-        const result = switch (progress) {
-            .pending => return .stepped,
-            .complete => |result| result,
-        };
-        const publication = self.context.borrow().view.publication;
-        switch (result) {
-            .bound => |bound| {
-                const code = env.AnonymousCode.create(evaluator.allocator, bound) catch |err| {
-                    bound.discard(evaluator.releases, evaluator.allocator);
-                    return err;
-                };
-                evaluator.retireDriver(self);
-                const current = &evaluator.current.?;
-                std.debug.assert(current.program == .unbound and current.code == code.executable().code());
-                evaluator.releases.releaseHeader(current.code);
-                current.program = .{ .bound = code.executable() };
-                evaluator.rememberExecutable(code, publication);
-                evaluator.rememberLookups(code.executable(), publication);
-                return .detached;
-            },
-            .failed => |failure| {
-                const word = heap.valuesConst(self.cursor.borrow().code)[failure.index].symbol;
-                const code = self.cursor.borrow().code;
-                evaluator.retireDriver(self);
-                evaluator.active_index = failure.index;
-                const unbound = evaluator.failUnbound(word, failure.miss);
-                evaluator.setFailureSite(code, failure.index);
-                return unbound;
-            },
-        }
     }
 };
 
@@ -7665,7 +7432,7 @@ fn enterBody(self: *Unit, executable: *const env.Executable, word: intern.TraceW
     entered = true;
     self.current = .{
         .code = executable.code(),
-        .program = .{ .bound = executable },
+        .program = .{ .definition = executable },
         .position = .{ .source = 0 },
         .site = site,
         .traced_word = word,
@@ -7731,7 +7498,6 @@ fn resumeFrames(self: *Unit) MachineError!bool {
             };
             if (comptime root_execution_metrics_enabled)
                 self.root_execution_metrics.application_resumes += 1;
-            var application_bound = continuation.bound;
             const next = continuation.resume_fn(
                 self,
                 continuation.context,
@@ -7741,7 +7507,6 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                 if (continuation.traced_word != no_word) {
                     self.setFailureTraceParent(continuation.traced_word);
                 }
-                application_bound.deinit(self.releases);
                 continuation.deinit_fn(self.releases, self.allocator, continuation.context);
                 return err;
             };
@@ -7756,13 +7521,11 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                         .seeded = application.seeded,
                         .provenance = application.provenance,
                         .plan = continuation.plan,
-                        .bound = application_bound,
                     }, launch, continuation.traced_word);
                     return true;
                 },
                 .suspend_inline => |suspension| {
                     const installed = self.workDriver() orelse {
-                        application_bound.deinit(self.releases);
                         continuation.deinit_fn(
                             self.releases,
                             self.allocator,
@@ -7773,7 +7536,6 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                     if (launch != .in_place or
                         @intFromPtr(suspension) != @intFromPtr(installed.context))
                     {
-                        application_bound.deinit(self.releases);
                         continuation.deinit_fn(
                             self.releases,
                             self.allocator,
@@ -7792,16 +7554,13 @@ fn resumeFrames(self: *Unit) MachineError!bool {
                         .selection = application_selection,
                         .provenance_nonce = continuation.provenance_nonce,
                         .plan = continuation.plan,
-                        .bound = application_bound,
                     } });
                     application_selection = .{};
-                    application_bound = .{};
                     defer suspended.deinit(self.releases, self.allocator);
                     try self.appendFrame(&suspended);
                     return true;
                 },
             };
-            application_bound.deinit(self.releases);
             continuation.deinit_fn(self.releases, self.allocator, continuation.context);
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until
@@ -8210,7 +7969,7 @@ fn startModuleSeal(self: *Unit) MachineError!void {
     const placeholder = try list.fromValuesGeneric(self.allocator, &.{});
     self.current = .{
         .code = placeholder.list,
-        .program = .incremental,
+        .program = .owned,
         .position = .{ .source = 0 },
         .site = .image(home, self.module_access, false),
         .traced_word = no_word,
@@ -8311,16 +8070,16 @@ const ModuleSealDriver = struct {
 
     const Phase = union(enum) {
         group: modules.GroupCursor,
-        bind: struct {
+        validate: struct {
             entries: env.GroupMap.RawEntryCursor,
-            current: ?struct { reservation: *env.Reservation, cursor: binder.BindingCursor } = null,
+            current: ?struct { reservation: *env.Reservation, cursor: binder.ValidationCursor } = null,
         },
         seal: modules.SealCursor,
 
         pub fn deinit(self: *Phase) void {
             switch (self.*) {
                 .group => |*cursor| cursor.deinit(),
-                .bind => |*bind| if (bind.current) |*current| current.cursor.deinit(),
+                .validate => |*validate| if (validate.current) |*current| current.cursor.deinit(),
                 .seal => |*cursor| cursor.deinit(),
             }
             self.* = undefined;
@@ -8348,22 +8107,20 @@ const ModuleSealDriver = struct {
                     const owned = image(evaluator);
                     self.context.borrowMut().group.?.directory = owned.groupDirectory();
                     cursor.deinit();
-                    self.phase.borrowMut().* = .{ .bind = .{ .entries = owned.groupEntries() } };
+                    self.phase.borrowMut().* = .{ .validate = .{ .entries = owned.groupEntries() } };
                 },
             },
-            .bind => |*bind| {
-                if (bind.current) |*current| {
-                    const progress = try current.cursor.advance(self.context.borrowMut(), work);
-                    const result = switch (progress) {
+            .validate => |*validate| {
+                if (validate.current) |*current| {
+                    const result = switch (current.cursor.advance(self.context.borrowMut(), work)) {
                         .pending => continue,
                         .complete => |result| result,
                     };
                     const reservation = current.reservation;
                     switch (result) {
-                        .bound => |bound| {
+                        .valid => {
                             current.cursor.deinit();
-                            bind.current = null;
-                            reservation.stage(evaluator.releases, bound);
+                            validate.current = null;
                         },
                         .failed => |failure| {
                             const code = reservation.quotation();
@@ -8376,28 +8133,22 @@ const ModuleSealDriver = struct {
                     }
                     continue;
                 }
-                switch (bind.entries.advance()) {
+                switch (validate.entries.advance()) {
                     .pending => {},
                     .item => |entry| switch (entry.value) {
-                        .reserved => |member| {
-                            // Built before assignment: assigning `try` in place
-                            // would mark `current` present before a failure.
-                            const cursor = try binder.BindingCursor.init(
-                                evaluator.allocator,
-                                evaluator.releases,
-                                member.reservation.quotation(),
-                            );
-                            bind.current = .{ .reservation = member.reservation, .cursor = cursor };
+                        .reserved => |reservation| validate.current = .{
+                            .reservation = reservation,
+                            .cursor = binder.ValidationCursor.init(evaluator.releases, reservation.quotation()),
                         },
                         .definition, .alias => {},
                     },
                     .complete => self.phase.borrowMut().* = .{ .seal = image(evaluator).sealCursor() },
                 }
             },
-            // Every body bound against one view; seal them together.
+            // Every body validated against one view; seal them together.
             .seal => |*cursor| switch (cursor.advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                // Every body was bound, never sealed as a literal.
+                // Every body was validated, never sealed as a literal.
                 error.UnboundWord => unreachable,
             }) {
                 .pending => {},

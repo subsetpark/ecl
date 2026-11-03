@@ -1,9 +1,8 @@
-//! Construction-time binding. A word occurrence carries the root it was written
-//! in; binding resolves each top-level unquoted occurrence of a quotation in its
-//! root, against one captured publication view, and seals the result into an
-//! executable whose targets never change. Ordinary dispatch then follows those
-//! targets without lookup. Explicit lookups (`execute`, reflection, and
-//! incremental top-level evaluation) use the same resolver one word at a time.
+//! Name resolution. A word occurrence carries the root it was written in, and
+//! resolves there against one captured publication view. Dispatch resolves
+//! each word when it is reached, through the same resolver one word at a time;
+//! a construction validates its bodies with it first, so a word that names
+//! nothing fails the definition rather than its call.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -50,7 +49,7 @@ pub const Context = struct {
     /// The provenance a qualified name written outside any module searches
     /// private registries under.
     provenance: modules.RegistrationProvenance,
-    /// Construction in progress. Only a binding resolver reads these; an
+    /// Construction in progress. Only a validating resolver reads these; an
     /// explicit lookup's context leaves them null.
     group: ?Group = null,
     self_reference: ?SelfReference = null,
@@ -76,9 +75,9 @@ pub const Miss = union(enum) {
     alias_cycle,
 };
 
-/// A miss that fails a binding. A qualified word whose module is not
-/// registered is not one: it binds to no target and resolves when it is
-/// reached, loading its module then, so binding never loads a module.
+/// A miss that fails a construction's validation. A qualified word whose
+/// module is not registered is not one: it resolves when it is reached,
+/// loading its module then, so validation never loads a module.
 pub const Unbound = union(enum) {
     unresolved: LookupChain,
     retired,
@@ -86,8 +85,8 @@ pub const Unbound = union(enum) {
 };
 
 /// Whether a resolution serves an explicit lookup, which can only reach
-/// sealed definitions, or a binding, which may also reach a reservation of
-/// the construction in progress.
+/// sealed definitions, or a construction's validation, which may also reach a
+/// reservation of the construction in progress.
 pub const Mode = enum { lookup, binding };
 
 /// What resolving one word produced. Borrowed: valid while the context's
@@ -99,7 +98,8 @@ pub fn OutcomeIn(comptime mode: Mode) type {
 
         pub const Resolved = switch (mode) {
             .lookup => *env.Definition,
-            .binding => env.Target,
+            // Validation only asks whether the word resolves.
+            .binding => void,
         };
     };
 }
@@ -241,7 +241,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
         fn found(self: *Self, definition: *env.Definition) Progress {
             return self.finish(.{ .resolved = switch (mode) {
                 .lookup => definition,
-                .binding => .{ .definition = definition },
+                .binding => {},
             } });
         }
 
@@ -262,7 +262,7 @@ pub fn ResolverIn(comptime mode: Mode) type {
             const binding: intern.BindingName = @fromBackingInt(self.name);
             if (mode == .binding) if (context.self_reference) |reference| {
                 if (reference.name == self.name and self.writtenIn(context, reference.root))
-                    return self.finish(.{ .resolved = .{ .reserved = .of(0) } });
+                    return self.finish(.{ .resolved = {} });
             };
             switch (self.root) {
                 .retired => return self.miss(.retired),
@@ -322,10 +322,10 @@ pub fn ResolverIn(comptime mode: Mode) type {
         fn followGroup(self: *Self, context: *const Context, entry: env.GroupEntry, require_public: bool) Progress {
             comptime std.debug.assert(mode == .binding);
             switch (entry) {
-                .reserved => |member| {
-                    if (require_public and member.reservation.visibility() != .public)
+                .reserved => |reservation| {
+                    if (require_public and reservation.visibility() != .public)
                         return self.miss(.{ .unresolved = .qualified });
-                    return self.finish(.{ .resolved = .{ .reserved = member.index } });
+                    return self.finish(.{ .resolved = {} });
                 },
                 .definition => |definition| return self.follow(context, .{ .definition = definition }, require_public),
                 .alias => |alias| return self.followAlias(context, alias, require_public),
@@ -546,153 +546,64 @@ pub fn ResolverIn(comptime mode: Mode) type {
     };
 }
 
-/// Binds one quotation: every top-level unquoted occurrence in a single pass,
-/// before any of it executes. Nested quotations and quoted words stay data.
-///
-/// Targets are borrowed while binding runs: the context's view keeps every
-/// definition it resolves alive. A counted target is noted once in a
-/// `DependencySet` whose capacity the forms still to bind bound, so it never
-/// grows or rehashes; clearing it and probing it are cursors that charge the
-/// unit's budget one slot at a time. Only when the walk completes does the
-/// cursor create the exact-size dependency table and take one reference per
-/// distinct target, one per step. Until then the cursor owns no references,
-/// and afterwards it owns them only through that table, which retires as its
-/// own owner: abandoning a cursor at any point is constant work.
-/// Binds a definition body for its construction, which may name the
-/// construction's own reservations.
-pub const BindingCursor = BindingCursorIn(.binding);
-/// Binds an anonymous application's body, which names only sealed
-/// definitions: its resolver is the explicit lookup's, which cannot reach a
-/// reservation.
-pub const AnonymousBindingCursor = BindingCursorIn(.lookup);
+/// Validates a definition body for its construction: every top-level
+/// unquoted occurrence must resolve, a word naming the construction's own
+/// members included, so a misspelled word fails the definition rather than
+/// the call. It records nothing: the body resolves each word again when it
+/// runs. Nested quotations and quoted words stay data. A qualified word whose
+/// module is not registered passes, and resolves, loading its module, when it
+/// is reached. One resolver step per unit of the unit's budget; abandoning
+/// the cursor at any point is constant work.
+pub const ValidationCursor = struct {
+    const Self = @This();
 
-pub fn BindingCursorIn(comptime mode: Mode) type {
-    return struct {
-        const Self = @This();
-        const Element = switch (mode) {
-            .lookup => ?*env.Definition,
-            .binding => env.Slot,
+    releases: *heap.ReleaseDomain,
+    /// Retained by the cursor for its life.
+    code: *value.ListHandle,
+    length: u32,
+    index: u32 = 0,
+    resolver: ?ResolverIn(.binding) = null,
+
+    pub const Failure = struct {
+        index: u32,
+        word: u32,
+        miss: Unbound,
+    };
+    pub const Result = union(enum) {
+        valid,
+        failed: Failure,
+    };
+    pub const Progress = poll.Progress(Result);
+
+    /// `code` is borrowed; the cursor takes its own reference.
+    pub fn init(releases: *heap.ReleaseDomain, code: *value.ListHandle) Self {
+        heap.incRef(code);
+        return .{
+            .releases = releases,
+            .code = code,
+            .length = if (code.kind() == .generic_spine) @intCast(code.length()) else 0,
         };
-        const no_target: Element = switch (mode) {
-            .lookup => null,
-            .binding => .none,
-        };
-        pub const Body = switch (mode) {
-            .lookup => env.AnonymousBody,
-            .binding => env.Bound,
-        };
-        allocator: std.mem.Allocator,
-        releases: *heap.ReleaseDomain,
-        /// Retained by the cursor until the bound body takes it.
-        code: *value.ListHandle,
-        targets: []Element,
-        index: u32 = 0,
-        any_target: bool = false,
-        step: Step = .walk,
-        seen: ?env.DependencySet = null,
-        dependencies: ?*env.DependencyTable = null,
+    }
 
-        const Step = union(enum) {
-            walk,
-            resolve: ResolverIn(mode),
-            /// Making the set on the first counted target, then noting it.
-            open_set: struct { cursor: env.DependencySet.InitCursor, definition: *env.Definition },
-            note: env.DependencySet.PutCursor,
-            collect: env.DependencySet.RawEntryCursor,
+    pub fn deinit(self: *Self) void {
+        if (self.resolver) |*resolver| resolver.deinit();
+        self.releases.releaseHeader(self.code);
+        self.* = undefined;
+    }
 
-            fn deinit(self: *Step) void {
-                switch (self.*) {
-                    .resolve => |*resolver| resolver.deinit(),
-                    .open_set => |*open| open.cursor.deinit(),
-                    .walk, .note, .collect => {},
-                }
-                self.* = .walk;
-            }
-        };
-
-        pub const Failure = struct {
-            index: u32,
-            word: u32,
-            miss: Unbound,
-        };
-        pub const Result = union(enum) {
-            bound: Body,
-            failed: Failure,
-        };
-        pub const BindProgress = poll.Progress(Result);
-
-        /// `code` is borrowed; the cursor takes its own reference.
-        pub fn init(
-            allocator: std.mem.Allocator,
-            releases: *heap.ReleaseDomain,
-            code: *value.ListHandle,
-        ) error{OutOfMemory}!Self {
-            const length: usize = @intCast(code.length());
-            const targets: []Element = if (code.kind() == .generic_spine and length != 0)
-                try allocator.alloc(Element, length)
-            else
-                &.{};
-            heap.incRef(code);
-            return .{
-                .allocator = allocator,
-                .releases = releases,
-                .code = code,
-                .targets = targets,
-            };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.step.deinit();
-            if (self.seen) |*seen| seen.deinit();
-            if (self.dependencies) |dependencies| dependencies.retire(self.releases);
-            if (self.targets.len != 0) self.allocator.free(self.targets);
-            self.releases.releaseHeader(self.code);
-            self.* = undefined;
-        }
-
-        /// Records the target bound at the current position; a counted one
-        /// starts noting it as a dependency, which the following steps finish.
-        fn record(self: *Self, target: OutcomeIn(mode).Resolved) void {
-            self.any_target = true;
-            const definition: ?*env.Definition = switch (mode) {
-                .lookup => target,
-                .binding => switch (target) {
-                    .definition => |definition| definition,
-                    // A reservation is this construction's own, never a dependency.
-                    .reserved => null,
-                },
-            };
-            self.targets[self.index] = switch (mode) {
-                .lookup => target,
-                .binding => .of(target),
-            };
-            self.index += 1;
-            const counted = definition orelse return;
-            if (counted.lifetime != .counted) return;
-            if (self.seen) |*seen| {
-                self.step = .{ .note = seen.putCursor(.of(counted), {}) };
-                return;
-            }
-            // Every counted target still to come is at or after this position.
-            const remaining = self.targets.len - (self.index - 1);
-            self.step = .{ .open_set = .{
-                .cursor = env.DependencySet.initCursor(self.allocator, remaining),
-                .definition = counted,
-            } };
-        }
-
-        pub fn advance(self: *Self, context: *const Context, work: *poll.WorkBudget) error{OutOfMemory}!BindProgress {
-            while (work.spend()) switch (self.step) {
-                .resolve => |*resolver| switch (resolver.advance(context)) {
-                    .pending => {},
+    pub fn advance(self: *Self, context: *const Context, work: *poll.WorkBudget) Progress {
+        while (work.spend()) {
+            if (self.resolver) |*resolver| {
+                switch (resolver.advance(context)) {
+                    .pending => continue,
                     .complete => |outcome| {
-                        self.step.deinit();
+                        resolver.deinit();
+                        self.resolver = null;
                         switch (outcome) {
-                            .resolved => |target| self.record(target),
+                            .resolved => {},
                             .missed => |reason| {
                                 const unbound: Unbound = switch (reason) {
                                     .unknown_module_prefix, .unregistered_module => {
-                                        self.targets[self.index] = no_target;
                                         self.index += 1;
                                         continue;
                                     },
@@ -700,119 +611,26 @@ pub fn BindingCursorIn(comptime mode: Mode) type {
                                     .retired => .retired,
                                     .alias_cycle => .alias_cycle,
                                 };
-                                const word = heap.valuesConst(self.code)[self.index].symbol.name;
                                 return .{ .complete = .{ .failed = .{
                                     .index = self.index,
-                                    .word = word,
+                                    .word = heap.valuesConst(self.code)[self.index].symbol.name,
                                     .miss = unbound,
                                 } } };
                             },
                         }
-                    },
-                },
-                .open_set => |*open| switch (try open.cursor.advance()) {
-                    .pending => {},
-                    .complete => |set| {
-                        const definition = open.definition;
-                        self.seen = set;
-                        self.step = .{ .note = self.seen.?.putCursor(.of(definition), {}) };
-                    },
-                },
-                .note => |*put| switch (put.advance()) {
-                    .pending => {},
-                    .complete => self.step = .walk,
-                },
-                .collect => |*entries| switch (entries.advance()) {
-                    .pending => {},
-                    .item => |entry| self.dependencies.?.hold(entry.key.definition()),
-                    .complete => {
-                        self.step = .walk;
-                        self.seen.?.deinit();
-                        self.seen = null;
-                    },
-                },
-                .walk => {
-                    if (self.index < self.targets.len) {
-                        const form = heap.valuesConst(self.code)[self.index];
-                        if (executableWord(form)) |word| {
-                            self.step = .{ .resolve = ResolverIn(mode).init(context, word) };
-                            continue;
-                        }
-                        self.targets[self.index] = no_target;
                         self.index += 1;
                         continue;
-                    }
-                    // Hold each distinct counted target once, in an exact-size table.
-                    if (self.seen) |*seen| {
-                        self.dependencies = try env.DependencyTable.create(self.allocator, seen.count());
-                        self.step = .{ .collect = seen.rawEntries() };
-                        continue;
-                    }
-                    const targets: []Element = if (self.any_target) self.targets else empty: {
-                        if (self.targets.len != 0) self.allocator.free(self.targets);
-                        break :empty &.{};
-                    };
-                    const bound: Body = .{
-                        .code = self.code,
-                        .targets = targets,
-                        .dependencies = self.dependencies,
-                    };
-                    self.targets = &.{};
-                    self.dependencies = null;
-                    heap.incRef(self.code);
-                    return .{ .complete = .{ .bound = bound } };
-                },
-            };
-            return .pending;
+                    },
+                }
+            }
+            if (self.index == self.length) return .{ .complete = .valid };
+            if (executableWord(heap.valuesConst(self.code)[self.index])) |word| {
+                self.resolver = ResolverIn(.binding).init(context, word);
+            } else self.index += 1;
         }
-    };
-}
-
-/// The most forms `bindReused` binds in one step. A constant, so the inline
-/// path is bounded work however it is used.
-pub const reused_binding_limit = env.AnonymousCode.inline_limit;
-
-/// Binds a short quotation in one step, and one allocation, from words its
-/// unit has already resolved, or returns null when any executable word is not
-/// in `cache`, leaving the full binder to resolve it. `cache.find(word)`
-/// returns what the word resolved to in the publication and provenance this
-/// binding would see, which is what the resolver would produce: an anonymous
-/// binding has no construction in progress, so binding a word is exactly
-/// looking it up. The cache keeps what it returns alive until this binding
-/// holds it.
-pub fn bindReused(
-    allocator: std.mem.Allocator,
-    code: *value.ListHandle,
-    cache: anytype,
-) error{OutOfMemory}!?*env.AnonymousCode {
-    const length: usize = @intCast(code.length());
-    std.debug.assert(length <= reused_binding_limit);
-    if (code.kind() != .generic_spine or length == 0)
-        return try env.AnonymousCode.createInline(allocator, code, &.{}, &.{});
-    var found: [reused_binding_limit]?*env.Definition = @splat(null);
-    var distinct: [reused_binding_limit]*env.Definition = undefined;
-    var distinct_count: usize = 0;
-    var any_target = false;
-    for (heap.valuesConst(code)[0..length], 0..) |form, index| {
-        const word = executableWord(form) orelse continue;
-        const definition = cache.find(word) orelse return null;
-        found[index] = definition;
-        any_target = true;
-        if (definition.lifetime != .counted) continue;
-        for (distinct[0..distinct_count]) |held| {
-            if (held == definition) break;
-        } else {
-            distinct[distinct_count] = definition;
-            distinct_count += 1;
-        }
+        return .pending;
     }
-    return try env.AnonymousCode.createInline(
-        allocator,
-        code,
-        if (any_target) found[0..length] else &.{},
-        distinct[0..distinct_count],
-    );
-}
+};
 
 /// The occurrence a form executes as a word, or null when the form is data:
 /// a value, a quoted symbol, or a lowered locals operation.

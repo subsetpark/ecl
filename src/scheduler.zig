@@ -1989,7 +1989,7 @@ pub const WorkerScheduler = enum(usize) {
                 unit.executeRootAtModule(generation);
             },
         }
-        try machine.initializeApplication(unit, request.quotation, request.initial_stack);
+        try machine.initialize(unit, request.quotation, request.initial_stack);
         // Attach the moved resources to the child's scope while the scope is
         // still private: nothing can reach it, so a failure here unwinds by
         // dropping the new memberships and the originals never moved.

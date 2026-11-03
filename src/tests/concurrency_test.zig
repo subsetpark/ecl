@@ -580,3 +580,27 @@ test "concurrency: a failing root unit cancels no spawned task" {
     defer actual.deinit();
     try std.testing.expectEqualStrings("", actual.bytes());
 }
+
+test "concurrency: tasks see a redefinition at their next dispatch" {
+    // Each task's loop body is a quotation applied at run time, so every
+    // dispatch of `v` reads the definition current then, while the root
+    // replaces it. Every sum lies between the all-old and all-new totals, and
+    // no replaced definition is reclaimed while a task can still reach it.
+    for ([_]usize{ 1, 8 }) |workers| {
+        var heap: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&heap);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var runtime = try session.Session.init(heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = workers }, .evaluate);
+        defer runtime.deinit();
+        try runOk(
+            &runtime,
+            "(1) `v def [1 2 3 4 5 6 7 8] (pop [] (0 2000 (v +) times) @spawn) each " ++
+                "(2) `v def (3) `v def (2) `v def " ++
+                "(task.await `ok at first dup 2000 >= swap 6000 <= and) each",
+        );
+        var shown = try display(&runtime);
+        defer shown.deinit();
+        try std.testing.expectEqualStrings("[1 1 1 1 1 1 1 1]", shown.bytes());
+    }
+}

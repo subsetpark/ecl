@@ -27,10 +27,9 @@ BindingName.
 > performing a registry mutation.
 >
 > A qualified call selects a registry name's current image and a public
-> binding in it in one atomic action. Selection happens when the code holding
-> the qualified word is bound, so bound code keeps the image it selected;
-> selection afterward observes only the replacement. Explicit lookup performs
-> a fresh selection each time it runs.
+> binding in it in one atomic action, when the call begins, so code written
+> before a replacement reaches the replacement at its next call. Explicit
+> lookup performs the same fresh selection each time it runs.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
 ---
 canonical? module-name or alias? module-name.
@@ -70,7 +69,9 @@ where
 >
 > Retirement is monotonic: replacement retires the former current
 > image and no retired image becomes current again. A retired image stays
-> published, so code bound to it and words written in it keep their meaning.
+> published, so unqualified words whose occurrences retain it as their scope
+> keep their meaning; qualified words select the current registration, and
+> aliases follow it on later lookup.
 Call.
 Image.
 Definition.
