@@ -94,7 +94,7 @@ const cases = [_]Case{
     .{ .name = "fail", .source = "\"bad\" fail" },
     .{ .name = "result.ok?", .source = "[] (2 3 +) @attempt result.ok?" },
     .{ .name = "result.or-raise", .source = "[] (2 3 +) @attempt result.or-raise" },
-    .{ .name = "result.or-else", .source = "[] (2 3 +) @attempt 9 result.or-else" },
+    .{ .name = "result.or-default", .source = "[] (2 3 +) @attempt 9 result.or-default" },
     .{ .name = "result.either", .source = "[7] result.ok (first) (pop 0) result.either" },
     .{ .name = "result.map-err", .source = "{kind io} result.err (pop {kind domain}) result.map-err" },
     // The prelude no longer carries these: the envelope interpreters live in
@@ -114,9 +114,9 @@ const cases = [_]Case{
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
     .{ .name = "result ok", .source = "[1 2] result.ok" },
-    .{ .name = "result and-then", .source = "[2 3] result.ok (+) result.and-then" },
+    .{ .name = "result map", .source = "[2 3] result.ok (+) result.map" },
     .{ .name = "result all", .source = "[1] result.ok {kind io} result.err pair result.all" },
-    .{ .name = "result malformed", .source = "{ok 5} (missing) result.and-then" },
+    .{ .name = "result malformed", .source = "{ok 5} (missing) result.map" },
     .{ .name = "str upper", .source = "\"héllo\" str.upper" },
     .{ .name = "str index-of missing", .source = "\"abc\" \"z\" str.index-of" },
     .{ .name = "csv parse", .source = "\"a,,c\nd,,f\" [] csv.parse" },
@@ -779,8 +779,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[5]
         \\stderr:
         \\<empty>
-        \\=== result.or-else ===
-        \\source: [] (2 3 +) @attempt 9 result.or-else
+        \\=== result.or-default ===
+        \\source: [] (2 3 +) @attempt 9 result.or-default
         \\exit: 0
         \\stdout:
         \\[5]
@@ -895,8 +895,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\{ok [1 2]}
         \\stderr:
         \\<empty>
-        \\=== result and-then ===
-        \\source: [2 3] result.ok (+) result.and-then
+        \\=== result map ===
+        \\source: [2 3] result.ok (+) result.map
         \\exit: 0
         \\stdout:
         \\{ok [5]}
@@ -912,12 +912,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== result malformed ===
-        \\source: {ok 5} (missing) result.and-then
+        \\source: {ok 5} (missing) result.map
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.and-then) data {source "prelude.ecl" line 22 col 14}}
+        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.map) data {source "prelude.ecl" line 22 col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0

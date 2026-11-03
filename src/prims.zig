@@ -46,7 +46,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise a language error from an error dict." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "The process arguments following the script or source, as a list of strings." },
         .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status." },
-        .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`or-else` is the defaulting idiom. Absent host IO is `` `io ``." },
+        .{ .name = "getenv", .primitive = getenv, .effect = "name -- string", .doc = "The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`result.or-default` is the defaulting idiom. Absent host IO is `` `io ``." },
     };
     try core.installBuiltins(&definitions);
     try combinators.install(core);
@@ -969,7 +969,7 @@ const PrinDriver = struct {
 };
 /// Reads one variable from the immutable session environ snapshot. An unset
 /// variable raises an error because absence has no empty-string representation;
-/// `@attempt`/`result.or-else` is the defaulting idiom.
+/// `@attempt`/`result.or-default` is the defaulting idiom.
 fn getenv(evaluator: *Fiber) MachineError!void {
     var name_value = try evaluator.popValue();
     defer name_value.deinit();

@@ -87,7 +87,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
                 "[4 5] (+ `sum set) `seeded @defm seeded.sum",
             .expected = "{ok [42]} {ok [5]} {ok [5]} 0 1 9",
         },
-        .{ .name = "results", .source = "[] (2 3 +) @attempt result.ok? [] (2 3 +) @attempt result.or-raise [] (missing) @attempt 9 result.or-else", .expected = "1 [5] 9" },
+        .{ .name = "results", .source = "[] (2 3 +) @attempt result.ok? [] (2 3 +) @attempt result.or-raise [] (missing) @attempt 9 result.or-default", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++

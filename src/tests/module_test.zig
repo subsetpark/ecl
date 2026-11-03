@@ -662,9 +662,9 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     defer runtime.deinit();
 
     const reserved = "module name `dict` is reserved for the standard library";
-    // `and-then` applies the caller's quotation under `@attempt`, `either`
+    // `map` applies the caller's quotation under `@attempt`, `either`
     // inline; neither runs it as standard-library code.
-    try expectOk(&runtime, "[] result.ok (`d `dict alias []) result.and-then `err at `kind at `domain match? " ++
+    try expectOk(&runtime, "[] result.ok (`d `dict alias []) result.map `err at `kind at `domain match? " ++
         "{kind user msg \"alias escaped\"} assert");
     try expectErrorContains(&runtime, "[] result.ok ([] () `dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
