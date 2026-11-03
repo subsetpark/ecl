@@ -11,6 +11,44 @@ fn addEclTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Com
     return b.addTest(with_runner);
 }
 
+/// When a captured check executes.
+const Rerun = enum {
+    /// On every request: the command reads inputs the build graph cannot hash.
+    always,
+    /// Only when an argument or declared file input changes.
+    on_input_change,
+};
+
+/// A Run step that inherits stdio (the default for one with no captured or
+/// output argument) holds the build runner's global stderr lock for its whole
+/// run, so a step that depends on several of them executes them one at a time.
+/// A check captures both streams instead and runs beside its siblings. The
+/// build runner replays captured stderr only when the command fails, so a
+/// passing check is silent. Standard input is empty rather than inherited.
+fn captureCheck(run: *std.Build.Step.Run, rerun: Rerun) void {
+    run.has_side_effects = rerun == .always;
+    run.setStdIn(.{ .bytes = "" });
+    _ = run.captureStdOut(.{});
+    _ = run.captureStdErr(.{});
+}
+
+/// A captured check whose command reports failures on stdout (`ecl test`,
+/// `pant`). The shell folds stdout into stderr, the stream the build runner
+/// reports on failure. Append the command with `addArgs`/`addArtifactArg`.
+fn addCheckCommand(b: *std.Build, name: []const u8, rerun: Rerun) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{ "sh", "-c", "exec \"$@\" >&2", "sh" });
+    run.setName(name);
+    captureCheck(run, rerun);
+    return run;
+}
+
+/// Runs a test artifact as a captured check; the test runner reports on stderr.
+fn addTestRun(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = b.addRunArtifact(tests);
+    captureCheck(run, .always);
+    return run;
+}
+
 /// The one allocation-tracing control for the CLI and every test allocator.
 /// Set by `-Dalloc-trace-frames`; see agent-guides/testing.md.
 // SAFETY: `build` assigns this first, before any helper that reads it runs.
@@ -293,7 +331,8 @@ pub fn build(b: *std.Build) void {
         // when the interpreter's own instrumentation does not reference it.
         exe.forceUndefinedSymbol("__tsan_atomic32_load");
     }
-    b.installArtifact(exe);
+    const install_exe = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install_exe.step);
     var git_native_run: ?*std.Build.Step = null;
     var pkg_fetch_run: ?*std.Build.Step = null;
     var pkg_git_run: ?*std.Build.Step = null;
@@ -307,17 +346,20 @@ pub fn build(b: *std.Build) void {
         b.installFile("apps/pkg/application.json", "share/ecl/apps/pkg/application.json");
         b.installFile("apps/pkg/installed.modules", "share/ecl/apps/pkg/ecl.modules");
         b.getInstallStep().dependOn(native_build.installExtension(b, extension, "share/ecl/apps/pkg"));
-        const pkg_git_acceptance = b.addSystemCommand(&.{ "python3", "test/package_git_application.py" });
+        const pkg_git_acceptance = addCheckCommand(b, "pkg git acceptance", .always);
+        pkg_git_acceptance.addArgs(&.{ "python3", "test/package_git_application.py" });
         pkg_git_acceptance.addArtifactArg(exe);
         pkg_git_acceptance.addArtifactArg(extension);
         pkg_git_run = &pkg_git_acceptance.step;
         b.step("test-pkg-git", "Run installed package commands, mixed sources, and portable-lock reproduction in ECL").dependOn(&pkg_git_acceptance.step);
-        const git_native_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
+        const git_native_acceptance = addCheckCommand(b, "git extension acceptance", .always);
+        git_native_acceptance.addArgs(&.{ "python3", "test/git_extension.py" });
         git_native_acceptance.addArtifactArg(exe);
         git_native_acceptance.addArtifactArg(extension);
         const git_native_step = b.step("test-git-extension", "Verify the standalone Git snapshot port over controlled HTTPS");
         git_native_step.dependOn(&git_native_acceptance.step);
-        const pkg_fetch_acceptance = b.addSystemCommand(&.{ "python3", "test/git_extension.py" });
+        const pkg_fetch_acceptance = addCheckCommand(b, "pkg fetch acceptance", .always);
+        pkg_fetch_acceptance.addArgs(&.{ "python3", "test/git_extension.py" });
         pkg_fetch_acceptance.addArtifactArg(exe);
         pkg_fetch_acceptance.addArtifactArg(extension);
         pkg_fetch_acceptance.addArg("--application");
@@ -329,7 +371,14 @@ pub fn build(b: *std.Build) void {
     }
     b.installFile("THIRD_PARTY_NOTICES.md", "share/doc/ecl/THIRD_PARTY_NOTICES.md");
     const native_runtime_options = b.addOptions();
-    native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
+    // The installed path rather than the emitted binary: an emitted path makes
+    // every test compile that imports these options wait for the CLI to link.
+    // An untracked path adds no build dependency, so each run of such a test
+    // depends on `install_exe` instead.
+    native_runtime_options.addOptionPathUntracked("ecl_exe", .{ .relative = .{
+        .base = .install_bin,
+        .sub_path = exe.out_filename,
+    } });
     native_runtime_options.addOptionPathDirectory(
         "fixture_dir",
         fixture_files.getDirectory(),
@@ -372,7 +421,8 @@ pub fn build(b: *std.Build) void {
     pkg_fixture_options.addOptionPath("server_cert", b.path("test/fixtures/pkg/server.pem"));
     pkg_fixture_options.addOptionPath("server_key", b.path("test/fixtures/pkg/server-key.pem"));
 
-    const repl_tests = b.addSystemCommand(&.{"expect"});
+    const repl_tests = addCheckCommand(b, "repl expect", .always);
+    repl_tests.addArg("expect");
     repl_tests.addFileArg(b.path("test/repl.exp"));
     repl_tests.addArtifactArg(exe);
     const repl_step = b.step("test-repl", "Run the real REPL under a PTY");
@@ -406,15 +456,17 @@ pub fn build(b: *std.Build) void {
     addTestInputs(test_mod, &test_imports, &test_fixture_inputs);
     const tests = addEclTest(b, .{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
-    const run_tests = b.addRunArtifact(tests);
+    const run_tests = addTestRun(b, tests);
     run_tests.step.dependOn(&fixture_files.step);
+    run_tests.step.dependOn(&install_exe.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
     if (git_native_run) |step| test_step.dependOn(step);
     if (pkg_fetch_run) |step| test_step.dependOn(step);
     if (pkg_git_run) |step| test_step.dependOn(step);
     test_step.dependOn(native_negative_step);
-    const run_ecl_tests = b.addRunArtifact(exe);
+    const run_ecl_tests = addCheckCommand(b, "ecl test", .always);
+    run_ecl_tests.addArtifactArg(exe);
     run_ecl_tests.addArg("test");
     run_ecl_tests.setCwd(b.path("test/stdlib-tests"));
     const ecl_test_step = b.step(
@@ -423,7 +475,8 @@ pub fn build(b: *std.Build) void {
     );
     ecl_test_step.dependOn(&run_ecl_tests.step);
     test_step.dependOn(&run_ecl_tests.step);
-    const run_pkg_tests = b.addRunArtifact(exe);
+    const run_pkg_tests = addCheckCommand(b, "ecl pkg tests", .always);
+    run_pkg_tests.addArtifactArg(exe);
     run_pkg_tests.addArg("--module-map");
     run_pkg_tests.addFileArg(b.path("apps/pkg/test/ecl.modules"));
     run_pkg_tests.addArg("test");
@@ -433,13 +486,15 @@ pub fn build(b: *std.Build) void {
     // Full generation verification repeatedly inspects sealed archives. Keep this
     // public ECL acceptance outside the fast precommit policy-test tier.
     // Ported format and SemVer property corpora retain their full-suite budget.
-    const run_pkg_contracts = b.addRunArtifact(exe);
+    const run_pkg_contracts = addCheckCommand(b, "ecl pkg contracts", .always);
+    run_pkg_contracts.addArtifactArg(exe);
     run_pkg_contracts.addArg("--module-map");
     run_pkg_contracts.addFileArg(b.path("apps/pkg/test/contracts/ecl.modules"));
     run_pkg_contracts.addArg("test");
     b.step("test-pkg-contracts", "Run the package manifest, version, and solver contract corpora in ECL").dependOn(&run_pkg_contracts.step);
     test_step.dependOn(&run_pkg_contracts.step);
-    const run_pkg_generations = b.addRunArtifact(exe);
+    const run_pkg_generations = addCheckCommand(b, "ecl pkg generations", .always);
+    run_pkg_generations.addArtifactArg(exe);
     run_pkg_generations.addArg("--module-map");
     run_pkg_generations.addFileArg(b.path("apps/pkg/test/acceptance/ecl.modules"));
     run_pkg_generations.addArgs(&.{ "test", "--runner", "pkg.test.generation.run" });
@@ -450,7 +505,8 @@ pub fn build(b: *std.Build) void {
     // it runs in a fresh build-owned temporary directory. The application
     // resolves relative cache and temporary settings against that directory,
     // which keeps every write out of the caller's real cache.
-    const pkg_command_acceptance = b.addRunArtifact(exe);
+    const pkg_command_acceptance = addCheckCommand(b, "ecl pkg command acceptance", .always);
+    pkg_command_acceptance.addArtifactArg(exe);
     pkg_command_acceptance.addArg("--module-map");
     pkg_command_acceptance.addFileArg(b.path("apps/pkg/test/acceptance/command.modules"));
     pkg_command_acceptance.addArgs(&.{ "test", "--runner", "pkg.test.command.run" });
@@ -465,8 +521,9 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "native:", "concurrency: native shutdown" },
     });
     native_runtime_tests.linkage = runtime_linkage;
-    const run_native_runtime_tests = b.addRunArtifact(native_runtime_tests);
+    const run_native_runtime_tests = addTestRun(b, native_runtime_tests);
     run_native_runtime_tests.step.dependOn(&fixture_files.step);
+    run_native_runtime_tests.step.dependOn(&install_exe.step);
     const native_runtime_step = b.step(
         "test-native-runtime",
         "Run native loader and transactional-call tests",
@@ -475,8 +532,9 @@ pub fn build(b: *std.Build) void {
     const port_filter = b.option([]const u8, "port-test-filter", "Run matching public port behavior tests");
     const port_tests = addEclTest(b, .{ .root_module = test_mod, .filters = if (port_filter) |filter| &.{filter} else &.{ "process:", "net:", "native:", "port_message.test.", "heap.test.port" } });
     port_tests.linkage = runtime_linkage;
-    const run_port_tests = b.addRunArtifact(port_tests);
+    const run_port_tests = addTestRun(b, port_tests);
     run_port_tests.step.dependOn(&fixture_files.step);
+    run_port_tests.step.dependOn(&install_exe.step);
     b.step("test-ports", "Run shared process, network, and native port behavior").dependOn(&run_port_tests.step);
     const native_acceptance_mod = b.createModule(.{
         .root_source_file = b.path("test/native_runtime.zig"),
@@ -485,8 +543,9 @@ pub fn build(b: *std.Build) void {
     });
     native_acceptance_mod.addOptions("native_runtime_options", native_runtime_options);
     const native_acceptance_tests = addEclTest(b, .{ .root_module = native_acceptance_mod });
-    const run_native_acceptance = b.addRunArtifact(native_acceptance_tests);
+    const run_native_acceptance = addTestRun(b, native_acceptance_tests);
     run_native_acceptance.step.dependOn(&fixture_files.step);
+    run_native_acceptance.step.dependOn(&install_exe.step);
     const native_acceptance_step = b.step(
         "test-native-acceptance",
         "Run the standalone native CLI acceptance tests",
@@ -580,6 +639,7 @@ pub fn build(b: *std.Build) void {
         fuzz_tests.use_llvm = true;
         const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
         run_fuzz_tests.step.dependOn(&fixture_files.step);
+        run_fuzz_tests.step.dependOn(&install_exe.step);
         fuzz_step.dependOn(&run_fuzz_tests.step);
         const campaign_step = b.step(fuzz_target.step_name, fuzz_target.description);
         campaign_step.dependOn(&run_fuzz_tests.step);
@@ -606,10 +666,10 @@ pub fn build(b: *std.Build) void {
         "oom-filter",
         "Run OOM tests whose names contain this substring",
     ) orelse "oom: standard-library and host:";
-    const run_core_oom_tests = b.addRunArtifact(oom_tests);
+    const run_core_oom_tests = addTestRun(b, oom_tests);
     run_core_oom_tests.setEnvironmentVariable("ECL_OOM_FILTER", "oom: core:");
     run_core_oom_tests.step.dependOn(&fixture_files.step);
-    const run_surface_oom_tests = b.addRunArtifact(oom_tests);
+    const run_surface_oom_tests = addTestRun(b, oom_tests);
     run_surface_oom_tests.setEnvironmentVariable("ECL_OOM_FILTER", oom_surface_filter);
     run_surface_oom_tests.step.dependOn(&fixture_files.step);
 
@@ -654,7 +714,8 @@ pub fn build(b: *std.Build) void {
     );
     audit_mod.addOptions("source_audit_options", audit_options);
     const audit_exe = b.addExecutable(.{ .name = "ecl-source-audit", .root_module = audit_mod });
-    const run_audit = b.addRunArtifact(audit_exe);
+    const run_audit = addCheckCommand(b, "source audit", .always);
+    run_audit.addArtifactArg(audit_exe);
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/bench_kernels.zig"),
         .target = target,
@@ -758,7 +819,7 @@ pub fn build(b: *std.Build) void {
     e2e_mod.addOptions("build_options", e2e_options);
     e2e_mod.addImport("minish", minish);
     const e2e_tests = addEclTest(b, .{ .root_module = e2e_mod });
-    const run_e2e_tests = b.addRunArtifact(e2e_tests);
+    const run_e2e_tests = addTestRun(b, e2e_tests);
     run_e2e_tests.step.dependOn(&fixture_files.step);
     test_step.dependOn(&run_e2e_tests.step);
     // The same CLI acceptance run as a named step, so it can be gated on its
@@ -774,7 +835,7 @@ pub fn build(b: *std.Build) void {
     scheduler_shell_mod.addOptions("build_options", e2e_options);
     scheduler_shell_mod.addImport("minish", minish);
     const scheduler_shell_tests = addEclTest(b, .{ .root_module = scheduler_shell_mod });
-    const run_scheduler_shell_tests = b.addRunArtifact(scheduler_shell_tests);
+    const run_scheduler_shell_tests = addTestRun(b, scheduler_shell_tests);
     const scheduler_shell_step = b.step(
         "test-scheduler-shell",
         "Run public executable scheduler properties",
@@ -797,8 +858,9 @@ pub fn build(b: *std.Build) void {
         },
     });
     kernel_slice_tests.linkage = runtime_linkage;
-    const run_kernel_slice_tests = b.addRunArtifact(kernel_slice_tests);
+    const run_kernel_slice_tests = addTestRun(b, kernel_slice_tests);
     run_kernel_slice_tests.step.dependOn(&fixture_files.step);
+    run_kernel_slice_tests.step.dependOn(&install_exe.step);
     const kernel_slice_step = b.step("test-kernels", "Run the kernel and capability test slice");
     kernel_slice_step.dependOn(&run_kernel_slice_tests.step);
 
@@ -823,8 +885,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"concurrency:"},
         });
         worker_tests.linkage = runtime_linkage;
-        const run_worker_tests = b.addRunArtifact(worker_tests);
+        const run_worker_tests = addTestRun(b, worker_tests);
         run_worker_tests.step.dependOn(&fixture_files.step);
+        run_worker_tests.step.dependOn(&install_exe.step);
         worker_step.dependOn(&run_worker_tests.step);
         if (worker_count == 8) worker_eight_step.dependOn(&run_worker_tests.step);
     }
@@ -896,8 +959,9 @@ pub fn build(b: *std.Build) void {
         },
     });
     tsan_tests.linkage = runtime_linkage;
-    const run_tsan_tests = b.addRunArtifact(tsan_tests);
+    const run_tsan_tests = addTestRun(b, tsan_tests);
     run_tsan_tests.step.dependOn(&fixture_files.step);
+    run_tsan_tests.step.dependOn(&install_exe.step);
     const tsan_step = b.step("test-tsan", "Run tests under ThreadSanitizer");
     tsan_step.dependOn(&run_tsan_tests.step);
 
@@ -908,7 +972,7 @@ pub fn build(b: *std.Build) void {
     });
     differential_mod.addImport("ecl-internal", internal_mod);
     const differential_tests = addEclTest(b, .{ .root_module = differential_mod });
-    const run_differential = b.addRunArtifact(differential_tests);
+    const run_differential = addTestRun(b, differential_tests);
     const differential_step = b.step("differential", "Compare automatic and generic idiom execution");
     differential_step.dependOn(&run_differential.step);
 
@@ -921,7 +985,7 @@ pub fn build(b: *std.Build) void {
     });
     reference_mod.addOptions("reference_options", reference_options);
     const reference_tests = addEclTest(b, .{ .root_module = reference_mod });
-    const run_reference_tests = b.addRunArtifact(reference_tests);
+    const run_reference_tests = addTestRun(b, reference_tests);
     const reference_step = b.step(
         "test-snapshots",
         "Check promoted Zig CLI behavior against reference snapshots",
@@ -949,8 +1013,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"acceptance:"},
         });
         acceptance_unit_tests.linkage = runtime_linkage;
-        const run_acceptance_unit_tests = b.addRunArtifact(acceptance_unit_tests);
+        const run_acceptance_unit_tests = addTestRun(b, acceptance_unit_tests);
         run_acceptance_unit_tests.step.dependOn(&fixture_files.step);
+        run_acceptance_unit_tests.step.dependOn(&install_exe.step);
 
         const acceptance_e2e_tests = addEclTest(b, .{
             .root_module = e2e_mod,
@@ -959,7 +1024,7 @@ pub fn build(b: *std.Build) void {
                 "e2e: pp and final stack display elide huge leaves",
             },
         });
-        const run_acceptance_e2e_tests = b.addRunArtifact(acceptance_e2e_tests);
+        const run_acceptance_e2e_tests = addTestRun(b, acceptance_e2e_tests);
         run_acceptance_e2e_tests.step.dependOn(&fixture_files.step);
 
         acceptance_step.dependOn(&run_audit.step);
@@ -1114,8 +1179,9 @@ pub fn build(b: *std.Build) void {
         },
     });
     precommit_tests.linkage = runtime_linkage;
-    const run_precommit_tests = b.addRunArtifact(precommit_tests);
+    const run_precommit_tests = addTestRun(b, precommit_tests);
     run_precommit_tests.step.dependOn(&fixture_files.step);
+    run_precommit_tests.step.dependOn(&install_exe.step);
     const precommit_test_step = b.step(
         "test-precommit",
         "Run the fast core test tier (the test half of `precommit`)",
@@ -1140,7 +1206,8 @@ pub fn build(b: *std.Build) void {
         .name = "ecl-source-check",
         .root_module = ecl_source_mod,
     });
-    const run_ecl_source = b.addRunArtifact(ecl_source_exe);
+    const run_ecl_source = addCheckCommand(b, "ecl source check", .always);
+    run_ecl_source.addArtifactArg(ecl_source_exe);
     const ecl_source_step = b.step(
         "check-ecl",
         "Check checked-in ECL source conventions: canonical formatting and module registration",
@@ -1150,48 +1217,12 @@ pub fn build(b: *std.Build) void {
     // SPEC.md is a checked-in rendering assembled by ECL. The build graph
     // supplies paths and generated fragments; language-level ordering and
     // inclusion remain ordinary ECL behavior in assemble.ecl.
-    const render_module_spec = b.addSystemCommand(&.{
-        "pant", "--markdown", "--module-path", "design/formal",
-    });
-    render_module_spec.addFileArg(b.path("design/formal/modules.pant"));
-    const rendered_module_spec = render_module_spec.captureStdOut(.{
-        .basename = "modules.md",
-    });
-    const render_value_spec = b.addSystemCommand(&.{
-        "pant", "--markdown", "--module-path", "design/formal",
-    });
-    render_value_spec.addFileArg(b.path("design/formal/values.pant"));
-    const rendered_value_spec = render_value_spec.captureStdOut(.{
-        .basename = "values.md",
-    });
-    const render_printing_spec = b.addSystemCommand(&.{
-        "pant", "--markdown", "--module-path", "design/formal",
-    });
-    render_printing_spec.addFileArg(b.path("design/formal/printing.pant"));
-    const rendered_printing_spec = render_printing_spec.captureStdOut(.{
-        .basename = "printing.md",
-    });
-    const render_error_spec = b.addSystemCommand(&.{
-        "pant", "--markdown", "--module-path", "design/formal",
-    });
-    render_error_spec.addFileArg(b.path("design/formal/errors.pant"));
-    const rendered_error_spec = render_error_spec.captureStdOut(.{
-        .basename = "errors.md",
-    });
-    const render_unit_spec = b.addSystemCommand(&.{
-        "pant", "--markdown", "--module-path", "design/formal",
-    });
-    render_unit_spec.addFileArg(b.path("design/formal/units.pant"));
-    const rendered_unit_spec = render_unit_spec.captureStdOut(.{
-        .basename = "units.md",
-    });
-    const render_concurrency_spec = b.addSystemCommand(&.{
-        "pant", "--markdown", "--module-path", "design/formal",
-    });
-    render_concurrency_spec.addFileArg(b.path("design/formal/concurrency.pant"));
-    const rendered_concurrency_spec = render_concurrency_spec.captureStdOut(.{
-        .basename = "concurrency.md",
-    });
+    const rendered_module_spec = renderFormalModel(b, "modules");
+    const rendered_value_spec = renderFormalModel(b, "values");
+    const rendered_printing_spec = renderFormalModel(b, "printing");
+    const rendered_error_spec = renderFormalModel(b, "errors");
+    const rendered_unit_spec = renderFormalModel(b, "units");
+    const rendered_concurrency_spec = renderFormalModel(b, "concurrency");
 
     // The assembler reads and writes through the `'cwd` filesystem root the
     // command line supplies, so it receives the build root and relativizes the
@@ -1220,7 +1251,8 @@ pub fn build(b: *std.Build) void {
     const spec_step = b.step("spec", "Assemble design/SPEC.md from its authored sources");
     spec_step.dependOn(&update_spec.step);
 
-    const check_spec_run = b.addRunArtifact(exe);
+    const check_spec_run = addCheckCommand(b, "check spec", .always);
+    check_spec_run.addArtifactArg(exe);
     check_spec_run.addFileArg(b.path("design/spec/assemble.ecl"));
     check_spec_run.addDirectoryArg(b.path("."));
     check_spec_run.addArg("--check");
@@ -1258,57 +1290,41 @@ pub fn build(b: *std.Build) void {
     const stdlib_step = b.step("stdlib", "Assemble design/STDLIB.md from design/stdlib");
     stdlib_step.dependOn(&assemble_stdlib.step);
 
-    const check_stdlib_run = b.addRunArtifact(exe);
+    const check_stdlib_run = addCheckCommand(b, "check stdlib", .always);
+    check_stdlib_run.addArtifactArg(exe);
     check_stdlib_run.addFileArg(b.path("design/stdlib/assemble.ecl"));
     check_stdlib_run.addArg("--check");
     check_stdlib_run.setCwd(b.path("."));
-    check_stdlib_run.has_side_effects = true;
     const check_stdlib_step = b.step(
         "check-stdlib",
         "Check that design/STDLIB.md matches design/stdlib and the prelude is in rank order",
     );
     check_stdlib_step.dependOn(&check_stdlib_run.step);
 
-    const check_formal_run = b.addSystemCommand(&.{
-        "pant", "--check",   "--bound", "2",             "--steps",
-        "2",    "--timeout", "8",       "--module-path", "design/formal",
-    });
-    check_formal_run.addFileArg(b.path("design/formal/modules.pant"));
-    const check_units_formal_run = b.addSystemCommand(&.{
-        "pant", "--check",   "--bound", "2",             "--steps",
-        "2",    "--timeout", "8",       "--module-path", "design/formal",
-    });
-    check_units_formal_run.addFileArg(b.path("design/formal/units.pant"));
-    const check_values_formal_run = b.addSystemCommand(&.{
-        "pant", "--check",   "--bound", "2",             "--steps",
-        "0",    "--timeout", "8",       "--module-path", "design/formal",
-    });
-    check_values_formal_run.addFileArg(b.path("design/formal/values.pant"));
-    const check_printing_formal_run = b.addSystemCommand(&.{
-        "pant", "--check",   "--bound", "2",             "--steps",
-        "0",    "--timeout", "8",       "--module-path", "design/formal",
-    });
-    check_printing_formal_run.addFileArg(b.path("design/formal/printing.pant"));
-    const check_errors_formal_run = b.addSystemCommand(&.{
-        "pant", "--check",   "--bound", "2",             "--steps",
-        "0",    "--timeout", "8",       "--module-path", "design/formal",
-    });
-    check_errors_formal_run.addFileArg(b.path("design/formal/errors.pant"));
-    const check_concurrency_formal_run = b.addSystemCommand(&.{
-        "pant", "--check",   "--bound", "2",             "--steps",
-        "2",    "--timeout", "12",      "--module-path", "design/formal",
-    });
-    check_concurrency_formal_run.addFileArg(b.path("design/formal/concurrency.pant"));
     const check_formal_step = b.step(
         "check-formal",
         "Check the bounded Pantagruel language models (needs pant and z3)",
     );
-    check_formal_step.dependOn(&check_formal_run.step);
-    check_formal_step.dependOn(&check_units_formal_run.step);
-    check_formal_step.dependOn(&check_values_formal_run.step);
-    check_formal_step.dependOn(&check_printing_formal_run.step);
-    check_formal_step.dependOn(&check_errors_formal_run.step);
-    check_formal_step.dependOn(&check_concurrency_formal_run.step);
+    // Each check is a pure function of the formal sources, so it reruns only
+    // when one of them changes. Upgrading pant does not invalidate a pass.
+    const formal_checks = [_]struct { model: []const u8, steps: []const u8, timeout: []const u8 }{
+        .{ .model = "modules", .steps = "2", .timeout = "8" },
+        .{ .model = "units", .steps = "2", .timeout = "8" },
+        .{ .model = "values", .steps = "0", .timeout = "8" },
+        .{ .model = "printing", .steps = "0", .timeout = "8" },
+        .{ .model = "errors", .steps = "0", .timeout = "8" },
+        .{ .model = "concurrency", .steps = "2", .timeout = "12" },
+    };
+    for (formal_checks) |check| {
+        const run = addCheckCommand(b, b.fmt("pant check {s}", .{check.model}), .on_input_change);
+        run.addArgs(&.{
+            "pant",      "--check",   "--bound",     "2",             "--steps",
+            check.steps, "--timeout", check.timeout, "--module-path", "design/formal",
+        });
+        run.addFileArg(b.path(b.fmt("design/formal/{s}.pant", .{check.model})));
+        addFormalInputs(b, run);
+        check_formal_step.dependOn(&run.step);
+    }
 
     // zlint is a downloaded binary rather than a Zig dependency, so it is
     // optional here and blocking in CI. It is wired in when it is on PATH
@@ -1318,7 +1334,7 @@ pub fn build(b: *std.Build) void {
     // Whether zlint is present is decided when the step runs rather than
     // while configuring, which would make every configuration depend on PATH.
     const lint_sources = "{ git ls-files '*.zig'; git ls-files --others --exclude-standard '*.zig'; } | " ++
-        "zlint -S --deny-warnings";
+        "zlint -S --deny-warnings >&2";
     const lint_step = b.step("lint", "Run zlint over first-party Zig sources (needs zlint on PATH)");
     const run_lint = b.addSystemCommand(&.{
         "sh", "-c",
@@ -1326,6 +1342,7 @@ pub fn build(b: *std.Build) void {
             "{ echo 'zlint is not on PATH; install it from github.com/DonIsaac/zlint to run this gate' >&2; exit 1; }; " ++
             lint_sources,
     });
+    captureCheck(run_lint, .always);
     lint_step.dependOn(&run_lint.step);
     const run_lint_when_present = b.addSystemCommand(&.{
         "sh", "-c", "command -v zlint >/dev/null || exit 0; " ++ lint_sources,
@@ -1333,7 +1350,8 @@ pub fn build(b: *std.Build) void {
 
     // CLI acceptance launches copies of the binary under test from ECL, so it
     // runs in a fresh build-owned directory where each test owns a subdirectory.
-    const cli_acceptance = b.addRunArtifact(exe);
+    const cli_acceptance = addCheckCommand(b, "ecl cli acceptance", .always);
+    cli_acceptance.addArtifactArg(exe);
     cli_acceptance.addArg("--module-map");
     cli_acceptance.addFileArg(b.path("test/cli-acceptance/ecl.modules"));
     cli_acceptance.addArg("test");
@@ -1348,6 +1366,7 @@ pub fn build(b: *std.Build) void {
         "precommit",
         "The local gate: formatting, architecture audit, whole-tree analysis, and the fast test tier",
     );
+    captureCheck(run_lint_when_present, .always);
     precommit_step.dependOn(&run_lint_when_present.step);
     precommit_step.dependOn(&check_zig_fmt.step);
     precommit_step.dependOn(&run_audit.step);
@@ -1364,6 +1383,22 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&cli_acceptance.step);
     precommit_step.dependOn(&run_pkg_tests.step);
     precommit_step.dependOn(git_extension_step);
+}
+
+/// Every Pantagruel model. A model imports others through `--module-path`,
+/// which the build cannot hash, so each render and check declares them all.
+const formal_models = [_][]const u8{ "modules", "units", "values", "printing", "errors", "concurrency" };
+
+fn addFormalInputs(b: *std.Build, run: *std.Build.Step.Run) void {
+    for (formal_models) |model| run.addFileInput(b.path(b.fmt("design/formal/{s}.pant", .{model})));
+}
+
+/// Renders one model to Markdown for SPEC.md assembly.
+fn renderFormalModel(b: *std.Build, model: []const u8) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{ "pant", "--markdown", "--module-path", "design/formal" });
+    run.addFileArg(b.path(b.fmt("design/formal/{s}.pant", .{model})));
+    addFormalInputs(b, run);
+    return run.captureStdOut(.{ .basename = b.fmt("{s}.md", .{model}) });
 }
 
 const NativeModules = struct {

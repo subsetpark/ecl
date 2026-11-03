@@ -57,13 +57,23 @@ Read this guide for every source or test change. The short rules in
   source audit will not notice either until the file is in its manifest. Prove a
   new test can fail before trusting it to pass: break its assertion on purpose,
   watch the tier report the failure, then put it back.
+- **Build checks capture their output.** Every test and check Run step in
+  `build.zig` goes through `captureCheck`: a step that inherits stdio holds the
+  build runner's global stderr lock for its whole run, which once serialized
+  every check in `precommit`. A passing check prints nothing; a failing one
+  reports its stderr, and `addCheckCommand` folds stdout into it for commands
+  such as `ecl test` and `pant` that report failures there. Read `--summary all`
+  to see what ran. A new check that bypasses these helpers runs alone, and a
+  test compile that imports an emitted artifact path waits for that artifact to
+  link.
 
 ## Test tiers
 
 There are exactly three test tiers, and only the first one is the ordinary local
 tier.
 
-- **Local: `zig build precommit`.** Roughly 80 seconds after a source change.
+- **Local: `zig build precommit`.** Roughly 50 seconds after a source change
+  and 20 with nothing changed.
   It lints (when `zlint` is on PATH), checks Zig formatting and the checked-in
   ECL source conventions (`check-ecl`: canonical formatting, and a standard
   module's terminal form is `@defm`), runs the architecture audit, builds the
