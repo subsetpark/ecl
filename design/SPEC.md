@@ -1521,7 +1521,7 @@ counter]`, and every draw is a pure function of it. `rand.int`, `rand.ints`,
 and `rand.float` each take a state and return the advanced state alongside the
 result, so a program's draws are reproducible by construction — running it
 twice from the same key produces the same values, and nothing hidden
-accumulates between units, tasks, or module loads.
+accumulates between submissions, tasks, or module loads.
 
 - `rand.entropy` is the only word that reads the host, and the only
   nondeterministic word in the language. A program is reproducible unless
@@ -1850,7 +1850,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   handle, or executable capability.
 - `descriptor @test` validates and looks up the descriptor against the
   current canonical registration and its source when specified. A present test
-  runs in a fresh isolated Unit under that generation's private home. It
+  runs as a task under that generation's private home, spawned in the current
+  scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
   replaced-away test is a reified missing-test error. The runner's operand
   stack never seeds the test, registry changes persist between invocations in
@@ -2105,7 +2106,7 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 
 ##### Action
 
-> `Spawn task under root` is the same boundary when no task is executing: a root unit, or a stack transaction inside one, spawns into the session root scope.
+> `Spawn task under root` is the same boundary when no task is executing: code at the root, including a stack transaction there, spawns into the session root scope.
 
 **`Units`**, **`Concurrency`** ↝ Spawn task under root *entry*: `Value`, *body*: `Value`, **value-type** *entry* = **list-type**, **value-type** *body* = **list-type**.
 
@@ -2354,8 +2355,9 @@ initially ∀ *message*: `Message` · ¬**message-created?** *message*.
 ### Task scopes and observation
 
 Task scopes exist at exactly two places: the session root and each spawned
-task. A spawn is owned by the task executing it, or by the session root when no
-task is executing. `@attempt`, combinator applications, `load`, and module
+task. Code runs either in a task, its *current task*, or at the session root,
+and the words that park, own, or observe bindings act on that one. A spawn is
+owned by the current task, or by the session root when no task is executing. `@attempt`, combinator applications, `load`, and module
 construction open no scope; they are stack transactions inside the enclosing
 one. A task's attached unit cannot become terminal while a task it owns is
 active: its completion cancels the remaining owned tasks and waits for their
@@ -2371,8 +2373,8 @@ The composition `(task.await) each` awaits every input,
 returns cached results in input order, preserves failures as data, and does not
 cancel siblings.
 
-`@each` starts one isolated unit per element and enforces exactly one result
-value from each unit. It returns results in input order. After the leftmost
+`@each` spawns one task per element and enforces exactly one result value
+from each. It returns results in input order. After the leftmost
 failure it cancels the remaining element tasks, waits for quiescence, and
 re-raises that failure. Selection of the leftmost failure is independent of
 schedule order. Element tasks have no simultaneous-progress guarantee; a
@@ -2383,7 +2385,7 @@ through I/O interleaving among concurrent tasks. I/O remains ordered within
 one task. Sequential combinators including `each`, `for`, and `fold` execute
 left to right.
 
-`exit` is available only to the root unit outside `@attempt`. Elsewhere it
+`exit` is available only at the root, outside `@attempt`. Elsewhere it
 raises `` `domain ``. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the supplied status.
 
@@ -2420,7 +2422,8 @@ helper, whose result is the reply; `task.await-for` bounds the exchange.
 
 ### External ports and processes
 
-An external port created by a unit belongs to that unit's task scope. The
+An external port belongs to the scope it was created in: the current task's,
+or the session root's. The
 scope, not the number or location of port values, owns the live external
 resource. Closing a scope stops new operations, requests cancellation, and
 does not complete until each owned resource has published a terminal state and
@@ -2430,10 +2433,11 @@ opaque handle to terminal state. Ownership moves only when a unit constructor
 moves it: `@give` makes the new child's scope the owner as part of
 constructing that child, so the resource is never unowned and is never
 reachable by the child before the child owns it. Ownership governs lifetime,
-not use: any unit holding a port value may operate on it, and a unit may give
-away only a port its own scope owns.
+not use: any code holding a port value may operate on it, but only code whose
+current scope owns a port may give it away.
 
-Port operations may suspend the current unit on external readiness. Such a
+Port operations may suspend the current task, or the root, on external
+readiness. Such a
 suspension is an ordinary scheduler park: it consumes no worker while waiting,
 participates in the same cancellation and deadline arbitration as task waits,
 and resumes a bounded continuation. Input and output queues are bounded, so a
@@ -2449,10 +2453,10 @@ publish atomically or leave the destination unchanged.
 
 The standard streams are endpoints of this kind, named by `fd.in`, `fd.out`,
 and `fd.err`. They belong to the Session rather than to a task scope: every
-unit shares the same three values, nothing closes them, and `@give` does not
+task and the root share the same three values, nothing closes them, and `@give` does not
 move them. Input reads return what the host has and `[]` at stable EOF, on
 every later read as well; one reader may be pending. Output writes from
-different units are served in the order they began, and each call's bytes
+different tasks are served in the order they began, and each call's bytes
 stay contiguous. When standard input is the program source there is no input
 device, and `fd.in` is `` `io ``. Text crosses these endpoints only through the
 `io` words, which encode and decode UTF-8 at the boundary. A file opened with
@@ -2488,16 +2492,16 @@ before binding and never resolved through a name service. Port zero requests
 an ephemeral port.
 
 A listener is a port. Binding and listening complete before the value is
-returned, the value belongs to the creating unit's task scope, and accepting a
+returned, the value belongs to the scope it was created in, and accepting a
 connection is the only listener operation that parks. The bound address and
 port are observable data; closing a listener, explicitly or through scope
 closure, is one idempotent transition after which the address is no longer
-observable, every unit parked in accept on it fails, and the same address and
+observable, every accept waiting on it fails, and the same address and
 port may be bound again. A host bind failure is `` `io `` carrying the requested
 address, the requested port, and one reason from a closed vocabulary.
 
 A connection is a port too, distinct from a listener and from a process port.
-It belongs to the task scope of the unit that accepted it, not to the
+It belongs to the scope that accepted it, not to the
 listener's scope: closing that scope aborts the connection even while its
 value is stored elsewhere, and closing the listener leaves accepted
 connections open. A connection not yet accepted stays in the host's backlog;
@@ -2510,14 +2514,14 @@ contiguous. Explicit close delivers the bytes already queued and then shuts
 the socket down; scope closure discards them and shuts down at once. Both
 ends' addresses are observable data while the connection is open. A peer
 failure is `` `io `` carrying the peer's address, the peer's port, and one reason
-from a closed vocabulary; a cancelled wait fails only the unit that was
-parked.
+from a closed vocabulary; a cancelled wait fails only the task, or the root,
+that was waiting.
 
 A serving word built over connections applies its handler in a fresh unit per
 request under the checked one-result contract. A request's framing failure,
 or its handler's failure or ill-formed result, is data to the serving word
-and affects only that request. The serving unit ends only by cancellation or
-by a fatal failure of accept; either ending quiesces its children by the
+and affects only that request. A serving word runs until it is cancelled or
+accept fails fatally; either ending quiesces its children by the
 ordinary scope rules, and the serving word never closes a listener it did not
 create.
 

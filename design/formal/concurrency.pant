@@ -147,8 +147,8 @@ some task: Task, child: Unit,
 where
 
 > `Spawn task under root` is the same boundary when no task is executing:
-> a root unit, or a stack transaction inside one, spawns into the session
-> root scope.
+> code at the root, including a stack transaction there, spawns into the
+> session root scope.
 Units, Concurrency ~> Spawn task under root @ entry: Value, body: Value, value-type entry = list-type, value-type body = list-type.
 ---
 some task: Task, child: Unit,
