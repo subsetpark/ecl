@@ -124,8 +124,8 @@
  (|result on-ok on-err|
   result checked pop
   result `ok dict.has?
-  result (`ok at) partial on-ok compose
-  result (`err at) partial on-err compose
+  result (`ok at) partial on-ok cat
+  result (`err at) partial on-err cat
   if) `either def
 
  ### def all

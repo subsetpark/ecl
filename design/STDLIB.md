@@ -871,11 +871,21 @@ Takes an optional annotation, a body, and a name, and leaves nothing. Declare a 
 ### append
 `( sequence value -- sequence )` — Append one value to the end of a sequence.
 
-### compose
-`( left right -- quotation )` — Concatenate two quotations in execution order.
+### fail
+`( msg -- )` — Raise a user-kind error whose message is the supplied value: `{kind user msg msg}`. Defined in ecl.
 
 ### find
 `( sequence needle -- index )` — Return the index of the first element that returns 1 from `match?` against the needle, or the sequence length when no element matches. Defined in ecl.
+
+### iterations
+`( value count quotation -- list )` — *Isolated*, unary contract `( a -- a )`. Return the initial value followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list. Defined in ecl over `scan`.
+
+#### Examples
+
+```ecl
+1 3 (10 +) iterations
+# => [1 11 21 31]
+```
 
 ### scan1
 `( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`. Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements. Defined in ecl over `scan`.
@@ -889,14 +899,21 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 ### uncons
 `( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
 
+### while-values
+`( value predicate step -- list )` — *Isolated*, contracts `( state -- bool )` and `( state -- state )`. Return the initial value and successive states through the first state for which the predicate is false. Defined in ecl over `unfold`.
+
+#### Examples
+
+```ecl
+1 (5 <) (1 +) while-values
+# => [1 2 3 4 5]
+```
+
 ### zip
 `( left right -- pairs )` — Pair corresponding elements of two conforming sequences.
 
 ### dip
 `( x q -- ... )` — *Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` returns on top of its results.
-
-### fail
-`( msg -- )` — Raise a user-kind error whose message is the supplied value: `{kind user msg msg}`. Defined in ecl.
 
 ### from-digits
 `( digits base -- value )` — Combine digits, most significant first, into a value. The base is one integer for every position, or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect. Digits pervade: a list of equal-length digit lists, one per position, gives one value per column. A radix list of the wrong length fails with `` `shape ``. Inverse of `to-digits` for values in range.
@@ -912,28 +929,8 @@ Takes an optional annotation, a value, and a name, and leaves nothing. Bind the 
 # => 3723
 ```
 
-### iterations
-`( value count quotation -- list )` — *Isolated*, unary contract `( a -- a )`. Return the initial value followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list. Defined in ecl over `scan`.
-
-#### Examples
-
-```ecl
-1 3 (10 +) iterations
-# => [1 11 21 31]
-```
-
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial elements and last element.
-
-### while-values
-`( value predicate step -- list )` — *Isolated*, contracts `( state -- bool )` and `( state -- state )`. Return the initial value and successive states through the first state for which the predicate is false. Defined in ecl over `unfold`.
-
-#### Examples
-
-```ecl
-1 (5 <) (1 +) while-values
-# => [1 2 3 4 5]
-```
 
 ### and
 `( x y -- bool )` — **Pervasive.** Compute boolean conjunction over 0 and 1 values. Both operands are already evaluated; there is no short-circuiting. Defined in ecl.
@@ -1845,7 +1842,7 @@ l {read-timeout-ms 5000} (handler) http.server.@serve
 ```
 
 ### route
-`( request routes -- response )` — *Inline.* Dispatch a request over a list of `[method pattern handler]` rows. The method is a string compared exactly against the request's `` `method ``. A pattern is a slash path such as `"/users/:id"` whose segments must equal the request's `` `path `` segments one for one, except that a segment beginning with `:` binds any nonempty path segment under its name in a string dictionary. The first row whose pattern and method both match has the request, with `` `params `` set to that dictionary, passed to its handler, which is applied inline with the contract `( request -- response )`. Middleware is composition: wrap the handler quotation with `compose`.
+`( request routes -- response )` — *Inline.* Dispatch a request over a list of `[method pattern handler]` rows. The method is a string compared exactly against the request's `` `method ``. A pattern is a slash path such as `"/users/:id"` whose segments must equal the request's `` `path `` segments one for one, except that a segment beginning with `:` binds any nonempty path segment under its name in a string dictionary. The first row whose pattern and method both match has the request, with `` `params `` set to that dictionary, passed to its handler, which is applied inline with the contract `( request -- response )`. Middleware is composition: wrap the handler quotation with `cat`.
 
 When some pattern matches but no matching row's method does, the result is `405 "method not allowed" text` with an `allow` header joining the matching rows' methods with `,`; when no pattern matches, the result is `http.response.not-found`. Every row is checked before any comparison: a non-list routes value is `` `type ``, a row that is not a list of three elements is `` `shape ``, and a non-string method, non-string pattern, or non-quotation handler is `` `type ``.
 

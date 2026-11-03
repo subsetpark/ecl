@@ -145,15 +145,25 @@
 (sequence value -- sequence : "Append one value to the end of a sequence.")
 (wrap cat) `append def
 
-### def compose
-(left right -- quotation : "Concatenate two quotations in execution order.")
-(cat dup len 0 = (pop ()) when) `compose def
+### def fail
+(msg -- :
+ "Raise a user-kind error whose message is the supplied value: `{kind user msg msg}`. Defined in
+  ecl.")
+(wrap (kind user msg) swap cat dict.core.from-flat raise) `fail def
 
 ### def find
 (sequence needle -- index :
  "Return the index of the first element that returns 1 from `match?` against the needle, or the
   sequence length when no element matches. Defined in ecl.")
 ((match?) partial each first-where) `find def
+
+### def iterations
+(value count quotation -- list :
+ "*Isolated*, unary contract `( a -- a )`. Return the initial value followed by `count` successive
+  quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton
+  list. Defined in ecl over `scan`.")
+(|value count quotation|
+ value wrap count range value (pop) quotation cat scan cat) `iterations def
 
 ### def scan1
 (list quotation -- list :
@@ -180,6 +190,14 @@
 (list -- first rest : "Split a nonempty list into its first element and remaining elements.")
 (dup first swap rest) `uncons def
 
+### def while-values
+(value predicate step -- list :
+ "*Isolated*, contracts `( state -- bool )` and `( state -- state )`. Return the initial value and
+  successive states through the first state for which the predicate is false. Defined in ecl over
+  `unfold`.")
+(|value predicate step|
+ value predicate step (dup) cat unfold nip value swap cons) `while-values def
+
 ### def zip
 (left right -- pairs : "Pair corresponding elements of two conforming sequences.")
 ((pair) zip-with) `zip def
@@ -189,12 +207,6 @@
  "*Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x`
   returns on top of its results.")
 (swap literal append call) `dip def
-
-### def fail
-(msg -- :
- "Raise a user-kind error whose message is the supplied value: `{kind user msg msg}`. Defined in
-  ecl.")
-(wrap (kind user msg) swap compose dict.core.from-flat raise) `fail def
 
 ### def from-digits
 (digits base -- value :
@@ -210,25 +222,9 @@
  if
  zip 0 (|acc p| acc p 1 at * p 0 at +) fold) `from-digits def
 
-### def iterations
-(value count quotation -- list :
- "*Isolated*, unary contract `( a -- a )`. Return the initial value followed by `count` successive
-  quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton
-  list. Defined in ecl over `scan`.")
-(|value count quotation|
- value wrap count range value (pop) quotation compose scan cat) `iterations def
-
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")
 (reverse uncons reverse swap) `unappend def
-
-### def while-values
-(value predicate step -- list :
- "*Isolated*, contracts `( state -- bool )` and `( state -- state )`. Return the initial value and
-  successive states through the first state for which the predicate is false. Defined in ecl over
-  `unfold`.")
-(|value predicate step|
- value predicate step (dup) compose unfold nip value swap cons) `while-values def
 
 ### def and
 (x y -- bool :

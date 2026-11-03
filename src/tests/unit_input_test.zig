@@ -210,10 +210,9 @@ test "unit inputs: a runtime-built body acquires no attribution" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs7.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // cat, compose, and raze all produce runtime-built values, and a reader
-    // witness carried by a nested fragment grants no admission through one.
+    // cat and raze both produce runtime-built values, and a reader witness
+    // carried by a nested fragment grants no admission through one.
     try expectStack(&runtime, "7 `k set [] ((k) `geta) (def) cat `catted @defm catted.geta", "7");
-    try expectStack(&runtime, "7 `k set [] ((k) `getb) (def) compose `composed @defm composed.getb", "7");
     try expectStack(&runtime, "7 `k set [] [((k) `getc) (def)] raze `razed @defm razed.getc", "7");
     // Supplying explicit seeds changes the initial stack and nothing else.
     try expectStack(&runtime, "7 `k set [] ((k) `getd) (def) cat `seeded @defm seeded.getd", "7");

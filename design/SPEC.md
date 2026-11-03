@@ -1931,7 +1931,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 - **A word resolves in the scope its text was written in.** The word itself
   carries the scope, so it
-  survives every operation that moves code around: `cat` and `compose` splice
+  survives every operation that moves code around: `cat` splices
   tokens from two sources into one list and each token keeps the scope it was
   written in. A module word may hand `(private-helper)` to `each` and the
   private still resolves, because the literal was written inside the module;
@@ -1947,7 +1947,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   nested inside it can scope its own body to its own image.
 
   Generic runtime list operations do not create lineage. A body produced by
-  `cat`, `compose`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
+  `cat`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
   similar operation keeps the scopes already carried by its parts, but module
   construction accepts it without traversing or re-scoping it. Reader-authored
   fragments do not make their runtime-built container reader-authored. For
