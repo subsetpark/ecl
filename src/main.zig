@@ -161,6 +161,7 @@ fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
     defer init.process.gpa.free(path);
     var host = ecl.heap.HostOwner.init(init.process.gpa);
     defer host.cleanup().drain();
+    var diagnostic: ecl.module_map.Diagnostic = .{};
     const map = (if (from_stdin) input: {
         var buffer: [8192]u8 = undefined;
         var stream = std.Io.File.stdin().reader(init.process.io, &buffer);
@@ -169,10 +170,14 @@ fn checkMapCommand(init: Startup, arguments: []const []const u8) AppError!u8 {
             else => return emitIoError(init, "cannot read bounded module map input", err),
         };
         defer init.process.gpa.free(source);
-        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true);
-    } else ecl.module_map.load(host.cleanup(), init.process.io, path)) catch |err| switch (err) {
+        break :input ecl.module_map.validate(host.cleanup(), init.process.io, source, path, true, &diagnostic);
+    } else ecl.module_map.load(host.cleanup(), init.process.io, path, &diagnostic)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => return emitSyntheticError(init, .io, "invalid module map", null),
+        error.Invalid => {
+            var buffer: [512]u8 = undefined;
+            const message = std.fmt.bufPrint(&buffer, "invalid module map: {s}", .{diagnostic.message()}) catch &buffer;
+            return emitSyntheticError(init, .io, message, null);
+        },
     };
     defer map.deinit();
     return 0;

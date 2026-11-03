@@ -414,7 +414,9 @@ pub const Session = enum(usize) {
             };
             if (map_path) |path| {
                 defer allocator.free(path);
-                const map = maps.load(host_owner.cleanup(), host.io, path) catch |err| switch (err) {
+                // Startup reports every invalid host configuration alike.
+                var diagnostic: maps.Diagnostic = .{};
+                const map = maps.load(host_owner.cleanup(), host.io, path, &diagnostic) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Invalid => return error.InvalidHostConfig,
                 };

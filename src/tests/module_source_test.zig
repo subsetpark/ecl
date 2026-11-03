@@ -95,7 +95,8 @@ test "loader: map validation and snapshot construction clean up every allocation
             defer owner.cleanup().drain();
             var main = try @import("../modules.zig").Registry.init(owner.cleanup());
             defer main.deinit();
-            const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true);
+            var diagnostic: @import("../module_map.zig").Diagnostic = .{};
+            const map = try @import("../module_map.zig").validate(owner.cleanup(), std.testing.io, standalone_map, filename, true, &diagnostic);
             const snapshot = @import("../module_snapshot.zig").Snapshot.fromMap(owner.cleanup(), &main, map, cwd) catch |err| {
                 map.deinit();
                 return err;

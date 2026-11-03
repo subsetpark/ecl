@@ -63,7 +63,23 @@ with tempfile.TemporaryDirectory(prefix="ecl-module-maps-") as temporary:
     duplicate.write_text("[] () `localmod @defm")
     result = run("check-map", "maps/complete")
     assert result.returncode == 1 and "invalid module map" in result.stderr
+    # The diagnostic names the module and both declaring files.
+    for detail in ["module `localmod`", "`src/duplicate.ecl`", "`src/entry.ecl`", "scope `local`"]:
+        assert detail in result.stderr, result.stderr
     duplicate.unlink()
+
+    # Each rejection names what to fix rather than only that the map is invalid.
+    for document, detail in [
+        ("broken", "must contain exactly one dict"),
+        ("{format 2 map \"complete\"}", "must declare `format 1`"),
+        (complete.replace("local \"local\"", "local \"other\""), "local scope `other` is not declared"),
+        (complete.replace("visible []", "visible [\"ghost\"]"), "lists undeclared scope `ghost`"),
+        (complete.replace("[\"src/*.ecl\"]", "[\"../*.ecl\"]"), "invalid source pattern `../*.ecl`"),
+    ]:
+        result = run("check-map", "--document", "maps/candidate", "-", input_text=document)
+        assert result.returncode == 1 and detail in result.stderr, (detail, result.stderr)
+    result = run("check-map", "--document", "maps/unpublished", "-", input_text="{format 1 map \"chain\"}")
+    assert result.returncode == 1 and "cannot read module map" in result.stderr, result.stderr
 
     (maps / "chain").write_text("{format 1 map \"reference\"}")
     for path in ["maps/chain", "ecl.modules", "missing"]:

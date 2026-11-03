@@ -37,5 +37,16 @@
   `stdin map str bytes put `timeout-ms 30000 put `stdout-limit 4096 put `stderr-limit 65536 put
   proc.run
   dup `term at {kind exited code 0} match?
-  swap `stderr at chars `io error.new swap error.with-message assert) `validate def
+  (pop) (`stderr at chars rejection raise) if) `validate def
+
+ ### defp rejection
+ (text -- error :
+  "Recover the kind and message of the error dict `check-map` printed, so the reason is raised
+   directly with this caller's trace rather than nested as text. Output that is not one error dict
+   is kept verbatim as the message.")
+ (dup wrap (parse first) @attempt
+  dup `ok dict.has? (`ok at first) (pop 0) if
+  dup error.valid?
+  ([kind msg] dict.take nip) (pop `io error.new swap str.trim error.with-message) if)
+ `rejection defp
 ) `pkg.map @defm

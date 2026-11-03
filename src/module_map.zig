@@ -98,82 +98,138 @@ pub fn discover(allocator: std.mem.Allocator, io: std.Io, start: []const u8, exp
     }
 }
 
-pub fn load(host: *const heap.HostCleanup, io: std.Io, path: []const u8) Error!*Validated {
-    return loadFile(host, io, path, true);
+/// Why validation rejected a document. The caller owns the storage; after
+/// `error.Invalid` it holds one bounded reason naming the offending document,
+/// scope, path, or module. The innermost failure wins, so a referenced map's
+/// own reason is not replaced by its referrer's.
+pub const Diagnostic = struct {
+    buffer: [512]u8 = @splat(0),
+    len: usize = 0,
+
+    pub fn message(self: *const Diagnostic) []const u8 {
+        return self.buffer[0..self.len];
+    }
+
+    fn fail(self: *Diagnostic, comptime format: []const u8, args: anytype) error{Invalid} {
+        if (self.len == 0) {
+            var writer: std.Io.Writer = .fixed(&self.buffer);
+            // Truncation keeps the leading reason, which names the offender.
+            writer.print(format, args) catch {};
+            self.len = writer.end;
+        }
+        return error.Invalid;
+    }
+
+    /// Attribute an inert-data or text failure to the enclosing entry.
+    fn reject(self: *Diagnostic, err: Error, comptime format: []const u8, args: anytype) Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Invalid => self.fail(format, args),
+        };
+    }
+};
+
+pub fn load(host: *const heap.HostCleanup, io: std.Io, path: []const u8, diagnostic: *Diagnostic) Error!*Validated {
+    return loadFile(host, io, path, true, diagnostic);
 }
 
-fn loadFile(host: *const heap.HostCleanup, io: std.Io, path: []const u8, allow_reference: bool) Error!*Validated {
+fn loadFile(host: *const heap.HostCleanup, io: std.Io, path: []const u8, allow_reference: bool, diagnostic: *Diagnostic) Error!*Validated {
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, host.allocator(), .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Invalid,
+        else => return diagnostic.fail("cannot read module map `{s}`: {s}", .{ path, @errorName(err) }),
     };
     defer host.allocator().free(bytes);
-    return validate(host, io, bytes, path, allow_reference);
+    return validate(host, io, bytes, path, allow_reference, diagnostic);
 }
 
 /// Validate one complete document, resolving paths against its filename.
 /// References resolve exactly once. Source discovery parses but never executes.
-pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, path: []const u8, allow_reference: bool) Error!*Validated {
-    if (bytes.len > 16 * 1024 * 1024) return error.Invalid;
+pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, path: []const u8, allow_reference: bool, diagnostic: *Diagnostic) Error!*Validated {
+    if (bytes.len > 16 * 1024 * 1024) return diagnostic.fail("module map `{s}` exceeds 16 MiB", .{path});
     const allocator = host.allocator();
     var diag: reader.Diag = .{};
     var parsed = switch (reader.read(host, path, bytes, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Invalid,
+        else => return diagnostic.fail("module map `{s}` does not parse: {s}", .{ path, diag.text() }),
     }) {
         .complete => |complete| complete,
-        .incomplete => return error.Invalid,
+        .incomplete => |incomplete| return diagnostic.fail("module map `{s}` is incomplete: {s}", .{ path, incomplete.message }),
     };
     defer parsed.deinit();
-    if (parsed.values().len != 1) return error.Invalid;
+    if (parsed.values().len != 1) return diagnostic.fail("module map `{s}` must contain exactly one dict", .{path});
     const item = parsed.values()[0];
-    const top = try data.asDict(item);
-    const version = try data.field(top, "format");
-    if (version != .int or version.int != 1) return error.Invalid;
-    const directory = std.fs.path.dirname(path) orelse return error.Invalid;
+    const top = data.asDict(item) catch |err| return diagnostic.reject(err, "module map `{s}` must contain exactly one dict", .{path});
+    const version = data.field(top, "format") catch |err| return diagnostic.reject(err, "module map `{s}` has no `format`", .{path});
+    if (version != .int or version.int != 1) return diagnostic.fail("module map `{s}` must declare `format 1`", .{path});
+    const directory = std.fs.path.dirname(path) orelse return diagnostic.fail("module map path `{s}` has no directory", .{path});
     if (top.length() == 2) {
-        if (!allow_reference) return error.Invalid;
-        _ = try data.exactFields(item, &.{ "format", "map" });
-        const reference = try ownedText(allocator, try data.field(top, "map"));
+        if (!allow_reference) return diagnostic.fail("referenced module map `{s}` is itself a reference; it must be a complete map", .{path});
+        _ = data.exactFields(item, &.{ "format", "map" }) catch |err|
+            return diagnostic.reject(err, "reference map `{s}` must contain exactly `format` and `map`", .{path});
+        const reference_value = data.field(top, "map") catch |err|
+            return diagnostic.reject(err, "reference map `{s}` must contain exactly `format` and `map`", .{path});
+        const reference = ownedText(allocator, reference_value) catch |err|
+            return diagnostic.reject(err, "reference map `{s}` has an invalid `map` path", .{path});
         defer allocator.free(reference);
         const target = try std.fs.path.resolve(allocator, &.{ directory, reference });
         defer allocator.free(target);
-        return loadFile(host, io, target, false);
+        return loadFile(host, io, target, false, diagnostic);
     }
-    _ = try data.exactFields(item, &.{ "format", "local", "scopes" });
-    const definitions = try data.asDict(try data.field(top, "scopes"));
-    if (definitions.length() == 0 or definitions.length() > 4096) return error.Invalid;
+    _ = data.exactFields(item, &.{ "format", "local", "scopes" }) catch |err|
+        return diagnostic.reject(err, "module map `{s}` must contain exactly `format`, `local`, and `scopes`", .{path});
+    const definitions_value = data.field(top, "scopes") catch |err|
+        return diagnostic.reject(err, "module map `{s}` has no `scopes`", .{path});
+    const definitions = data.asDict(definitions_value) catch |err|
+        return diagnostic.reject(err, "module map `{s}` `scopes` must be a dict", .{path});
+    if (definitions.length() == 0 or definitions.length() > 4096)
+        return diagnostic.fail("module map `{s}` must declare between 1 and 4096 scopes", .{path});
     const owned = try allocator.create(Backing);
     // SAFETY: local is assigned before publication and is not read by error cleanup.
     owned.* = .{ .allocator = allocator, .local = undefined };
     const result = Validated.fromBacking(owned);
     errdefer result.deinit();
     for (0..@intCast(definitions.length())) |index| {
-        const name = try ownedText(allocator, dict.keyAt(definitions, index));
+        const name = ownedText(allocator, dict.keyAt(definitions, index)) catch |err|
+            return diagnostic.reject(err, "scope {d} in `{s}` must be named by a non-empty string without control characters", .{ index, path });
         errdefer allocator.free(name);
-        for (owned.scopes.items) |scope| if (std.mem.eql(u8, name, scope.name)) return error.Invalid;
-        const definition = try data.exactFields(dict.valueAt(definitions, index), &.{ "root", "visible", "sources", "artifacts" });
-        const root_text = try ownedText(allocator, try data.field(definition, "root"));
+        for (owned.scopes.items) |scope| if (std.mem.eql(u8, name, scope.name))
+            return diagnostic.fail("scope `{s}` is declared twice", .{name});
+        const definition = data.exactFields(dict.valueAt(definitions, index), &.{ "root", "visible", "sources", "artifacts" }) catch |err|
+            return diagnostic.reject(err, "scope `{s}` must contain exactly `root`, `visible`, `sources`, and `artifacts`", .{name});
+        const root_value = data.field(definition, "root") catch |err|
+            return diagnostic.reject(err, "scope `{s}` has no `root`", .{name});
+        const root_text = ownedText(allocator, root_value) catch |err|
+            return diagnostic.reject(err, "scope `{s}` has an invalid `root`", .{name});
         defer allocator.free(root_text);
         const root = try std.fs.path.resolve(allocator, &.{ directory, root_text });
         errdefer allocator.free(root);
         try owned.scopes.append(allocator, .{ .name = name, .root = root, .visible = &.{} });
     }
-    const local_name = try ownedText(allocator, try data.field(top, "local"));
+    const local_value = data.field(top, "local") catch |err|
+        return diagnostic.reject(err, "module map `{s}` has no `local`", .{path});
+    const local_name = ownedText(allocator, local_value) catch |err|
+        return diagnostic.reject(err, "module map `{s}` `local` must name a scope", .{path});
     defer allocator.free(local_name);
-    owned.local = findScope(owned, local_name) orelse return error.Invalid;
+    owned.local = findScope(owned, local_name) orelse
+        return diagnostic.fail("local scope `{s}` is not declared in `scopes`", .{local_name});
     for (owned.scopes.items, 0..) |*scope, index| {
         const id: ScopeId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
         const definition = try data.asDict(dict.valueAt(definitions, index));
-        const visibility = try sequence(try data.field(definition, "visible"));
+        const visibility_value = data.field(definition, "visible") catch |err|
+            return diagnostic.reject(err, "scope `{s}` has no `visible`", .{scope.name});
+        const visibility = sequence(visibility_value) catch |err|
+            return diagnostic.reject(err, "scope `{s}` `visible` must be a list", .{scope.name});
         const visible = try allocator.alloc(ScopeId, visibility.list.length() + 1);
         errdefer allocator.free(visible);
         visible[0] = id;
         for (1..visible.len) |edge| {
-            const name = try ownedText(allocator, list.atUnchecked(visibility, edge - 1));
+            const name = ownedText(allocator, list.atUnchecked(visibility, edge - 1)) catch |err|
+                return diagnostic.reject(err, "scope `{s}` `visible` entry {d} must be a scope name", .{ scope.name, edge - 1 });
             defer allocator.free(name);
-            visible[edge] = findScope(owned, name) orelse return error.Invalid;
-            for (visible[0..edge]) |prior| if (prior == visible[edge]) return error.Invalid;
+            visible[edge] = findScope(owned, name) orelse
+                return diagnostic.fail("scope `{s}` lists undeclared scope `{s}` in `visible`", .{ scope.name, name });
+            for (visible[0..edge]) |prior| if (prior == visible[edge])
+                return diagnostic.fail("scope `{s}` repeats `{s}` in `visible`; a scope is always visible to itself", .{ scope.name, name });
         }
         scope.visible = visible;
         // Transfer the visibility buffer before fallible artifact validation.
@@ -182,30 +238,43 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     for (owned.scopes.items, 0..) |scope, index| {
         const id: ScopeId = @fromBackingInt(@intCast(@as(u32, @intCast(index))));
         const definition = try data.asDict(dict.valueAt(definitions, index));
-        const artifacts = try sequence(try data.field(definition, "artifacts"));
+        const artifacts_value = data.field(definition, "artifacts") catch |err|
+            return diagnostic.reject(err, "scope `{s}` has no `artifacts`", .{scope.name});
+        const artifacts = sequence(artifacts_value) catch |err|
+            return diagnostic.reject(err, "scope `{s}` `artifacts` must be a list", .{scope.name});
         for (0..@intCast(artifacts.list.length())) |artifact_index| {
-            const record = try data.exactFields(list.atUnchecked(artifacts, artifact_index), &.{ "path", "kind", "exports" });
-            const artifact_path = try ownedText(allocator, try data.field(record, "path"));
+            const record = data.exactFields(list.atUnchecked(artifacts, artifact_index), &.{ "path", "kind", "exports" }) catch |err|
+                return diagnostic.reject(err, "artifact {d} in scope `{s}` must contain exactly `path`, `kind`, and `exports`", .{ artifact_index, scope.name });
+            const path_value = try data.field(record, "path");
+            const artifact_path = ownedText(allocator, path_value) catch |err|
+                return diagnostic.reject(err, "artifact {d} in scope `{s}` has an invalid `path`", .{ artifact_index, scope.name });
             defer allocator.free(artifact_path);
-            if (!safePath(artifact_path)) return error.Invalid;
+            if (!safePath(artifact_path))
+                return diagnostic.fail("artifact path `{s}` in scope `{s}` must be relative, without `.`, `..`, `:`, or wildcards", .{ artifact_path, scope.name });
             const kind_value = try data.field(record, "kind");
-            if (kind_value != .symbol) return error.Invalid;
-            const kind = std.meta.stringToEnum(Kind, intern.get(kind_value.symbol.name)) orelse return error.Invalid;
-            const exports = try sequence(try data.field(record, "exports"));
-            if (kind == .native and exports.list.length() != 1) return error.Invalid;
+            const kind = (if (kind_value == .symbol) std.meta.stringToEnum(Kind, intern.get(kind_value.symbol.name)) else null) orelse
+                return diagnostic.fail("artifact `{s}` in scope `{s}` must have kind `ecl` or `native`", .{ artifact_path, scope.name });
+            const exports = sequence(try data.field(record, "exports")) catch |err|
+                return diagnostic.reject(err, "artifact `{s}` in scope `{s}` `exports` must be a list", .{ artifact_path, scope.name });
+            if (kind == .native and exports.list.length() != 1)
+                return diagnostic.fail("native artifact `{s}` in scope `{s}` must export exactly one module", .{ artifact_path, scope.name });
             const names = try allocator.alloc(intern.ModuleName, @intCast(exports.list.length()));
             defer allocator.free(names);
             for (names, 0..) |*name, name_index| {
-                const spelling = try ownedText(allocator, list.atUnchecked(exports, name_index));
+                const spelling = ownedText(allocator, list.atUnchecked(exports, name_index)) catch |err|
+                    return diagnostic.reject(err, "artifact `{s}` in scope `{s}` export {d} must be a module name", .{ artifact_path, scope.name, name_index });
                 defer allocator.free(spelling);
                 name.* = intern.internModuleName(spelling) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidName => return error.Invalid,
+                    error.InvalidName => return diagnostic.fail("artifact `{s}` in scope `{s}` exports invalid module name `{s}`", .{ artifact_path, scope.name, spelling }),
                 };
             }
-            try addArtifact(owned, id, artifact_path, kind, names);
+            try addArtifact(owned, id, artifact_path, kind, names, diagnostic);
         }
-        const patterns = try sequence(try data.field(definition, "sources"));
+        const patterns_value = data.field(definition, "sources") catch |err|
+            return diagnostic.reject(err, "scope `{s}` has no `sources`", .{scope.name});
+        const patterns = sequence(patterns_value) catch |err|
+            return diagnostic.reject(err, "scope `{s}` `sources` must be a list", .{scope.name});
         if (patterns.list.length() == 0) continue;
         var globs: std.ArrayList([]u8) = .empty;
         defer {
@@ -213,48 +282,54 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
             globs.deinit(allocator);
         }
         for (0..@intCast(patterns.list.length())) |pattern_index| {
-            const glob = try ownedText(allocator, list.atUnchecked(patterns, pattern_index));
+            const glob = ownedText(allocator, list.atUnchecked(patterns, pattern_index)) catch |err|
+                return diagnostic.reject(err, "scope `{s}` source pattern {d} must be a non-empty string", .{ scope.name, pattern_index });
             errdefer allocator.free(glob);
-            if (!validGlob(glob)) return error.Invalid;
+            if (!validGlob(glob))
+                return diagnostic.fail("scope `{s}` has invalid source pattern `{s}`; patterns are relative, without `.`, `..`, or partial `**` segments", .{ scope.name, glob });
             try globs.append(allocator, glob);
         }
-        var root = std.Io.Dir.cwd().openDir(io, scope.root, .{ .iterate = true }) catch return error.Invalid;
+        var root = std.Io.Dir.cwd().openDir(io, scope.root, .{ .iterate = true }) catch |err|
+            return diagnostic.fail("cannot open source root `{s}` of scope `{s}`: {s}", .{ scope.root, scope.name, @errorName(err) });
         defer root.close(io);
         var walker = root.walk(allocator) catch return error.OutOfMemory;
         defer walker.deinit();
         while (walker.next(io) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.Invalid,
+            else => return diagnostic.fail("cannot list sources under `{s}` of scope `{s}`: {s}", .{ scope.root, scope.name, @errorName(err) }),
         }) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".ecl")) continue;
             var selected = false;
             for (globs.items) |glob| selected = selected or globMatches(glob, entry.path);
             if (!selected) continue;
-            if (!safePath(entry.path)) return error.Invalid;
+            if (!safePath(entry.path))
+                return diagnostic.fail("source `{s}` in scope `{s}` has an unsupported path; rename it or exclude it from `sources`", .{ entry.path, scope.name });
             const source = root.readFileAlloc(io, entry.path, allocator, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return error.Invalid,
+                else => return diagnostic.fail("cannot read source `{s}` in scope `{s}`: {s}", .{ entry.path, scope.name, @errorName(err) }),
             };
             defer allocator.free(source);
             owned.source_bytes += source.len;
-            if (owned.source_bytes > 64 * 1024 * 1024) return error.Invalid;
+            if (owned.source_bytes > 64 * 1024 * 1024)
+                return diagnostic.fail("discovered sources exceed 64 MiB at `{s}` in scope `{s}`", .{ entry.path, scope.name });
             var source_diag: reader.Diag = .{};
             var forms = switch (reader.read(host, entry.path, source, &source_diag) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return error.Invalid,
+                else => return diagnostic.fail("source `{s}` in scope `{s}` does not parse: {s}", .{ entry.path, scope.name, source_diag.text() }),
             }) {
                 .complete => |complete| complete,
-                .incomplete => return error.Invalid,
+                .incomplete => |incomplete| return diagnostic.fail("source `{s}` in scope `{s}` is incomplete: {s}", .{ entry.path, scope.name, incomplete.message }),
             };
             defer forms.deinit();
             var names: std.ArrayList(intern.ModuleName) = .empty;
             defer names.deinit(allocator);
             var scanner: reader.DeclarationScan = .{};
             for (forms.values()) |form| if (scanner.feed(form)) |symbol| {
-                const name = intern.moduleName(symbol) catch return error.Invalid;
+                const name = intern.moduleName(symbol) catch
+                    return diagnostic.fail("source `{s}` in scope `{s}` declares invalid module name `{s}`", .{ entry.path, scope.name, intern.get(symbol) });
                 try names.append(allocator, name);
             };
-            try addArtifact(owned, id, entry.path, .ecl, names.items);
+            try addArtifact(owned, id, entry.path, .ecl, names.items, diagnostic);
         }
     }
     std.mem.sort(Artifact, owned.artifacts.items, {}, struct {
@@ -266,21 +341,30 @@ pub fn validate(host: *const heap.HostCleanup, io: std.Io, bytes: []const u8, pa
     return result;
 }
 
-fn addArtifact(owned: *Backing, scope: ScopeId, path: []const u8, kind: Kind, names: []const intern.ModuleName) Error!void {
-    if (owned.artifacts.items.len == 4096) return error.Invalid;
+fn addArtifact(owned: *Backing, scope: ScopeId, path: []const u8, kind: Kind, names: []const intern.ModuleName, diagnostic: *Diagnostic) Error!void {
+    const scope_name = owned.scopes.items[@backingInt(scope)].name;
+    if (owned.artifacts.items.len == 4096)
+        return diagnostic.fail("module map exceeds 4096 artifacts at `{s}` in scope `{s}`", .{ path, scope_name });
     var count = names.len;
     for (names, 0..) |name, index| for (names[0..index]) |prior| {
-        if (prior == name) return error.Invalid;
+        if (prior == name)
+            return diagnostic.fail("`{s}` in scope `{s}` declares module `{s}` more than once", .{ path, scope_name, moduleSpelling(name) });
     };
     for (owned.artifacts.items) |prior| {
         count += prior.exports.len;
-        if (std.mem.eql(u8, owned.scopes.items[@backingInt(prior.scope)].root, owned.scopes.items[@backingInt(scope)].root) and
-            std.mem.eql(u8, prior.path, path)) return error.Invalid;
+        const prior_scope = owned.scopes.items[@backingInt(prior.scope)];
+        if (std.mem.eql(u8, prior_scope.root, owned.scopes.items[@backingInt(scope)].root) and
+            std.mem.eql(u8, prior.path, path))
+            return diagnostic.fail("artifact `{s}` appears in both scope `{s}` and scope `{s}`, which share a root", .{ path, prior_scope.name, scope_name });
         for (names) |name| for (prior.exports) |existing| {
-            if (name == existing) return error.Invalid;
+            if (name == existing) return diagnostic.fail(
+                "module `{s}` is declared by both `{s}` (scope `{s}`) and `{s}` (scope `{s}`); rename one module or exclude one file from `sources`",
+                .{ moduleSpelling(name), prior.path, prior_scope.name, path, scope_name },
+            );
         };
     }
-    if (count > 65_536) return error.Invalid;
+    if (count > 65_536)
+        return diagnostic.fail("module map exceeds 65536 exported modules at `{s}` in scope `{s}`", .{ path, scope_name });
     const owned_path = try owned.allocator.dupe(u8, path);
     errdefer owned.allocator.free(owned_path);
     const exports = try owned.allocator.dupe(intern.ModuleName, names);
@@ -291,6 +375,10 @@ fn addArtifact(owned: *Backing, scope: ScopeId, path: []const u8, kind: Kind, na
         }
     }.less);
     try owned.artifacts.append(owned.allocator, .{ .scope = scope, .path = owned_path, .kind = kind, .exports = exports });
+}
+
+fn moduleSpelling(name: intern.ModuleName) []const u8 {
+    return intern.get(intern.moduleId(name));
 }
 
 fn findScope(owned: *const Backing, name: []const u8) ?ScopeId {
@@ -384,9 +472,10 @@ fn validationAllocation(document: []const u8) !usize {
     var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var host = heap.HostOwner.init(counting.allocator());
     defer host.cleanup().drain();
+    var diagnostic: Diagnostic = .{};
     try std.testing.expectError(
         error.Invalid,
-        validate(host.cleanup(), std.testing.io, document, "/maps/ecl.modules", true),
+        validate(host.cleanup(), std.testing.io, document, "/maps/ecl.modules", true, &diagnostic),
     );
     return counting.allocated_bytes;
 }
