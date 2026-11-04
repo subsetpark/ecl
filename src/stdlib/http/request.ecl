@@ -46,7 +46,7 @@
 
  ### defp string-field?
  (name request -- bool : "Return 1 when an optional request field is absent or a string.")
- (swap over over dict.has? (at str.str?) (pop pop 1) if) `string-field? defp
+ (swap 2dup dict.has? (at str.str?) (pop pop 1) if) `string-field? defp
 
  ### def valid?
  (value -- bool :

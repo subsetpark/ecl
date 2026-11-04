@@ -16,7 +16,7 @@
 
 ### def relativize-absolute
 (root path -- path : "Strip the build root prefix from an absolute path beneath it.")
-(swap root-prefix over over str.starts?
+(swap root-prefix 2dup str.starts?
  `domain error.new "assembly input is outside the build root" error.with-message assert
  len drop) `relativize-absolute def
 

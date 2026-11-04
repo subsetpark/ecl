@@ -89,7 +89,7 @@
 
 ### def rank-of
 (name ranks -- rank : "Return a name's rank, or zero for a word without a definition.")
-(swap over over dict.has? (at) (pop pop 0) if) `rank-of def
+(swap 2dup dict.has? (at) (pop pop 0) if) `rank-of def
 
 ### def rank-order
 (names ranks -- indices : "Return the permutation ordering names by rank, then by codepoint.")
@@ -140,7 +140,7 @@
 
 ### def prelude-ranks
 (-- ranks : "Rank the prelude's definitions after checking that the file is already in rank order.")
-("src/prelude.ecl" source-forms definitions over swap ranks over over rank-order
+("src/prelude.ecl" source-forms definitions over swap ranks 2dup rank-order
  (|names ranks order|
   names order at names match?
   "src/prelude.ecl is not in dependency-rank, codepoint order" check

@@ -27,6 +27,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "1 2 3 rollup 4 5 6 rolldown",
             .expected = "3 1 2 5 6 4",
         },
+        .{ .name = "two-value stack copy", .source = "1 2 2dup", .expected = "1 2 1 2" },
         .{
             .name = "migrated numeric words",
             .source = "7 3 mod -2 neg -2 abs 2 3 <> 2 2 <> 2 3 <= 3 2 <= " ++
@@ -92,8 +93,9 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
                 "2 3 (+) (*) bi2 2 3 (1 +) both 2 3 (+) (*) (-) tri2 " ++
-                "3 [(1 +) (2 *) (1 -)] cleave 3 [] cleave `w [(type) ()] cleave",
-            .expected = "2 4 3 4 6 4 6 2 5 6 3 4 5 6 -1 4 6 2 symbol w",
+                "3 [(1 +) (2 *) (1 -)] cleave 3 [] cleave `w [(type) ()] cleave " ++
+                "2 3 (+) 2keep `w 4 (pop type) 2keep (type) dip",
+            .expected = "2 4 3 4 6 4 6 2 5 6 3 4 5 6 -1 4 6 2 symbol w 5 2 3 symbol symbol 4",
         },
         .{
             .name = "derived control and scalar",
@@ -183,6 +185,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "setp",     "assert",    "rotate",      "windows",      "each-prior",
         "fold1",    "scan1",     "iterations",  "while-values", "converges",
         "converge", "chunk",     "from-digits", "to-digits",    "collect",
+        "2dup",     "2keep",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

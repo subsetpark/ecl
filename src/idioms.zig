@@ -153,8 +153,7 @@ const abs_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "max" } },
 };
 const mod_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "over", .binding = .source } },
-    .{ .word = .{ .spelling = "over", .binding = .source } },
+    .{ .word = .{ .spelling = "2dup", .binding = .source } },
     .{ .word = .{ .spelling = "div" } },
     .{ .word = .{ .spelling = "*" } },
     .{ .word = .{ .spelling = "-" } },

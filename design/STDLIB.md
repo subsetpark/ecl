@@ -112,6 +112,9 @@ Conventions:
 ### /
 `( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
 
+### 2keep
+`( x y q -- ... )` — *Inline.* Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top of the quotation's results.
+
 ### <
 `( x y -- bool )` — **Pervasive.** Ascending comparison, producing 0/1 masks.
 
@@ -988,6 +991,9 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 # => 3 3
 ```
 
+### 2dup
+`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
+
 ### @each
 `( sequence values quotation -- results )` — *Unit constructor*, one fresh unit per element, contract `( a -- b )` enforced per element. Concurrent `each`: apply a quotation in one fresh unit per element and return one result per element in input order. Each child's stack starts with its element deepest; `list values (q) @each` adds the shared values above it. Results are joined in order; the leftmost failure cancels every later task, waits for them to quiesce, and is re-raised. Defined in ecl over `@spawn`, `task.await`, and `task.cancel`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See Concurrency.
 
@@ -1026,9 +1032,6 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ### lex-cmp-with
 `( left right comparator -- order )` — Compare two sequences lexicographically with an inline `( left-element right-element -- order )` comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the sequences are ordered by length. Defined in ecl.
 
-### mod
-`( x y -- z )` — **Pervasive.** Compute checked integer remainders.
-
 ### partition
 `( sequence predicate -- matches rejects )` — *Isolated*, contract `( a -- bool )`. Split a sequence into the elements whose predicate returned 1 and those that returned 0. Defined in ecl.
 
@@ -1052,6 +1055,35 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 ### bi
 `( x p q -- ... )` — *Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
 
+### cleave
+`( x quotations -- ... )` — *Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. Each quotation runs on the stack the previous one left, with a fresh copy of the input on top, so a later quotation can consume earlier results: `3 [(1 +) (+)] cleave` leaves `7`. The input is pushed inertly, so a symbol is pushed rather than executed. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
+
+### converge
+`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches a fixed point or returns to the initial value.
+
+### mod
+`( x y -- z )` — **Pervasive.** Compute checked integer remainders.
+
+### product
+`( sequence -- product )` — Multiply every element of a numeric sequence; 1 when the sequence is empty. A nonempty sequence's product starts from its first element, so a list of rows multiplies to a row.
+
+### sum
+`( sequence -- total )` — Add every element of a numeric sequence; 0 when the sequence is empty. A nonempty sequence's total starts from its first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
+
+#### Examples
+
+```ecl
+[1 2 3] sum
+# => 6
+[[1 2] [3 4]] sum
+# => [4 6]
+[] sum
+# => 0
+```
+
+### tri
+`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input in left-to-right order.
+
 ### case
 `( x clauses -- ... )` — *Inline.* Select and call the first action whose key matches the subject. The clause list is flat, nonempty, and odd: `[key action … else]`. Keys are inert data: any value, never executed, with duplicates legal and the first `match?` result of 1 winning. Every action and the else must be a quotation, and all of them are validated before any comparison or user quotation runs. When no key matches, the else runs. Defined in ecl; `` `case see `` renders the definition.
 
@@ -1072,28 +1104,8 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 # => [[0 1 2] [3 4 5] [6]]
 ```
 
-### cleave
-`( x quotations -- ... )` — *Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. Each quotation runs on the stack the previous one left, with a fresh copy of the input on top, so a later quotation can consume earlier results: `3 [(1 +) (+)] cleave` leaves `7`. The input is pushed inertly, so a symbol is pushed rather than executed. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
-
-### converge
-`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches a fixed point or returns to the initial value.
-
-### product
-`( sequence -- product )` — Multiply every element of a numeric sequence; 1 when the sequence is empty. A nonempty sequence's product starts from its first element, so a list of rows multiplies to a row.
-
-### sum
-`( sequence -- total )` — Add every element of a numeric sequence; 0 when the sequence is empty. A nonempty sequence's total starts from its first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
-
-#### Examples
-
-```ecl
-[1 2 3] sum
-# => 6
-[[1 2] [3 4]] sum
-# => [4 6]
-[] sum
-# => 0
-```
+### mean
+`( sequence -- mean )` — Return the arithmetic mean of a nonempty numeric sequence.
 
 ### to-digits
 `( value radices -- digits )` — Split a value into one digit per radix, most significant first, by floor division, so every digit lies from zero below its radix even for negative values. A value beyond the radices' capacity keeps only its low digits. Values pervade: a list of values gives one digit list per radix. Radices must be positive integers, or the word fails with `` `domain ``; `[2] 8 take` builds eight binary radices.
@@ -1108,12 +1120,6 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 -7 [10 10] to-digits
 # => [9 3]
 ```
-
-### tri
-`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input in left-to-right order.
-
-### mean
-`( sequence -- mean )` — Return the arithmetic mean of a nonempty numeric sequence.
 
 ## agent
 
