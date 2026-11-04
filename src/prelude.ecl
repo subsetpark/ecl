@@ -435,6 +435,36 @@ def
  qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
  qs x (|q x| x literal wrap q append `call append) partial each raze call) `cleave def
 
+### def cleave-n
+# As cleave, with the packed inputs pushed above each previous result.
+(: "*Inline.* N-ary cleave. Takes `x₁ … xₙ n quotations`: apply each quotation in a list to the same
+    `n` input values in left-to-right order, leaving each quotation's results above the previous
+    one's: `x 1 [p q] cleave-n` is `x [p q] cleave`, and `x y 2 [p q] cleave-n` is `x y [p q]
+    cleave2`. Each quotation runs on the stack the previous one left, with fresh copies of the
+    inputs on top. The inputs are pushed inertly, so a symbol is pushed rather than executed. `n`
+    must be a nonnegative int, and the list and each of its elements must be quotations, or the word
+    fails with `` `type `` or `` `domain `` before any quotation runs. An empty list consumes the
+    inputs and leaves nothing; `0` runs each quotation with no inputs pushed.")
+(|n qs|
+ n type `int match? {kind type msg "cleave-n expected an int arity"} assert
+ n 0 >= {kind domain msg "cleave-n arity must be nonnegative"} assert
+ qs type `list match? {kind type msg "cleave-n expected a list of quotations"} assert
+ qs (type `list match?) all? {kind type msg "cleave-n expected a list of quotations"} assert
+ n pack (literal) each qs swap
+ (|q xs| xs q append `call append) partial
+ each raze call) `cleave-n def
+
+### def cleave2
+(x y quotations -- ... :
+ "*Inline.* Binary cleave: apply each quotation in a list to the same pair of input values in
+  left-to-right order, leaving each quotation's results above the previous one's: `x y [p q]
+  cleave2` is `x y p q bi2`. Each quotation runs on the stack the previous one left, with fresh
+  copies of `x` and `y` on top, so a later quotation can consume earlier results: `2 3 [(+) (+ +)]
+  cleave2` leaves `10`. The inputs are pushed inertly, so a symbol is pushed rather than executed.
+  The list and each of its elements must be quotations, or the word fails with `` `type `` before
+  any quotation runs. An empty list consumes both inputs and leaves nothing.")
+(2 swap cleave-n) `cleave2 def
+
 ### def converge
 (value quotation -- value :
  "*Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches

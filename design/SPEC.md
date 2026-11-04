@@ -1196,8 +1196,8 @@ failing (see Concurrency).
 Three quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
-  are `call`, `dip`, `keep`, `bi`, `tri`, `bi2`, `tri2`, `both`, `if`, `when`,
-  `unless`, `case`, and `times`.
+  are `call`, `dip`, `keep`, `bi`, `tri`, `cleave`, `bi2`, `tri2`, `cleave2`,
+  `cleave-n`, `both`, `if`, `when`, `unless`, `case`, and `times`.
 - **Checkpointed inline guards**: `cond`, `while`, and `linrec` test quotations run
   inline against a retained operand-stack checkpoint. A test
   may consume, rearrange, or add values; its top value must be a 0/1 boolean,
