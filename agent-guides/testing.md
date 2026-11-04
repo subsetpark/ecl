@@ -157,7 +157,13 @@ reason before selecting the matrix.
   `zig build` output runs the DebugAllocator, whose per-allocation machinery can
   be hundreds of times slower on allocation-heavy paths and can fabricate a
   convincing per-operation “defect” with clean-looking scaling curves. Rebuild
-  with `-Doptimize=safe` before timing anything.
+  with `-Doptimize=safe` before timing anything. Release builds strip the CLI's
+  debug info and symbols by default; add `-Dstrip=false` before profiling it
+  with `sample` or reproducing a crash. The flag only changes what a build
+  emits: it cannot restore symbols to an already stripped binary, and a rebuild
+  from different source or build inputs may not symbolize an existing trace.
+  Build the exact binary under investigation with `-Dstrip=false`, and keep
+  the matching unstripped artifact to symbolicate a crash trace.
 
 ## Allocators, OOM, and ownership in tests
 
