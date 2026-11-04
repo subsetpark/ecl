@@ -1100,7 +1100,11 @@ and driver setup stay outside the operation-by-representation expansion, while
 the bounded element loops retain their concrete types: the executor is
 instantiated once per result representation and broadcast shape, and a plan
 contributes only its loop, so a new storage class multiplies loops and never
-executors.
+executors. A class pair on which an operation faults at every element is not
+reachable. An operation whose result does not depend on operand order compiles
+one loop per unordered pair: the other order, and a broadcast scalar on the
+left, run that loop with exchanged operands. A loop's vector width is therefore
+a function of the pair rather than its order.
 Sequential reductions use the same separation: a static plan admits accumulator
 classes that stabilize after at most one scalar operation, and owns selection
 for both the recognition guard and entry. A transitioning seed participates in

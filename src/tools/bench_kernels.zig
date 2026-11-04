@@ -318,6 +318,23 @@ fn classMatrix(io: std.Io, out: *std.Io.Writer) !void {
                 }
             }
         }
+        // A scalar on the left reaches the mirrored plans, which the leaf
+        // pairs above never run.
+        for (matrix_operations) |operation| {
+            inline for (matrix_scalars) |left_scalar| {
+                inline for (matrix_classes) |right_class| {
+                    const right = try std.fmt.allocPrint(std.heap.smp_allocator, right_class.leaf, .{size});
+                    defer std.heap.smp_allocator.free(right);
+                    const setup = try std.fmt.allocPrint(std.heap.smp_allocator, "{s} {s}", .{ left_scalar.leaf, right });
+                    defer std.heap.smp_allocator.free(setup);
+                    const phrase = try std.fmt.allocPrint(std.heap.smp_allocator, "over over {s} pop", .{operation});
+                    defer std.heap.smp_allocator.free(phrase);
+                    const label = try std.fmt.allocPrint(std.heap.smp_allocator, "{s} {s} {s}", .{ left_scalar.name, right_class.name, operation });
+                    defer std.heap.smp_allocator.free(label);
+                    try reportMatrixCase(out, label, size, measureMatrixCase(io, setup, phrase, size));
+                }
+            }
+        }
         for (matrix_reductions) |reduction| {
             inline for (matrix_classes) |class| {
                 const setup = try std.fmt.allocPrint(std.heap.smp_allocator, class.leaf, .{size});
