@@ -91,8 +91,9 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
-                "2 3 (+) (*) bi2 2 3 (1 +) both 2 3 (+) (*) (-) tri2",
-            .expected = "2 4 3 4 6 4 6 2 5 6 3 4 5 6 -1",
+                "2 3 (+) (*) bi2 2 3 (1 +) both 2 3 (+) (*) (-) tri2 " ++
+                "3 [(1 +) (2 *) (1 -)] cleave 3 [] cleave `w [(type) ()] cleave",
+            .expected = "2 4 3 4 6 4 6 2 5 6 3 4 5 6 -1 4 6 2 symbol w",
         },
         .{
             .name = "derived control and scalar",
@@ -261,6 +262,8 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         },
         .{ .name = "case shape", .source = "1 [] case", .kind = "shape" },
         .{ .name = "case type", .source = "1 2 case", .kind = "type" },
+        .{ .name = "cleave type", .source = "1 2 cleave", .kind = "type" },
+        .{ .name = "cleave validates before running", .source = "1 [(missing) 2] cleave", .kind = "type" },
         .{ .name = "at-path propagates lookup failure", .source = "{a [1]} [a 4] at-path", .kind = "domain", .word = "at" },
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },
