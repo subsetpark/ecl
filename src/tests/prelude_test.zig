@@ -101,6 +101,12 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "2 4 3 4 6 4 6 2 5 6 3 4 5 6 -1 4 6 2 symbol w 5 6 -1 10 symbol v w 6 6 4 6 7 8 symbol v w 5 2 3 symbol symbol 4",
         },
         .{
+            .name = "cleaves keep a quoted symbol input quoted",
+            .source = "(`m) first [()] cleave wrap call (`m) first 1 [()] cleave-n wrap call " ++
+                "(`m) first `n [()] cleave2 pop wrap call",
+            .expected = "m m m",
+        },
+        .{
             .name = "derived control and scalar",
             .source = "1 (7) when 0 (8) when 0 (9) unless 1 (10) unless " ++
                 "3 [1 (10) 3 (30) (90)] case (foo) first [foo (70) (90)] case " ++
