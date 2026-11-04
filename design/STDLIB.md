@@ -1072,6 +1072,9 @@ This is ordinary quotation composition and constructs nothing. It is not a unit'
 # => [[0 1 2] [3 4 5] [6]]
 ```
 
+### cleave
+`( x quotations -- ... )` — *Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. The input is captured inertly, so a symbol is pushed rather than executed. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
+
 ### converge
 `( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches a fixed point or returns to the initial value.
 

@@ -450,6 +450,20 @@ def
  k 0 > {kind domain msg "chunk size must be positive"} assert
  xs xs len k div xs len k mod 0 > + range k * cut) `chunk def
 
+### def cleave
+# Build one program that pushes the captured input before each quotation, then
+# run it inline, so every quotation sees the stack the previous one left.
+(x quotations -- ... :
+ "*Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each
+  quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. The input is
+  captured inertly, so a symbol is pushed rather than executed. The list and each of its elements
+  must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list
+  consumes the input and leaves nothing.")
+(|x qs|
+ qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
+ qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
+ qs x (swap partial) partial each [] (cat) fold call) `cleave def
+
 ### def converge
 (value quotation -- value :
  "*Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches
