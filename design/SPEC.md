@@ -2066,6 +2066,16 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   import in a module re-exports the alias, which chains: `a.x` names `m.x`.
   Alias cycles are `` `domain `` when reached or validated; an alias whose
   target is missing is `` `undefined-word `` then.
+  Imports between modules do not depend on which file declares a module or
+  where in it. When a module body imports from a module that is unregistered
+  because its own load is still in progress (declared later in the same file,
+  or by a file whose load led to this one), the import publishes its aliases
+  without loading, and the load that registers the module validates them
+  before it completes. A missing or private attribute then fails that load as
+  `` `undefined-word ``, whose data names the importing module. Each deferred
+  name is checked once, by that load. Construction still cannot call such a
+  name, because it resolves only once its module is sealed. Top-level imports
+  are never deferred.
   At top level, naming a binding that already exists replaces only that
   binding; in a module body an imported name, like a defined one, may be
   introduced once. Importing selected names never splices an entire module.

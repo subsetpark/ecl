@@ -959,6 +959,75 @@ test "loader: a failing mapped artifact publishes no usable module" {
     try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
 }
 
+test "loader: module-body imports do not depend on which file declares the module or where" {
+    for ([_][]const u8{ "pair.left.sum", "pair.right.sum" }) |entry| {
+        var inputs = try runtime_fixture.Fixture.init();
+        defer inputs.deinit();
+        try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
+            "{path \"left.ecl\" kind ecl exports [\"pair.left\" \"pair.later\"]} " ++
+            "{path \"right.ecl\" kind ecl exports [\"pair.right\"]}]}}}");
+        // `pair.left` imports from a module declared after it in its own file
+        // and from a file whose own module imports back from this one.
+        try writeInput(&inputs, "left.ecl", "[] (`pair.later (base) importp `pair.right (step) importp " ++
+            "(1) `one def (base step +) `sum def) `pair.left @defm\n" ++
+            "[] ((10) `base def) `pair.later @defm\n");
+        try writeInput(&inputs, "right.ecl", "[] (`pair.left (one) importp (one 100 +) `step def " ++
+            "(step base +) `sum def `pair.later (base) importp) `pair.right @defm\n");
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+        defer runtime.deinit();
+        try expectOk(&runtime, entry);
+        try expectOk(&runtime, "pair.left.sum pair.right.sum");
+        for (runtime.stackItems()) |item| try std.testing.expectEqual(@as(i64, 111), item.int);
+    }
+}
+
+test "loader: a deferred module-body import is still validated by the load" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try writeInput(&inputs, "ecl.modules", "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
+        "{path \"outer.ecl\" kind ecl exports [\"outer\"]} " ++
+        "{path \"inner.ecl\" kind ecl exports [\"inner\"]} " ++
+        "{path \"private.ecl\" kind ecl exports [\"private\" \"sealed\"]} " ++
+        "{path \"early.ecl\" kind ecl exports [\"early\" \"late\"]} " ++
+        "{path \"top.ecl\" kind ecl exports [\"top\" \"after\"]}]}}}");
+    try writeInput(&inputs, "outer.ecl", "[] (`inner (x) importp (0) `go def) `outer @defm\n");
+    try writeInput(&inputs, "inner.ecl", "[] (`outer (missing) importp (2) `x def) `inner @defm\n");
+    try writeInput(&inputs, "private.ecl", "[] (`sealed (secret) importp (0) `go def) `private @defm\n[] ((1) `secret defp) `sealed @defm\n");
+    try writeInput(&inputs, "early.ecl", "[] (`late (y) importp y `v set) `early @defm\n[] ((2) `y def) `late @defm\n");
+    try writeInput(&inputs, "top.ecl", "`after (z) import\n[] ((3) `z def) `after @defm\n[] () `top @defm\n");
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
+    defer runtime.deinit();
+    // The misspelled name is in the nested file; the outer load checks it,
+    // and the failure names the module that imported it.
+    try expectErrorContains(&runtime, "outer.go", &.{ "kind undefined-word", "name outer.missing", "importer inner", "outer.ecl" });
+    try expectErrorContains(&runtime, "private.go", &.{ "kind undefined-word", "name sealed.secret", "importer private" });
+    // A staged alias is not visible before its module seals, so construction
+    // still cannot call a word its body has yet to define.
+    try expectErrorContains(&runtime, "early.v", &.{ "kind undefined-word", "undefined word `y`" });
+    // Top-level source stays incremental.
+    try expectErrorContains(&runtime, "top.z", &.{ "kind domain", "recursive auto-load" });
+}
+
+test "loader: ECL_PATH modules import from each other" {
+    var inputs = try runtime_fixture.Fixture.init();
+    defer inputs.deinit();
+    try writeInput(&inputs, "ping.ecl", "[] (`pong (bounce) importp (1) `one def (bounce 10 +) `total def) `ping @defm");
+    try writeInput(&inputs, "pong.ecl", "[] (`ping (one) importp (one 1 +) `bounce def) `pong @defm");
+    try writeInput(&inputs, "typo.ecl", "[] (`other (ay) importp) `typo @defm");
+    try writeInput(&inputs, "other.ecl", "[] (`typo (nope) importp (1) `ay def) `other @defm");
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{ .ecl_path = inputs.cwd }), .cooperative, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "ping.total");
+    try std.testing.expectEqual(@as(i64, 12), runtime.stackItems()[0].int);
+    try expectErrorContains(&runtime, "typo.ay", &.{ "kind undefined-word", "name typo.nope", "importer other" });
+}
+
 test "loader: one quotation rechecks direct visibility in each scope" {
     var inputs = try runtime_fixture.Fixture.init();
     defer inputs.deinit();

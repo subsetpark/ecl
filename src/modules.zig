@@ -1755,6 +1755,52 @@ const LoadingNode = struct {
     key: LoadingKey,
     owner: std.atomic.Value(usize),
     next: ?*LoadingNode,
+    /// Module-body imports that named a module this load has yet to
+    /// register. Only the lease holder writes it, and every release empties
+    /// it before the owner slot frees, so a later holder starts with none.
+    deferred: std.ArrayList(DeferredImport) = .empty,
+
+    fn releaseDeferred(self: *LoadingNode) void {
+        self.deferred.clearAndFree(self.registry.allocator());
+    }
+};
+
+/// One public name a module body imported from a module that the importing
+/// fiber's own load chain is still loading. The import stages its alias
+/// without validating it; the load holding the lease validates every
+/// deferred name before it completes, so a misspelled import still fails the
+/// load rather than its first use.
+pub const DeferredImport = struct {
+    module: intern.ModuleName,
+    binding: intern.BindingName,
+    /// The qualified spelling an undefined-word failure reports.
+    qualified: u32,
+    /// The module whose body imported the name, which a failure reports:
+    /// it need not be a module of the load that checks it.
+    importer: intern.ModuleName,
+};
+
+/// Proof that the requesting owner holds the loading lease for a key. Only
+/// `Registry.HeldLoadingCursor` mints one, and only for the owner that holds
+/// it. The lease's frame lies below the requesting driver on that owner's own
+/// evaluation, so it cannot be released while the claim is in use.
+pub const LoadingClaim = enum(usize) {
+    _,
+
+    fn init(loading: *LoadingNode) LoadingClaim {
+        return @fromBackingInt(@intCast(@intFromPtr(loading)));
+    }
+    fn node(self: LoadingClaim) *LoadingNode {
+        return @ptrFromInt(@backingInt(self));
+    }
+    pub fn reserveDeferred(self: LoadingClaim, count: usize) error{OutOfMemory}!void {
+        const loading = self.node();
+        try loading.deferred.ensureUnusedCapacity(loading.registry.allocator(), count);
+    }
+    /// Requires capacity from `reserveDeferred`.
+    pub fn deferAssumeCapacity(self: LoadingClaim, item: DeferredImport) void {
+        self.node().deferred.appendAssumeCapacity(item);
+    }
 };
 /// The authority to make one artifact's registrations visible. Only
 /// `LoadingLease.artifactCommit` mints one, and only from a live lease keyed
@@ -1793,6 +1839,10 @@ pub const LoadingLease = enum(usize) {
         std.debug.assert(self != .finished);
         return @ptrFromInt(@backingInt(self));
     }
+    /// The imports deferred onto this load. Valid until the lease is released.
+    pub fn deferredImports(self: LoadingLease) []const DeferredImport {
+        return self.node().deferred.items;
+    }
     pub fn move(self: *LoadingLease) LoadingLease {
         const result = self.*;
         std.debug.assert(result != .finished);
@@ -1801,12 +1851,14 @@ pub const LoadingLease = enum(usize) {
     }
     pub fn finish(self: *LoadingLease) void {
         const loading = self.node();
+        loading.releaseDeferred();
         loading.owner.store(free_loading_owner, .release);
         self.* = .finished;
     }
     pub fn deinit(self: *LoadingLease) void {
         if (self.* == .finished) return;
         const loading = self.node();
+        loading.releaseDeferred();
         loading.owner.store(free_loading_owner, .release);
         self.* = .finished;
     }
@@ -1888,6 +1940,7 @@ pub const Registry = enum(usize) {
         var loading = backing.loading.load(.acquire);
         while (loading) |node| {
             loading = node.next;
+            node.releaseDeferred();
             self.allocator().destroy(node);
         }
         backing.host.drain();
@@ -2871,6 +2924,29 @@ pub const Registry = enum(usize) {
             .owner = owner,
             .state = .{ .scan = .{ .observed_head = head, .cursor = head } },
         };
+    }
+
+    /// Scans for a lease `owner` already holds on `key`, without reserving
+    /// or contending: one node per advance. Another owner's lease, or none,
+    /// completes with null.
+    pub const HeldLoadingCursor = struct {
+        key: LoadingKey,
+        owner: LoadingOwner,
+        cursor: ?*LoadingNode,
+
+        pub fn advance(self: *HeldLoadingCursor) poll.Progress(?LoadingClaim) {
+            const node = self.cursor orelse return .{ .complete = null };
+            self.cursor = node.next;
+            if (!node.key.eql(self.key)) return .pending;
+            if (node.owner.load(.acquire) != self.owner.token()) return .{ .complete = null };
+            return .{ .complete = .init(node) };
+        }
+    };
+    pub fn heldModuleLoadingCursor(self: *Registry, name: intern.ModuleName, owner: LoadingOwner) HeldLoadingCursor {
+        return .{ .key = .{ .module = name }, .owner = owner, .cursor = self.privateState().loading.load(.acquire) };
+    }
+    pub fn heldArtifactLoadingCursor(self: *Registry, artifact: map_state.ArtifactId, owner: LoadingOwner) HeldLoadingCursor {
+        return .{ .key = .{ .artifact = artifact }, .owner = owner, .cursor = self.privateState().loading.load(.acquire) };
     }
 
     pub fn beginArtifactLoadingCursor(
