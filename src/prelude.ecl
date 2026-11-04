@@ -418,6 +418,23 @@ def
   beneath `q`'s.")
 ((keep) dip call) `bi def
 
+### def cleave
+# Call each original quotation in turn with the input pushed above whatever the
+# previous one left. Calling the quotations themselves keeps their provenance
+# and avoids building one large spliced program.
+(x quotations -- ... :
+ "*Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each
+  quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. Each quotation runs
+  on the stack the previous one left, with a fresh copy of the input on top, so a later quotation
+  can consume earlier results: `3 [(1 +) (+)] cleave` leaves `7`. The input is pushed inertly, so a
+  symbol is pushed rather than executed. The list and each of its elements must be quotations, or
+  the word fails with `` `type `` before any quotation runs. An empty list consumes the input and
+  leaves nothing.")
+(|x qs|
+ qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
+ qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
+ qs x (|q x| x literal wrap q append `call append) partial each raze call) `cleave def
+
 ### def converge
 (value quotation -- value :
  "*Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches
@@ -486,23 +503,6 @@ def
 (|xs k|
  k 0 > {kind domain msg "chunk size must be positive"} assert
  xs xs len k div xs len k mod 0 > + range k * cut) `chunk def
-
-### def cleave
-# Call each original quotation in turn with the input pushed above whatever the
-# previous one left. Calling the quotations themselves keeps their provenance
-# and avoids building one large spliced program.
-(x quotations -- ... :
- "*Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each
-  quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. Each quotation runs
-  on the stack the previous one left, with a fresh copy of the input on top, so a later quotation
-  can consume earlier results: `3 [(1 +) (+)] cleave` leaves `7`. The input is pushed inertly, so a
-  symbol is pushed rather than executed. The list and each of its elements must be quotations, or
-  the word fails with `` `type `` before any quotation runs. An empty list consumes the input and
-  leaves nothing.")
-(|x qs|
- qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
- qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
- qs x (|q x| x literal wrap q append `call append) partial each raze call) `cleave def
 
 ### def mean
 (sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")
