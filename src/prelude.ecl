@@ -1,3 +1,9 @@
+### def 2keep
+(x y q -- ... :
+ "*Inline.* Binary `keep`: apply a quotation to a pair of values, then restore both values, in
+  order, on top of the quotation's results.")
+(|x y q| x y q call x y) `2keep def
+
 ### def <=
 (x y -- bool :
  "**Pervasive.** Compare conforming values for less-than-or-equal order, producing boolean masks.")
@@ -276,6 +282,10 @@ def
   operands, preserving the exact body for attribution.")
 (((literal) each) dip cat) `with def
 
+### def 2dup
+(x y -- x y x y : "Copy the top two stack values onto the top, preserving their order.")
+(over over) `2dup def
+
 ### def @each
 (sequence values quotation -- results :
  "*Unit constructor*, one fresh unit per element, contract `( a -- b )` enforced per element.
@@ -389,10 +399,6 @@ def
   over 0 = (nip) (pop) if)
  call) `lex-cmp-with def
 
-### def mod
-(x y -- z : "**Pervasive.** Compute checked integer remainders.")
-(over over div * -) `mod def
-
 ### def partition
 (sequence predicate -- matches rejects :
  "*Isolated*, contract `( a -- bool )`. Split a sequence into the elements whose predicate returned
@@ -411,6 +417,37 @@ def
  "*Inline.* Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results
   beneath `q`'s.")
 ((keep) dip call) `bi def
+
+### def converge
+(value quotation -- value :
+ "*Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches
+  a fixed point or returns to the initial value.")
+(converges last) `converge def
+
+### def mod
+(x y -- z : "**Pervasive.** Compute checked integer remainders.")
+(2dup div * -) `mod def
+
+### def product
+# A nonempty sequence starts from its first element, as `(*) fold1` does, so
+# no one seed multiplies a copy of a first row.
+(sequence -- product :
+ "Multiply every element of a numeric sequence; 1 when the sequence is empty. A nonempty sequence's
+  product starts from its first element, so a list of rows multiplies to a row.")
+(dup empty? (pop 1) ((*) fold1) if) `product def
+
+### def sum
+# A nonempty sequence starts from its first element, as `(+) fold1` does, so
+# no zero seed copies a first row or turns a -0.0 total into 0.0.
+(sequence -- total :
+ "Add every element of a numeric sequence; 0 when the sequence is empty. A nonempty sequence's total
+  starts from its first element: a list of rows sums to a row, and a sum of negative zeros is
+  `-0.0`.")
+(dup empty? (pop 0) ((+) fold1) if) `sum def
+
+### def tri
+(x p q r -- ... : "*Inline.* Apply three quotations to the same input in left-to-right order.")
+(((keep) dip keep) dip call) `tri def
 
 ### def case
 # Validate the clause container before inspecting any clause.
@@ -467,28 +504,9 @@ def
  qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
  qs x (|q x| x literal wrap q append `call append) partial each raze call) `cleave def
 
-### def converge
-(value quotation -- value :
- "*Isolated*, unary contract `( a -- a )`. Return the last value before repeated application reaches
-  a fixed point or returns to the initial value.")
-(converges last) `converge def
-
-### def product
-# A nonempty sequence starts from its first element, as `(*) fold1` does, so
-# no one seed multiplies a copy of a first row.
-(sequence -- product :
- "Multiply every element of a numeric sequence; 1 when the sequence is empty. A nonempty sequence's
-  product starts from its first element, so a list of rows multiplies to a row.")
-(dup empty? (pop 1) ((*) fold1) if) `product def
-
-### def sum
-# A nonempty sequence starts from its first element, as `(+) fold1` does, so
-# no zero seed copies a first row or turns a -0.0 total into 0.0.
-(sequence -- total :
- "Add every element of a numeric sequence; 0 when the sequence is empty. A nonempty sequence's total
-  starts from its first element: a list of rows sums to a row, and a sum of negative zeros is
-  `-0.0`.")
-(dup empty? (pop 0) ((+) fold1) if) `sum def
+### def mean
+(sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")
+(dup sum swap len /) `mean def
 
 ### def to-digits
 (value radices -- digits :
@@ -505,11 +523,3 @@ def
   st 0 at r mod 0 < st r
   (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) call)
  fold 1 at) `to-digits def
-
-### def tri
-(x p q r -- ... : "*Inline.* Apply three quotations to the same input in left-to-right order.")
-(((keep) dip keep) dip call) `tri def
-
-### def mean
-(sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")
-(dup sum swap len /) `mean def

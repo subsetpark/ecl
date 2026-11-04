@@ -369,7 +369,7 @@
  (path pattern -- bool params :
   "Match a slash path against a pattern; params bind `:name` segments.")
  ("/" split swap "/" split swap
-  over over len swap len =
+  2dup len swap len =
   (zip dup (segment-ok?) all? swap (1 at ":" str.starts?) filter (dup 1 at 1 drop swap first pair)
    each
    dict.from-pairs)
@@ -532,7 +532,7 @@
  ### defp read-body
  (connection leftover length -- body :
   "Complete a Content-Length body from the leftover head bytes and the connection.")
- (swap (over over len >) (read-body-step) while swap take nip) `read-body defp
+ (swap (2dup len >) (read-body-step) while swap take nip) `read-body defp
 
  ### defp build-request
  (connection request-line headers body -- request :
