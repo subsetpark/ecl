@@ -83,11 +83,19 @@ const MapScratch = struct {
         errdefer std.testing.allocator.free(path);
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.modules",
-            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [{path \"probe.ecl\" kind ecl exports [\"mapprobe\"]}]}}}",
+            .data = "{format 1 local \"root\" scopes {\"root\" {root \".\" visible [] sources [] artifacts [" ++
+                "{path \"probe.ecl\" kind ecl exports [\"mapprobe\"]} " ++
+                "{path \"deferred.ecl\" kind ecl exports [\"deferprobe\" \"deferlater\"]}]}}}",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "probe.ecl",
             .data = "[] ((42) `answer def) `helper @defm [] ((helper.answer) `answer def) `mapprobe @defm",
+        });
+        // Imports from a module declared later in its own file, which the
+        // load records and then validates before committing.
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "deferred.ecl",
+            .data = "[] (`deferlater (seven) importp (seven) `answer def) `deferprobe @defm [] ((7) `seven def) `deferlater @defm",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -716,6 +724,7 @@ const StdlibSurface = enum {
     source_declarations,
     host_metadata,
     mapped_module,
+    deferred_import,
     root_source_preload,
     random,
     dict,
@@ -846,6 +855,11 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-lock-tier.ecl",
             "mapprobe.answer pop",
+        ),
+        .deferred_import => try runOk(
+            &runtime,
+            "oom-deferred-import.ecl",
+            "deferprobe.answer pop",
         ),
         .random => try runOk(
             &runtime,
@@ -1697,6 +1711,11 @@ test "oom: standard-library and host: native port lifecycle transfer and rollbac
 test "oom: standard-library and host: module map: artifact loading propagates every allocation failure" {
     try requireSelectedOomTest(@src());
     try checkStdlibSurface(.mapped_module);
+}
+
+test "oom: standard-library and host: module map: deferred module-body imports propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
+    try checkStdlibSurface(.deferred_import);
 }
 
 test "oom: standard-library and host: module map: local source preload propagates every allocation failure" {

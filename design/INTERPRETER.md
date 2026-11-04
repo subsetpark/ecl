@@ -816,6 +816,21 @@ loader can observe completion. Provenance carries the artifact's publication
 identity. Failed loads publish neither partial public registrations nor a
 committed artifact; retry uses the same source identity.
 
+A loading lease also carries the module-body imports deferred onto it. An
+import whose target module its own fiber is still loading, by name on the
+search path or through the declaring artifact under a map, would be a load
+cycle. Instead it stages its aliases unchecked and records each name on the
+held lease. It does that through a claim that only a scan for that same owner
+can mint. The lease's frame lies below the importing driver, so the claim
+cannot outlive it. The load checks deferred names against the main registry
+after its declared modules and before it commits. It reads the main registry
+because an importer's own lookup cannot see an uncommitted artifact. Releasing
+the lease on any path discards the list. A nested load that deferred names
+onto an outer one has already committed if the outer load later fails.
+A load that fails deferred validation still leaves the modules its bodies
+registered published, as it does when any later step fails: the registry
+has no unpublish edit, and each image lives in its history until teardown.
+
 Standalone validation owns bounded input and the validated map through a host
 cleanup owner without constructing a Session. An unpublished document supplies
 its intended filename as the relative-path base; validation does not require

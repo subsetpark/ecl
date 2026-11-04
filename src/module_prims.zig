@@ -12,6 +12,7 @@ const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
+const map_state = @import("module_snapshot.zig");
 const Value = value.Value;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
@@ -210,7 +211,24 @@ const ImportName = struct {
 /// destination scope. What it publishes are name aliases, `x -> m.x`: every
 /// later binding or lookup follows the alias, so an import never captures the
 /// target it validated.
+///
+/// A module body may import from a module that its own fiber is still
+/// loading, whether that module is declared later in the same file or by a
+/// file earlier in the load chain. Auto-loading it would be a cycle, so the
+/// import instead stages its aliases unvalidated and hands each name to the
+/// held load, which validates them before it completes. Where a module lives
+/// therefore never decides whether an import between modules succeeds.
 const ImportDriver = struct {
+    /// How an unregistered target is resolved: by auto-loading it, or by
+    /// deferring to a load this fiber already holds.
+    const Deferral = union(enum) {
+        unprobed,
+        module: modules.Registry.HeldLoadingCursor,
+        catalog: map_state.LookupCursor,
+        artifact: modules.Registry.HeldLoadingCursor,
+        claimed: struct { held: modules.LoadingClaim, importer: intern.ModuleName },
+        load,
+    };
     pub const ownership: heap.DriverOwnership = .fields;
     module_id: u32,
     requested: heap.Owned(Value),
@@ -227,6 +245,7 @@ const ImportDriver = struct {
     validation_index: usize = 0,
     resolution: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
     validated: bool = false,
+    deferral: Deferral = .unprobed,
     publish_index: usize = 0,
     publisher: ?heap.Owned(modules.Registry.DefineCursor) = null,
 
@@ -300,34 +319,90 @@ const ImportDriver = struct {
                 }
             }
 
-            if (self.generation == null) {
-                if (self.acquisition == null)
-                    self.acquisition = .init(machine.ModuleLookupCursor.atCurrent(evaluator, self.module_name.?));
-                switch (self.acquisition.?.borrowMut().advance()) {
+            if (self.generation == null) switch (self.deferral) {
+                .unprobed => {
+                    if (self.acquisition == null)
+                        self.acquisition = .init(machine.ModuleLookupCursor.atCurrent(evaluator, self.module_name.?));
+                    switch (self.acquisition.?.borrowMut().advance()) {
+                        .pending => continue,
+                        .complete => |maybe_generation| {
+                            self.acquisition.?.deinit(evaluator.releases, evaluator.allocator);
+                            self.acquisition = null;
+                            if (maybe_generation) |generation| {
+                                self.generation = .init(generation);
+                                continue;
+                            }
+                            // Only a module body stages its imports for a
+                            // later check; top-level source stays incremental.
+                            self.deferral = if (self.scope.storage == .module_root)
+                                .{ .module = evaluator.inherited.registry.heldModuleLoadingCursor(self.module_name.?, .of(evaluator)) }
+                            else
+                                .load;
+                            continue;
+                        },
+                    }
+                },
+                // A search-path load holds its module's name while its file runs.
+                .module => |*held| switch (held.advance()) {
                     .pending => continue,
-                    .complete => |maybe_generation| if (maybe_generation) |generation| {
-                        self.generation = .init(generation);
-                        self.acquisition.?.deinit(evaluator.releases, evaluator.allocator);
-                        self.acquisition = null;
-                        continue;
-                    } else {
-                        const module_id = self.module_id;
-                        const module_name = self.module_name.?;
-                        const requested_word = if (self.prepared.borrow().len == 0)
-                            module_id
+                    .complete => |maybe_claim| {
+                        if (maybe_claim) |held_claim| {
+                            try self.claimLoad(evaluator, held_claim);
+                            continue;
+                        }
+                        self.deferral = if (evaluator.inherited.module_snapshot) |project|
+                            .{ .catalog = project.lookupCursor(
+                                evaluator.current.?.site.registration_provenance.scopeId(),
+                                intern.get(intern.moduleId(self.module_name.?)),
+                            ) }
                         else
-                            self.prepared.borrow()[0].qualified;
-                        const requested = self.requested.take();
-                        evaluator.retireDriver(self);
-                        return evaluator.retryImportAfterLoad(
-                            module_id,
-                            requested,
-                            module_name,
-                            requested_word,
-                        );
+                            .load;
+                        continue;
                     },
-                }
-            }
+                },
+                // A mapped load holds the artifact that declares the module.
+                // An unmatched or hidden module takes the ordinary loader,
+                // which reports it.
+                .catalog => |*lookup| switch (lookup.advance()) {
+                    .pending => continue,
+                    .complete => |outcome| {
+                        lookup.deinit();
+                        self.deferral = switch (outcome) {
+                            .matched => |match| .{ .artifact = evaluator.inherited.registry.heldArtifactLoadingCursor(match.artifact_id, .of(evaluator)) },
+                            .unmatched, .hidden => .load,
+                        };
+                        continue;
+                    },
+                },
+                .artifact => |*held| switch (held.advance()) {
+                    .pending => continue,
+                    .complete => |maybe_claim| {
+                        if (maybe_claim) |held_claim| {
+                            try self.claimLoad(evaluator, held_claim);
+                            continue;
+                        }
+                        self.deferral = .load;
+                        continue;
+                    },
+                },
+                .claimed => {},
+                .load => {
+                    const module_id = self.module_id;
+                    const module_name = self.module_name.?;
+                    const requested_word = if (self.prepared.borrow().len == 0)
+                        module_id
+                    else
+                        self.prepared.borrow()[0].qualified;
+                    const requested = self.requested.take();
+                    evaluator.retireDriver(self);
+                    return evaluator.retryImportAfterLoad(
+                        module_id,
+                        requested,
+                        module_name,
+                        requested_word,
+                    );
+                },
+            };
 
             if (self.prepared.borrow().len == 0) return .completed;
 
@@ -337,6 +412,16 @@ const ImportDriver = struct {
                     continue;
                 }
                 const requested = self.prepared.borrow()[self.validation_index];
+                if (self.deferral == .claimed) {
+                    self.deferral.claimed.held.deferAssumeCapacity(.{
+                        .module = self.module_name.?,
+                        .binding = requested.binding,
+                        .qualified = requested.qualified,
+                        .importer = self.deferral.claimed.importer,
+                    });
+                    self.validation_index += 1;
+                    continue;
+                }
                 if (self.resolution == null)
                     self.resolution = .init(self.generation.?.borrow().lookupCursor(requested.binding));
                 switch (self.resolution.?.borrowMut().advance()) {
@@ -389,6 +474,17 @@ const ImportDriver = struct {
             }
         }
         return .stepped;
+    }
+
+    /// Capacity for every requested name is reserved up front, so recording
+    /// them cannot fail partway through the request.
+    fn claimLoad(self: *ImportDriver, evaluator: *Fiber, held: modules.LoadingClaim) MachineError!void {
+        const image = evaluator.stagingImage(self.scope) orelse return evaluator.fail(
+            .domain,
+            "module imports are legal only while the module is under construction",
+        );
+        try held.reserveDeferred(self.prepared.borrow().len);
+        self.deferral = .{ .claimed = .{ .held = held, .importer = image.moduleName() } };
     }
 };
 

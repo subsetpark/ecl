@@ -202,6 +202,7 @@ const ErrorDataKey = enum {
     @"destination-path",
     address,
     port,
+    importer,
 };
 const ErrorData = struct {
     key: union(enum) { builtin: ErrorDataKey, symbol: u32 },
@@ -6945,6 +6946,9 @@ fn verifyPublishedModule(
     return .detached;
 }
 
+/// Verifies what a completed load registered before releasing its lease:
+/// every module the load was expected to register, then every import a
+/// module body deferred onto this load. An artifact commits only after both.
 const QualifiedRegistrationDriver = struct {
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
@@ -6952,9 +6956,36 @@ const QualifiedRegistrationDriver = struct {
     loading: ?heap.Owned(modules.LoadingLease) = null,
     artifact: ?map_state.ArtifactId = null,
     module_index: usize = 0,
+    /// The active name lookup of the `.resolving` phase. It is a direct field,
+    /// not a phase payload, so cancelling the driver releases its pin.
+    resolving_cursor: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
+    phase: union(enum) {
+        declared,
+        /// The index of the deferred import whose module is being acquired.
+        deferred: usize,
+        /// The deferred import whose name is being looked up.
+        resolving: usize,
+    } = .declared,
 
     pub fn advance(evaluator: *Fiber, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
+        switch (self.phase) {
+            .declared => {},
+            .deferred => |index| return self.acquireDeferred(evaluator, index),
+            .resolving => |index| {
+                const cursor = if (self.resolving_cursor) |*owned| owned else unreachable;
+                switch (cursor.borrowMut().advance()) {
+                    .pending => return .stepped,
+                    .complete => |maybe_entry| {
+                        const public = if (maybe_entry) |entry| modules.entryIsPublic(entry) else false;
+                        cursor.deinit(evaluator.releases, evaluator.allocator);
+                        self.resolving_cursor = null;
+                        if (!public) return self.failDeferred(evaluator, index);
+                        return self.nextDeferred(evaluator, index + 1);
+                    },
+                }
+            },
+        }
         switch (self.acquisition.borrowMut().advance()) {
             .pending => return .stepped,
             .complete => |maybe_generation| {
@@ -7004,15 +7035,59 @@ const QualifiedRegistrationDriver = struct {
                         ));
                         return .stepped;
                     }
-                    var artifact_lease = self.loading.?.borrowMut();
-                    evaluator.inherited.module_snapshot.?.commitArtifact(
-                        artifact_lease.artifactCommit(),
-                    );
-                    artifact_lease.finish();
                 }
-                return continueSourceRequest(evaluator, self, self.request);
+                return self.nextDeferred(evaluator, 0);
             },
         }
+    }
+
+    fn deferredImports(self: *const QualifiedRegistrationDriver) []const modules.DeferredImport {
+        const loading = if (self.loading) |*owned| owned.borrow() else return &.{};
+        return loading.deferredImports();
+    }
+
+    /// A deferred target is always a module this load registers, so it is
+    /// read from the main registry directly: the importer's own lookup would
+    /// not see an artifact that has yet to commit.
+    fn nextDeferred(self: *QualifiedRegistrationDriver, evaluator: *Fiber, index: usize) MachineError!WorkProgress {
+        const deferred = self.deferredImports();
+        if (index == deferred.len) return self.complete(evaluator);
+        self.acquisition.deinit(evaluator.releases, evaluator.allocator);
+        self.acquisition = .init(evaluator.inherited.registry.acquireCursor(deferred[index].module));
+        self.phase = .{ .deferred = index };
+        return .stepped;
+    }
+
+    fn acquireDeferred(self: *QualifiedRegistrationDriver, evaluator: *Fiber, index: usize) MachineError!WorkProgress {
+        switch (self.acquisition.borrowMut().advance()) {
+            .pending => return .stepped,
+            .complete => |maybe_generation| {
+                var lease = maybe_generation orelse return self.failDeferred(evaluator, index);
+                defer lease.deinit();
+                const binding = self.deferredImports()[index].binding;
+                self.resolving_cursor = .init(lease.lookupCursor(binding));
+                self.phase = .{ .resolving = index };
+                return .stepped;
+            },
+        }
+    }
+
+    fn failDeferred(self: *QualifiedRegistrationDriver, evaluator: *Fiber, index: usize) MachineError {
+        const deferred = self.deferredImports()[index];
+        const failure = evaluator.undefinedNameIn(deferred.qualified, .qualified);
+        evaluator.pendingFailure().addData(.importer, .{ .symbol = .{ .name = intern.moduleId(deferred.importer) } });
+        evaluator.pendingFailure().addData(.path, self.path.borrow());
+        return failure;
+    }
+
+    fn complete(self: *QualifiedRegistrationDriver, evaluator: *Fiber) MachineError!WorkProgress {
+        if (self.loading) |*owned| {
+            const lease = owned.borrowMut();
+            if (self.artifact != null)
+                evaluator.inherited.module_snapshot.?.commitArtifact(lease.artifactCommit());
+            lease.finish();
+        }
+        return continueSourceRequest(evaluator, self, self.request);
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -7738,12 +7813,13 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                 }
                 break :name names[0];
             } else continuation.request.module.name;
-            if (artifact == null) loading.finish();
+            // The lease stays held through verification: imports deferred
+            // onto this load are checked before it releases.
             try self.startDriver(QualifiedRegistrationDriver{
                 .path = .init(path.take()),
                 .acquisition = .init(registry.acquireCursor(first_name)),
                 .request = continuation.request,
-                .loading = if (artifact != null) .init(loading.move()) else null,
+                .loading = .init(loading.move()),
                 .artifact = artifact,
             });
             return true;
