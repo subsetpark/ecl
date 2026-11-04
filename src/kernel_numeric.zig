@@ -224,6 +224,11 @@ pub const PervadeCursor = struct {
         /// leaf representation to choose, so it publishes as a spine without
         /// profiling its children.
         all_lists: bool = true,
+        /// Whether every child of this binary frame pairs two scalars: each
+        /// operand is a scalar or a leaf. Such a child is exactly one scalar
+        /// operation, so the frame applies it in place rather than starting a
+        /// child node per element.
+        scalar_children: bool = false,
         materializer: ?list.ValueMaterializer = null,
 
         fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {
@@ -497,6 +502,7 @@ pub const PervadeCursor = struct {
                 .right_scalar = node.right != .list,
                 .depth = node.depth,
                 .values = values.take(),
+                .scalar_children = holdsScalars(node.left) and holdsScalars(node.right),
             } });
             return .framed;
         }
@@ -577,6 +583,17 @@ pub const PervadeCursor = struct {
         while (frame.index != frame.values.capacity()) {
             if (work.take(list_child_units) == 0) return .pending;
             const index = frame.index;
+            if (frame.scalar_children) {
+                // Exactly the scalar path `startBinary` takes for this child.
+                const left = if (frame.left_scalar) frame.left else list.atUnchecked(frame.left, index);
+                const right = if (frame.right_scalar) frame.right.? else list.atUnchecked(frame.right.?, index);
+                const result = selectScalar(frame.operation.binary)(left, right) catch |fault|
+                    return scalarFailure(evaluator, fault, index);
+                frame.all_lists = false;
+                frame.values.appendOwned(result);
+                frame.index += 1;
+                continue;
+            }
             const child: Child = switch (frame.operation) {
                 .binary => |operation| .{ .binary = .{
                     .operation = operation,
@@ -837,6 +854,12 @@ pub const PervadeCursor = struct {
         frame.candidate = 0;
     }
 };
+
+/// Whether every element of `item`, taken as a pervasion operand, is a scalar:
+/// it is a scalar itself or a leaf. A dict never reaches a list frame.
+fn holdsScalars(item: Value) bool {
+    return item != .list or item.list.kind() != .generic_spine;
+}
 
 fn selectScalar(operation: BinaryOp) ScalarBinary {
     return switch (operation) {
@@ -1253,21 +1276,27 @@ fn leafNumber(item: Value) ?Number {
 }
 
 /// The result class of one binary operation on two numeric classes, or null when
-/// the result is not of one width.
+/// no typed loop exists for the pair.
 ///
 /// `min` and `max` return one of their operands rather than a computed value, so
 /// a mixed pair yields ints and floats element by element — genuinely
 /// heterogeneous, and the one numeric shape that stays on the profiling route.
+///
+/// The int-only words fault on every element with a real operand, so such a pair
+/// has no result to type. Declining it leaves the fault to the generic route,
+/// which reports it identically, and keeps a loop that could never complete out
+/// of every binary.
 fn binaryResult(comptime operation: BinaryOp, comptime left: Number, comptime right: Number) ?Number {
     const real = left == .real or right == .real;
     return switch (operation) {
         .add, .sub, .mul => if (real) .real else .integer,
         .div, .pow, .atan2 => .real,
-        .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr => .integer,
-        .wrap_add, .wrap_sub, .wrap_mul => .integer,
+        .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr => if (real) null else .integer,
+        .wrap_add, .wrap_sub, .wrap_mul => if (real) null else .integer,
+        .and_word, .or_word => if (real) null else .byte,
         // A 0/1 result is a byte: a mask over a large list costs one byte per
         // element, and every consumer of a byte leaf reads it as an int.
-        .eq, .ne, .lt, .gt, .le, .ge, .and_word, .or_word => .byte,
+        .eq, .ne, .lt, .gt, .le, .ge => .byte,
         .min, .max => if (real)
             if (left != right) null else .real
         else if (left == .byte and right == .byte)
@@ -1424,6 +1453,11 @@ fn narrowLanes(comptime In: type, comptime Out: type, comptime lanes: usize, val
     return @truncate(values);
 }
 
+/// The narrower of two element types.
+fn Narrowest(comptime A: type, comptime B: type) type {
+    return if (@sizeOf(A) <= @sizeOf(B)) A else B;
+}
+
 /// A binary typed operation: one range loop (runPieces) and its replay, run
 /// by its result class's `BinaryKernel` at top level or inside pervasion.
 fn binaryKernel(
@@ -1433,6 +1467,59 @@ fn binaryKernel(
     comptime shape: Shape,
 ) type {
     return binaryKernelInto(operation, left_class, right_class, shape, comptime binaryResult(operation, left_class, right_class).?);
+}
+
+/// The operation that computes `operation(a, b)` as `twin(b, a)`, or null when
+/// the order matters. A real `min` or `max` is order-dependent: the selection
+/// between `-0.0` and `0.0` keeps whichever operand came first. Every twin
+/// reports the same fault for the same element as the operation it stands for.
+fn mirroredOperation(comptime operation: BinaryOp, comptime left: Number, comptime right: Number) ?BinaryOp {
+    return switch (operation) {
+        .add, .mul, .eq, .ne, .band, .bor, .bxor, .wrap_add, .wrap_mul, .and_word, .or_word => operation,
+        .lt => .gt,
+        .gt => .lt,
+        .le => .ge,
+        .ge => .le,
+        .min, .max => if (left == .real or right == .real) null else operation,
+        .sub, .div, .int_div, .mod, .pow, .atan2, .bsl, .bsr, .wrap_sub => null,
+    };
+}
+
+fn mirroredShape(comptime shape: Shape) Shape {
+    return switch (shape) {
+        .leaf_leaf => .leaf_leaf,
+        .leaf_scalar => .scalar_leaf,
+        .scalar_leaf => .leaf_scalar,
+        .leaf_only => unreachable,
+    };
+}
+
+/// Whether a binary plan runs its mirrored twin's loop rather than one of its
+/// own: a scalar on the left, or leaves whose classes are out of order. Each
+/// unordered pair then compiles one loop, and the twin's loop is the same code
+/// with its operands exchanged. A pair with one real operand keeps the real
+/// first in either shape: its scalar comparison measured slower with the int
+/// first, and both orders of its arithmetic measured alike.
+fn mirrorsOnto(comptime operation: BinaryOp, comptime left: Number, comptime right: Number, comptime shape: Shape) bool {
+    if (mirroredOperation(operation, left, right) == null) return false;
+    if (shape == .leaf_scalar or shape == .leaf_only) return false;
+    if ((left == .real) != (right == .real)) return right == .real;
+    return shape == .scalar_leaf or @backingInt(left) > @backingInt(right);
+}
+
+/// A binary plan's chunk that exchanges its operands and runs its mirrored
+/// twin's loop. The call stays out of line so the twin's loop is not copied
+/// back into this instantiation.
+fn mirroredBinaryKernel(comptime operation: BinaryOp, comptime left_class: Number, comptime right_class: Number, comptime shape: Shape) type {
+    const twin = comptime mirroredOperation(operation, left_class, right_class).?;
+    const Twin = binaryKernel(twin, right_class, left_class, comptime mirroredShape(shape));
+    const out = comptime binaryResult(operation, left_class, right_class).?;
+    comptime std.debug.assert(binaryResult(twin, right_class, left_class).? == out);
+    return struct {
+        fn chunk(params: NumericParams, operands: [2]Value, output: *support.LeafResult(out.kind()), range: flat.Chunk, evaluator: *Fiber) MachineError!void {
+            return @call(.never_inline, Twin.chunk, .{ params, [2]Value{ operands[1], operands[0] }, output, range, evaluator });
+        }
+    };
 }
 
 /// `binaryKernel` with the result class chosen by the caller: a scalar program
@@ -1449,13 +1536,13 @@ fn binaryKernelInto(
     const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
     const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
     const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
-    // An int operation with a byte result, such as a comparison's mask, runs
-    // as many lanes as one output vector holds: the narrowed lanes then fill
-    // a whole store, and the narrowing is one shuffle tree per output vector
-    // rather than a narrowing chain per operand vector. Only that pairing
-    // widens, since every widened loop is code in every binary.
-    const lanes = if (left_class == .integer and out == .byte)
-        std.simd.suggestVectorLength(u8) orelse 1
+    // An integral loop runs as many lanes as one vector of its narrowest
+    // stream holds, operands or result: that stream then fills whole loads or
+    // stores, and the wider streams are the ones split. The count depends on
+    // the pair and not on its order, so a mirrored plan runs its twin's loop
+    // at its own speed.
+    const lanes = if (left_class != .real and right_class != .real)
+        std.simd.suggestVectorLength(Narrowest(left_class.Element(), Narrowest(right_class.Element(), out.Element()))) orelse 1
     else
         std.simd.suggestVectorLength(left_class.Element()) orelse 1;
     const Vectors = flat.VectorFamily(left_class.Element(), right_class.Element(), out.Element(), lanes);
@@ -2055,7 +2142,10 @@ const NumericBinaryPlan = opaque {
                         .out = out,
                         .run = Shared.run,
                         .nested = Shared.nested,
-                        .chunk = @ptrCast(&binaryKernel(operation, candidate_left, candidate_right, candidate_shape).chunk),
+                        .chunk = if (comptime mirrorsOnto(operation, candidate_left, candidate_right, candidate_shape))
+                            @ptrCast(&mirroredBinaryKernel(operation, candidate_left, candidate_right, candidate_shape).chunk)
+                        else
+                            @ptrCast(&binaryKernel(operation, candidate_left, candidate_right, candidate_shape).chunk),
                     };
                     table[@backingInt(candidate_left)][@backingInt(candidate_right)][@backingInt(candidate_shape)] =
                         @ptrCast(&data);
