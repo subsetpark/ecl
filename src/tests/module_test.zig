@@ -360,17 +360,27 @@ const redefinition_churn = "(dup 0 = (pop) ((1) `churned def 1 - churn) if) `chu
 /// Every fiber retains a fixed amount of source provenance, so the batches are
 /// one fiber each and differ only in their count: a small batch fixes the
 /// per-fiber cost, and a large one must not retain anything per redefinition.
+/// The retained provenance accumulates in storage that grows by amortized
+/// doubling, and which fiber pays for a doubling shifts with unrelated session
+/// state. Each size therefore runs twice and keeps its smaller growth: a
+/// doubling lands in at most one of the pair, while retention per
+/// redefinition would show in both.
 fn expectChurnBounded(runtime: *session.Session, counting: anytype, large: usize) !void {
+    var buffer: [32]u8 = undefined;
+    const large_churn = try std.fmt.bufPrint(&buffer, "{d} churn", .{large});
     try expectOk(runtime, redefinition_churn);
     try expectOk(runtime, "64 churn");
-    const warmed = counting.total_requested_bytes;
-    try expectOk(runtime, "64 churn");
-    const after_small = counting.total_requested_bytes;
-    var buffer: [32]u8 = undefined;
-    try expectOk(runtime, try std.fmt.bufPrint(&buffer, "{d} churn", .{large}));
-    const after_large = counting.total_requested_bytes;
-    const small_growth = after_small -| warmed;
-    const large_growth = after_large -| after_small;
+    var small_growth: usize = std.math.maxInt(usize);
+    var large_growth: usize = std.math.maxInt(usize);
+    for (0..2) |_| {
+        const before_small = counting.total_requested_bytes;
+        try expectOk(runtime, "64 churn");
+        const after_small = counting.total_requested_bytes;
+        try expectOk(runtime, large_churn);
+        const after_large = counting.total_requested_bytes;
+        small_growth = @min(small_growth, after_small -| before_small);
+        large_growth = @min(large_growth, after_large -| after_small);
+    }
     std.testing.expect(large_growth <= small_growth + 4096) catch |err| {
         std.debug.print("redefinition churn: small_growth={d} large_growth={d}\n", .{ small_growth, large_growth });
         return err;

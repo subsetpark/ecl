@@ -421,7 +421,10 @@ def
 ### def cleave
 # Call each original quotation in turn with the input pushed above whatever the
 # previous one left. Calling the quotations themselves keeps their provenance
-# and avoids building one large spliced program.
+# and avoids building one large spliced program. The program is the transpose
+# of three equal rows (inputs, quotations, calls), built with whole-list words:
+# a per-element `each` closure costs several times as much. `flip` refuses
+# zero rows, so an empty list builds the empty program directly.
 (x quotations -- ... :
  "*Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each
   quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. Each quotation runs
@@ -433,10 +436,13 @@ def
 (|x qs|
  qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
  qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
- qs x (|q x| x literal wrap q append `call append) partial each raze call) `cleave def
+ x literal wrap qs len take qs [call] qs len take 3 pack
+ qs empty? (pop []) (flip raze) if call) `cleave def
 
 ### def cleave-n
-# As cleave, with the packed inputs pushed above each previous result.
+# As cleave, with one row per input. The inputs repeat as rows of a k-by-n
+# matrix whose transpose gives the n input rows; zero inputs or zero
+# quotations would hand `flip` an empty axis, so both build without it.
 (: "*Inline.* N-ary cleave. Takes `x₁ … xₙ n quotations`: apply each quotation in a list to the same
     `n` input values in left-to-right order, leaving each quotation's results above the previous
     one's: `x 1 [p q] cleave-n` is `x [p q] cleave`, and `x y 2 [p q] cleave-n` is `x y [p q]
@@ -450,11 +456,13 @@ def
  n 0 >= {kind domain msg "cleave-n arity must be nonnegative"} assert
  qs type `list match? {kind type msg "cleave-n expected a list of quotations"} assert
  qs (type `list match?) all? {kind type msg "cleave-n expected a list of quotations"} assert
- n pack (literal) each qs swap
- (|q xs| xs q append `call append) partial
- each raze call) `cleave-n def
+ n pack (literal) each wrap qs len take
+ n 0 = qs empty? or (pop []) (flip) if
+ qs wrap cat [call] qs len take wrap cat
+ qs empty? (pop []) (flip raze) if call) `cleave-n def
 
 ### def cleave2
+# As cleave, with one input row for each of x and y.
 (x y quotations -- ... :
  "*Inline.* Binary cleave: apply each quotation in a list to the same pair of input values in
   left-to-right order, leaving each quotation's results above the previous one's: `x y [p q]
@@ -463,7 +471,11 @@ def
   cleave2` leaves `10`. The inputs are pushed inertly, so a symbol is pushed rather than executed.
   The list and each of its elements must be quotations, or the word fails with `` `type `` before
   any quotation runs. An empty list consumes both inputs and leaves nothing.")
-(2 swap cleave-n) `cleave2 def
+(|x y qs|
+ qs type `list match? {kind type msg "cleave2 expected a list of quotations"} assert
+ qs (type `list match?) all? {kind type msg "cleave2 expected a list of quotations"} assert
+ x literal wrap qs len take y literal wrap qs len take qs [call] qs len take 4 pack
+ qs empty? (pop []) (flip raze) if call) `cleave2 def
 
 ### def converge
 (value quotation -- value :
