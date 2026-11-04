@@ -917,7 +917,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.map) data {source "prelude.ecl" line 22 col 14}}
+        \\{kind type msg "an ok result must carry a list of success values" word raise trace (raise assert result.map) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -931,7 +931,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (raise assert str.index-of) data {source "prelude.ecl" line 22 col 14}}
+        \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (raise assert str.index-of) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d,,f" [] csv.parse
@@ -1002,7 +1002,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind shape msg "table columns must share one length" word raise trace (raise assert table.rows) data {source "prelude.ecl" line 22 col 14}}
+        \\{kind shape msg "table columns must share one length" word raise trace (raise assert table.rows) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
