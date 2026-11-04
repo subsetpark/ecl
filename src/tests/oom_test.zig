@@ -31,6 +31,7 @@ const runtime_fixture = @import("runtime_fixture.zig");
 const std = @import("std");
 const session = @import("../session.zig");
 const heap = @import("../heap.zig");
+const FailingAllocator = @import("test_heap.zig").FailingAllocator;
 const native_fixture = @import("native_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
 const process_fixture = @import("process_fixture_options");
@@ -228,7 +229,7 @@ fn checkAllocationFailureShard(
 ) !void {
     var fail_index = shard_index;
     while (fail_index < needed_alloc_count) : (fail_index += allocation_failure_shard_count) {
-        var failing = std.testing.FailingAllocator.init(backing_allocator, .{
+        var failing = FailingAllocator.init(backing_allocator, .{
             .fail_index = fail_index,
         });
 
@@ -267,7 +268,7 @@ fn checkAllAllocationFailuresParallel(
     // Session take a one-time allocation path. Settle it before measuring the
     // repeatable Session-owned ordinals that the failure sweep replays.
     try probe(backing_allocator);
-    var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
+    var baseline = FailingAllocator.init(backing_allocator, .{});
     try probe(baseline.allocator());
 
     const Context = struct {
@@ -320,7 +321,7 @@ fn checkPostInitAllocationFailureShard(
     const stride = allocation_failure_shard_count * ordinal_shard_count;
     while (failure_offset < needed_alloc_count) : (failure_offset += stride) {
         errdefer std.debug.print("\nOOM failure offset {d}/{d}\n", .{ failure_offset, needed_alloc_count });
-        var failing = std.testing.FailingAllocator.init(backing_allocator, .{});
+        var failing = FailingAllocator.init(backing_allocator, .{});
 
         if (probe(&failing, failure_offset)) |_| {
             if (failing.has_induced_failure) {
@@ -398,10 +399,10 @@ fn checkPostInitAllocationFailureOrdinalShard(
         if (ordinal_shard_count == 0) @compileError("an OOM ordinal shard count must be nonzero");
         if (ordinal_shard_index >= ordinal_shard_count) @compileError("an OOM ordinal shard index must be in range");
     }
-    var warm = std.testing.FailingAllocator.init(backing_allocator, .{});
+    var warm = FailingAllocator.init(backing_allocator, .{});
     const warm_start = try probe(&warm, null);
 
-    var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
+    var baseline = FailingAllocator.init(backing_allocator, .{});
     const first_failure_index = try probe(&baseline, null);
     const needed_alloc_count = if (shape == .concurrent)
         @max(warm.alloc_index - warm_start, baseline.alloc_index - first_failure_index)
@@ -741,7 +742,7 @@ const StdlibSurface = enum {
 
 fn stdlibSessionAllocationProbe(
     comptime surface: StdlibSurface,
-    failing: *std.testing.FailingAllocator,
+    failing: *FailingAllocator,
     failure_offset: ?usize,
 ) !usize {
     const allocator = failing.allocator();
@@ -1106,7 +1107,7 @@ fn stdlibSessionAllocationProbe(
 fn SurfaceProbe(comptime surface: StdlibSurface) type {
     return struct {
         fn run(
-            failing: *std.testing.FailingAllocator,
+            failing: *FailingAllocator,
             failure_offset: ?usize,
         ) !usize {
             return stdlibSessionAllocationProbe(surface, failing, failure_offset);
@@ -1140,7 +1141,7 @@ fn testSessionAllocationProbe(allocator: std.mem.Allocator) !void {
 const structured_find_source = "[[1]] [1] find pop";
 
 fn structuredFindAllocationCount() !usize {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var failing = FailingAllocator.init(std.testing.allocator, .{});
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
@@ -1162,7 +1163,7 @@ test "oom: core: recognized structured find propagates every allocation failure"
     // Bootstrap outside the failure window, then exhaust the smallest public
     // operation that reaches the recognized driver's structural match cursor.
     for (0..allocation_count) |offset| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var failing = FailingAllocator.init(std.testing.allocator, .{});
         var runtime_inputs = try runtime_fixture.Fixture.init();
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
@@ -1205,7 +1206,7 @@ test "oom: core: seeded @load propagates every allocation failure" {
 const admitted_construction_source = "[] () `oom-driver @defm";
 
 fn admittedConstructionAllocationCount() !usize {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var failing = FailingAllocator.init(std.testing.allocator, .{});
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
@@ -1230,7 +1231,7 @@ test "oom: core: admitted construction driver allocation failure transfers its c
     // allocation must destroy its re-scope cursor once, without leaving a
     // second local owner to destroy the same source header again.
     for (0..allocation_count) |offset| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var failing = FailingAllocator.init(std.testing.allocator, .{});
         var runtime_inputs = try runtime_fixture.Fixture.init();
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
@@ -1247,7 +1248,7 @@ const batch_import_setup = "[] (1 `a set 2 `b set) `oom-import @defm";
 const batch_import_source = "`oom-import (a b) import";
 
 fn batchImportAllocationCount() !usize {
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var failing = FailingAllocator.init(std.testing.allocator, .{});
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
@@ -1265,7 +1266,7 @@ test "oom: core: batch import propagates every allocation failure" {
     try std.testing.expect(allocation_count != 0);
 
     for (0..allocation_count) |offset| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var failing = FailingAllocator.init(std.testing.allocator, .{});
         var runtime_inputs = try runtime_fixture.Fixture.init();
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(failing.allocator(), &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
@@ -1352,21 +1353,21 @@ test "oom: standard-library and host: dictionary pervasion" {
 }
 
 fn nativePortForwardingProbe(
-    failing: *std.testing.FailingAllocator,
+    failing: *FailingAllocator,
     failure_offset: ?usize,
 ) !usize {
     return portForwardingProbe(failing, failure_offset, false);
 }
 
 fn borrowedPortForwardingProbe(
-    failing: *std.testing.FailingAllocator,
+    failing: *FailingAllocator,
     failure_offset: ?usize,
 ) !usize {
     return portForwardingProbe(failing, failure_offset, true);
 }
 
 fn portForwardingProbe(
-    failing: *std.testing.FailingAllocator,
+    failing: *FailingAllocator,
     failure_offset: ?usize,
     comptime borrowed: bool,
 ) !usize {
@@ -1436,7 +1437,7 @@ fn NativePortLifecycleProbe(comptime source: []const u8) type {
 
 fn BuiltinResourceLifecycleProbe(comptime backend: enum { process, listener }, comptime closing: []const u8) type {
     return struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked_allocator = LockedAllocator{ .child = failing.allocator() };
             const allocator = locked_allocator.allocator();
             const scaffold = std.testing.allocator;
@@ -1502,7 +1503,7 @@ test "oom: standard-library and host: common resource listener shutdown" {
 
 fn NativePortProbe(comptime source: []const u8, comptime setup: []const u8) type {
     return struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked_allocator = LockedAllocator{ .child = failing.allocator() };
             const allocator = locked_allocator.allocator();
             var output_buffer: [256]u8 = undefined;
@@ -1598,7 +1599,7 @@ test "oom: standard-library and host: cooperative native child publication" {
 test "oom: standard-library and host: native port registered concurrent allocation accounting" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             const start = failing.alloc_index;
             if (failure_offset) |offset| failing.fail_index = start + offset;
             // Deliberately swallow allocation failure to prove that allowing
@@ -1806,7 +1807,7 @@ test "oom: standard-library and host: host: network connections propagate every 
 test "oom: standard-library and host: common network endpoint publication and transport" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var output_buffer: [256]u8 = undefined;
             var output = std.Io.Writer.fixed(&output_buffer);
@@ -1996,7 +1997,7 @@ test "oom: standard-library and host: native port child batch publication" {
 
 fn NetAcceptResultProbe(comptime operation: []const u8) type {
     return struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked_allocator = LockedAllocator{ .child = failing.allocator() };
             var output_buffer: [256]u8 = undefined;
             var output = std.Io.Writer.fixed(&output_buffer);
@@ -2129,7 +2130,7 @@ test "oom: standard-library and host: native memory allocator facade" {
 test "oom: standard-library and host: native instance endpoint policy" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
@@ -2155,7 +2156,7 @@ test "oom: standard-library and host: native operation overload registration" {
 test "oom: standard-library and host: host static native registration" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
@@ -2175,7 +2176,7 @@ test "oom: standard-library and host: host static native registration" {
 test "oom: standard-library and host: unlimited cooperative instance resource" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
@@ -2220,7 +2221,7 @@ test "oom: standard-library and host: native diagnostic finalizer result" {
 test "oom: standard-library and host: native capacity rejection" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
@@ -2259,7 +2260,7 @@ test "oom: standard-library and host: native activity stream supervision" {
 test "oom: standard-library and host: host eager native registration" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
@@ -2279,7 +2280,7 @@ test "oom: standard-library and host: host eager native registration" {
 test "oom: standard-library and host: native instance message budgets" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
@@ -2327,7 +2328,7 @@ test "oom: standard-library and host: native initializer input leases" {
 test "oom: standard-library and host: native instance work quanta" {
     try requireSelectedOomTest(@src());
     const Probe = struct {
-        fn run(failing: *std.testing.FailingAllocator, failure_offset: ?usize) !usize {
+        fn run(failing: *FailingAllocator, failure_offset: ?usize) !usize {
             var locked = LockedAllocator{ .child = failing.allocator() };
             var inputs = try runtime_fixture.Fixture.init();
             defer inputs.deinit();
