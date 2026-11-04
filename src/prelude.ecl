@@ -421,7 +421,11 @@ def
 ### def cleave
 # Call each original quotation in turn with the input pushed above whatever the
 # previous one left. Calling the quotations themselves keeps their provenance
-# and avoids building one large spliced program.
+# and avoids building one large spliced program. The program is the transpose
+# of three equal rows (inputs, quotations, calls), built with whole-list words:
+# a per-element `each` closure costs several times as much. `flip` refuses
+# zero rows, so an empty list builds the empty program directly. Each input
+# rides in a list and `first` fetches it, which keeps a quoted symbol's flag.
 (x quotations -- ... :
  "*Inline.* Apply each quotation in a list to the same input in left-to-right order, leaving each
   quotation's results above the previous one's: `x [p q] cleave` is `x p q bi`. Each quotation runs
@@ -433,7 +437,53 @@ def
 (|x qs|
  qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
  qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
- qs x (|q x| x literal wrap q append `call append) partial each raze call) `cleave def
+ x wrap wrap qs len take [first] qs len take qs [call] qs len take 4 pack
+ qs empty? (pop []) (flip raze) if call) `cleave def
+
+### def cleave-n
+# As cleave, with a fetch row after each input row. The inputs repeat as rows
+# of a matrix whose transpose gives the program. Each input rides in a
+# one-element list and is fetched by `first` when the program runs: a symbol
+# pushed from a program has lost its quotation flag, but one fetched from a
+# list keeps it. Zero quotations would hand `flip` an empty axis, so that case
+# builds without it.
+(: "*Inline.* N-ary cleave. Takes `x₁ … xₙ n quotations`: apply each quotation in a list to the same
+    `n` input values in left-to-right order, leaving each quotation's results above the previous
+    one's: `x 1 [p q] cleave-n` is `x [p q] cleave`, and `x y 2 [p q] cleave-n` is `x y [p q]
+    cleave2`. Each quotation runs on the stack the previous one left, with fresh copies of the
+    inputs on top. The inputs are pushed inertly, so a symbol is pushed rather than executed. `n`
+    must be a nonnegative int, and the list and each of its elements must be quotations, or the word
+    fails with `` `type `` or `` `domain `` before any quotation runs. An empty list consumes the
+    inputs and leaves nothing; `0` runs each quotation with no inputs pushed.")
+(|n qs|
+ n type `int match? {kind type msg "cleave-n expected an int arity"} assert
+ n 0 >= {kind domain msg "cleave-n arity must be nonnegative"} assert
+ qs type `list match? {kind type msg "cleave-n expected a list of quotations"} assert
+ qs (type `list match?) all? {kind type msg "cleave-n expected a list of quotations"} assert
+ n qs qs empty?
+ (pop pack pop [])
+ (|n qs|
+  n pack (wrap) each qs
+  (|i qs| i wrap qs len take [first] qs len take 2 pack) partial each raze
+  qs wrap cat [call] qs len take wrap cat flip raze)
+ if call) `cleave-n def
+
+### def cleave2
+# As cleave, with an input row and a fetch row for each of x and y.
+(x y quotations -- ... :
+ "*Inline.* Binary cleave: apply each quotation in a list to the same pair of input values in
+  left-to-right order, leaving each quotation's results above the previous one's: `x y [p q]
+  cleave2` is `x y p q bi2`. Each quotation runs on the stack the previous one left, with fresh
+  copies of `x` and `y` on top, so a later quotation can consume earlier results: `2 3 [(+) (+ +)]
+  cleave2` leaves `10`. The inputs are pushed inertly, so a symbol is pushed rather than executed.
+  The list and each of its elements must be quotations, or the word fails with `` `type `` before
+  any quotation runs. An empty list consumes both inputs and leaves nothing.")
+(|x y qs|
+ qs type `list match? {kind type msg "cleave2 expected a list of quotations"} assert
+ qs (type `list match?) all? {kind type msg "cleave2 expected a list of quotations"} assert
+ x wrap wrap qs len take [first] qs len take y wrap wrap qs len take [first] qs len take
+ qs [call] qs len take 6 pack
+ qs empty? (pop []) (flip raze) if call) `cleave2 def
 
 ### def converge
 (value quotation -- value :
