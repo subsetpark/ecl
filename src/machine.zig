@@ -6956,12 +6956,15 @@ const QualifiedRegistrationDriver = struct {
     loading: ?heap.Owned(modules.LoadingLease) = null,
     artifact: ?map_state.ArtifactId = null,
     module_index: usize = 0,
+    /// The active name lookup of the `.resolving` phase. It is a direct field,
+    /// not a phase payload, so cancelling the driver releases its pin.
+    resolving_cursor: ?heap.Owned(modules.ModuleNameLookupCursor) = null,
     phase: union(enum) {
         declared,
         /// The index of the deferred import whose module is being acquired.
         deferred: usize,
         /// The deferred import whose name is being looked up.
-        resolving: struct { index: usize, cursor: heap.Owned(modules.ModuleNameLookupCursor) },
+        resolving: usize,
     } = .declared,
 
     pub fn advance(evaluator: *Fiber, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
@@ -6969,15 +6972,18 @@ const QualifiedRegistrationDriver = struct {
         switch (self.phase) {
             .declared => {},
             .deferred => |index| return self.acquireDeferred(evaluator, index),
-            .resolving => |*resolving| switch (resolving.cursor.borrowMut().advance()) {
-                .pending => return .stepped,
-                .complete => |maybe_entry| {
-                    const index = resolving.index;
-                    resolving.cursor.deinit(evaluator.releases, evaluator.allocator);
-                    const public = if (maybe_entry) |entry| modules.entryIsPublic(entry) else false;
-                    if (!public) return self.failDeferred(evaluator, index);
-                    return self.nextDeferred(evaluator, index + 1);
-                },
+            .resolving => |index| {
+                const cursor = if (self.resolving_cursor) |*owned| owned else unreachable;
+                switch (cursor.borrowMut().advance()) {
+                    .pending => return .stepped,
+                    .complete => |maybe_entry| {
+                        const public = if (maybe_entry) |entry| modules.entryIsPublic(entry) else false;
+                        cursor.deinit(evaluator.releases, evaluator.allocator);
+                        self.resolving_cursor = null;
+                        if (!public) return self.failDeferred(evaluator, index);
+                        return self.nextDeferred(evaluator, index + 1);
+                    },
+                }
             },
         }
         switch (self.acquisition.borrowMut().advance()) {
@@ -7059,7 +7065,8 @@ const QualifiedRegistrationDriver = struct {
                 var lease = maybe_generation orelse return self.failDeferred(evaluator, index);
                 defer lease.deinit();
                 const binding = self.deferredImports()[index].binding;
-                self.phase = .{ .resolving = .{ .index = index, .cursor = .init(lease.lookupCursor(binding)) } };
+                self.resolving_cursor = .init(lease.lookupCursor(binding));
+                self.phase = .{ .resolving = index };
                 return .stepped;
             },
         }

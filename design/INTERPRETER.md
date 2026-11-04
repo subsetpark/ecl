@@ -827,6 +827,9 @@ after its declared modules and before it commits. It reads the main registry
 because an importer's own lookup cannot see an uncommitted artifact. Releasing
 the lease on any path discards the list. A nested load that deferred names
 onto an outer one has already committed if the outer load later fails.
+A load that fails deferred validation still leaves the modules its bodies
+registered published, as it does when any later step fails: the registry
+has no unpublish edit, and each image lives in its history until teardown.
 
 Standalone validation owns bounded input and the validated map through a host
 cleanup owner without constructing a Session. An unpublished document supplies
