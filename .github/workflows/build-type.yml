@@ -344,8 +344,9 @@ jobs:
             test "$OPTIMIZE" = safe
             # Host CPU detection can emit instructions Valgrind cannot decode.
             # Use the baseline CPU for both the CLI and its loaded extension.
-            timeout 10m zig build -Dcpu=baseline -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
-            timeout 10m zig build native-sample-fixture -Dcpu=baseline -Dapps=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
+            # Keep symbols so Memcheck reports name their frames.
+            timeout 10m zig build -Dcpu=baseline -Dapps=false -Dstrip=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
+            timeout 10m zig build native-sample-fixture -Dcpu=baseline -Dapps=false -Dstrip=false -Doptimize="$OPTIMIZE" --summary all < /dev/null
 
             memcheck() {
               local name="$1" expected="$2" output report status

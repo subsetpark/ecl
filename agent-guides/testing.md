@@ -157,7 +157,9 @@ reason before selecting the matrix.
   `zig build` output runs the DebugAllocator, whose per-allocation machinery can
   be hundreds of times slower on allocation-heavy paths and can fabricate a
   convincing per-operation “defect” with clean-looking scaling curves. Rebuild
-  with `-Doptimize=safe` before timing anything.
+  with `-Doptimize=safe` before timing anything. Release builds strip the CLI's
+  debug info and symbols by default; add `-Dstrip=false` before profiling it
+  with `sample` or reading a release crash trace.
 
 ## Allocators, OOM, and ownership in tests
 

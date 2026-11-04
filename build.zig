@@ -270,11 +270,22 @@ pub fn build(b: *std.Build) void {
         native_negative_step.dependOn(&negative.step);
     }
 
+    // Debug info costs about a quarter of a release compile, since LLVM carries
+    // it through every pass, and nothing at runtime. `-fstrip` also drops the
+    // symbol table, so a release binary meant for profiling, sanitizers, or
+    // Memcheck passes `-Dstrip=false`. Only the CLI strips; tests and tools keep
+    // their symbols.
+    const strip = b.option(
+        bool,
+        "strip",
+        "Omit debug info and symbols from the CLI (default: on for release modes without -Dgit-tsan)",
+    ) orelse (optimize != .debug and !git_tsan);
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = git_tsan,
+        .strip = strip,
     });
     const apps = b.option(bool, "apps", "Build and install maintained applications and their native extensions") orelse true;
     const git_extension: ?*std.Build.Step.Compile = if (apps) extension: {
