@@ -1211,7 +1211,8 @@ Three quotation-application behaviors exist:
   `@each`, and `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
-quotation argument (given per word in the reference). The contract is
+quotation argument as that argument's nested effect (see
+[Quotation slots](#quotation-slots)). The contract is
 checked dynamically at each application; a violation is an immediate
 `` `contract `` error naming the element and the observed effect.
 
@@ -1452,8 +1453,9 @@ The annotation is ordinary quotation data — no special grammar — and is
 recognized only when it contains a top-level word `--` or `:`. Nested
 markers and the quoted symbols `` `-- ``/`` `: `` are inert. A recognized
 annotation is validated as a whole before the binding publishes: at most
-one marker of each kind, `--` before `:`, only words around `--`, and
-exactly one string after `:`. A malformed recognized annotation is a
+one marker of each kind, `--` before `:`, only slots (see
+[Quotation slots](#quotation-slots)) around `--`, and exactly one string
+after `:`. A malformed recognized annotation is a
 `` `domain `` error. The quotation adjacent to the name is unconditionally the
 body; only the value beneath it is considered for annotation recognition.
 `set`/`setp` capture their value with `literal` before `def`/`defp` sees it,
@@ -1476,33 +1478,69 @@ repository policy requiring meaningful documentation.
 Documentation has canonical form. Publication trims source-only indentation,
 folds physical line breaks within prose to spaces, collapses a paragraph
 boundary to one blank line, and preserves each `-`-prefixed Markdown item on
-its own logical line with its continuations folded in. `doc` returns this
-canonical string, so source formatting cannot change reflective documentation.
+its own logical line with its continuations folded in. A paragraph without
+items whose lines do not all start at one column, such as an example, is laid
+out by hand: it keeps its lines and their indentation past the documentation's
+margin. A first line beside the opening quote has no column of its own. `doc`
+returns this canonical string, so source formatting cannot change reflective
+documentation.
 Strings anywhere else retain their exact decoded codepoints.
 
-#### The after row
+#### Variable rows
 
-The after portion of an effect is either **all named slots** or exactly
-the token `...`:
+The token `...` stands for a variable row: zero or more values whose count
+the effect does not fix. Each portion of an effect may hold one `...`, at any
+position among its named slots, and the named slots of that portion become a
+minimum:
 
 ```ecl
 (result on-ok on-err -- ...) (body) `case def
+(... n -- list) (body) `pack def
+(x (... -- ...) -- ... x) (body) `keep def
 ```
 
-`...` declares a **fixed before row and a variable after row**: how many
-values the word consumes is known, how many it leaves is not. The before
-slots are checked at boundaries exactly as today; the after check is
-skipped. This remains a genuine partial contract: a
-word that would otherwise carry a documentation-only annotation regains
-input checking and honest reflection, and `which` and `see` render the effect
-with `-- ...`.
+A row in the before portion declares that the word consumes at least its
+named before slots and an unknown number more. A row in the after portion
+declares that the word leaves at least its named after slots, with an unknown
+number of further values where the row sits. The effect remains a genuine
+partial contract, checked as far as its named slots allow: the named before
+slots are checked at entry; with a fixed before portion, the word must leave
+exactly its named after slots, or at least them when the after portion holds a
+row; with a row in the before portion, the depth the word leaves is not
+checked, since how many values it consumed is unknown. A word that would
+otherwise carry a documentation-only annotation regains input checking and
+honest reflection.
 
-The grammar is strict: no mixing (`(a -- ... b)` is `` `domain ``), and the
-token never appears in a before row (`(... -- b)` is `` `domain ``). Named row
-variables in the Factor style (..a, ..b) are deferred to the static
-checker; `...` is the anonymous row that reads the same way today. The
-native ABI is deliberately excluded: a native `complete` requires the
-exact output tuple, so `...` in a `Call` effect is a compile error.
+A second `...` in either portion is `` `domain ``. A `...` on one side never
+refers to a `...` on the other: it is a placeholder, not a row variable, so
+`(... a -- ... b)` says nothing about which values survive. Named row
+variables in the Factor style (..a, ..b) are deferred to the static checker.
+The native ABI is deliberately excluded: a native `Call` takes exactly its
+declared inputs and `complete` requires the exact output tuple, so `...`
+anywhere in a `Call` effect is refused.
+
+#### Quotation slots
+
+A slot is a word or a nested effect. A nested effect describes the quotation
+that occupies that position, and may name it with a label: a word ending in
+`:` as its first element.
+
+```ecl
+(collection (a -- b) -- collection) (body) `each def
+(bool (then: -- ...) (else: -- ...) -- ...) (body) `if def
+```
+
+The bare form is the default; a label names a quotation the documentation
+must refer to, typically where a word takes several. Every slot is one
+element of the effect, so a nested effect never changes the word's arity or
+its boundary check. A nested effect follows the same slot grammar as the
+effect around it, including `...` and further nesting, and carries no
+documentation string. It is documentation only: names are scoped to their
+own level and carry no identity across levels, and nothing checks the
+quotation against it. An isolated combinator's dynamic contract is stated
+here and checked by the combinator, not by the annotation. A label anywhere
+but first in a nested effect is `` `domain ``, as is nesting more than eight
+levels deep.
 
 The exact names `--`, `:`, and `...` are reserved against binding: they remain
 legal symbol values and can be built into annotations at runtime, but cannot be

@@ -363,6 +363,21 @@ test "formatter reflows only structurally recognized documentation" {
         "`square-doc def\n";
     try expectFormat(square_source, square_expected);
 
+    // A nested effect is a slot, so the annotation stays recognized.
+    const nested_source =
+        "(list (a -- bool) (then: -- ...) -- bool : \"This documentation contains enough ordinary prose to " ++
+        "exceed the configured width beside its nested quotation effects.\")\n" ++
+        "(dup)\n" ++
+        "`nested-doc def\n";
+    const nested_expected =
+        "### def nested-doc\n" ++
+        "(list (a -- bool) (then: -- ...) -- bool :\n" ++
+        " \"This documentation contains enough ordinary prose to exceed the configured width beside its nested\n" ++
+        "  quotation effects.\")\n" ++
+        "(dup)\n" ++
+        "`nested-doc def\n";
+    try expectFormat(nested_source, nested_expected);
+
     const ordinary = "(\"This ordinary string is deliberately kept byte-for-byte, even when it is much longer " ++
         "than the target formatting width and contains   repeated spaces.\")";
     try expectFormat(ordinary, ordinary ++ "\n");
@@ -397,6 +412,45 @@ test "doc-only prose keeps its prefix and preserves paragraphs and bullets" {
         "\"First prose line that continues softly across physical source lines and is long enough to need " ++
             "canonical wrapping in the formatter output.\\n\\n- One bullet whose continuation is also folded " ++
             "into the same logical bullet item. More words for that item.\\n- Two.\"",
+    );
+}
+
+test "a docstring paragraph whose lines start at different columns keeps its lines" {
+    const source =
+        "(x -- x :\n" ++
+        "   \"Prose folds\n" ++
+        "    as before.\n\n" ++
+        "    Ex:\n" ++
+        "      1  2 +\n" ++
+        "    3\n\n" ++
+        "        [a\n" ++
+        "         b]\n\n" ++
+        "    - A bullet\n" ++
+        "      continues.\")\n" ++
+        "(dup)\n" ++
+        "`laid-out def\n";
+    const expected =
+        "### def laid-out\n" ++
+        "(x -- x :\n" ++
+        " \"Prose folds as before.\n" ++
+        "\n" ++
+        "  Ex:\n" ++
+        "    1  2 +\n" ++
+        "  3\n" ++
+        "\n" ++
+        "      [a\n" ++
+        "       b]\n" ++
+        "\n" ++
+        "  - A bullet continues.\")\n" ++
+        "(dup)\n" ++
+        "`laid-out def\n";
+    try expectFormat(source, expected);
+
+    const executable = try std.fmt.allocPrint(allocator, "{s} `laid-out doc", .{expected});
+    defer allocator.free(executable);
+    try support.expectStack(
+        executable,
+        "\"Prose folds as before.\\n\\nEx:\\n  1  2 +\\n3\\n\\n    [a\\n     b]\\n\\n- A bullet continues.\"",
     );
 }
 

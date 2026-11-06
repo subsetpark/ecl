@@ -877,7 +877,7 @@ const Formatter = struct {
         if (separator) |index| if (index > colon_index) return null;
         if (separator == null and colon_index != 0) return null;
         if (forms.len != colon_index + 2 or forms[colon_index + 1].kind != .string) return null;
-        for (forms[0..colon_index]) |item| _ = wordBytes(item) orelse return null;
+        for (forms[0..colon_index]) |item| _ = try self.effectSlot(item) orelse return null;
         return .{
             .forms = forms,
             .colon = colon_index,
@@ -885,6 +885,15 @@ const Formatter = struct {
             .document = forms[colon_index + 1],
             .open = delimited.open,
             .close = delimited.close,
+        };
+    }
+    /// An effect slot's layout: a word, or a nested effect, which keeps the
+    /// layout of the quotation it is.
+    fn effectSlot(self: *Formatter, item: *Form) Error!?*const Doc {
+        if (wordBytes(item)) |bytes| return try self.docs.text(bytes);
+        return switch (item.kind) {
+            .delimited => |delimited| if (std.mem.eql(u8, delimited.open, "(")) item.layout.? else null,
+            else => null,
         };
     }
     fn formatAnnotation(self: *Formatter, annotation_info: Annotation) Error!*const Doc {
@@ -905,7 +914,7 @@ const Formatter = struct {
         }
         const header_items = try self.allocator().alloc(*const Doc, annotation_info.colon + 1);
         for (annotation_info.forms[0 .. annotation_info.colon + 1], 0..) |item, index| {
-            header_items[index] = try self.docs.text(wordBytes(item).?);
+            header_items[index] = (try self.effectSlot(item)).?;
         }
         const header = try self.docs.group(try self.docs.join(
             try self.docs.softline(),
@@ -928,26 +937,52 @@ const Formatter = struct {
     }
     fn documentContent(self: *Formatter, document: Value) Error!*const Doc {
         const count: usize = @intCast(document.list.length());
-        var output: std.ArrayList(*const Doc) = .empty;
-        defer output.deinit(self.allocator());
+        var lines: std.ArrayList(DocumentLine) = .empty;
+        defer lines.deinit(self.allocator());
         var start: usize = 0;
         while (start < count) {
             var end = start;
             while (end < count and charAt(document, end) != '\n') end += 1;
-            try output.append(self.allocator(), try self.documentLine(
-                document,
-                start,
-                end,
-                if (end == count) 2 else 0,
-            ));
-            if (end == count) break;
-            var breaks: usize = 0;
-            while (end < count and charAt(document, end) == '\n') : (end += 1) breaks += 1;
-            try output.append(self.allocator(), try self.docs.node(.{ .docline = breaks }));
-            start = end;
+            var next = end;
+            while (next < count and charAt(document, next) == '\n') next += 1;
+            try lines.append(self.allocator(), .{ .start = start, .end = end, .breaks = next - end });
+            start = next;
+        }
+        // Normalized prose is one line per paragraph or bullet, so a paragraph
+        // of several lines without bullets, or any indented line, is verbatim.
+        var paragraph: usize = 0;
+        while (paragraph < lines.items.len) {
+            var close = paragraph;
+            while (close + 1 < lines.items.len and lines.items[close].breaks == 1) close += 1;
+            var bulleted = false;
+            var indented = false;
+            for (lines.items[paragraph .. close + 1]) |line| {
+                bulleted = bulleted or isDocumentBullet(document, line.start, line.end);
+                indented = indented or (line.start < line.end and charAt(document, line.start) == ' ');
+            }
+            const verbatim = !bulleted and (indented or close > paragraph);
+            for (lines.items[paragraph .. close + 1]) |*line| line.verbatim = verbatim;
+            paragraph = close + 1;
+        }
+        var output: std.ArrayList(*const Doc) = .empty;
+        defer output.deinit(self.allocator());
+        for (lines.items, 0..) |line, index| {
+            const last = index + 1 == lines.items.len;
+            try output.append(self.allocator(), if (line.verbatim)
+                try self.docs.text(try escapedWord(self.allocator(), document, line.start, line.end))
+            else
+                try self.documentLine(document, line.start, line.end, if (last) 2 else 0));
+            if (last) break;
+            // A verbatim line cannot be flattened into `\n` escapes.
+            if (line.verbatim or lines.items[index + 1].verbatim) {
+                for (0..line.breaks) |_| try output.append(self.allocator(), try self.docs.hardline());
+            } else {
+                try output.append(self.allocator(), try self.docs.node(.{ .docline = line.breaks }));
+            }
         }
         return self.docs.concat(output.items);
     }
+    const DocumentLine = struct { start: usize, end: usize, breaks: usize, verbatim: bool = false };
     fn documentLine(
         self: *Formatter,
         document: Value,
@@ -955,8 +990,7 @@ const Formatter = struct {
         end: usize,
         reserve: usize,
     ) Error!*const Doc {
-        const bullet = start < end and charAt(document, start) == '-' and
-            (start + 1 == end or charAt(document, start + 1) == ' ');
+        const bullet = isDocumentBullet(document, start, end);
         const word_start = start + @as(usize, if (bullet and start + 1 < end) 2 else 0);
         var words: std.ArrayList([]const u8) = .empty;
         defer words.deinit(self.allocator());
@@ -1388,6 +1422,10 @@ fn escapedWord(
         }
     }
     return output.toOwnedSlice(allocator);
+}
+fn isDocumentBullet(document: Value, start: usize, end: usize) bool {
+    return start < end and charAt(document, start) == '-' and
+        (start + 1 == end or charAt(document, start + 1) == ' ');
 }
 fn charAt(document: Value, index: usize) u32 {
     return list.atUnchecked(document, index).char;

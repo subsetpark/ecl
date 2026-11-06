@@ -1341,9 +1341,9 @@ const EffectCheck = struct {
     inputs: u32,
     outputs: u32,
     word: intern.TraceWord,
-    /// An anonymous after row is an input-only contract: entry consumption is
-    /// still verified, the post-condition compare is skipped.
-    row: bool = false,
+    /// How the post-condition compares the observed depth with
+    /// `expected_depth`; entry consumption is verified regardless.
+    result_depth: env.Effect.ResultDepth = .exact,
     provenance: EffectProvenance = .none,
 
     fn activateSource(
@@ -7682,7 +7682,7 @@ fn prepareEffectCheck(
         .entry_depth = available,
         .inputs = declared.inputs,
         .outputs = declared.outputs,
-        .row = declared.row,
+        .result_depth = declared.result_depth,
         .word = word,
     };
 }
@@ -7853,15 +7853,25 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
 }
 fn finishEffectCheck(self: *Fiber, check: *EffectCheck) MachineError!void {
     check.restoreActive(self);
-    if (check.row) return;
     const observed = self.stack.items.len;
-    if (observed == check.expected_depth) return;
+    switch (check.result_depth) {
+        .unchecked => return,
+        .exact => if (observed == check.expected_depth) return,
+        .at_least => if (observed >= check.expected_depth) return,
+    }
     self.active_word = check.word;
     const observed_relative = observed - self.stack_base;
     const failure = self.failFmt(
         .contract,
-        "{s} declared ({d} -- {d}); seeded {d}, observed {d}",
-        .{ self.activeWordName(), check.inputs, check.outputs, check.entry_depth, observed_relative },
+        "{s} declared ({d} -- {s}{d}); seeded {d}, observed {d}",
+        .{
+            self.activeWordName(),
+            check.inputs,
+            if (check.result_depth == .at_least) "at least " else "",
+            check.outputs,
+            check.entry_depth,
+            observed_relative,
+        },
     );
     self.pendingFailure().addData(.seeded, .{ .int = check.entry_depth });
     self.pendingFailure().addData(.observed, .{ .int = @intCast(observed_relative) });

@@ -1,4 +1,10 @@
 //! Canonical prose normalization for reflective definition documentation.
+//!
+//! Prose paragraphs fold into one line and bullets into one line each. A
+//! paragraph with no bullets whose lines do not all start at one column is
+//! laid out by hand, such as an example, and keeps its lines and their
+//! indentation past the margin. A first line beside the opening quote has no
+//! column of its own and does not count.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -13,6 +19,8 @@ const Line = struct {
     end: usize,
     leading: usize,
     blank: bool,
+    /// Set on a paragraph's first line when the paragraph keeps its lines.
+    verbatim: bool = false,
 };
 
 const Kind = enum { prose, bullet };
@@ -39,7 +47,7 @@ pub const NormalizeCursor = struct {
     document: Value,
     lines: []Line,
     line_count: usize = 0,
-    phase: enum { scan, bounds, render_count, render_fill, materialize } = .scan,
+    phase: enum { scan, bounds, classify, render_count, render_fill, materialize } = .scan,
     source_index: usize = 0,
     line_start: usize = 0,
     leading: usize = 0,
@@ -49,10 +57,18 @@ pub const NormalizeCursor = struct {
     content_start: usize = 0,
     content_end: usize = 0,
     margin: ?usize = null,
+    classify_index: usize = 0,
+    paragraph_first: ?usize = null,
+    paragraph_column: ?usize = null,
+    paragraph_ragged: bool = false,
+    paragraph_bulleted: bool = false,
     render_line: usize = 0,
-    render_mode: enum { idle, bullet_trim, content } = .idle,
+    render_mode: enum { idle, bullet_trim, content, verbatim_pad, verbatim } = .idle,
     render_index: usize = 0,
     render_end: usize = 0,
+    render_pad: usize = 0,
+    paragraph_start: bool = true,
+    in_verbatim: bool = false,
     pending_space: bool = false,
     emitted: bool = false,
     pending_blank: bool = false,
@@ -93,6 +109,7 @@ pub const NormalizeCursor = struct {
         while (self.phase == .materialize or work.spend()) switch (self.phase) {
             .scan => self.scanOne(),
             .bounds => self.boundOne(),
+            .classify => self.classifyOne(),
             .render_count, .render_fill => try self.renderOne(),
             .materialize => return switch (try self.materializer.?.advance(work)) {
                 .pending => .pending,
@@ -145,8 +162,8 @@ pub const NormalizeCursor = struct {
             self.content_end = self.bounds_index;
             while (self.content_end > self.content_start and self.lines[self.content_end - 1].blank)
                 self.content_end -= 1;
-            self.resetRender();
-            self.phase = .render_count;
+            self.classify_index = self.content_start;
+            self.phase = .classify;
             return;
         }
         const line = self.lines[self.bounds_index];
@@ -159,9 +176,53 @@ pub const NormalizeCursor = struct {
         self.bounds_index += 1;
     }
 
+    fn classifyOne(self: *NormalizeCursor) void {
+        if (self.classify_index == self.content_end) {
+            self.closeParagraph();
+            self.resetRender();
+            self.phase = .render_count;
+            return;
+        }
+        const index = self.classify_index;
+        self.classify_index += 1;
+        const line = self.lines[index];
+        if (line.blank) return self.closeParagraph();
+        if (self.paragraph_first == null) {
+            self.paragraph_first = index;
+            self.paragraph_column = null;
+            self.paragraph_ragged = false;
+            self.paragraph_bulleted = false;
+        }
+        if (isBullet(self.document, line.start + line.leading, line.end))
+            self.paragraph_bulleted = true;
+        if (index == 0 and line.start == 0) return;
+        if (self.paragraph_column) |column| {
+            if (column != line.leading) self.paragraph_ragged = true;
+        } else self.paragraph_column = line.leading;
+    }
+
+    fn closeParagraph(self: *NormalizeCursor) void {
+        const first = self.paragraph_first orelse return;
+        self.lines[first].verbatim = self.paragraph_ragged and !self.paragraph_bulleted;
+        self.paragraph_first = null;
+    }
+
+    /// Indentation a line keeps past the margin. The first line, when it opens
+    /// the string, sits beside the quote and keeps none.
+    fn remainingIndent(self: *const NormalizeCursor, index: usize) usize {
+        const line = self.lines[index];
+        const removed = if (index == 0 and line.start == 0)
+            line.leading
+        else
+            @min(line.leading, self.margin orelse 0);
+        return line.leading - removed;
+    }
+
     fn resetRender(self: *NormalizeCursor) void {
         self.render_line = self.content_start;
         self.render_mode = .idle;
+        self.paragraph_start = true;
+        self.in_verbatim = false;
         self.pending_space = false;
         self.emitted = false;
         self.pending_blank = false;
@@ -208,6 +269,24 @@ pub const NormalizeCursor = struct {
             }
             return;
         }
+        if (self.render_mode == .verbatim_pad) {
+            if (self.render_pad == 0) {
+                self.render_mode = .verbatim;
+            } else {
+                self.render_pad -= 1;
+                try self.emit(' ');
+            }
+            return;
+        }
+        if (self.render_mode == .verbatim) {
+            if (self.render_index == self.render_end) {
+                self.finishRenderedLine();
+            } else {
+                try self.emit(at(self.document, self.render_index));
+                self.render_index += 1;
+            }
+            return;
+        }
         if (self.render_mode == .content) {
             if (self.render_index == self.render_end) {
                 self.finishRenderedLine();
@@ -240,16 +319,28 @@ pub const NormalizeCursor = struct {
         const line = self.lines[self.render_line];
         if (line.blank) {
             if (self.emitted) self.pending_blank = true;
+            self.paragraph_start = true;
             self.render_line += 1;
             return;
         }
-        const removed = if (self.render_line == 0 and line.start == 0)
-            line.leading
-        else
-            @min(line.leading, self.margin orelse 0);
-        const start = line.start + removed;
-        const remaining_indent = line.leading - removed;
+        if (self.paragraph_start) {
+            self.in_verbatim = line.verbatim;
+            self.paragraph_start = false;
+        }
+        const remaining_indent = self.remainingIndent(self.render_line);
+        const start = line.start + line.leading - remaining_indent;
         const item_start = line.start + line.leading;
+        if (self.in_verbatim) {
+            self.current = .prose;
+            if (self.emitted) {
+                if (self.pending_blank) self.enqueue(&.{ '\n', '\n' }) else self.enqueue(&.{'\n'});
+            }
+            self.render_end = line.end;
+            self.render_index = item_start;
+            self.render_pad = remaining_indent;
+            self.render_mode = .verbatim_pad;
+            return;
+        }
         const bullet = isBullet(self.document, item_start, line.end);
         self.current = if (bullet) .bullet else if (self.previous == .bullet and remaining_indent > 0)
             .bullet

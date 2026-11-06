@@ -690,12 +690,12 @@
  ([] (1) (serve-step) while) `accept-loop defp
 
  ### def @serve
- (listener config handler -- :
-  "*Unit constructor*, contract `( request -- response )` enforced per request. Serve HTTP/1.1
-   requests from a `net` listener until the unit ends: accept in a loop and give each connection to
-   a child unit that owns it. The child frames one request under the read deadline, applies the
-   handler as `[request] handler @attempt` in a fresh unit, writes its single response with
-   `Content-Length` and `Connection: close`, and closes the connection.
+ (listener config (handler: request -- response) -- :
+  "*Unit constructor*, the handler's effect enforced per request. Serve HTTP/1.1 requests from a
+   `net` listener until the unit ends: accept in a loop and give each connection to a child unit
+   that owns it. The child frames one request under the read deadline, applies the handler as
+   `[request] handler @attempt` in a fresh unit, writes its single response with `Content-Length`
+   and `Connection: close`, and closes the connection.
 
    The request is the dictionary `{method target path query headers body peer}`: `` `method `` and
    `` `target `` are the request-line tokens; `` `path `` and `` `query `` are the target split at

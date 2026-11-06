@@ -58,26 +58,23 @@
   core.put) `update-or def
 
  ### def map
- (dict quotation -- dict :
-  "Call a `( key value -- value )` quotation for every entry, replacing values while preserving keys
-   and insertion order.")
+ (dict (key value -- value) -- dict :
+  "Call the quotation for every entry, replacing values while preserving keys and insertion order.")
  (|d transform|
   d dict.core.keys
   d pairs transform ((dup first swap 1 wrap at-path) dip call) partial each
   dict.core.from-lists) `map def
 
  ### def filter
- (dict predicate -- dict :
-  "Call a `( key value -- bool )` predicate in insertion order and retain the entries for which it
-   returns 1.")
+ (dict (key value -- bool) -- dict :
+  "Call the predicate in insertion order and retain the entries for which it returns 1.")
  (|d predicate|
   d pairs dup predicate ((dup first swap 1 wrap at-path) dip call) partial each
   where wrap at-path from-pairs) `filter def
 
  ### def reject
- (dict predicate -- dict :
-  "Call a `( key value -- bool )` predicate in insertion order and discard the entries for which it
-   returns 1.")
+ (dict (key value -- bool) -- dict :
+  "Call the predicate in insertion order and discard the entries for which it returns 1.")
  (|d predicate|
   d pairs dup predicate ((dup first swap 1 wrap at-path) dip call not) partial each
   where wrap at-path from-pairs) `reject def
