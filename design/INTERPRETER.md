@@ -1262,8 +1262,8 @@ substantial host operation—but preserves the properties ecl cares about:
 
 Builtins remain appropriate for irreducible representation or host-authority
 operations. Compact language logic belongs in the prelude or source modules.
-Recognition is the bridge for the small set of source definitions whose
-measured cost justifies fusion.
+Recognition fuses the small set of phrases in user code whose measured cost
+justifies it; it never stands in for a source definition.
 
 ## 8. Scheduling and structured concurrency
 
