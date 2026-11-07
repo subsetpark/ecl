@@ -403,13 +403,16 @@ const EffectBuild = struct {
                 },
             },
             .materialized => |item| {
-                const parsed = env.ValidatedEffect.parse(item.list, try intern.intern("--")) orelse {
+                // A native call takes exactly its declared inputs and completes
+                // with exactly its declared outputs, so no row is admitted.
+                const parsed = env.ValidatedEffect.parse(item.list) orelse null;
+                if (parsed == null or parsed.?.result_depth != .exact) {
                     heap.hostDomain(self.host).releaseValue(item);
                     self.state = .failed;
                     return error.InvalidEffect;
-                };
-                self.state = .{ .complete = parsed };
-                return parsed;
+                }
+                self.state = .{ .complete = parsed.? };
+                return parsed.?;
             },
             .complete => |effect| return effect,
             .failed, .consumed => unreachable,

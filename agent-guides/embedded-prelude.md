@@ -11,10 +11,12 @@ apply as well.
   navigation header and before the body quotation; the header begins the
   complete definition block.
 - Give every prelude definition a meaningful, nonempty annotation docstring.
-  Include an effect when the successful stack effect is fixed and expressible;
-  when only the before row is fixed, declare it with a `...` after row. Use a
-  documentation-only annotation only when the before row is not fixed, and
-  state the shape in the docstring.
+  Include an effect whenever the successful stack effect is expressible: when
+  a word consumes or leaves a variable number of values, put one `...` in that
+  row where they sit, keeping every value whose position is known named. Use a
+  documentation-only annotation only when no effect is expressible, and state
+  the shape in the docstring. State the contract of an isolated quotation
+  argument as that slot's nested effect, not in the docstring.
 - Treat the annotation—not the navigation comment—as the documentation
   authority. `doc`, `which`, and `see` reflect it, and `design/STDLIB.md`
   renders the word's entry from it.

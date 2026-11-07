@@ -2411,16 +2411,8 @@ pub const Registry = enum(usize) {
             self: *BuiltinCandidateCursor,
             source: []const u8,
         ) error{OutOfMemory}!env.ValidatedEffect {
-            var tokens: [env.max_builtin_effect_tokens]value.Value = undefined;
-            var count: usize = 0;
-            var iterator = std.mem.tokenizeAny(u8, source, " \t");
-            while (iterator.next()) |token| {
-                if (count == tokens.len) return error.OutOfMemory;
-                tokens[count] = .{ .symbol = .{ .name = try intern.intern(token) } };
-                count += 1;
-            }
-            const owned = try list.fromValuesGeneric(self.allocator, tokens[0..count]);
-            return env.ValidatedEffect.parse(owned.list, try intern.intern("--")) orelse {
+            const owned = try env.builtinEffectValue(self.allocator, self.releases, source);
+            return env.ValidatedEffect.parse(owned.list) orelse {
                 self.releases.releaseValue(owned);
                 return error.OutOfMemory;
             };

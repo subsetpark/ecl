@@ -76,7 +76,7 @@
 ### def rank-step
 (ranks matrix -- ranks :
  "Recompute every rank from the current ranks of the definitions each uses.")
-(swap (|row ranks| ranks row where at dup empty? (pop 0) (max-of 1 +) if) partial each)
+(swap (|row ranks| ranks row where at dup empty? (pop 0) ((max) fold1 1 +) if) partial each)
 `rank-step def
 
 ### def ranks
@@ -121,11 +121,16 @@
  (pop 0)
  if) `annotation? def
 
+### def slot-text
+(slot -- text : "Render an effect slot: a word's spelling, or a nested effect in parentheses.")
+(dup type `list match? ((slot-text) each " " join "(" swap cat ")" cat) (word-spelling) if)
+`slot-text def
+
 ### def effect-text
 (annotation -- text :
  "Render an annotation's declared effect as an entry's leading code span and dash, or return the
   empty string for a documentation-only annotation.")
-((word-spelling) each dup ":" find take
+((slot-text) each dup ":" find take
  dup "--" find over len <
  ((|words| "`( " words " " join cat " )` — " cat) call)
  (pop "")
@@ -182,10 +187,23 @@
 (name -- text : "Escape a word name for a Markdown heading.")
 ("*" "\\*" str.replace) `escaped def
 
+### def verbatim?
+(paragraph -- bool :
+ "Return 1 when a normalized documentation paragraph is laid out by hand: it has no bullet, and
+  either several lines or an indented one.")
+("\n" split
+ dup (dup "- " starts? swap "-" match? or) any? not
+ over len 1 > rolldown (" " starts?) any? or and) `verbatim? def
+
+### def doc-text
+(doc -- text :
+ "Render documentation as Markdown, fencing each hand-laid paragraph so its lines survive.")
+("\n\n" split (dup verbatim? ("```\n" swap cat "\n```" cat) when) each "\n\n" join) `doc-text def
+
 ### def entry-text
 (name qualifier -- text :
  "Render a word's declared effect and documentation, read through reflection.")
-(swap cat intern dup effect effect-text swap doc cat) `entry-text def
+(swap cat intern dup effect effect-text swap doc doc-text cat) `entry-text def
 
 ### def member?
 (name names -- bool : "Return 1 when a list holds a value matching the name.")

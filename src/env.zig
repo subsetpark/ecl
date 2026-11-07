@@ -68,11 +68,18 @@ pub const BindingOrigin = union(enum) {
 };
 pub const ValidatedEffect = struct {
     quotation: *EffectQuotation,
+    /// The named before slots: exactly what the word consumes, or the minimum
+    /// when the before portion holds a row.
     inputs: u32,
+    /// The named after slots: exactly what the word leaves, or the minimum
+    /// when the after portion holds a row.
     outputs: u32,
-    /// The after portion is the anonymous row token rather than named slots:
-    /// the before row is checked at boundaries, the after row is not.
-    row: bool = false,
+    result_depth: ResultDepth = .exact,
+
+    /// What a boundary can check of the depth a word leaves. A before row
+    /// leaves the consumed count unknown, so nothing about the result depth
+    /// can be checked; an after row alone still fixes a minimum.
+    pub const ResultDepth = enum { exact, at_least, unchecked };
     pub fn header(self: ValidatedEffect) *value.ListHandle {
         return @ptrCast(@alignCast(self.quotation));
     }
@@ -82,62 +89,199 @@ pub const ValidatedEffect = struct {
     pub fn retire(self: ValidatedEffect, releases: *heap.ReleaseDomain) void {
         releases.releaseHeader(self.header());
     }
-    pub fn fromValidated(effect_header: *value.ListHandle, separator_index: usize) ValidatedEffect {
-        std.debug.assert(effect_header.kind() == .generic_spine and separator_index < effect_header.length());
+    pub fn fromValidated(effect_header: *value.ListHandle, shape: EffectShape) ValidatedEffect {
+        const split = shape.split;
+        std.debug.assert(effect_header.kind() == .generic_spine and split < effect_header.length());
         return .{
             .quotation = @ptrCast(@alignCast(effect_header)),
-            .inputs = @intCast(separator_index),
-            .outputs = @intCast(@as(usize, @intCast(effect_header.length())) - separator_index - 1),
-            .row = isRowEffect(effect_header, separator_index),
+            .inputs = @intCast(split - @intFromBool(shape.before_row)),
+            .outputs = @intCast(@as(usize, @intCast(effect_header.length())) - split - 1 -
+                @intFromBool(shape.after_row)),
+            .result_depth = if (shape.before_row)
+                .unchecked
+            else if (shape.after_row)
+                .at_least
+            else
+                .exact,
         };
     }
-    /// The after portion is the row token exactly when it is that one word.
-    pub fn isRowEffect(effect_header: *value.ListHandle, separator_index: usize) bool {
-        const count: usize = @intCast(effect_header.length());
-        if (count != separator_index + 2) return false;
-        const after = list.atUnchecked(.{ .list = effect_header }, separator_index + 1);
-        return after == .symbol and std.mem.eql(u8, intern.get(after.symbol.name), lexer.row_token);
-    }
-    pub const ParseProgress = poll.Progress(?ValidatedEffect);
-    pub const ParseCursor = struct {
-        header: *value.ListHandle,
-        separator: u32,
-        index: usize = 0,
-        split: ?usize = null,
-        pub fn advance(self: *ParseCursor) ParseProgress {
-            if (self.header.kind() != .generic_spine) return .{ .complete = null };
-            const count: usize = @intCast(self.header.length());
-            if (self.index == count) {
-                const split = self.split orelse return .{ .complete = null };
-                return .{ .complete = .{
-                    .quotation = @ptrCast(@alignCast(self.header)),
-                    .inputs = @intCast(split),
-                    .outputs = @intCast(count - split - 1),
-                    .row = isRowEffect(self.header, split),
-                } };
-            }
-            const atom = list.atUnchecked(.{ .list = self.header }, self.index);
-            if (atom != .symbol) return .{ .complete = null };
-            if (atom.symbol.name == self.separator) {
-                if (self.split != null) return .{ .complete = null };
-                self.split = self.index;
-            }
-            self.index += 1;
-            return .pending;
-        }
-    };
-    pub fn parse(effect_header: *value.ListHandle, separator: u32) ?ValidatedEffect {
-        var cursor = ParseCursor{ .header = effect_header, .separator = separator };
-        return poll.drive(?ValidatedEffect, &cursor, .{});
+    pub fn parse(effect_header: *value.ListHandle) ?ValidatedEffect {
+        var cursor = EffectGrammar.init(
+            effect_header,
+            @intCast(effect_header.length()),
+        ) orelse return null;
+        const shape = poll.drive(?EffectShape, &cursor, .{}) orelse return null;
+        return fromValidated(effect_header, shape);
     }
 };
+
 pub const Effect = ValidatedEffect;
+
+/// Deepest nesting of quotation slots an effect may declare.
+pub const max_effect_depth = 8;
+
+/// Where a validated level's separator sits, and which portions hold a row,
+/// making that portion's named slots a minimum.
+pub const EffectShape = struct {
+    split: usize,
+    before_row: bool,
+    after_row: bool,
+};
+
+/// One level of an effect under validation. The slot grammar lives here alone:
+/// the runtime cursor over values and the comptime check of builtin effect
+/// text both drive these rules, so the two cannot disagree. A slot is a word
+/// or a nested effect; each level has exactly one `--`, `...` at most once in
+/// each portion, and a label word ending in `:` only first in a nested effect. Every slot is one element, so the top level's separator index
+/// alone determines arity.
+pub const EffectLevel = struct {
+    nested: bool,
+    index: usize = 0,
+    split: ?usize = null,
+    before_row: bool = false,
+    after_row: bool = false,
+
+    pub fn admitWord(self: *EffectLevel, spelling: []const u8) bool {
+        const index = self.index;
+        self.index += 1;
+        if (std.mem.eql(u8, spelling, "--")) {
+            if (self.split != null) return false;
+            self.split = index;
+            return true;
+        }
+        if (std.mem.eql(u8, spelling, lexer.row_token)) {
+            const row = if (self.split == null) &self.before_row else &self.after_row;
+            if (row.*) return false;
+            row.* = true;
+            return true;
+        }
+        // A lone `:` would be a documentation marker, which only a top-level
+        // annotation carries, and that ends the effect before it.
+        if (std.mem.endsWith(u8, spelling, ":"))
+            return self.nested and index == 0 and spelling.len > 1;
+        return true;
+    }
+
+    pub fn admitNested(self: *EffectLevel) void {
+        self.index += 1;
+    }
+
+    /// The level's shape, or null when the level is malformed.
+    pub fn close(self: EffectLevel) ?EffectShape {
+        const split = self.split orelse return null;
+        return .{ .split = split, .before_row = self.before_row, .after_row = self.after_row };
+    }
+};
+
+/// Validates an effect value one element per step, with nesting as an
+/// explicit frame stack.
+pub const EffectGrammar = struct {
+    // SAFETY: frames below `depth` are initialized; the rest are never read.
+    frames: [max_effect_depth]Frame = undefined,
+    depth: usize = 1,
+
+    const Frame = struct {
+        items: *value.ListHandle,
+        end: usize,
+        level: EffectLevel,
+    };
+
+    /// Validate the first `end` elements of `effect`; a definition's
+    /// annotation ends its effect before the documentation marker.
+    pub fn init(effect: *value.ListHandle, end: usize) ?EffectGrammar {
+        if (effect.kind() != .generic_spine) return null;
+        var grammar: EffectGrammar = .{};
+        grammar.frames[0] = .{ .items = effect, .end = end, .level = .{ .nested = false } };
+        return grammar;
+    }
+
+    /// Completes with the top level's shape, or null when any level is
+    /// malformed.
+    pub fn advance(self: *EffectGrammar) poll.Progress(?EffectShape) {
+        const frame = &self.frames[self.depth - 1];
+        if (frame.level.index == frame.end) {
+            const shape = frame.level.close() orelse return .{ .complete = null };
+            self.depth -= 1;
+            return if (self.depth == 0) .{ .complete = shape } else .pending;
+        }
+        switch (list.atUnchecked(.{ .list = frame.items }, frame.level.index)) {
+            .list => |nested| {
+                if (nested.kind() != .generic_spine or self.depth == max_effect_depth)
+                    return .{ .complete = null };
+                frame.level.admitNested();
+                self.frames[self.depth] = .{
+                    .items = nested,
+                    .end = @intCast(nested.length()),
+                    .level = .{ .nested = true },
+                };
+                self.depth += 1;
+            },
+            .symbol => |symbol| if (!frame.level.admitWord(intern.get(symbol.name)))
+                return .{ .complete = null },
+            else => return .{ .complete = null },
+        }
+        return .pending;
+    }
+};
+
+/// Splits builtin effect text into words and parentheses. Usable at comptime.
+pub const EffectTokens = struct {
+    source: []const u8,
+    position: usize = 0,
+
+    pub fn next(self: *EffectTokens) ?[]const u8 {
+        while (self.position < self.source.len and self.source[self.position] == ' ') self.position += 1;
+        if (self.position == self.source.len) return null;
+        const start = self.position;
+        if (self.source[start] == '(' or self.source[start] == ')') {
+            self.position += 1;
+            return self.source[start..self.position];
+        }
+        while (self.position < self.source.len) : (self.position += 1) switch (self.source[self.position]) {
+            ' ', '(', ')' => break,
+            else => {},
+        };
+        return self.source[start..self.position];
+    }
+};
+
+/// Build the effect value that builtin effect text spells, nested lists for
+/// its parenthesized slots. The text must already satisfy
+/// `validateBuiltinEffect`, which bounds its depth and level widths.
+pub fn builtinEffectValue(
+    allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
+    source: []const u8,
+) error{OutOfMemory}!value.Value {
+    var tokens: EffectTokens = .{ .source = source };
+    return buildEffectLevel(allocator, releases, &tokens);
+}
+
+fn buildEffectLevel(
+    allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
+    tokens: *EffectTokens,
+) error{OutOfMemory}!value.Value {
+    // SAFETY: only the first `count` items are read or released.
+    var items: [max_builtin_effect_tokens]value.Value = undefined;
+    var count: usize = 0;
+    defer for (items[0..count]) |item| releases.releaseValue(item);
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, ")")) break;
+        items[count] = if (std.mem.eql(u8, token, "("))
+            try buildEffectLevel(allocator, releases, tokens)
+        else
+            .{ .symbol = .{ .name = try intern.intern(token) } };
+        count += 1;
+    }
+    return list.fromValuesGeneric(allocator, items[0..count]);
+}
 
 /// One word of a builtin-backed module: a host primitive published under a
 /// module name. The metadata is authored as plain text because these modules
 /// are compiled in and therefore have no loader descriptor to carry it.
-/// Slots either side of `--` in a builtin word's declared effect. Fixed
-/// because these effects are fixed compiled-in text outside the user-data path.
+/// Elements in one level of a builtin word's declared effect, `--` included.
+/// Fixed because these effects are compiled-in text outside the user-data path.
 pub const max_builtin_effect_tokens: usize = 16;
 
 pub const BuiltinWord = struct {
@@ -179,10 +323,30 @@ fn validateBuiltinEffect(comptime name: []const u8, comptime effect: []const u8)
     for (effect[1..], effect[0 .. effect.len - 1]) |byte, previous| {
         if (byte == ' ' and previous == ' ') @compileError("invalid primitive effect spacing: " ++ name);
     }
-    var separators: usize = 0;
-    var iterator = std.mem.tokenizeScalar(u8, effect, ' ');
-    while (iterator.next()) |token| separators += @intFromBool(std.mem.eql(u8, token, "--"));
-    if (separators != 1) @compileError("primitive effect requires exactly one separator: " ++ name);
+    // SAFETY: levels below `depth` are initialized; the rest are never read.
+    var levels: [max_effect_depth]EffectLevel = undefined;
+    levels[0] = .{ .nested = false };
+    var depth: usize = 1;
+    var tokens: EffectTokens = .{ .source = effect };
+    while (tokens.next()) |token| {
+        const level = &levels[depth - 1];
+        if (std.mem.eql(u8, token, ")")) {
+            if (depth == 1 or level.close() == null) @compileError("malformed primitive effect: " ++ name);
+            depth -= 1;
+            continue;
+        }
+        if (std.mem.eql(u8, token, "(")) {
+            level.admitNested();
+        } else if (!level.admitWord(token)) @compileError("malformed primitive effect: " ++ name);
+        if (level.index > max_builtin_effect_tokens)
+            @compileError("primitive effect level is too wide: " ++ name);
+        if (std.mem.eql(u8, token, "(")) {
+            if (depth == max_effect_depth) @compileError("primitive effect nests too deeply: " ++ name);
+            levels[depth] = .{ .nested = true };
+            depth += 1;
+        }
+    }
+    if (depth != 1 or levels[0].close() == null) @compileError("malformed primitive effect: " ++ name);
 }
 
 pub const ModulePublication = union(enum) {
@@ -1295,50 +1459,17 @@ pub const BuildingEnv = enum(usize) {
         return @fromBackingInt(@backingInt(self));
     }
 
-    const BuiltinEffect = struct {
-        value: value.Value,
-        validated: ValidatedEffect,
-    };
-
     /// Only the static factory can pair authored metadata with its validated
     /// effect builder. Runtime installation never accepts an unchecked word.
     const StaticBuiltin = opaque {
-        const EffectData = struct {
-            tokens: []const []const u8,
-            separator: usize,
-            build: *const fn (*BuildingEnv, *const EffectData) error{OutOfMemory}!BuiltinEffect,
-        };
         const Data = struct {
             definition: BuiltinWord,
-            effect: ?EffectData,
         };
-
-        fn effectBuilder(comptime count: usize) @FieldType(EffectData, "build") {
-            return struct {
-                fn build(builder: *BuildingEnv, effect: *const EffectData) error{OutOfMemory}!BuiltinEffect {
-                    return builder.builtinEffect(count, effect);
-                }
-            }.build;
-        }
 
         fn init(comptime definition: BuiltinWord) *const StaticBuiltin {
             const data = comptime blk: {
                 assertStaticBuiltin(definition);
-                const effect: ?EffectData = if (definition.effect) |source| effect: {
-                    const count = countEffectTokens(source);
-                    var tokens: [count][]const u8 = undefined;
-                    var iterator = std.mem.tokenizeScalar(u8, source, ' ');
-                    // SAFETY: assertStaticBuiltin guarantees exactly one `--`
-                    // token, so the loop assigns separator before it is read.
-                    var separator: usize = undefined;
-                    for (&tokens, 0..) |*token, index| {
-                        token.* = iterator.next().?;
-                        if (std.mem.eql(u8, token.*, "--")) separator = index;
-                    }
-                    const frozen = tokens;
-                    break :effect .{ .tokens = &frozen, .separator = separator, .build = effectBuilder(count) };
-                } else null;
-                break :blk Data{ .definition = definition, .effect = effect };
+                break :blk Data{ .definition = definition };
             };
             return @ptrCast(&data);
         }
@@ -1356,13 +1487,14 @@ pub const BuildingEnv = enum(usize) {
             const releases = heap.hostDomain(state.host);
             const document_value = try machine.stringValue(allocator, releases, definition.doc);
             defer releases.releaseValue(document_value);
-            const builtin_effect: ?BuiltinEffect = if (data.effect) |*effect|
-                try effect.build(builder, effect)
+            const effect_value: ?value.Value = if (definition.effect) |source|
+                try builtinEffectValue(allocator, releases, source)
             else
                 null;
-            defer if (builtin_effect) |effect| releases.releaseValue(effect.value);
+            defer if (effect_value) |item| releases.releaseValue(item);
             const created = try Definition.create(allocator, .static, .{ .builtin = definition.primitive }, .{
-                .effect = if (builtin_effect) |effect| effect.validated else null,
+                // assertStaticBuiltin checked this text against the same grammar.
+                .effect = if (effect_value) |item| ValidatedEffect.parse(item.list).? else null,
                 .doc = documentation(document_value.list).?,
                 .root = .core,
             });
@@ -1375,25 +1507,6 @@ pub const BuildingEnv = enum(usize) {
             };
         }
     };
-
-    fn builtinEffect(
-        self: *BuildingEnv,
-        comptime token_count: usize,
-        effect: *const StaticBuiltin.EffectData,
-    ) error{OutOfMemory}!BuiltinEffect {
-        var environment = self.target();
-        const allocator = environment.privateState().host.allocator();
-        var tokens: [token_count]value.Value = undefined;
-        for (effect.tokens, &tokens) |token, *destination| {
-            const id = try intern.intern(token);
-            destination.* = .{ .symbol = .{ .name = id } };
-        }
-        const effect_value = try list.fromValuesGeneric(allocator, &tokens);
-        return .{
-            .value = effect_value,
-            .validated = .fromValidated(effect_value.list, effect.separator),
-        };
-    }
 
     pub fn installBuiltin(self: *BuildingEnv, comptime definition: BuiltinWord) error{OutOfMemory}!void {
         return StaticBuiltin.init(definition).install(self);
@@ -1453,13 +1566,6 @@ pub const BuildingEnv = enum(usize) {
         self.* = .invalid;
     }
 };
-
-fn countEffectTokens(comptime source: []const u8) usize {
-    if (source.len == 0) @compileError("primitive effect cannot be empty");
-    var count: usize = 1;
-    for (source) |byte| count += @intFromBool(byte == ' ');
-    return count;
-}
 
 pub fn assertStaticNamespace(comptime name: []const u8) void {
     if (intern.isReservedBytes(name) or !lexer.validSymbolSegment(name)) {

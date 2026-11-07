@@ -5,7 +5,6 @@ const poll = @import("poll.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
-const lexer = @import("lexer.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
@@ -30,9 +29,9 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "def", .primitive = bind(.def), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Bind a quotation to a public word, with optional effect and documentation metadata. See [Definition annotations](SPEC.md#definition-annotations) for the annotation forms and validation; see [Modules](SPEC.md#modules) for module-context requirements." },
-        .{ .name = "defp", .primitive = bind(.defp), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Bind a private module word, with optional effect and documentation metadata. A top-level `defp` is an error." },
-        .{ .name = "test", .primitive = bind(.test_declaration), .effect = null, .doc = "Takes an optional annotation, a body, and a name, and leaves nothing. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names." },
+        .{ .name = "def", .primitive = bind(.def), .effect = "... body name --", .doc = "An optional annotation may sit beneath the body. Bind a quotation to a public word, with optional effect and documentation metadata. See [Definition annotations](SPEC.md#definition-annotations) for the annotation forms and validation; see [Modules](SPEC.md#modules) for module-context requirements." },
+        .{ .name = "defp", .primitive = bind(.defp), .effect = "... body name --", .doc = "An optional annotation may sit beneath the body. Bind a private module word, with optional effect and documentation metadata. A top-level `defp` is an error." },
+        .{ .name = "test", .primitive = bind(.test_declaration), .effect = "... body name --", .doc = "An optional annotation may sit beneath the body. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names." },
         .{ .name = "doc", .primitive = doc, .effect = "name -- string", .doc = "Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``." },
         .{ .name = "effect", .primitive = declaredEffect, .effect = "name -- annotation", .doc = "Return the declared stack effect of a resolved binding as an annotation such as `(x y -- z)`, or `()` when it declares none." },
         .{ .name = "which", .primitive = which, .effect = "name --", .doc = "Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition." },
@@ -110,13 +109,16 @@ const DefineDriver = struct {
         source: heap.Owned(Value),
         separator_at: ?usize,
         effect_end: usize,
+        /// The effect's validated shape, once its grammar has been checked.
+        shape: ?env.EffectShape = null,
     };
     const State = union(enum) {
         scan_annotation: AnnotationScan,
         validate_annotation: struct {
             context: AnnotationContext,
             document: ?Value,
-            index: usize = 0,
+            /// The effect's slot grammar, until it has been checked.
+            grammar: ?env.EffectGrammar,
         },
         prepare_effect: AnnotationContext,
         copy_effect: struct {
@@ -228,6 +230,11 @@ const DefineDriver = struct {
                         if (!value_at.isString()) return malformed(evaluator);
                         break :document value_at;
                     } else null;
+                    const grammar = if (scan.separator_at != null)
+                        env.EffectGrammar.init(scan.candidate.borrow().list, effect_end) orelse
+                            return malformed(evaluator)
+                    else
+                        null;
                     evaluator.discard(1);
                     heap.retainValue(scan.candidate.borrow());
                     self.annotation_value = .init(scan.candidate.borrow());
@@ -239,6 +246,7 @@ const DefineDriver = struct {
                             .effect_end = effect_end,
                         },
                         .document = document,
+                        .grammar = grammar,
                     } };
                     continue;
                 }
@@ -254,24 +262,15 @@ const DefineDriver = struct {
                 _ = work.spend();
             },
             .validate_annotation => |*validation| {
-                if (validation.context.separator_at) |split| {
-                    if (validation.index != validation.context.effect_end) {
-                        const slot = list.atUnchecked(
-                            validation.context.source.borrow(),
-                            validation.index,
-                        );
-                        if (validation.index != split and slot != .symbol)
-                            return malformed(evaluator);
-                        // The after portion is all named slots or exactly the
-                        // row token; the before portion never names a row.
-                        if (slot == .symbol and
-                            std.mem.eql(u8, intern.get(slot.symbol.name), lexer.row_token) and
-                            (validation.index <= split or validation.context.effect_end != split + 2))
-                            return malformed(evaluator);
-                        validation.index += 1;
-                        _ = work.spend();
-                        continue;
+                if (validation.grammar) |*grammar| {
+                    switch (grammar.advance()) {
+                        .pending => _ = work.spend(),
+                        .complete => |shape| {
+                            validation.context.shape = shape orelse return malformed(evaluator);
+                            validation.grammar = null;
+                        },
                     }
+                    continue;
                 }
                 // The documentation is kept as written; `doc` normalizes it
                 // when asked, and `see` through the formatter.
@@ -328,7 +327,7 @@ const DefineDriver = struct {
                     self.annotation.borrowMut().effect_value = effect_value;
                     self.annotation.borrowMut().effect = env.ValidatedEffect.fromValidated(
                         effect_value.list,
-                        materialization.context.separator_at.?,
+                        materialization.context.shape.?,
                     );
                     materialization.materializer.deinit(
                         evaluator.releases,
