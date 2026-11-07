@@ -227,6 +227,7 @@ pub const SequenceOp = enum {
     reverse,
     first,
     rest,
+    find,
     range,
     shape,
     len,
@@ -248,6 +249,7 @@ pub const SequenceOp = enum {
             .reverse => "reverse",
             .first => "first",
             .rest => "rest",
+            .find => "find",
             .range => "range",
             .shape => "shape",
             .len => "len",
@@ -262,6 +264,7 @@ pub const SequenceOp = enum {
 pub const OrderOp = enum {
     cmp,
     grade,
+    sort,
     distinct,
     group,
     group_columns,
@@ -270,6 +273,7 @@ pub const OrderOp = enum {
         return switch (self) {
             .cmp => "cmp",
             .grade => "grade",
+            .sort => "sort",
             .distinct => "distinct",
             .group => "group",
             .group_columns => "group-columns",
@@ -283,7 +287,6 @@ pub const TextOp = enum {
     split,
     join,
     str,
-    format,
 
     pub fn spelling(self: TextOp) []const u8 {
         return switch (self) {
@@ -292,7 +295,6 @@ pub const TextOp = enum {
             .split => "split",
             .join => "join",
             .str => "str",
-            .format => "format",
         };
     }
 };

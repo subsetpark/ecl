@@ -28,6 +28,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
         .cmp => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "left right -- ordering", .doc = "Three-way whole-value ordering, −1/0/1; **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain: numbers (exact across int/float), chars by codepoint, and lists, which compare lexicographically: corresponding elements by `cmp` until the first nonzero result, then by length. Strings are char lists, so they order by codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements after the first difference are never compared. Equivalent on two lists to `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe for ordering: `-` errors on int64 overflow where an ordering must be total." },
         .grade => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- indices", .doc = "The stable ascending sort permutation. Orders by `cmp`, so every element pair must be mutually comparable; the error's index names the later element of a pair that is not." },
+        .sort => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- sorted", .doc = "Return a stable ascending sort of a list by `cmp`." },
         .distinct => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`." },
         .group_columns => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "columns -- groups", .doc = "Group rows from a nonempty list of equal-length columns. Keys are whole composite lists, in first-occurrence order; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``." },
         .group => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- dict", .doc = "Dict from each distinct value to the list of its 0-based indices, keyed in first-occurrence order." },
@@ -40,6 +41,7 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
             return switch (operation) {
                 .cmp => cmpPrimitive(evaluator),
                 .grade => gradePrimitive(evaluator),
+                .sort => sortPrimitive(evaluator),
                 .distinct => distinctPrimitive(evaluator),
                 .group => groupPrimitive(evaluator),
                 .group_columns => groupColumnsPrimitive(evaluator),
@@ -80,7 +82,14 @@ fn cmpPrimitive(evaluator: *Fiber) MachineError!void {
 }
 
 const incomparable_pair = "two comparable numbers, chars, or lists";
-const incomparable_grade = "grade expected mutually comparable numbers, chars, or lists";
+/// `grade` and `sort` share the walk, so the message names whichever ran.
+fn failIncomparable(evaluator: *Fiber, index: usize) MachineError {
+    var buffer: [128]u8 = undefined;
+    const message = std.fmt.bufPrint(&buffer, "{s} expected mutually comparable numbers, chars, or lists", .{
+        evaluator.activeWordName(),
+    }) catch "expected mutually comparable numbers, chars, or lists";
+    return evaluator.failAtIndex(.type, message, index);
+}
 
 /// The kinds `cmp` orders within. Values of two classes never order, and a
 /// value with no class orders with nothing.
@@ -441,8 +450,8 @@ fn startTypedGrade(evaluator: *Fiber, collection: *heap.OwnedValue, sorted_value
     unreachable;
 }
 
-pub fn sortForIdiom(evaluator: *Fiber) MachineError!void {
-    try startGrade(evaluator, true);
+fn sortPrimitive(evaluator: *Fiber) MachineError!void {
+    return startGrade(evaluator, true);
 }
 
 const CompareProgress = union(enum) { pending, complete: std.math.Order, not_comparable };
@@ -638,7 +647,7 @@ const GradeDriver = struct {
                     const end = index.* + work.take(count - index.*);
                     while (index.* != end) : (index.* += 1) {
                         if (class == null or orderClass(list.atUnchecked(collection, index.*)) != class)
-                            return evaluator.failAtIndex(.type, incomparable_grade, index.*);
+                            return failIncomparable(evaluator, index.*);
                     }
                 }
                 if (index.* == count) self.state.borrowMut().* = .{ .initialize = 0 };
@@ -658,11 +667,7 @@ const GradeDriver = struct {
             },
             .sort => |*sort| switch (sort.borrowMut().advance(work) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.NotComparable => return evaluator.failAtIndex(
-                    .type,
-                    incomparable_grade,
-                    sort.borrowMut().comparing().?.position,
-                ),
+                error.NotComparable => return failIncomparable(evaluator, sort.borrowMut().comparing().?.position),
             }) {
                 .pending => return .stepped,
                 .complete => {

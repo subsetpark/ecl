@@ -191,6 +191,23 @@ test "combinators: contracts and conformability are structural errors" {
         },
         .{ .name = "fold extra result", .source = "[10] 0 (dup) fold", .kind = "contract", .word = "fold" },
         .{ .name = "scan extra result", .source = "[10] 0 (dup) scan", .kind = "contract", .word = "scan" },
+        .{
+            .name = "fold1 counts from the original list",
+            .source = "[10 20 30] (dup 20 = (pop pop 1 2) (+) if) fold1",
+            .kind = "contract",
+            .word = "fold1",
+            .data = &.{
+                .{ .name = "index", .expected = .{ .int = 1 } },
+                .{ .name = "seeded", .expected = .{ .int = 2 } },
+                .{ .name = "observed", .expected = .{ .int = 2 } },
+            },
+        },
+        .{ .name = "fold1 empty", .source = "[] (pop pop 1) fold1", .kind = "domain", .word = "fold1" },
+        .{ .name = "fold1 non-list", .source = "5 (+) fold1", .kind = "type", .word = "fold1" },
+        .{ .name = "lex-cmp-with extra result", .source = "[[1]] [[2]] (dup) lex-cmp-with", .kind = "contract", .word = "lex-cmp-with" },
+        .{ .name = "lex-cmp-with non-int order", .source = "[[1]] [[2]] (pop pop `x) lex-cmp-with", .kind = "type", .word = "lex-cmp-with" },
+        .{ .name = "lex-cmp-with non-list", .source = "[1] 2 (cmp) lex-cmp-with", .kind = "type", .word = "lex-cmp-with" },
+        .{ .name = "dip non-quotation", .source = "1 2 3 dip", .kind = "type", .word = "dip" },
         .{ .name = "zip-with atoms", .source = "1 2 (+) zip-with", .kind = "type", .word = "zip-with" },
         .{
             .name = "zip-with lengths",
@@ -201,6 +218,22 @@ test "combinators: contracts and conformability are structural errors" {
                 .{ .name = "left", .expected = .{ .int = 1 } },
                 .{ .name = "right", .expected = .{ .int = 2 } },
             },
+        },
+    });
+}
+
+test "combinators: dip fold1 and lex-cmp-with run any quotation" {
+    // Quotations no recognizer takes: nested lists, a user word, and a
+    // comparator that reads past its first difference only when told to.
+    try support.expectStacks(&.{
+        .{ .name = "dip restores the protected value", .source = "1 5 9 (+) dip [] 9 (len) dip", .expected = "6 9 0 9" },
+        .{ .name = "fold1 singleton", .source = "[[1 2]] (pop pop 0) fold1", .expected = "[1 2]" },
+        .{ .name = "fold1 nested rows", .source = "[[1] [2] [3]] (cat) fold1", .expected = "[1 2 3]" },
+        .{
+            .name = "lex-cmp-with stops at the first nonzero order",
+            .source = "[[1] [2]] [[1] [3] [0]] (cmp) lex-cmp-with [[1]] [[1] [2]] (cmp) lex-cmp-with " ++
+                "[[2]] [[1]] (cmp) lex-cmp-with",
+            .expected = "-1 -1 1",
         },
     });
 }
@@ -242,8 +275,8 @@ test "combinators: finite iterations keep their words' bindings and still check 
         .{ .name = "failure after kept bindings", .source = "(dup *) `sq def [1 2 x] (sq 1 +) each", .kind = "type", .word = "*" },
         .{ .name = "for failure after kept bindings", .source = "(dup *) `sq def [1 2 x] (sq pop) for", .kind = "type", .word = "*" },
         // An application whose operands the kept match does not admit declines
-        // to the generic definition, which reports its own error.
-        .{ .name = "kept match declined", .source = "[[1 2 3] [] [4]] ((+) fold1) each", .kind = "domain", .word = "first" },
+        // to the generic path, which reports its own error.
+        .{ .name = "kept match declined", .source = "[[1 2 3] [] [4]] ((+) fold1) each", .kind = "domain", .word = "fold1" },
     });
 }
 
@@ -893,15 +926,6 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try expectStack(&generic, "[1 2 3] (neg) each", "[-1 -2 -3]");
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
-    try expectStack(&automatic, "pop [3 1 2] sort", "[1 2 3]");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-
-    try expectStack(&automatic, "pop -2 abs", "2");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-
-    try expectStack(&automatic, "pop [1 2 3] reverse", "[3 2 1]");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-
     // Constant and partial-capture spellings of `match? each` produce their
     // boolean mask in one bounded driver. Structured elements still compare
     // as whole values rather than inheriting `in?`'s recursive pervasion.
@@ -923,23 +947,6 @@ test "idioms: automatic hits and forced generic preserves behavior" {
         "pop [1 1.0 [2] {a 3} x] [2] (match?) partial each",
         "[0 0 1 0 0]",
     );
-    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
-
-    // The trusted `find` body keeps a declarative match-mask fallback, while
-    // direct recognition compares only until the first hit and never builds
-    // that mask. Empty, structured, and miss cases share the length sentinel.
-    try expectStack(&automatic, "pop [1 2 1] 2 find", "1");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-    try expectStack(&automatic, "pop [[1] [2]] [2] find", "1");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-    try expectStack(&automatic, "pop [] [2] find", "0");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-
-    try expectStack(&generic, "pop [1 2 1] 2 find", "1");
-    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
-    try expectStack(&generic, "pop [[1] [2]] [2] find", "1");
-    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
-    try expectStack(&generic, "pop [] [2] find", "0");
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
     // `partial` prefixes a non-word constant as itself, so it reaches the same
@@ -979,34 +986,9 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try std.testing.expectEqual(@as(u64, 1), executable_form.lastIdiomHits());
 }
 
-test "idioms: a standard-library definition recognizes through its registration" {
-    // Embedded source constructs an anonymous image and registers it in a
-    // separate step, so recognition must be recorded while the image is still
-    // a value. Losing it leaves `str.format` correct and ~75x slower.
-    var runtime_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&runtime_heap);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    try expectStack(&runtime, "[1 \"b\"] \"x{}y{}\" str.format", "\"x1yb\"");
-    try std.testing.expectEqual(@as(u64, 1), runtime.lastIdiomHits());
-}
-
-// Two separate reasons recognition must not fire, kept together because both
-// are about a rebound name and only one is about late binding.
-//
-// The first two cases are late binding proper: the rebound word is reached
-// through a quotation, which resolves where its invoker runs, so the session
-// definition really is what executes and a recognizer that assumed the core
-// body would be wrong.
-//
-// The last three rebind a prelude word's *dependency* — `neg`'s `*`, `sort`'s
-// `grade` — and are now the opposite lesson. A prelude definition resolves
-// against core alone, so the session rebinding cannot reach inside it and the
-// prelude behavior is what executes. Recognition stays off in these cases too,
-// which is why the hit counts are unchanged, but it is no longer *late
-// binding* that keeps it off.
+// A rebound word is reached through a quotation, which resolves where its
+// invoker runs, so the rebinding really is what executes and a recognizer that
+// assumed the core builtin would be wrong.
 test "idioms: a foreign stamp keeps recognition off" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
@@ -1087,55 +1069,6 @@ test "idioms: a rebound name keeps recognition off" {
     );
     try std.testing.expectEqual(@as(u64, 0), rebound_match.lastIdiomHits());
 
-    // A word inside a one-element quotation is subject to the same binding
-    // guard as a bare pattern word. This replacement has the exact `find`
-    // shape, but its quoted `match?` resolves to the session definition, so
-    // the recognizer must fall back and preserve that definition's result.
-    var rebound_quoted_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&rebound_quoted_heap);
-    var runtime_inputs16 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs16.deinit();
-    var rebound_quoted = try session.Session.init(rebound_quoted_heap.allocator(), &.{}, runtime_inputs16.inputs(.{}), .default, .evaluate);
-    defer rebound_quoted.deinit();
-    try expectStack(
-        &rebound_quoted,
-        "(pop pop 42) `match? def " ++
-            "((match?) partial each first-where) `find def [1 2] 2 find",
-        "0",
-    );
-
-    var rebound_dependency_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&rebound_dependency_heap);
-    var runtime_inputs17 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs17.deinit();
-    var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{}, runtime_inputs17.inputs(.{}), .default, .evaluate);
-    defer rebound_dependency.deinit();
-    // `neg` is `(-1 *)` in the prelude, so its `*` retains core resolution:
-    // the result is unchanged and recognition, decided at the freeze edge,
-    // stays on.
-    try expectStack(&rebound_dependency, "(pop pop 42) `* def 2 neg", "-2");
-
-    var direct_sort_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&direct_sort_heap);
-    var runtime_inputs18 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs18.deinit();
-    var direct_sort = try session.Session.init(direct_sort_heap.allocator(), &.{}, runtime_inputs18.inputs(.{}), .default, .evaluate);
-    defer direct_sort.deinit();
-    // Likewise `sort` reaches the prelude `grade`, session or module alike.
-    try expectStack(&direct_sort, "(pop [0]) `grade def [3 1 2] sort", "[1 2 3]");
-
-    var used_sort_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&used_sort_heap);
-    var runtime_inputs19 = try runtime_fixture.Fixture.init();
-    defer runtime_inputs19.deinit();
-    var used_sort = try session.Session.init(used_sort_heap.allocator(), &.{}, runtime_inputs19.inputs(.{}), .default, .evaluate);
-    defer used_sort.deinit();
-    try expectStack(
-        &used_sort,
-        "[] ((a -- b) (pop [0]) `grade def) `m @defm `m (grade) import [3 1 2] sort",
-        "[1 2 3]",
-    );
-
     var between_applications_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&between_applications_heap);
     var runtime_inputs20 = try runtime_fixture.Fixture.init();
@@ -1158,8 +1091,8 @@ test "idioms: an offered phrase answered from the call-site cache sees a redefin
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // One `(+)`, offered three times in one submission: the later checks are
-    // cache hits. Redefining `+` must still reach the next application, while the
-    // prelude's `sum`, written in core, keeps core `+`.
+    // cache hits. Redefining `+` must still reach the next application, while
+    // the builtin `sum` keeps its own addition.
     try expectStack(
         &runtime,
         "((+) fold1) `f def [1 2] f [3 4] f [5 6] f [1 2 3] sum " ++

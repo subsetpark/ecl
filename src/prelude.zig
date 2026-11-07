@@ -110,5 +110,5 @@ pub fn installSource(
         },
     };
     if (fiber.stack.items.len != 0) return error.InvalidPrelude;
-    try building.finish(machine.recognizeCore);
+    building.finish();
 }

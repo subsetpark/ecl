@@ -829,7 +829,7 @@ fn auditUnsafeCasts() bool {
     failed = auditErasedCasts(
         "machine erased callbacks",
         @embedFile("../machine.zig"),
-        &.{ "ApplicationAdapters", "IdiomFallbackAdapters", "WorkDriverAdapters" },
+        &.{ "ApplicationAdapters", "WorkDriverAdapters" },
     ) or failed;
     failed = auditErasedCasts(
         "capability payload erasure",
@@ -909,8 +909,10 @@ const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive" },
     .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive" },
     .{ .file = "kernel_numeric.zig", .function = "reduceGroups" },
+    .{ .file = "kernel_numeric.zig", .function = "startReduction" },
     .{ .file = "kernel_sequence.zig", .function = "atPrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "inPrimitive" },
+    .{ .file = "kernel_sequence.zig", .function = "findPrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "razePrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "takePrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "rotatePrimitive" },
@@ -937,8 +939,6 @@ const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "idioms.zig", .function = "install" },
     .{ .file = "idioms.zig", .function = "applyLengthEach" },
     .{ .file = "idioms.zig", .function = "applyMatchEach" },
-    .{ .file = "idioms.zig", .function = "applyMatchFind" },
-    .{ .file = "idioms.zig", .function = "startReduction" },
 };
 
 fn auditKernelDriverStarts() bool {

@@ -24,18 +24,11 @@ test "every idiom entry hits across values empties spines floats and failures" {
         inline for (std.meta.tags(Variant)) |variant| {
             const source = try sourceFor(entry, variant);
             defer allocator.free(source);
-            const comparison = if (entry.context == .fold1 or
-                (entry.operation == .direct and entry.operation.direct == .fold1))
-                compareReductionModes(source)
-            else if (variant == .failure and entry.operation == .direct and switch (entry.operation.direct) {
-                .sum, .product, .reshape_sum, .reshape_product, .where_at => true,
-                else => false,
-            })
-                compareTotalFailure(source)
-            else if (entry.operation == .direct and entry.operation.direct == .lex_cmp_with)
-                // Its hits are its comparator's, which the `lex_cmp` entry
-                // counts.
+            // An empty `fold1` declines to the generic path, so its hits vary.
+            const comparison = if (entry.context == .fold1)
                 compareModesExactly(source)
+            else if (variant == .failure and entry.context == .phrase)
+                comparePhraseFailure(source)
             else
                 compareExecutions(source);
             comparison catch |err| {
@@ -75,18 +68,6 @@ fn execute(
     var runtime = try ecl.session.Session.init(session_allocator, &.{}, inputs.inputs(.{}), .default, .evaluate);
     errdefer runtime.deinit();
     runtime.setIdiomMode(mode);
-    const warmup: ?[]const u8 = if (std.mem.indexOf(u8, source, "str.format") != null)
-        "\"\" str.upper pop"
-    else
-        null;
-    if (warmup) |stdlib_source| switch (try runtime.runUnit("<idiom-warmup>", stdlib_source)) {
-        .ok => {},
-        .incomplete => return error.TestUnexpectedResult,
-        .err => |failure| {
-            runtime.release(failure);
-            return error.TestUnexpectedResult;
-        },
-    };
     const failure = switch (try runtime.runUnit("<idiom-differential>", source)) {
         .ok => null,
         .incomplete => return error.TestUnexpectedResult,
@@ -117,9 +98,9 @@ fn compareExecutions(source: []const u8) !void {
     }
 }
 
-/// A recognized `sum`/`product` fault must carry the definition's kind,
-/// message, word, and element index; its trace and column may differ.
-fn compareTotalFailure(source: []const u8) !void {
+/// A fused phrase's fault must carry the unfused words' kind, message, word,
+/// and element index; its trace and column may differ.
+fn comparePhraseFailure(source: []const u8) !void {
     try compareExecutions(source);
     var automatic_heap: SessionHeap = .init;
     defer retireHeap(&automatic_heap);
@@ -149,7 +130,7 @@ fn compareTotalFailure(source: []const u8) !void {
 }
 
 fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
-    if (entry.context == .direct) return directSource(entry, variant);
+    if (entry.context == .phrase) return headedSource(entry, variant);
     const phrase = try phraseSource(entry, variant);
     defer allocator.free(phrase);
     return switch (entry.operation) {
@@ -184,7 +165,7 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                     @tagName(entry.context),
                 },
             ),
-            .direct, .lex_cmp => unreachable,
+            .phrase, .lex_cmp => unreachable,
         },
         .length => std.fmt.allocPrint(allocator, "{s} ({s}) each", .{ switch (variant) {
             .atom => "[[] [1] [2 3]]",
@@ -199,68 +180,31 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             .{ matchInput(variant), phrase },
         ),
         .cmp => std.fmt.allocPrint(allocator, "{s} ({s}) lex-cmp-with", .{ lexInput(variant), phrase }),
-        .direct => unreachable,
+        .phrase => unreachable,
     };
 }
 
-fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
-    return switch (entry.operation) {
-        .unary => |operation| std.fmt.allocPrint(
-            allocator,
-            "{s} {s}",
-            .{ unaryDirectInput(operation, variant), entry.source_word.? },
-        ),
-        .binary => |operation| std.fmt.allocPrint(
-            allocator,
-            "{s} {s} {s}",
-            .{
-                binaryInput(operation, variant, false),
-                binaryInput(operation, variant, true),
-                entry.source_word.?,
-            },
-        ),
-        .match, .length, .cmp => unreachable,
-        .direct => |operation| direct: {
-            var result: std.ArrayList(u8) = .empty;
-            errdefer result.deinit(allocator);
-            try result.print(allocator, "{s} {s}", .{
-                directInput(operation, variant),
-                if (operation == .str_format) operation.spelling() else entry.source_word.?,
-            });
-            for (entry.following) |word| try result.print(allocator, " {s}", .{word.spelling});
-            break :direct result.toOwnedSlice(allocator);
-        },
-    };
+/// A phrase head over its operands, continued by its following words.
+fn headedSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    try result.print(allocator, "{s} {s}", .{ headedInput(entry.operation.phrase, variant), entry.source_word.? });
+    for (entry.following) |word| try result.print(allocator, " {s}", .{word.spelling});
+    return result.toOwnedSlice(allocator);
 }
 
 fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
-    try appendPattern(&result, entry, entry.pattern, variant);
-    return result.toOwnedSlice(allocator);
-}
-
-fn appendPattern(
-    result: *std.ArrayList(u8),
-    entry: ecl.idioms.RegistryEntry,
-    pattern: []const ecl.idioms.PatternAtom,
-    variant: Variant,
-) !void {
-    for (pattern, 0..) |atom, index| {
+    for (entry.pattern, 0..) |atom, index| {
         if (index > 0) try result.append(allocator, ' ');
         switch (atom) {
-            .quotation => |inner| {
-                try result.append(allocator, '(');
-                try appendPattern(result, entry, inner, variant);
-                try result.append(allocator, ')');
-            },
-            .int => |number| try result.print(allocator, "{d}", .{number}),
             .constant => try result.appendSlice(allocator, constantFor(entry.operation, variant)),
-            .literal => try result.appendSlice(allocator, "0"),
             .operation => try result.appendSlice(allocator, entry.operation.spelling()),
             .word => |word| try result.appendSlice(allocator, word.spelling),
         }
     }
+    return result.toOwnedSlice(allocator);
 }
 
 fn constantFor(operation: ecl.idioms.Operation, variant: Variant) []const u8 {
@@ -286,29 +230,6 @@ fn matchConstant(variant: Variant) []const u8 {
         .atom, .empty, .float => "1",
         .spine => "[1]",
         .failure => "{a 1}",
-    };
-}
-
-fn unaryDirectInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const u8 {
-    if (operation == .bnot) return switch (variant) {
-        .atom, .float => "-2",
-        .empty => "[]",
-        .spine => "[[-2] [3]]",
-        .failure => "{}",
-    };
-    return switch (variant) {
-        .atom => switch (operation) {
-            .sqrt => "4",
-            .log => "1.0",
-            .not_word => "0",
-            .bnot => "-2",
-            .abs, .neg => "-2",
-            .floor, .ceil, .round, .exp, .sin, .cos => "1.25",
-        },
-        .empty => "[]",
-        .spine => "[[-2] [3]]",
-        .float => "-0.0",
-        .failure => "{}",
     };
 }
 
@@ -413,33 +334,8 @@ fn reductionInput(variant: Variant) []const u8 {
     };
 }
 
-fn sortInput(variant: Variant) []const u8 {
-    return switch (variant) {
-        .atom => "[3 1 2]",
-        .empty => "[]",
-        .spine => "[\"b\" \"a\"]",
-        .float => "[0.1 -0.0 0.2]",
-        .failure => "[1 \"x\"]",
-    };
-}
-
-fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
+fn headedInput(operation: ecl.idioms.PhraseOp, variant: Variant) []const u8 {
     return switch (operation) {
-        .fold1 => switch (variant) {
-            .atom => "[1 2 3] (+)",
-            .empty => "[] (+)",
-            .spine => "[[1] [2]] (+)",
-            .float => "[0.1 -0.0 0.2] (+)",
-            .failure => "[1 bad] (+)",
-        },
-        .sort => sortInput(variant),
-        .lex_cmp_with => switch (variant) {
-            .atom => "[1 2 3] [1 2 4] (cmp)",
-            .empty => "[] [1] (cmp)",
-            .spine => "[[1] [2]] [[1] [2]] (pop pop 0)",
-            .float => "[1 2] [1.0 0.5] (cmp)",
-            .failure => "[1 2] \"ab\" (cmp)",
-        },
         // The shape follows the list; `empty` is the single-row case, which
         // the fold returns unchanged.
         .reshape_sum, .reshape_product => switch (variant) {
@@ -462,49 +358,6 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .spine => "\"abc\" bytes [2 0 1]",
             .float => "[0.1 -0.0 0.2] [1 1 0]",
             .failure => "\"abc\" [1 0 1 1]",
-        },
-        // A non-list operand declines to the definition, so the failure
-        // variant faults inside the recognized reduction.
-        .sum, .product => switch (variant) {
-            .atom => "[1 2 3]",
-            .empty => "[]",
-            .spine => "[[1 2] [3 4] [5 6]]",
-            .float => "[0.1 -0.0 0.2]",
-            .failure => "[[1 2] [3 bad]]",
-        },
-        .find => switch (variant) {
-            .atom => "[1 2 1] 2",
-            .empty => "[] 1",
-            .spine => "[[1] [2]] [2]",
-            .float => "[1.0 2.0] 2.0",
-            .failure => "[{}] {a 1}",
-        },
-        .rest, .reverse => switch (variant) {
-            .atom => "[1 2 3]",
-            .empty => "[]",
-            .spine => "[[1] [2]]",
-            .float => "[0.1 -0.0 0.2]",
-            .failure => "1",
-        },
-        // `dip` needs a value below the protected one for its quotation to
-        // work on, and quotations built only from builtins so the pass counts
-        // one recognition rather than a nested one. The failure variant fails
-        // inside the quotation: a non-list top would fall through to the
-        // generic composition instead, which is a fallback rather than a
-        // fused-versus-generic comparison.
-        .dip => switch (variant) {
-            .atom => "5 9 (1 +)",
-            .empty => "[] 9 (len)",
-            .spine => "[[1] [2]] 9 (len)",
-            .float => "0.5 9 (1 +)",
-            .failure => "`sym 9 (1 +)",
-        },
-        .str_format => switch (variant) {
-            .atom => "[\"Ada\" 2] \"name={} n={}\"",
-            .empty => "[] \"\"",
-            .spine => "[[1] {a 2}] \"{} {}\"",
-            .float => "[0.1] \"{}\"",
-            .failure => "[] \"{\"",
         },
     };
 }
@@ -562,17 +415,6 @@ fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
 /// expectValueEquivalent), rendered representation, and — unlike the
 /// exhaustive harness above — the complete error dict on failure.
 fn compareModesExactly(source: []const u8) !void {
-    return compareModes(source, true);
-}
-
-// Generic source-defined boolean words blame their internal `not`, whereas
-// the existing scalar idiom blames `and`/`or`. Compare their error contract
-// independently of that pre-existing difference in execution-site metadata.
-fn compareReductionModes(source: []const u8) !void {
-    return compareModes(source, false);
-}
-
-fn compareModes(source: []const u8, exact_errors: bool) !void {
     var automatic_heap: SessionHeap = .init;
     defer retireHeap(&automatic_heap);
     var generic_heap: SessionHeap = .init;
@@ -584,16 +426,6 @@ fn compareModes(source: []const u8, exact_errors: bool) !void {
 
     try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
     if (automatic.failure) |automatic_failure| {
-        if (!exact_errors) {
-            for ([_][]const u8{ "kind", "msg" }) |name| {
-                const key: ecl.value.Value = .{ .symbol = .{ .name = try ecl.intern.intern(name) } };
-                try expectValueEquivalent(
-                    (try ecl.dict.testing.get(std.testing.allocator, generic.failure.?, key)).?,
-                    (try ecl.dict.testing.get(std.testing.allocator, automatic_failure, key)).?,
-                );
-            }
-            return;
-        }
         var automatic_rendered = try automatic.runtime.renderValue(automatic_failure);
         defer automatic_rendered.deinit();
         var generic_rendered = try generic.runtime.renderValue(generic.failure.?);
@@ -658,24 +490,7 @@ test "idioms: partial captures preserve generic behavior" {
     try expectHits("(pop 99) `first def [1 2 3] 3 (+) partial each", 1);
 }
 
-test "idioms: an ordinary module with stdlib's shape cannot inherit its recognition" {
-    const source =
-        "[] ((pop pop \"ordinary\") `format-valid defp " ++
-        "(format-valid) `format def) `lookalike @defm " ++
-        "[] \"\" lookalike.format";
-    var heap: SessionHeap = .init;
-    defer retireHeap(&heap);
-    var run = try execute(source, .automatic, heap.allocator());
-    defer run.deinit();
-    try std.testing.expect(run.failure == null);
-    try std.testing.expectEqual(@as(u64, 0), run.runtime.lastIdiomHits());
-    var display = try run.runtime.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("\"ordinary\"", display.bytes());
-}
-
-/// Phrase hits, unlike idiom hits, distinguish a fused `reshape sum` from an
-/// unfused `reshape` followed by a recognized `sum`: both score one idiom hit.
+/// Phrase hits count only fused phrases, whatever else a source recognizes.
 fn expectPhraseHits(source: []const u8, expected: u64) !void {
     var heap: SessionHeap = .init;
     defer retireHeap(&heap);
@@ -756,8 +571,7 @@ test "idioms: a caller's quotation is recognized inside prelude definitions" {
     }
     // `each` and `all?`'s own `(and)` fold.
     try expectHits("[1 2 3] (0 >=) all?", 2);
-    // `each`, and the `dip` inside `filter`'s own `over`.
-    try expectHits("[1 2 3 4 5 6] (3 mod) filter", 2);
+    try expectHits("[1 2 3 4 5 6] (3 mod) filter", 1);
     // The shadowed `neg` declines; only the fold is recognized.
     try expectHits("(pop 1) `neg def [5 6] (neg) all?", 1);
     // A `(cmp)` comparator offered by `lex-cmp-with`.
@@ -810,11 +624,7 @@ test "idioms: scalar programs preserve generic behavior" {
             return err;
         };
     }
-    // A prelude-defined operation faults inside its own body on the generic
-    // path, naming the builtin it reached there (`div` for `mod`); a lifted
-    // step names the operation, as every recognized prelude operation does.
-    // Kind and message agree.
-    try compareModes("[1 2] (0 mod 1 +) each", false);
+    try compareModesExactly("[1 2] (0 mod 1 +) each");
     try expectHits("[1 2 3] (3 mod 0 =) each", 1);
     try expectHits("[1 2 3] (dup *) each", 1);
     try expectHits("[1 2 3] [4 5 6] (+ 2 *) zip-with", 1);
@@ -839,11 +649,11 @@ test "idioms: reductions run two-input programs in order" {
         "[5] (-) fold1",
         "[] 0 (2 * +) fold",
         "[] 0 (2 * +) scan",
-        // A builtin's fault traces through the definition that offered the
-        // quotation.
+        // A builtin's fault inside the quotation.
         "[1 2 0 4] 100 (swap div) scan",
         "[1 2 0 4] (div) fold1",
         "[1 2 0 4] (1 + div) fold1",
+        "[1 2 0 4] (mod) fold1",
         "[9223372036854775807 1] 0 (+ 1 +) fold",
         // Shapes a program declines.
         "[1 2 3] `a (2 * +) fold",
@@ -858,8 +668,6 @@ test "idioms: reductions run two-input programs in order" {
             return err;
         };
     }
-    // A prelude operation names itself, as it does under `each`.
-    try compareModes("[1 2 0 4] (mod) fold1", false);
     try expectHits("[1 2 3] 0 (dup * +) fold", 1);
     try expectHits("[1 2 3] 0 (2 * -) scan", 1);
     try expectHits("[1 2 3] (-) fold1", 1);
@@ -986,7 +794,7 @@ test "idioms: boolean folds and fold1 preserve seeds errors and bindings" {
         "5 range 2 >= 1 (and) scan",              "5 range 3 >= 0 (or) scan",
         "5 range 2 >= (and) fold1",               "5 range 3 >= (or) fold1",
         "5 range 2 >= 2 (and) fold",              "5 range 2 >= 1.0 (or) scan",
-    }) |source| compareReductionModes(source) catch |err| {
+    }) |source| compareModesExactly(source) catch |err| {
         std.log.err("reduction comparison failed for {s}", .{source});
         return err;
     };
@@ -1000,7 +808,7 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
     // Recognition happens where the phrase's first word executes, so where
     // the code came from cannot change the outcome: each form fuses once and
     // agrees with generic execution. A fused failure is compared field by
-    // field in the registry test, as a recognized `sum`'s trace differs.
+    // field in the registry test, as a fused fault's trace differs.
     const fused = [_][]const u8{
         "[1 2 3 4 5 6] [2 3] reshape sum",
         "[1.5 2.5 3.5 4.5] [2 2] reshape product",
@@ -1023,9 +831,9 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
     try expectHits("[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each", 1);
 
     // Words that do not continue the phrase run as written: a user `sum`
-    // shadows the trusted one; a shape the fold cannot take (cycling, three
-    // axes, a generic list) or a phrase split across a definition reaches
-    // `sum` itself, which is recognized on its own.
+    // shadows the builtin; a shape the fold cannot take (cycling, three axes,
+    // a generic list) or a phrase split across a definition reaches `sum`
+    // itself.
     const declined = [_][]const u8{
         "(pop 99) `sum def [1 2 3 4] [2 2] reshape sum",
         "[1 2 3] [2 2] reshape sum",
@@ -1041,6 +849,6 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
     }
     for (declined) |source| try expectPhraseHits(source, 0);
     try expectHits("(pop 99) `sum def [1 2 3 4] [2 2] reshape sum", 0);
-    try expectHits("[1 2 3] [2 2] reshape sum", 1);
-    try expectHits("([2 2] reshape) `rows def [1 2 3 4] rows sum", 1);
+    try expectHits("[1 2 3] [2 2] reshape sum", 0);
+    try expectHits("([2 2] reshape) `rows def [1 2 3 4] rows sum", 0);
 }

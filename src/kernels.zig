@@ -1,5 +1,5 @@
 //! The installer for the kernel surface. `install` publishes the core kernel
-//! families; module-backed random draws and hosted idioms enter through their
+//! families; module-backed random draws and `str.format` enter through their
 //! qualified exports.
 //!
 //! Each family's operations are one enum in `kernel_support`, the same one its

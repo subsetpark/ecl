@@ -346,3 +346,21 @@ test "sequence: display expands structural dictionaries and str stays canonical"
         "\"{type concat left {type empty} right {type epsilon}}\"",
     );
 }
+
+test "sequence: rest reverse and find" {
+    try helper.expectStacks(&.{
+        .{ .name = "rest", .source = "[1 2 3] rest [7] rest [0.1 -0.0 0.2] rest \"ab\" rest", .expected = "[2 3] [] [-0.0 0.2] \"b\"" },
+        .{ .name = "reverse", .source = "[1 2 3] reverse [] reverse [0.1 -0.0 0.2] reverse \"ab\" reverse", .expected = "[3 2 1] () [0.2 -0.0 0.1] \"ba\"" },
+        .{
+            .name = "find compares whole values and answers the length on a miss",
+            .source = "[1 2 1] 2 find [[1] [2]] [2] find [] [2] find [1 2] 3 find [1.0 2.0] 2.0 find [{}] {} find",
+            .expected = "1 1 0 2 1 0",
+        },
+    });
+    try helper.expectErrors(&.{
+        .{ .name = "rest of empty", .source = "[] rest", .kind = "domain", .word = "rest" },
+        .{ .name = "rest of an atom", .source = "1 rest", .kind = "type", .word = "rest" },
+        .{ .name = "reverse of a dict", .source = "{a 1} reverse", .kind = "type", .word = "reverse" },
+        .{ .name = "find in an atom", .source = "5 1 find", .kind = "type", .word = "find" },
+    });
+}

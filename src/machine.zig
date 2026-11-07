@@ -1858,35 +1858,8 @@ comptime {
 }
 /// A user quotation offered to a combinator, recognized where it is applied.
 pub const IdiomRequest = enum { each, zip_with, fold, fold1, scan, lex_cmp };
-/// A call of a trusted source word whose body was recognized when its
-/// environment froze. Only whether this call's operands admit the entry is left.
-pub const TrustedCall = struct {
-    body: *Header,
-    idiom: env.DirectIdiom,
-};
-
-/// What a trusted call's recognition decided. `declined` runs the body as any
-/// source word runs; `offered` stands for a combinator, whose quotation is
-/// offered with the body as its fallback.
-pub const TrustedOutcome = union(enum) { applied, declined, offered: IdiomRequest };
-pub const IdiomFallback = struct {
-    /// What to do if recognition declines, carried by value. Recognition holds
-    /// at most one fallback at a time and the only one with any state is a core
-    /// word's body and trace word, so describing the decline costs no
-    /// allocation. Storing it inline also removes the question a pointer
-    /// raised: with every payload here, teardown always retires fields and
-    /// never frees storage.
-    pub const storage_len = 96;
-    storage: [storage_len]u8 align(@alignOf(usize)) = @splat(0),
-    run_fn: *const fn (*Fiber, ?*anyopaque) MachineError!void,
-    deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, ?*anyopaque) void,
-    pub fn run(self: *IdiomFallback, evaluator: *Fiber) MachineError!void {
-        return self.run_fn(evaluator, &self.storage);
-    }
-    pub fn deinit(self: *IdiomFallback, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        self.deinit_fn(releases, allocator, &self.storage);
-    }
-};
+/// The combinator's generic path, run when recognition declines its quotation.
+pub const IdiomFallback = *const fn (*Fiber) MachineError!void;
 
 /// Configuration and semantic services inherited by every spawned Fiber.
 /// Keeping this as one value makes addition of a new inherited service an
@@ -1961,58 +1934,6 @@ pub const Environ = @import("startup_environment.zig").View;
 /// through `fd.in`, or the program source itself, which `fd.in` refuses.
 pub const StandardInput = struct {
     pub const Availability = standard_streams.Availability;
-};
-
-fn IdiomFallbackAdapters(comptime Payload: type) type {
-    return struct {
-        fn run(evaluator: *Fiber, raw: ?*anyopaque) MachineError!void {
-            const payload: *Payload = @ptrCast(@alignCast(raw.?));
-            return Payload.run(evaluator, payload);
-        }
-
-        fn deinit(
-            releases: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-            raw: ?*anyopaque,
-        ) void {
-            const payload: *Payload = @ptrCast(@alignCast(raw.?));
-            heap.deinitDriverFields(releases, allocator, payload);
-        }
-    };
-}
-
-/// Copies a fallback payload into the fallback itself. The payload must own its
-/// fields and hold no pointer into itself, because the value moves with the
-/// fallback rather than staying at one address.
-pub fn typedIdiomFallback(payload: anytype) IdiomFallback {
-    const Payload = @TypeOf(payload);
-    if (@typeInfo(Payload) != .@"struct")
-        @compileError("idiom fallback payload must be a struct value");
-    if (@sizeOf(Payload) > IdiomFallback.storage_len)
-        @compileError(@typeName(Payload) ++ " exceeds the inline idiom fallback storage");
-    if (@alignOf(Payload) > @alignOf(usize))
-        @compileError(@typeName(Payload) ++ " exceeds the inline idiom fallback alignment");
-    _ = comptime heap.validateDriverOwnership(Payload);
-    const adapters = IdiomFallbackAdapters(Payload);
-    var result: IdiomFallback = .{
-        .run_fn = adapters.run,
-        .deinit_fn = adapters.deinit,
-    };
-    const target: *Payload = @ptrCast(@alignCast(&result.storage));
-    target.* = payload;
-    return result;
-}
-/// What to do if recognition declines, made only when something needs it: to
-/// decline, or to carry into a match that must wait. An applied match never
-/// makes one. `context` is borrowed for the synchronous call that receives the
-/// source, so the recognizer makes the fallback before it returns or not at all.
-pub const FallbackSource = struct {
-    context: ?*const anyopaque = null,
-    make_fn: *const fn (?*const anyopaque, *Fiber) IdiomFallback,
-
-    pub fn make(self: FallbackSource, evaluator: *Fiber) IdiomFallback {
-        return self.make_fn(self.context, evaluator);
-    }
 };
 
 pub const ParkRequest = union(enum) {
@@ -5270,19 +5191,6 @@ pub const Fiber = struct {
         if (self.workDriver()) |driver| driver.trace_parent = word;
     }
 
-    /// Attributes the application the caller just began to `word`. A
-    /// recognized idiom whose callback applies a quotation stands in for the
-    /// source body frame that would otherwise have carried the word, so
-    /// failures inside that quotation still trace through the word the caller
-    /// wrote. Only the installing callback may claim an application this way:
-    /// an unrelated enclosing application owns its own attribution.
-    pub fn setApplicationTraceParent(self: *Fiber, word: intern.TraceWord) void {
-        const frame = &self.frames.items[self.frames.items.len - 1];
-        std.debug.assert(frame.* == .application);
-        frame.application.traced_word = word;
-        self.current.?.traced_word = word;
-    }
-
     /// The single parking choke point. A parked fiber would hold its slot's
     /// turn across an unbounded wait, so a state application refuses to park
     /// here — before any wait — rather than in each parking word, which is
@@ -5322,10 +5230,10 @@ pub const Fiber = struct {
         const current = &self.current.?;
         current.position = .{ .source = current.position.source + count };
     }
-    pub fn commitDirectIdiomTrace(self: *Fiber) intern.TraceWord {
-        const parent = self.active_word;
+    /// A phrase that runs to the end of its code finishes that code as a
+    /// tail call would, so the code's own word no longer traces.
+    pub fn commitPhraseTrace(self: *Fiber) void {
         if (self.current.?.nextIndex() >= self.current.?.code.length()) self.current.?.traced_word = no_word;
-        return parent;
     }
     /// Traces the pending failure through `word`, the definition whose frame
     /// the failing path elided, unless an inner one already holds it.
@@ -5347,8 +5255,8 @@ pub const Fiber = struct {
         }
         return error.Ecl;
     }
-    pub fn continueWithIdiom(self: *Fiber, request: IdiomRequest, source: FallbackSource) MachineError!void {
-        return idioms.tryApply(self, request, source);
+    pub fn continueWithIdiom(self: *Fiber, request: IdiomRequest, fallback: IdiomFallback) MachineError!void {
+        return idioms.tryApply(self, request, fallback);
     }
     /// The active word as a diagnostic spells it. A module-local word has no
     /// single interned spelling, so the rendering borrows the fiber's scratch;
@@ -7182,8 +7090,8 @@ fn definitionTraceWord(definition: *const env.Definition, home: ?*const modules.
 /// word's: its effects are reflective metadata, and its arity failures are
 /// those of the code it runs.
 fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) MachineError!void {
-    // A homeless builtin has no effect boundary and no recognition: the
-    // common case, run directly.
+    // A homeless builtin has no effect boundary: the common case, run
+    // directly.
     if (definition.home == null) switch (definition.code()) {
         .builtin => |primitive| return invokeBuiltin(self, .plain(name), primitive),
         else => {},
@@ -7196,26 +7104,7 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
     const checked = cross_home and origin != .standard_library;
     const cross_home_effect = if (checked) definition.effect else null;
     switch (definition.code()) {
-        .source => |executable| {
-            // A trusted definition's recognition was decided when its group
-            // sealed; one that recognized nothing runs as any source word does.
-            const trusted = origin == .core or origin == .standard_library;
-            if (trusted) if (definition.direct_idiom) |idiom| {
-                switch (try idioms.applyTrusted(self, .{ .body = executable.code(), .idiom = idiom })) {
-                    .applied => return,
-                    .declined => {},
-                    .offered => |request| {
-                        const body_fallback: DirectWordFallback.Source = .{
-                            .definition = definition,
-                            .word = trace_word,
-                            .effect = cross_home_effect,
-                        };
-                        return idioms.tryApply(self, request, body_fallback.source());
-                    },
-                }
-            };
-            try scheduleWord(self, executable, trace_word, home, cross_home_effect);
-        },
+        .source => |executable| try scheduleWord(self, executable, trace_word, home, cross_home_effect),
         .builtin => |primitive| {
             // A declared effect is the called word's contract, so its check
             // names that word; a failure inside the builtin names it too.
@@ -7232,57 +7121,6 @@ fn invokeDefinition(self: *Fiber, definition: *env.Definition, name: u32) Machin
         },
     }
 }
-
-const RetainedEffect = struct {
-    effect: env.Effect,
-
-    fn init(effect: env.Effect) RetainedEffect {
-        effect.retain();
-        return .{ .effect = effect };
-    }
-    pub fn deinit(self: *RetainedEffect, releases: *heap.ReleaseDomain) void {
-        self.effect.retire(releases);
-        self.* = undefined;
-    }
-};
-
-/// A trusted definition's body, run when a recognizer it offered declines.
-/// Trusted definitions are static, so the fallback borrows the definition.
-const DirectWordFallback = struct {
-    definition: *env.Definition,
-    word: intern.TraceWord,
-    effect: ?heap.Owned(RetainedEffect),
-
-    const Source = struct {
-        definition: *env.Definition,
-        word: intern.TraceWord,
-        effect: ?env.Effect,
-
-        fn source(self: *const Source) FallbackSource {
-            return .{ .context = self, .make_fn = make };
-        }
-
-        fn make(context: ?*const anyopaque, _: *Fiber) IdiomFallback {
-            const self: *const Source = @ptrCast(@alignCast(context.?));
-            std.debug.assert(self.definition.lifetime == .static);
-            return typedIdiomFallback(DirectWordFallback{
-                .definition = self.definition,
-                .word = self.word,
-                .effect = if (self.effect) |effect| .init(RetainedEffect.init(effect)) else null,
-            });
-        }
-    };
-    pub fn run(evaluator: *Fiber, self: *DirectWordFallback) MachineError!void {
-        return scheduleWord(
-            evaluator,
-            self.definition.code().source,
-            self.word,
-            modules.definitionHome(self.definition),
-            if (self.effect) |*owned| owned.borrow().effect else null,
-        );
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
 fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
     return switch (home.registrationProvenance()) {
@@ -8223,78 +8061,6 @@ fn startModuleSeal(self: *Fiber) MachineError!void {
     });
 }
 
-/// What a word in a sealing group resolves to, against directories that can no
-/// longer change: the group's own for a word written in its image, then core.
-/// Words written anywhere else are not admitted.
-const FrozenGroup = struct {
-    environment: *env.Env,
-    image_scope: ?env.ScopeId,
-    directory: ?*const env.NameMap,
-
-    fn resolve(context: *const anyopaque, word: value.Symbol) ?idioms.FrozenHit {
-        const self: *const FrozenGroup = @ptrCast(@alignCast(context));
-        const binding: intern.BindingName = @fromBackingInt(word.name);
-        const own = switch (env.wordTarget(word.slot)) {
-            .local => return null,
-            .unlinked => false,
-            .root => |id| own: {
-                if (id == self.environment.coreScopeId()) break :own false;
-                if (self.image_scope != null and id == self.image_scope.?) break :own true;
-                return null;
-            },
-        };
-        if (own) if (self.directory) |directory| {
-            var cursor = directory.rawLookup(binding);
-            if (poll_api.drive(?env.Entry, &cursor, .{})) |entry| switch (entry) {
-                .definition => |definition| return .{ .definition = definition, .in_core = false },
-                .alias => return null,
-            };
-        };
-        var cursor = self.environment.coreLookup(binding);
-        const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse return null;
-        return switch (entry) {
-            .definition => |definition| if (definition.visibility == .public) .{ .definition = definition, .in_core = true } else null,
-            .alias => null,
-        };
-    }
-};
-
-/// Records recognition for a standard-library group's trusted definitions,
-/// against bodies that are bound and directories that are sealed.
-fn recognizeGroup(evaluator: *Fiber, image: *modules.OwnedImage) void {
-    const home = image.executionHome(evaluator.module_access);
-    const frozen: FrozenGroup = .{
-        .environment = evaluator.environment,
-        .image_scope = home.scope(evaluator.module_access).cellId(),
-        .directory = image.sealedDirectory(),
-    };
-    const lookup: idioms.FrozenLookup = .{ .context = &frozen, .resolve_fn = FrozenGroup.resolve };
-    for (idioms.direct_names) |spelling| {
-        // A dotted spelling names one module's word; a plain one, any group's.
-        const local = if (std.mem.lastIndexOfScalar(u8, spelling, '.')) |dot| local: {
-            if (!std.mem.eql(u8, spelling[0..dot], intern.get(intern.moduleId(image.moduleName())))) continue;
-            break :local spelling[dot + 1 ..];
-        } else spelling;
-        const id = intern.intern(local) catch continue;
-        var cursor = image.sealedDirectory().rawLookup(@fromBackingInt(id));
-        const entry = poll_api.drive(?env.Entry, &cursor, .{}) orelse continue;
-        const definition = switch (entry) {
-            .definition => |definition| definition,
-            .alias => continue,
-        };
-        if (definition.code() != .source) continue;
-        definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
-    }
-}
-
-/// Records recognition for core's trusted definitions as core freezes.
-pub fn recognizeCore(environment: env.Env, spelling: []const u8, definition: *env.Definition) void {
-    var held = environment;
-    const frozen: FrozenGroup = .{ .environment = &held, .image_scope = null, .directory = null };
-    const lookup: idioms.FrozenLookup = .{ .context = &frozen, .resolve_fn = FrozenGroup.resolve };
-    definition.direct_idiom = idioms.recognizeTrusted(lookup, spelling, definition);
-}
-
 /// Binds a module group's reserved bodies against one view, then seals them
 /// together. Each bound body is staged on its own reserved definition, which
 /// the image under construction owns: a failure or a restart leaves nothing
@@ -8399,7 +8165,6 @@ const ModuleSealDriver = struct {
                     const owned = image(evaluator);
                     const provenance = owned.provenance();
                     const name = owned.moduleName();
-                    if (provenance == .standard_library) recognizeGroup(evaluator, owned);
                     evaluator.retireDriver(self);
                     releaseCurrent(evaluator);
                     const boundary = evaluator.popFrame(.boundary);

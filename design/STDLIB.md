@@ -212,8 +212,27 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate a pure descriptor returned by `tests`, late-bind its module/name and optional source identifier to the current catalog, and run the body as a fresh isolated Unit under that registration's private home and durable state. Return exactly `{ok (values)}` or `{err error}`; a missing current test is a reified error. Ordinary Sessions receive `` `domain ``.
 
+### abs
+`( x -- y )` — Return the absolute value of `x`.
+
 ### alias
 `( short name -- )` — Register an unqualified short registry name for a canonical, possibly dotted module name. Aliases and module names may not collide in either direction.
+
+### all?
+`( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for every element; otherwise return 0.
+
+#### Examples
+
+```ecl
+[2 4 6] (2 mod 0 =) all?
+# => 1
+```
+
+### and
+`( x y -- bool )` — Compute boolean and over 0 and 1 values.
+
+### any?
+`( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for at least one element; otherwise return 0.
 
 ### args
 `( -- arguments )` — The process arguments following the script or source, as a list of strings.
@@ -300,6 +319,9 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => "foo" "hé"
 ```
 
+### clamp
+`( value lower upper -- bounded )` — Constrain a value to the inclusive interval between `lower` and `upper`.
+
 ### cmp
 `( left right -- ordering )` — Three-way whole-value ordering, −1/0/1; **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain: numbers (exact across int/float), chars by codepoint, and lists, which compare lexicographically: corresponding elements by `cmp` until the first nonzero result, then by length. Strings are char lists, so they order by codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements after the first difference are never compared. Equivalent on two lists to `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe for ordering: `-` errors on int64 overflow where an ordering must be total.
 
@@ -356,6 +378,9 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 
 ### del
 `( collection selector -- collection )` — Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys.
+
+### dip
+`( x (q: ... -- ...) -- ... x )` — *Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results.
 
 ### distinct
 `( list -- list )` — First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`.
@@ -426,6 +451,9 @@ Ex:
 # => (next-member open-tgz read-member sha256 unpack-tgz)
 ```
 
+### find
+`( list needle -- index )` — Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches.
+
 ### first
 `( list -- value )` — Return the first element of a nonempty list; an empty list is `` `domain ``.
 
@@ -475,6 +503,9 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 [1 2 3 4] 0 (+) fold
 # => 10
 ```
+
+### fold1
+`( list (acc a -- acc) -- value )` — *Isolated*. Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`.
 
 ### for
 `( collection (a --) -- )` — *Isolated*. Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing.
@@ -563,6 +594,9 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ### len
 `( list -- count )` — Top-level list element count. Lists may be ragged. Dictionary entry count is provided by `dict.size`.
 
+### lex-cmp-with
+`( left right (left-element right-element -- order) -- order )` — *Isolated*. Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length.
+
 ### linrec
 `( predicate base pre post -- ... )` — *Inline.* Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level.
 
@@ -592,8 +626,14 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ### max
 `( x y -- z )` — **Pervasive.** The greater of two comparable atoms.
 
+### mean
+`( list -- mean )` — Return the arithmetic mean of a nonempty numeric list.
+
 ### min
 `( x y -- z )` — **Pervasive.** The lesser of two comparable atoms.
+
+### mod
+`( x y -- z )` — Compute remainder of `x` / `y`.
 
 ### module-doc
 `( module-name -- string )` — Return the canonical documentation string of a module's current generation, loading an embedded or mapped module on first mention. A source module states it with a documentation-only annotation before its `@defm` operands; a native module, in its descriptor. An alias reports its target's documentation. An invalid module name, `` `core ``, or a module without documentation is `` `domain ``; an unknown one is `` `undefined-word ``.
@@ -606,6 +646,12 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 
 ### not
 `( bool -- bool )` — **Pervasive.** Invert 0/1 values.
+
+### or
+`( x y -- bool )` — Compute boolean or over 0 and 1 values.
+
+### over
+`( x y -- x y x )` — Copy the value beneath the top of the stack onto the top.
 
 ### pack
 `( ... n -- list )` — Collect the top `n` values into a list.
@@ -654,6 +700,9 @@ Ex:
 ### pow
 `( x y -- z )` — **Pervasive.** Exponentiation; returns float.
 
+### product
+`( list -- product )` — Multiply every element of a numeric list; 1 when the list is empty. A nonempty list's product starts from its first element, so a list of rows multiplies to a row.
+
 ### put
 `( collection selector value -- collection )` — Functional replacement. For a list collection, a nested list selector is pervasive and replacement lists conform recursively to its shape; an atomic replacement extends across every selected position. Selector leaves are integer indices. Repeated indices are processed left to right, so the last replacement wins. For a dictionary, the selector is always one whole-value key, including a list key.
 
@@ -701,6 +750,12 @@ Ex:
 
 ### reverse
 `( list -- list )` — Return a list with its top-level element order reversed.
+
+### rolldown
+`( x y z -- y z x )` — Rotate the top three stack values downward.
+
+### rollup
+`( x y z -- z x y )` — Rotate the top three stack values upward.
 
 ### rotate
 `( list count -- rotated )` — Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int.
@@ -786,6 +841,20 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 # => "\"abc\""
 ```
 
+### sum
+`( list -- total )` — Add every element of a numeric list; 0 when the list is empty. A nonempty list's total starts from its first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
+
+#### Examples
+
+```ecl
+[1 2 3] sum
+# => 6
+[[1 2] [3 4]] sum
+# => [4 6]
+[] sum
+# => 0
+```
+
 ### swap
 `( x y -- y x )` — Exchange the top two stack values.
 
@@ -830,6 +899,9 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 "abc" type
 # => list
 ```
+
+### uncons
+`( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
 
 ### unfold
 `( state (predicate: state -- bool) (step: state -- state item) -- state list )` — *Isolated*. Before every step, apply the predicate. When it returns 0, return the current state and all generated items. When it returns 1, apply the step, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`.
@@ -883,6 +955,16 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 # => [[1 2 3] [2 3 4]]
 ```
 
+### with
+`( values quotation -- quotation )` — Push each of `values` to the left of `quotation`, preserving the quotedness of symbols.
+
+#### Examples
+
+```ecl
+[3] (dup) with call
+# => 3 3
+```
+
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
 
@@ -899,17 +981,49 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 # => [11 22 33]
 ```
 
-### abs
-`( x -- y )` — Return the absolute value of `x`.
+### 2dup
+`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
+
+### @each
+`( list values (quotation: a ... -- b) -- results )` — Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit, with the element seeded to the unit stack. `values` is then seeded above the element.
 
 ### append
 `( list value -- list )` — Push `value` to the end of `list`.
 
+### chunk
+`( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
+
+#### Examples
+
+```ecl
+[0 1 2 3 4 5 6] 3 chunk
+# => [[0 1 2] [3 4 5] [6]]
+```
+
+### cleave
+`( x quotations -- ... )` — Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
+
+### cleave-n
+`( ... n quotations -- ... )` — N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs.
+
+### cleave2
+`( x y quotations -- ... )` — Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs.
+
+### converges
+`( value (a -- a) -- list )` — Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended.
+
 ### fail
 `( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`.
 
-### find
-`( list needle -- index )` — Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches.
+### filter
+`( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
+
+#### Examples
+
+```ecl
+[1 2 3 4] (2 mod 0 =) filter
+# => [2 4]
+```
 
 ### iterations
 `( value count (a -- a) -- list )` — Return `value` followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list.
@@ -921,8 +1035,21 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 # => [1 11 21 31]
 ```
 
+### keep
+`( x (... -- ...) -- ... x )` — Apply a quotation to a value, then restore the value on top of the quotation's results.
+
 ### parse-one
 `( string -- x )` — Parse source text holding exactly one form and return that form unevaluated. No form or several forms is `` `shape ``.
+
+### partition
+`( list (a -- bool) -- matches rejects )` — Split a list into the elements whose predicate returned 1 and those that returned 0.
+
+#### Examples
+
+```ecl
+[1 2 3 4] (2 mod 0 =) partition pair
+# => [[2 4] [1 3]]
+```
 
 ### scan1
 `( list (acc a -- acc) -- list )` — Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements.
@@ -933,8 +1060,22 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 ### setp
 `( ... value name -- )` — `set` as a private module name. A top-level `setp` is an error.
 
-### uncons
-`( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
+### to-digits
+`( value radices -- digits )` — Split a value into one digit per radix, most significant first, by floor division, so every digit lies from zero below its radix even for negative values. A value beyond the radices' capacity keeps only its low digits. Values pervade: a list of values gives one digit list per radix. Radices must be positive integers, or the word fails with `` `domain ``; `[2] 8 take` builds eight binary radices.
+
+#### Examples
+
+```ecl
+13 [2 2 2 2] to-digits
+# => [1 1 0 1]
+3723 [24 60 60] to-digits
+# => [1 2 3]
+-7 [10 10] to-digits
+# => [9 3]
+```
+
+### unappend
+`( list -- initial last )` — Split a nonempty list into its initial elements and last element.
 
 ### while-values
 `( value (predicate: state -- bool) (step: state -- state) -- list )` — Return `value` and successive states through the first state for which the predicate is false.
@@ -949,105 +1090,6 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 ### zip
 `( left right -- pairs )` — Pair corresponding elements of two conforming lists.
 
-### dip
-`( x (q: ... -- ...) -- ... x )` — Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results.
-
-### from-digits
-`( digits base -- value )` — Combine digits, most significant first, into a value. The base is one integer for every position, or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect. Digits pervade: a list of equal-length digit lists, one per position, gives one value per column. A radix list of the wrong length fails with `` `shape ``. Inverse of `to-digits` for values in range.
-
-#### Examples
-
-```ecl
-[1 0 1] 2 from-digits
-# => 5
-[[1 0] [0 1] [1 1]] 2 from-digits
-# => [5 3]
-[1 2 3] [24 60 60] from-digits
-# => 3723
-```
-
-### unappend
-`( list -- initial last )` — Split a nonempty list into its initial elements and last element.
-
-### and
-`( x y -- bool )` — Compute boolean and over 0 and 1 values.
-
-### clamp
-`( value lower upper -- bounded )` — Constrain a value to the inclusive interval between `lower` and `upper`.
-
-### or
-`( x y -- bool )` — Compute boolean or over 0 and 1 values.
-
-### over
-`( x y -- x y x )` — Copy the value beneath the top of the stack onto the top.
-
-### rolldown
-`( x y z -- y z x )` — Rotate the top three stack values downward.
-
-### rollup
-`( x y z -- z x y )` — Rotate the top three stack values upward.
-
-### with
-`( values quotation -- quotation )` — Push each of `values` to the left of `quotation`, preserving the quotedness of symbols.
-
-#### Examples
-
-```ecl
-[3] (dup) with call
-# => 3 3
-```
-
-### 2dup
-`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
-
-### @each
-`( list values (quotation: a ... -- b) -- results )` — Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit, with the element seeded to the unit stack. `values` is then seeded above the element.
-
-### all?
-`( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for every element; otherwise return 0.
-
-#### Examples
-
-```ecl
-[2 4 6] (2 mod 0 =) all?
-# => 1
-```
-
-### any?
-`( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for at least one element; otherwise return 0.
-
-### converges
-`( value (a -- a) -- list )` — Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended.
-
-### filter
-`( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
-
-#### Examples
-
-```ecl
-[1 2 3 4] (2 mod 0 =) filter
-# => [2 4]
-```
-
-### fold1
-`( list (acc a -- acc) -- value )` — Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`.
-
-### keep
-`( x (... -- ...) -- ... x )` — Apply a quotation to a value, then restore the value on top of the quotation's results.
-
-### lex-cmp-with
-`( left right (left-element right-element -- order) -- order )` — Compare two lists lexicographically with an inline comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length.
-
-### partition
-`( list (a -- bool) -- matches rejects )` — Split a list into the elements whose predicate returned 1 and those that returned 0.
-
-#### Examples
-
-```ecl
-[1 2 3 4] (2 mod 0 =) partition pair
-# => [[2 4] [1 3]]
-```
-
 ### @each!
 `( list (a -- b) -- results )` — Call @each with an empty seed list.
 
@@ -1060,41 +1102,6 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 
 ### bi
 `( x p q -- ... )` — Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
-
-### cleave
-`( x quotations -- ... )` — Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
-
-### cleave-n
-`( ... n quotations -- ... )` — N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs.
-
-### cleave2
-`( x y quotations -- ... )` — Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs.
-
-### converge
-`( x (a -- a) -- y )` — Return the last value before repeated application reaches a fixed point or returns to the initial value.
-
-### mod
-`( x y -- z )` — Compute remainder of `x` / `y`.
-
-### product
-`( list -- product )` — Multiply every element of a numeric list; 1 when the list is empty. A nonempty list's product starts from its first element, so a list of rows multiplies to a row.
-
-### sum
-`( list -- total )` — Add every element of a numeric list; 0 when the list is empty. A nonempty list's total starts from its first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`.
-
-#### Examples
-
-```ecl
-[1 2 3] sum
-# => 6
-[[1 2] [3 4]] sum
-# => [4 6]
-[] sum
-# => 0
-```
-
-### tri
-`( x p q r -- ... )` — Apply three quotations to `x` in left-to-right order.
 
 ### case
 `( x clauses -- ... )` — Select and call the first action whose key matches the subject. The clause list should be shaped:
@@ -1117,32 +1124,25 @@ Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is t
 # => "three"
 ```
 
-### chunk
-`( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
+### converge
+`( x (a -- a) -- y )` — Return the last value before repeated application reaches a fixed point or returns to the initial value.
+
+### from-digits
+`( digits base -- value )` — Combine digits, most significant first, into a value. The base is one integer for every position, or a list of radices with one per digit, as in mixed-radix time; the first radix has no effect. Digits pervade: a list of equal-length digit lists, one per position, gives one value per column. A radix list of the wrong length fails with `` `shape ``. Inverse of `to-digits` for values in range.
 
 #### Examples
 
 ```ecl
-[0 1 2 3 4 5 6] 3 chunk
-# => [[0 1 2] [3 4 5] [6]]
+[1 0 1] 2 from-digits
+# => 5
+[[1 0] [0 1] [1 1]] 2 from-digits
+# => [5 3]
+[1 2 3] [24 60 60] from-digits
+# => 3723
 ```
 
-### mean
-`( list -- mean )` — Return the arithmetic mean of a nonempty numeric list.
-
-### to-digits
-`( value radices -- digits )` — Split a value into one digit per radix, most significant first, by floor division, so every digit lies from zero below its radix even for negative values. A value beyond the radices' capacity keeps only its low digits. Values pervade: a list of values gives one digit list per radix. Radices must be positive integers, or the word fails with `` `domain ``; `[2] 8 take` builds eight binary radices.
-
-#### Examples
-
-```ecl
-13 [2 2 2 2] to-digits
-# => [1 1 0 1]
-3723 [24 60 60] to-digits
-# => [1 2 3]
--7 [10 10] to-digits
-# => [9 3]
-```
+### tri
+`( x p q r -- ... )` — Apply three quotations to `x` in left-to-right order.
 
 ## agent
 
@@ -2262,6 +2262,16 @@ Inert inspection of ECL source: what a source declares, found by the reader's di
 
 All case and whitespace operations use the ASCII character classes; every non-ASCII scalar passes through unchanged.
 
+### format
+`( values template -- string )` — Interpolate positional `{}` placeholders. Strings contribute their contents; other values contribute canonical `str`. `{{` and `}}` emit literal braces.
+
+#### Examples
+
+```ecl
+["Ada" 2] "name={} n={}" str.format
+# => "name=Ada n=2"
+```
+
 ### str?
 `( value -- bool )` — Return 1 when a value is a string, a list whose every element is a char, and 0 for every other value. The empty string answers 1, and so does the empty list: they are one value. Never raises.
 
@@ -2330,16 +2340,6 @@ All case and whitespace operations use the ASCII character classes; every non-AS
 ```ecl
 "Hello, wörld!" str.upper
 # => "HELLO, WöRLD!"
-```
-
-### format
-`( values template -- string )` — Interpolate positional `{}` placeholders. Strings contribute their contents; other values contribute canonical `str`. `{{` and `}}` emit literal braces.
-
-#### Examples
-
-```ecl
-["Ada" 2] "name={} n={}" str.format
-# => "name=Ada n=2"
 ```
 
 ## table

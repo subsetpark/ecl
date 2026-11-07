@@ -16,28 +16,21 @@ const Value = value.Value;
 const Fiber = support.Fiber;
 const MachineError = support.MachineError;
 
-/// The text family also includes the hosted `str.format` idiom;
-/// every other text operation is installed directly in core.
 const Op = support.TextOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (comptime std.meta.tags(Op)) |operation| {
-        if (comptime definition(operation)) |word| try core.installBuiltin(word);
+        try core.installBuiltin(comptime definition(operation));
     }
 }
 
-pub fn formatForIdiom(evaluator: *Fiber) MachineError!void {
-    return formatPrimitive(evaluator);
-}
-
-fn definition(comptime operation: Op) ?env.BuiltinWord {
+fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
         .put => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector value -- collection", .doc = "Functional replacement. For a list collection, a nested list selector is pervasive and replacement lists conform recursively to its shape; an atomic replacement extends across every selected position. Selector leaves are integer indices. Repeated indices are processed left to right, so the last replacement wins. For a dictionary, the selector is always one whole-value key, including a list key." },
         .del => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection selector -- collection", .doc = "Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys." },
         .split => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "string separator -- parts", .doc = "Split a string at every occurrence of a separator string; the parts are strings. An empty separator splits the input into one single-codepoint string per Unicode scalar, with no empty boundary parts; splitting an empty string this way returns an empty list." },
         .join => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "strings separator -- string", .doc = "Join a list of strings with a separator string." },
         .str => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value -- string", .doc = "The canonical printed representation; carries the round-trip guarantee (see [Readable representations and display](SPEC.md#readable-representations-and-display)): reading it back yields a structurally matching value for every recursively readable value." },
-        .format => null,
     };
 }
 
@@ -50,7 +43,6 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
                 .split => splitPrimitive(evaluator),
                 .join => joinPrimitive(evaluator),
                 .str => strPrimitive(evaluator),
-                .format => formatPrimitive(evaluator),
             };
         }
     }.run);
@@ -1769,7 +1761,8 @@ const JoinDriver = struct {
     }
 };
 
-fn formatPrimitive(evaluator: *Fiber) MachineError!void {
+/// `str.format`, exported by `str.core` and re-exported by `str`.
+pub fn formatPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var template = try evaluator.popValue();
     defer template.deinit();

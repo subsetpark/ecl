@@ -22,14 +22,37 @@ const ScalarBinary = *const fn (Value, Value) ScalarError!Value;
 const ScalarUnary = *const fn (Value) ScalarError!Value;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (comptime std.meta.tags(BinaryOp)) |operation| {
-        if (comptime binaryDefinition(operation)) |word| try core.installBuiltin(word);
+        try core.installBuiltin(comptime binaryDefinition(operation));
     }
     inline for (comptime std.meta.tags(UnaryOp)) |operation| {
-        if (comptime unaryDefinition(operation)) |word| try core.installBuiltin(word);
+        try core.installBuiltin(comptime unaryDefinition(operation));
     }
+    try core.installBuiltin(.{ .name = "sum", .primitive = totalPrimitive(.add, 0), .effect = "list -- total", .doc = "Add every element of a numeric list; 0 when the list is empty. A nonempty list's total starts from its first element: a list of rows sums to a row, and a sum of negative zeros is `-0.0`." });
+    try core.installBuiltin(.{ .name = "product", .primitive = totalPrimitive(.mul, 1), .effect = "list -- product", .doc = "Multiply every element of a numeric list; 1 when the list is empty. A nonempty list's product starts from its first element, so a list of rows multiplies to a row." });
 }
 
-fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
+/// `sum` and `product`: the empty seed, or a reduction from the first
+/// element, so no seed copies a first row or turns a -0.0 total into 0.0.
+fn totalPrimitive(comptime operation: BinaryOp, comptime empty: i64) env.PrimitiveImpl {
+    return struct {
+        fn run(evaluator: *Fiber) MachineError!void {
+            try evaluator.require(1);
+            const input = evaluator.stack.items[evaluator.stack.items.len - 1];
+            if (input != .list) {
+                var item = try evaluator.popValue();
+                defer item.deinit();
+                return evaluator.typeError("a list");
+            }
+            if (input.list.length() == 0) {
+                evaluator.discard(1);
+                return evaluator.pushOwned(.{ .int = empty });
+            }
+            return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
+        }
+    }.run;
+}
+
+fn binaryDefinition(comptime operation: BinaryOp) env.BuiltinWord {
     return switch (operation) {
         .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``." },
         .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``." },
@@ -51,7 +74,12 @@ fn binaryDefinition(comptime operation: BinaryOp) ?env.BuiltinWord {
         .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
         .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
         .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two." },
-        .mod, .ne, .le, .ge, .and_word, .or_word => null,
+        .mod => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute remainder of `x` / `y`." },
+        .ne => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for inequality." },
+        .le => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for less-than-or-equal order." },
+        .ge => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for greater-than-or-equal order." },
+        .and_word => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compute boolean and over 0 and 1 values." },
+        .or_word => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compute boolean or over 0 and 1 values." },
     };
 }
 
@@ -69,7 +97,7 @@ pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
     return bindBinary(operation);
 }
 
-fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
+fn unaryDefinition(comptime operation: UnaryOp) env.BuiltinWord {
     return switch (operation) {
         .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Square root. `` `domain `` on negative inputs (the result would be NaN)." },
         .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round down; the result is int64, `` `overflow `` outside its range." },
@@ -81,7 +109,8 @@ fn unaryDefinition(comptime operation: UnaryOp) ?env.BuiltinWord {
         .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Cosine; float transcendental." },
         .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "**Pervasive.** Invert 0/1 values." },
         .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`." },
-        .neg, .abs => null,
+        .neg => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Negate a numeric value." },
+        .abs => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return the absolute value of `x`." },
     };
 }
 
@@ -2417,9 +2446,6 @@ pub const ScalarProgram = struct {
         /// The word and its position in the quotation, which a fault names.
         word: u32,
         index: u32,
-        /// The word is a prelude definition, so a fault traces through it as
-        /// well as through the operation its body runs.
-        defined: bool,
     };
 
     inputs: u8,
@@ -3055,7 +3081,6 @@ fn failProgram(evaluator: *Fiber, phrase: Value, instruction: ScalarProgram.Inst
     evaluator.active_word = .plain(instruction.word);
     const failure = scalarFailure(evaluator, fault, null);
     evaluator.setFailureSite(phrase.list, instruction.index);
-    if (instruction.defined) evaluator.setFailureTraceParent(.plain(instruction.word));
     return failure;
 }
 
@@ -3812,6 +3837,212 @@ fn rowFoldStep(comptime operation: BinaryOp, comptime accumulator_class: Number,
         }
     };
 }
+
+/// `consumed` stack values lie under the result: the list is the deepest,
+/// and `start` is 1 when `initial` is its first element.
+pub fn startReduction(
+    evaluator: *Fiber,
+    operation: BinaryOp,
+    scan: bool,
+    input: Value,
+    initial: Value,
+    start: usize,
+    consumed: usize,
+) MachineError!void {
+    const from_first = start == 1;
+    std.debug.assert(input == .list);
+    const count: usize = @intCast(input.list.length());
+    if (count == start) {
+        if (from_first) {
+            try evaluator.pushBorrowed(initial);
+            var result = try evaluator.popValue();
+            defer result.deinit();
+            evaluator.discard(consumed);
+            return evaluator.pushOwned(result.take());
+        }
+        if (scan) {
+            const result = try list.fromValuesGeneric(evaluator.allocator, &.{});
+            evaluator.discard(3);
+            return evaluator.pushOwned(result);
+        }
+        evaluator.discard(1);
+        var accumulator = try evaluator.popValue();
+        defer accumulator.deinit();
+        evaluator.discard(1);
+        try evaluator.pushOwned(accumulator.take());
+        return;
+    }
+    // Over a numeric leaf with an accumulator that stabilizes after at most
+    // one scalar step, reduction is one typed sequential pass instead of one
+    // cursor and one scheduler turn per element. Association stays left-to-right, so
+    // float sums keep the generic route's bits.
+    if (typedReduceCandidate(operation, input, initial)) {
+        return idiomReduceStart(operation)(evaluator, input, initial, scan, start, consumed);
+    }
+    const results: ?heap.OwnedValueBuffer = if (scan)
+        try .init(evaluator.releases, count)
+    else
+        null;
+    try evaluator.startDriver(ReductionDriver{
+        .operation = operation,
+        .scan = scan,
+        .input = input,
+        .initialized = start,
+        .consumed = consumed,
+        .accumulator = .init(.{ .borrowed = initial }),
+        .results = if (results) |owned_results| .init(owned_results) else null,
+        .materializer = null,
+    });
+}
+
+const ReductionDriver = struct {
+    /// Like a typed kernel's driver, it lives for one reduction and
+    /// releases the slot when it publishes, so it qualifies for the slot on
+    /// lifetime; a fold whose rows apply directly would otherwise spend its
+    /// largest fixed cost on this driver's allocation.
+    pub const inline_driver = true;
+
+    consumed: usize,
+    operation: BinaryOp,
+    scan: bool,
+    input: Value,
+    accumulator: heap.Owned(Accumulator),
+    results: ?heap.Owned(heap.OwnedValueBuffer),
+    initialized: usize = 0,
+    materializing: bool = false,
+    materializer: ?heap.Owned(list.ValueMaterializer),
+    // Not optional: emptying a `?Owned` of this size clears it whole, and
+    // the cursor is emptied once per row.
+    cursor: heap.Owned(PervadeCursor) = .none,
+
+    pub fn advance(
+        evaluator: *Fiber,
+        self: *ReductionDriver,
+    ) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        // A fold whose accumulator and next row are typed leaves of one class
+        // and length applies whole rows here, each charged before it runs,
+        // without a cursor or a machine turn per row. Anything else, and any
+        // row the remaining budget cannot pay for, takes the cursor below.
+        if (!self.scan) while (!self.cursor.isPresent() and self.initialized < self.input.list.length()) {
+            const accumulator = self.accumulator.borrowMut();
+            const owned = accumulator.* == .owned;
+            switch (try foldLeafRow(
+                evaluator,
+                self.operation,
+                accumulator.value(),
+                owned,
+                list.atUnchecked(self.input, self.initialized),
+            )) {
+                .declined => break,
+                .in_place => |next| accumulator.* = .{ .owned = next },
+                .fresh => |next| accumulator.replaceOwned(evaluator.releases, next),
+            }
+            self.initialized += 1;
+            if (evaluator.remainingKernelFuel() == 0) return .stepped;
+        };
+        if (!self.materializing and self.initialized < self.input.list.length()) {
+            if (!self.cursor.isPresent()) {
+                const row = list.atUnchecked(self.input, self.initialized);
+                // A fold's intermediate accumulator is solely this driver's,
+                // so the step may take over its buffer. A seed is borrowed
+                // from the caller and a scan accumulator is a retained
+                // output; both are only lent.
+                self.cursor = .init(if (!self.scan and self.accumulator.borrow() == .owned)
+                    try .initBinaryOwningLeft(
+                        evaluator.releases,
+                        evaluator.allocator,
+                        self.operation,
+                        .init(evaluator.releases, self.accumulator.borrowMut().takeOwned()),
+                        row,
+                    )
+                else
+                    try .initBinary(
+                        evaluator.releases,
+                        evaluator.allocator,
+                        self.operation,
+                        self.accumulator.borrow().value(),
+                        row,
+                    ));
+            }
+            const next = switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
+                .pending => return .stepped,
+                .complete => |result| result,
+            };
+            self.cursor.deinit(evaluator.releases, evaluator.allocator);
+            if (self.scan) {
+                self.results.?.borrowMut().appendOwned(next);
+                self.accumulator.borrowMut().* = .{ .borrowed = next };
+            } else {
+                self.accumulator.borrowMut().replaceOwned(evaluator.releases, next);
+            }
+            self.initialized += 1;
+            return .stepped;
+        }
+        if (!self.scan) {
+            evaluator.discard(self.consumed);
+            return .{ .output = self.accumulator.borrowMut().takeOwned() };
+        }
+        if (!self.materializing) {
+            self.materializer = .init(.init(
+                evaluator.allocator,
+                self.results.?.borrow().values(),
+            ));
+            self.materializing = true;
+        }
+        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
+            .pending => .stepped,
+            .complete => |result| completed: {
+                evaluator.discard(3);
+                break :completed .{ .output = result };
+            },
+        };
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// `transferred` is observed both after final publication and mid-fold, while
+/// the step's cursor owns the previous accumulator; `replaceOwned` then
+/// installs the step's result without releasing anything.
+const Accumulator = union(enum) {
+    borrowed: Value,
+    owned: Value,
+    transferred,
+
+    fn value(self: Accumulator) Value {
+        return switch (self) {
+            .borrowed, .owned => |item| item,
+            .transferred => unreachable,
+        };
+    }
+
+    fn replaceOwned(self: *Accumulator, releases: *heap.ReleaseDomain, next: Value) void {
+        switch (self.*) {
+            .borrowed, .transferred => {},
+            .owned => |item| releases.releaseValue(item),
+        }
+        self.* = .{ .owned = next };
+    }
+
+    fn takeOwned(self: *Accumulator) Value {
+        return switch (self.*) {
+            .borrowed => unreachable,
+            .owned => |item| taken: {
+                self.* = .transferred;
+                break :taken item;
+            },
+            .transferred => unreachable,
+        };
+    }
+
+    pub fn deinit(self: Accumulator, releases: *heap.ReleaseDomain) void {
+        switch (self) {
+            .borrowed, .transferred => {},
+            .owned => |item| releases.releaseValue(item),
+        }
+    }
+};
 
 pub const IdiomReduceStart = *const fn (*Fiber, Value, Value, bool, usize, usize) MachineError!void;
 

@@ -281,3 +281,17 @@ test "order: distinct charges nested structural hash and equality work" {
     try std.testing.expect((try runtime.runUnit("<test>", "distinct pop")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 2);
 }
+
+test "order: sort is grade applied to its list" {
+    try helper.expectStack(
+        "[3 1 2] sort [] sort [\"b\" \"a\"] sort [0.1 -0.0 0.2] sort",
+        "[1 2 3] () (\"a\" \"b\") [-0.0 0.1 0.2]",
+    );
+    try helper.expectError(.{
+        .name = "sort names itself for incomparable elements",
+        .source = "[1 \"x\"] sort",
+        .kind = "type",
+        .word = "sort",
+        .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+    });
+}

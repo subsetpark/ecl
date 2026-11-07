@@ -20,11 +20,11 @@ const Op = support.SequenceOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (comptime std.meta.tags(Op)) |operation| {
-        if (comptime definition(operation)) |word| try core.installBuiltin(word);
+        try core.installBuiltin(comptime definition(operation));
     }
 }
 
-fn definition(comptime operation: Op) ?env.BuiltinWord {
+fn definition(comptime operation: Op) env.BuiltinWord {
     return switch (operation) {
         .at => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "collection key -- value", .doc = "Index a list or look up a dict key. Pervades over nested list selectors, preserving their shape, so an index vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is always one whole value, including when that value is a list. A missing dict key is an error." },
         .where => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "counts -- indices", .doc = "Expand a list of nonnegative ints into each index replicated its count times. A 0/1 mask is the common case, yielding the positions of 1s: `[0 1 1 0] where` is `[1 2]`." },
@@ -42,7 +42,9 @@ fn definition(comptime operation: Op) ?env.BuiltinWord {
         .cut => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list starts -- pieces", .doc = "Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings." },
         .rotate => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list count -- rotated", .doc = "Rotate top-level element order left by a count, wrapping cyclically; a negative count rotates right, counts beyond the length wrap, and the empty list is returned unchanged. Native: a cyclic copy of the whole list (APL/J's dyadic reverse; K composes it from an index permutation). The count must be an int." },
         .first => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- value", .doc = "Return the first element of a nonempty list; an empty list is `` `domain ``." },
-        .reverse, .rest => null,
+        .reverse => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return a list with its top-level element order reversed." },
+        .rest => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return all but the first element of a nonempty list." },
+        .find => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list needle -- index", .doc = "Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches." },
     };
 }
 
@@ -67,6 +69,7 @@ fn primitive(evaluator: *Fiber, comptime operation: Op) MachineError!void {
         .reverse => reversePrimitive(evaluator),
         .first => firstPrimitive(evaluator),
         .rest => restPrimitive(evaluator),
+        .find => findPrimitive(evaluator),
         .range => rangePrimitive(evaluator),
         .shape => shapePrimitive(evaluator),
         .len => lenPrimitive(evaluator),
@@ -877,6 +880,70 @@ fn inPrimitive(evaluator: *Fiber) MachineError!void {
     });
 }
 
+fn findPrimitive(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    var needle = try evaluator.popValue();
+    defer needle.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list and a needle");
+    try evaluator.runDriver(FindDriver{
+        .collection = .init(collection.take()),
+        .needle = .init(needle.take()),
+    });
+}
+
+/// Compares until the first hit and returns the miss sentinel directly.
+/// Atomic pairs share `match?`'s scalar authority; structured pairs retain
+/// the same allocation-fallible bounded cursor.
+const FindDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    pub const inline_driver = true;
+    collection: heap.Owned(Value),
+    needle: heap.Owned(Value),
+    index: usize = 0,
+    cursor: ?heap.Owned(equal.MatchCursor) = null,
+
+    fn finish(self: *FindDriver, evaluator: *Fiber, index: usize) machine.WorkProgress {
+        if (self.cursor) |*cursor| cursor.deinit(evaluator.releases, evaluator.allocator);
+        self.cursor = null;
+        return .{ .output = .{ .int = @intCast(index) } };
+    }
+
+    pub fn advance(evaluator: *Fiber, self: *FindDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const input = self.collection.borrow();
+        const needle = self.needle.borrow();
+        const count: usize = @intCast(input.list.length());
+        const work = evaluator.workBudget();
+        while (self.index != count and work.spend()) {
+            const item = list.atUnchecked(input, self.index);
+            if (self.cursor == null) {
+                if (equal.matchWithoutStructure(item, needle)) |matches| {
+                    if (matches) return self.finish(evaluator, self.index);
+                    self.index += 1;
+                    continue;
+                }
+                self.cursor = .init(try .init(evaluator.allocator, item, needle));
+            }
+            switch (try self.cursor.?.borrowMut().advance(work)) {
+                .pending => return .stepped,
+                .complete => |matches| {
+                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
+                    self.cursor = null;
+                    if (matches) return self.finish(evaluator, self.index);
+                    self.index += 1;
+                    // The comparison drew on the same budget, so the next
+                    // element continues within the turn while it lasts.
+                    continue;
+                },
+            }
+        }
+        if (self.index != count) return .stepped;
+        return self.finish(evaluator, count);
+    }
+};
+
 fn membershipKindsCompatible(comptime needle_kind: value.HeapKind, comptime haystack_kind: value.HeapKind) bool {
     const needle_numeric = needle_kind == .leaf_u8 or needle_kind == .leaf_i64 or needle_kind == .leaf_f64;
     const haystack_numeric = haystack_kind == .leaf_u8 or haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64;
@@ -1523,10 +1590,6 @@ fn restPrimitive(evaluator: *Fiber) MachineError!void {
     try ListCopyDriver.installOne(evaluator, &collection, 1, count, false);
 }
 
-pub fn restForIdiom(evaluator: *Fiber) MachineError!void {
-    return restPrimitive(evaluator);
-}
-
 fn takePrimitive(evaluator: *Fiber) MachineError!void {
     var collection, var count_value = try evaluator.popPair();
     defer count_value.deinit();
@@ -1649,10 +1712,6 @@ fn reversePrimitive(evaluator: *Fiber) MachineError!void {
     const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0) return evaluator.pushOwned(try emptyLike(evaluator.allocator, collection.borrow()));
     try ListCopyDriver.installOne(evaluator, &collection, 0, count, true);
-}
-
-pub fn reverseForIdiom(evaluator: *Fiber) MachineError!void {
-    return reversePrimitive(evaluator);
 }
 
 const ListCopyDriver = struct {

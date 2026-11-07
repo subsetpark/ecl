@@ -1192,35 +1192,29 @@ prologue, vector blocks, tail, and fault reporting preserve the same contract.
 
 ### Idiom recognition is guarded, source-preserving fusion
 
-Some compact source definitions express a useful bulk operation but would
-otherwise decompose it back into many interpreter steps. `idioms.zig` matches
-a small closed table of quotation shapes against trusted source definitions
-and against quotations offered at selected combinator boundaries.
+Some compact quotations express a useful bulk operation but would otherwise
+decompose it back into many interpreter steps. `idioms.zig` matches a small
+closed table of quotation shapes against quotations offered at selected
+combinator boundaries and against the words that follow a phrase-heading
+builtin.
+
+Recognition applies only to user code. No definition's body is a pattern: an
+operation whose fused path would cover every input it accepts is a builtin, so
+a reflected source definition is always the code that runs. Recognition
+therefore never stands in for a definition's frame, and a fault inside a
+recognized application is reported at the user's own word.
 
 Recognition is guarded by binding identity. Every named token in the pattern
-must resolve, in the candidate's actual scope chain, to the expected trusted
-builtin or source definition. Shadowing, escaped code from another module,
-wrong literal shape, or any other mismatch selects the generic frame-machine
-path.
-
-A trusted definition, in the core or in a shipped standard-library image, is
-recognized once, when its group is sealed. Its words resolve in core or its
-sealed image, neither of which changes, so whether the body matches an entry
-is a property of the definition
-rather than of any call. The outcome is recorded on the definition; a call
-decides only whether its operands admit the entry and otherwise runs the body.
-The seal looks up only the names the table can recognize, so its work does not
-grow with the group. A quotation offered to a combinator is still checked when
-it is offered, against the definitions current then, since user scopes can
+must resolve, where the quotation runs, to the expected core builtin.
+Shadowing, escaped code from another module, wrong literal shape, or any other
+mismatch selects the combinator's generic path. A quotation is checked when it
+is offered, against the definitions current then, since user scopes can
 change.
 
-Every site uses one matcher over one table; only how a pattern word's binding
-is checked differs, once against the sealed directories or where the phrase
-runs. A pattern may nest a quotation and match it atom by atom. Recognition
-always happens when a frozen word executes, whether the code around it was
-written inline, passed to a combinator, built by `partial`, or held in a
-definition, so a phrase cannot be recognized in one of those places and missed
-in another.
+Every site uses one matcher over one table. Recognition always happens when a
+frozen word executes, whether the code around it was written inline, passed to
+a combinator, built by `partial`, or held in a definition, so a phrase cannot
+be recognized in one of those places and missed in another.
 
 A builtin can head a phrase continued by the words after it in the same code:
 `list [rows columns] reshape sum` folds the columns of the list's one buffer
@@ -1237,8 +1231,8 @@ phrase consumes those words instead of dispatching them, so it records what
 they resolve to as dispatch would, and a phrase on every iteration costs one
 probe per word. A word reached other than
 from a source position, a phrase split across a definition, or a shape the fold
-cannot take runs the words as written. A fault inside the phrase is reported as the last following word's
-own recognition reports it.
+cannot take runs the words as written. A fault inside the phrase is reported
+as the last following word's own.
 
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
@@ -1252,18 +1246,14 @@ step when the accumulator and the row are typed leaves of one class and
 length and the operation keeps that class. Each element goes through the
 scalar authority, so results and the first fault, with its element index, are
 the per-row cursor's; a row the remaining budget cannot pay for takes the
-cursor. `sum` and `product` are recognized as their whole definitions, with
-the reduction literal held to `((+) fold1)` or `((*) fold1)` and its operator
-as the active word: an empty list receives the seed and a nonempty one starts
-that `fold1` reduction directly, while any other operand runs the definition.
-Arbitrary quotations retain generic application semantics.
+cursor. Arbitrary quotations retain generic application semantics.
 For an offered quotation the guard result lives for that application and is
 discarded afterward, so redefinition receives a fresh check.
 
 This has the role of a superinstruction—one checked phrase becomes one more
 substantial host operation—but preserves the properties ecl cares about:
 
-- the source definition remains the only reflected definition;
+- every reflected source definition is the code that runs;
 - which definition each word denotes is decided exactly as binding decides it;
 - generated and spliced quotations need no recompilation; and
 - the generic path is always available as a differential oracle.
@@ -1721,7 +1711,7 @@ as ordinary ecl definitions and modules.
 core. It runs through the ordinary incremental evaluator in a root whose
 storage is the core-building authority, so each definition is validated as it
 is made against the core built so far and the prelude needs no forward
-references; core is then recognized and frozen before any ordinary unit
+references; core is then frozen before any ordinary unit
 starts. `stdlib.zig` is a compile-time manifest of embedded
 source and host-backed modules. Embedded modules win before filesystem search,
 so a stray file cannot silently replace shipped code, and their names are
@@ -1736,9 +1726,11 @@ The placement rule is:
 
 - use source for compact language logic;
 - use a builtin when the operation requires representation access or host
-  authority ecl cannot express; and
-- use guarded idiom recognition when a source definition should remain
-  authoritative but measured bulk performance needs a fused path.
+  authority ecl cannot express, or when a fused path would serve every input
+  the word accepts; and
+- use guarded idiom recognition for user quotations a combinator applies,
+  where measured bulk performance needs a fused path and the generic path
+  remains for every other quotation.
 
 Hosted modules combine source definitions with narrowly registered builtins.
 Their manifest, documentation, effects, provenance, and module requirements
