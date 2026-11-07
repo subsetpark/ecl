@@ -61,8 +61,8 @@ pub const Operation = union(enum) {
         };
     }
 };
-/// What a pattern word must resolve to: a core builtin, or, for the stack
-/// word `over` in a scalar program, its prelude definition.
+/// What a pattern word must resolve to: a core or standard-library builtin,
+/// or, for the stack word `over` in a scalar program, its prelude definition.
 pub const BindingKind = enum { builtin, source };
 pub const ExpectedWord = struct {
     spelling: []const u8,
