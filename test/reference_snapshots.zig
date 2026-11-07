@@ -160,7 +160,7 @@ const cases = [_]Case{
     .{ .name = "seeded module", .source = "[7] (`base set) `m @defm m.base" },
     .{ .name = "old spelling", .source = "(1) attempt" },
     .{ .name = "row annotation", .source = "(a -- ...) (dup) `f def `f see" },
-    .{ .name = "row after mixing", .source = "(a -- ... b) (dup) `f def" },
+    .{ .name = "two rows in one portion", .source = "(a ... b ... -- c) (dup) `f def" },
 };
 
 test "promoted Zig CLI behavior matches the reference snapshot" {
@@ -855,8 +855,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `set see
         \\exit: 0
         \\stdout:
-        \\(:
-        \\ "Takes an optional annotation, a value, and a name, and leaves nothing. Bind the value as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. Defined in ecl as `swap literal wrap swap def`, so `v `name set` is observationally `v literal wrap `name def`: the stored body is `(v)`, or `` (`v) `` for a symbol. An optional annotation beneath `v` is published as the constant's metadata; marker words inside `v` are nested in the body and remain captured data.")
+        \\(... value name -- :
+        \\ "(annotation value name -- ) *or* (value name -- ). Bind `value` as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. `annotation` is published as the constant's metadata.")
         \\(swap literal wrap swap def)
         \\stderr:
         \\<empty>
@@ -1179,13 +1179,13 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\(a -- ...) (dup)
         \\stderr:
         \\<empty>
-        \\=== row after mixing ===
-        \\source: (a -- ... b) (dup) `f def
+        \\=== two rows in one portion ===
+        \\source: (a ... b ... -- c) (dup) `f def
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind domain msg "malformed definition annotation" word def trace (def) data {source "<command>" line 1 col 23}}
+        \\{kind domain msg "malformed definition annotation" word def trace (def) data {source "<command>" line 1 col 29}}
         \\
     , transcript.written());
 }

@@ -84,9 +84,9 @@
   if) `map def
 
  ### def map-err
- (result quotation -- result :
-  "Replace a failure's error dict with the one its isolated `( error -- error )` quotation returns.
-   Return a success unchanged.")
+ (result (error -- error) -- result :
+  "Replace a failure's error dict with the one its isolated quotation returns. Return a success
+   unchanged.")
  (swap checked swap over `err dict.has?
   (swap `err at wrap swap @attempt
    dup `ok dict.has?

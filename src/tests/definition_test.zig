@@ -148,7 +148,70 @@ test "effect returns a binding's declared effect, or () when it declares none" {
             "(--) (1 pop) `quiet def " ++
             "`+ effect `dict.get effect `archive.sha256 effect " ++
             "`square effect `quiet effect `bare effect `def effect",
-        "(x y -- z) (dict key default -- value) (bytes -- lowercase-hex) (x -- y) (--) () ()",
+        "(x y -- z) (dict key default -- value) (bytes -- lowercase-hex) (x -- y) (--) () (... body name --)",
+    );
+}
+
+test "nested effects describe quotation slots, labelled or bare" {
+    try support.expectStack(
+        "(xs (a -- b) -- ys) (pop) `apply-one def " ++
+            "(l (q: ... a -- ...) -- l) (pop) `rows def " ++
+            "(b (then: -- ...) (else: -- ...) -- ...) (pop pop) `choose def " ++
+            "`apply-one effect `rows effect `choose effect `each effect `unfold effect",
+        "(xs (a -- b) -- ys) (l (q: ... a -- ...) -- l) (b (then: -- ...) (else: -- ...) -- ...) " ++
+            "(collection (a -- b) -- collection) " ++
+            "(state (predicate: state -- bool) (step: state -- state item) -- state list)",
+    );
+}
+
+test "a before-row row makes named inputs a minimum and leaves the result depth unchecked" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    // `... n` consumes n values beneath its count; any depth may remain.
+    try expectOk(&runtime, "[] ((... n -- list) (pack) `gather def " ++
+        "(a ... b -- c) (pop pop pop) `squeeze def) `rows @defm " ++
+        "1 2 3 2 rows.gather [2 3] match? swap 1 match? and " ++
+        "4 5 6 7 rows.squeeze 4 match? and");
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", display.bytes());
+    // A failed unit restores its entry stack, so each case drops the flag.
+    try expectErrorContains(&runtime, "pop rows.gather", "declared 1 input, but found 0");
+    try expectErrorContains(&runtime, "pop 1 rows.squeeze", "declared 2 inputs, but found 1");
+}
+
+test "an after-row row makes named outputs a minimum the boundary still checks" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] ((a -- ... b) (dup dup) `spread def " ++
+        "(a -- b ... c) () `same def " ++
+        "(a -- ... b) (pop) `vanish def) `tails @defm " ++
+        "1 tails.spread 3 pack [1 1 1] match?");
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", display.bytes());
+    try expectErrorContains(&runtime, "1 tails.vanish", "declared (1 -- at least 1); seeded 2, observed 1");
+    try expectErrorContains(&runtime, "pop 1 tails.same", "declared (1 -- at least 2); seeded 1, observed 1");
+}
+
+test "a nested effect is one slot of a module word's checked arity" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectOk(&runtime, "[] (((a -- b) x -- y) (pop) `keep-first def) `slots @defm " ++
+        "(1) 2 slots.keep-first (1) match?");
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", display.bytes());
+    try expectErrorContains(
+        &runtime,
+        "[] (((a -- b) x -- y) (pop pop) `drop-both def) `lying @defm (1) 2 lying.drop-both",
+        "declared (2 -- 1)",
     );
 }
 
@@ -298,6 +361,17 @@ test "recognized malformed annotations are domain errors" {
         .{ .name = "extra doc", .source = "(: \"a\" \"b\") (1) `x def", .kind = "domain", .word = "def" },
         .{ .name = "combined missing doc", .source = "(a -- b :) (1) `x def", .kind = "domain", .word = "def" },
         .{ .name = "combined extra doc", .source = "(a -- b : \"a\" \"b\") (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "top-level label", .source = "(q: -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "label not first", .source = "(a (x q: -- y) -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "lone colon slot", .source = "(a (: x -- y) -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "nested doc", .source = "(a (x -- y : \"d\") -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "nested without separator", .source = "(a (x y) -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "two nested after rows", .source = "(a (x -- ... y ...) -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "nonword nested slot", .source = "(a (1 -- y) -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "two before rows", .source = "(... a ... -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "two after rows", .source = "(a -- ... b ...) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "two nested before rows", .source = "(a (... x ... -- y) -- b) (1) `x def", .kind = "domain", .word = "def" },
+        .{ .name = "nesting too deep", .source = "(a ((((((((p -- q) -- r) -- s) -- t) -- u) -- v) -- w) -- x) -- b) (1) `x def", .kind = "domain", .word = "def" },
     });
 }
 

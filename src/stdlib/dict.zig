@@ -98,8 +98,8 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "update",
-        .effect = "dict keys quotation -- dict",
-        .doc = "Apply an isolated `( value -- value )` quotation to each whole top-level key without moving entries. Keys are processed in request order, so duplicates observe earlier updates. All keys are validated before the quotation is first applied; an absent key is `` `domain ``, and an empty key list returns the dictionary unchanged.",
+        .effect = "dict keys (value -- value) -- dict",
+        .doc = "Apply an isolated quotation to each whole top-level key without moving entries. Keys are processed in request order, so duplicates observe earlier updates. All keys are validated before the quotation is first applied; an absent key is `` `domain ``, and an empty key list returns the dictionary unchanged.",
         .primitive = combinators.updateDictKeysForModule,
     },
     .{
@@ -116,8 +116,8 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "merge-with",
-        .effect = "left right quotation -- dict",
-        .doc = "Merge two dictionaries, resolving each shared key with `( key left-value right-value -- value )`. Existing left keys keep their positions; right-only keys append in right order.",
+        .effect = "left right (key left-value right-value -- value) -- dict",
+        .doc = "Merge two dictionaries, resolving each shared key with the quotation. Existing left keys keep their positions; right-only keys append in right order.",
         .primitive = mergeWith,
     },
 };

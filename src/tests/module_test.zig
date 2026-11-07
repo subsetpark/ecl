@@ -587,8 +587,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .{ .symbol = .{ .name = try intern.intern("n") } },
     });
     defer releases.releaseValue(effect_value);
-    const separator = try intern.intern("--");
-    const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
+    const effect = (env.ValidatedEffect.parse(effect_value.list)).?;
     const document_value = try list.fromCodepoints(allocator, &.{ 'N', 'a', 't', 'i', 'v', 'e', '.' });
     defer releases.releaseValue(document_value);
     const document = env.documentation(document_value.list).?;

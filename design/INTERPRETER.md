@@ -1751,9 +1751,13 @@ checks semantic spelling conventions across all classified production sources;
 documentation completeness and effect syntax are compile-time requirements,
 for a builtin module's own documentation as for each of its words.
 Validated static descriptors carry those declarations into a shared runtime
-installation path. Effect token storage is specialized by its required capacity,
-not by the spelling of each word; installation retains declaration order and
-the same ownership and failure cleanup contract.
+installation path, which retains declaration order and the same ownership and
+failure cleanup contract. One slot grammar validates every effect: the
+compile-time check of builtin effect text and the runtime check of definition
+annotations and native descriptors drive the same per-level rules. A nested
+quotation effect is a single element of its enclosing effect, so the top-level
+separator index alone fixes a word's arity and nested effects never reach the
+boundary check.
 
 Port operation declarations bind documentation, typed handlers, lanes, and
 supported exchange endpoints together. Built-in and extension bridges derive
