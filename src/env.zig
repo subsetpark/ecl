@@ -8,7 +8,6 @@ const lexer = @import("lexer.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
-const idioms = @import("idioms.zig");
 const native_module = @import("native_module.zig");
 const reader_types = @import("reader_types.zig");
 /// In-tree primitives use Fiber's ergonomic error helpers. This binding
@@ -374,20 +373,6 @@ pub const ModulePublication = union(enum) {
     },
 };
 
-/// What a trusted definition's body was recognized as, decided once when its
-/// group sealed. A trusted body's words resolve in core or in its sealed
-/// image, neither of which changes, so the outcome is a property of the
-/// definition; only whether a particular call's operands
-/// admit it is left to that call. `env` stores the record for the recognizer
-/// that produced it and does not interpret it.
-pub const DirectIdiom = struct {
-    entry: u16,
-    /// Borrowed from the body, which the definition retains.
-    constant: ?value.Value = null,
-    active_word: ?u32 = null,
-    active_index: ?u32 = null,
-};
-
 /// Who keeps a definition alive. Core definitions live as long as the `Env`;
 /// a module image's definitions live as long as the image, which the Session
 /// keeps until teardown once it is published. A top-level session definition
@@ -419,7 +404,6 @@ pub const Definition = struct {
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     source: ?reader_types.SourceSlice = null,
-    direct_idiom: ?DirectIdiom = null,
     root: DefinitionRoot,
     /// The module image the definition belongs to, as `modules` names it.
     /// Opaque here: `env` never dereferences it.
@@ -1544,25 +1528,10 @@ pub const BuildingEnv = enum(usize) {
         return Scope.direct(allocator, .{ .core_build = .init(environment.privateState()) });
     }
 
-    /// Records recognition for core's trusted source definitions, then
-    /// freezes core. `recognize` is handed each source definition by name.
-    pub fn finish(
-        self: *BuildingEnv,
-        recognize: *const fn (Env, []const u8, *Definition) void,
-    ) error{OutOfMemory}!void {
+    /// Freezes core.
+    pub fn finish(self: *BuildingEnv) void {
         var environment = self.target();
-        const state = environment.privateState();
-        for (idioms.direct_names) |spelling| {
-            const id = try intern.intern(spelling);
-            const name = intern.namespaceName(id) catch continue;
-            var lookup = state.core.rawLookup(name);
-            const entry = poll.drive(?Entry, &lookup, .{}) orelse continue;
-            switch (entry) {
-                .definition => |definition| if (definition.code() == .source) recognize(environment, spelling, definition),
-                .alias => {},
-            }
-        }
-        state.core_frozen = true;
+        environment.privateState().core_frozen = true;
         self.* = .invalid;
     }
 };

@@ -26,6 +26,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "reduce-groups", .primitive = @import("kernel_numeric.zig").reduceGroups, .effect = "values groups reducer -- results", .doc = "Reduce each top-level index list, preserving group and index order, including repeated indices. Reducer symbols are `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Sum uses checked numeric addition from zero, left to right; count accepts any selected value. Min/max use whole-value comparison and preserve the first value on ties. Empty groups yield zero for sum/count and raise `` `domain `` for min/max. Noninteger selectors raise `` `type ``; negative or out-of-range indices and unknown symbols raise `` `domain ``. Built-in reducer meanings do not depend on word bindings." },
         .{ .name = "dup", .primitive = dup, .effect = "x -- x x", .doc = "Duplicate the top stack value." },
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
+        .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value. (`drop` is the sequence word.)" },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the visible operand stack into a bottom-to-top list while leaving every original value in place." },
         .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Raw structural prepend. On data, `1 [2 3] cons` is `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not safe partial application — that is `partial`." },
@@ -63,6 +64,10 @@ fn swap(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     const items = evaluator.stack.items;
     std.mem.swap(Value, &items[items.len - 1], &items[items.len - 2]);
+}
+fn over(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    try evaluator.pushBorrowed(evaluator.stack.items[evaluator.stack.items.len - 2]);
 }
 fn pop(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();

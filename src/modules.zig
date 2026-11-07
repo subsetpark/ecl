@@ -1457,10 +1457,6 @@ pub const OwnedImage = enum(usize) {
     pub fn groupEntries(self: *const OwnedImage) env.GroupMap.RawEntryCursor {
         return self.borrow().group.?.rawEntries();
     }
-    /// The sealed directory, once the seal cursor has completed.
-    pub fn sealedDirectory(self: *const OwnedImage) *const env.NameMap {
-        return &self.borrow().names.?;
-    }
     /// Seals every reservation of a group whose bodies are bound and moves
     /// each entry into the published directory.
     pub fn sealCursor(self: *const OwnedImage) SealCursor {

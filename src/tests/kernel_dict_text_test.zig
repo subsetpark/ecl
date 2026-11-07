@@ -229,13 +229,13 @@ test "dict-text: format splices strings and canonically renders other values" {
             .name = "format requires one value per placeholder",
             .source = "[1] \"{} {}\" str.format",
             .kind = "contract",
-            .word = "str.format",
+            .word = "str.core.format",
         },
         .{
             .name = "format rejects an unmatched brace",
             .source = "[] \"{\" str.format",
             .kind = "domain",
-            .word = "str.format",
+            .word = "str.core.format",
         },
     });
 }

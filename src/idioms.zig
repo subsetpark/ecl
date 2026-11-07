@@ -10,42 +10,22 @@ const equal = @import("equal.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
-const dict_text = @import("kernel_dict_text.zig");
-const combinators = @import("combinators.zig");
 
 const Value = value.Value;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 
 pub const Context = enum {
-    direct,
+    /// A builtin head continued by the words after it.
+    phrase,
     each,
     zip_with,
     fold,
     fold1,
     scan,
     lex_cmp,
-
-    /// A recognized application stands for a trusted definition's call, so
-    /// its fault traces through that definition.
-    fn tracesDefinition(self: Context) bool {
-        return switch (self) {
-            .direct, .fold1, .lex_cmp => true,
-            else => false,
-        };
-    }
 };
-pub const DirectOp = enum {
-    sort,
-    lex_cmp_with,
-    find,
-    rest,
-    reverse,
-    dip,
-    str_format,
-    fold1,
-    sum,
-    product,
+pub const PhraseOp = enum {
     /// `reshape` continued by `sum` or `product`: the fold over the rows a
     /// two-axis reshape would build, without building them.
     reshape_sum,
@@ -54,23 +34,10 @@ pub const DirectOp = enum {
     /// index list `where` would build.
     where_at,
 
-    pub fn spelling(self: DirectOp) []const u8 {
+    pub fn spelling(self: PhraseOp) []const u8 {
         return switch (self) {
-            .str_format => "str.format",
             .reshape_sum, .reshape_product => "reshape",
             .where_at => "where",
-            .lex_cmp_with => "lex-cmp-with",
-            else => @tagName(self),
-        };
-    }
-
-    /// The combinator a trusted definition stands for, whose caller's
-    /// quotation it offers with its body as the fallback.
-    pub fn offers(self: DirectOp) ?machine.IdiomRequest {
-        return switch (self) {
-            .fold1 => .fold1,
-            .lex_cmp_with => .lex_cmp,
-            else => null,
         };
     }
 };
@@ -81,7 +48,7 @@ pub const Operation = union(enum) {
     length,
     /// `cmp` as a lexicographic comparator.
     cmp,
-    direct: DirectOp,
+    phrase: PhraseOp,
 
     pub fn spelling(self: Operation) []const u8 {
         return switch (self) {
@@ -90,33 +57,19 @@ pub const Operation = union(enum) {
             .match => "match?",
             .length => "len",
             .cmp => "cmp",
-            .direct => |operation| operation.spelling(),
+            .phrase => |operation| operation.spelling(),
         };
     }
 };
-pub const BindingKind = enum { builtin, source };
-pub const ExpectedOrigin = enum { trusted, candidate_module };
 pub const ExpectedWord = struct {
     spelling: []const u8,
-    binding: BindingKind = .builtin,
-    origin: ExpectedOrigin = .trusted,
-    /// The word a fault inside the entry names, at the top-level position of
-    /// the phrase that holds it, as the definition's own execution would.
-    active: bool = false,
 };
 pub const PatternAtom = union(enum) {
     /// A non-word value, which becomes the operation's constant operand.
-    /// `literal` leaves every non-word as itself, so this is also what
-    /// `partial` prefixes onto its quotation.
     constant,
-    literal,
-    /// An int literal equal to this value.
-    int: i64,
     /// The entry's own operation word, which is also its active word.
     operation,
     word: ExpectedWord,
-    /// A quotation literal whose forms match this pattern exactly.
-    quotation: []const PatternAtom,
 };
 pub const RegistryEntry = struct {
     context: Context,
@@ -127,8 +80,6 @@ pub const RegistryEntry = struct {
     /// Words that must follow the head in the code it runs from, checked
     /// where it runs. The phrase consumes them when it applies.
     following: []const ExpectedWord = &.{},
-    /// The combinator a trusted definition stands for, from its operation.
-    offers: ?machine.IdiomRequest = null,
 };
 
 const operation_pattern = [_]PatternAtom{.operation};
@@ -138,126 +89,10 @@ const constant_swap_operation_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
     .operation,
 };
-const sort_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "grade", .active = true } },
-    .{ .word = .{ .spelling = "at" } },
-};
-const neg_pattern = [_]PatternAtom{ .literal, .{ .word = .{ .spelling = "*" } } };
-const abs_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "neg", .binding = .source } },
-    .literal,
-    .{ .word = .{ .spelling = "+" } },
-    .{ .word = .{ .spelling = "swap" } },
-    .{ .word = .{ .spelling = "max" } },
-};
-const mod_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "2dup", .binding = .source } },
-    .{ .word = .{ .spelling = "div" } },
-    .{ .word = .{ .spelling = "*" } },
-    .{ .word = .{ .spelling = "-" } },
-};
-const ne_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "=" } },
-    .{ .word = .{ .spelling = "not" } },
-};
-const le_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = ">" } },
-    .{ .word = .{ .spelling = "not" } },
-};
-const ge_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "<" } },
-    .{ .word = .{ .spelling = "not" } },
-};
-const and_pattern = [_]PatternAtom{
-    .literal,
-    .{ .word = .{ .spelling = "dip", .binding = .source } },
-    .{ .word = .{ .spelling = "not" } },
-    .{ .word = .{ .spelling = "not" } },
-    .{ .word = .{ .spelling = "min" } },
-};
-const or_pattern = [_]PatternAtom{
-    .literal,
-    .{ .word = .{ .spelling = "dip", .binding = .source } },
-    .{ .word = .{ .spelling = "not" } },
-    .{ .word = .{ .spelling = "not" } },
-    .{ .word = .{ .spelling = "max" } },
-};
-const find_pattern = [_]PatternAtom{
-    .{ .quotation = &.{.{ .word = .{ .spelling = "match?" } }} },
-    .{ .word = .{ .spelling = "partial", .binding = .source } },
-    .{ .word = .{ .spelling = "each" } },
-    .{ .word = .{ .spelling = "first-where" } },
-};
-const rest_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "first" } },
-    .{ .word = .{ .spelling = "pop" } },
-    .literal,
-    .{ .word = .{ .spelling = "drop" } },
-};
-const reverse_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "len" } },
-    .{ .word = .{ .spelling = "dup" } },
-    .literal,
-    .{ .word = .{ .spelling = "=" } },
-    .literal,
-    .literal,
-    .{ .word = .{ .spelling = "if" } },
-};
-const dip_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "swap" } },
-    .{ .word = .{ .spelling = "literal" } },
-    .{ .word = .{ .spelling = "append", .binding = .source } },
-    .{ .word = .{ .spelling = "call" } },
-};
-const str_format_pattern = [_]PatternAtom{
-    .{ .word = .{
-        .spelling = "format-valid",
-        .binding = .source,
-        .origin = .candidate_module,
-    } },
-};
-/// `sum` and `product`: `dup empty? (pop seed) ((op) fold1) if`. The
-/// reduction's operator is the active word, so a fault names `+` or `*` at
-/// that literal, as the definition's own reduction would.
-fn totalPattern(comptime seed: i64, comptime operator: []const u8) [5]PatternAtom {
-    return .{
-        .{ .word = .{ .spelling = "dup" } },
-        .{ .word = .{ .spelling = "empty?", .binding = .source } },
-        .{ .quotation = &.{ .{ .word = .{ .spelling = "pop" } }, .{ .int = seed } } },
-        .{ .quotation = &.{
-            .{ .quotation = &.{.{ .word = .{ .spelling = operator, .active = true } }} },
-            .{ .word = .{ .spelling = "fold1", .binding = .source } },
-        } },
-        .{ .word = .{ .spelling = "if" } },
-    };
-}
-const sum_pattern = totalPattern(0, "+");
-const product_pattern = totalPattern(1, "*");
-const fold1_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "swap" } },
-    .{ .word = .{ .spelling = "uncons", .binding = .source } },
-    .{ .word = .{ .spelling = "swap" } },
-    .{ .word = .{ .spelling = "rolldown", .binding = .source } },
-    .{ .word = .{ .spelling = "fold" } },
-};
-/// `lex-cmp-with`: `0 0 (test) (step) while (finish) call`.
-const lex_cmp_with_pattern = [_]PatternAtom{
-    .{ .int = 0 },
-    .{ .int = 0 },
-    .literal,
-    .literal,
-    .{ .word = .{ .spelling = "while" } },
-    .literal,
-    .{ .word = .{ .spelling = "call" } },
-};
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 3 + 18 + 18 + 4]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 4 + 18 + 3]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -319,72 +154,28 @@ pub const registry = blk: {
         };
         index += 3;
     }
-    for ([_]struct { operation: Operation, pattern: []const PatternAtom }{
-        .{ .operation = .{ .unary = .neg }, .pattern = &neg_pattern },
-        .{ .operation = .{ .unary = .abs }, .pattern = &abs_pattern },
-        .{ .operation = .{ .binary = .mod }, .pattern = &mod_pattern },
-        .{ .operation = .{ .binary = .ne }, .pattern = &ne_pattern },
-        .{ .operation = .{ .binary = .le }, .pattern = &le_pattern },
-        .{ .operation = .{ .binary = .ge }, .pattern = &ge_pattern },
-        .{ .operation = .{ .binary = .and_word }, .pattern = &and_pattern },
-        .{ .operation = .{ .binary = .or_word }, .pattern = &or_pattern },
-    }) |direct| {
-        entries[index] = .{
-            .context = .direct,
-            .pattern = direct.pattern,
-            .operation = direct.operation,
-            .source_word = direct.operation.spelling(),
-        };
-        index += 1;
-    }
-    for ([_]struct { operation: DirectOp, pattern: []const PatternAtom }{
-        .{ .operation = .fold1, .pattern = &fold1_pattern },
-        .{ .operation = .lex_cmp_with, .pattern = &lex_cmp_with_pattern },
-        .{ .operation = .sort, .pattern = &sort_pattern },
-        .{ .operation = .find, .pattern = &find_pattern },
-        .{ .operation = .rest, .pattern = &rest_pattern },
-        .{ .operation = .reverse, .pattern = &reverse_pattern },
-        .{ .operation = .dip, .pattern = &dip_pattern },
-        .{ .operation = .str_format, .pattern = &str_format_pattern },
-        .{ .operation = .sum, .pattern = &sum_pattern },
-        .{ .operation = .product, .pattern = &product_pattern },
-    }) |direct| {
-        entries[index] = .{
-            .context = .direct,
-            .pattern = direct.pattern,
-            .operation = .{ .direct = direct.operation },
-            .source_word = if (direct.operation == .str_format)
-                "format"
-            else
-                direct.operation.spelling(),
-        };
-        index += 1;
-    }
-    for ([_]struct { operation: DirectOp, total: []const u8 }{
+    for ([_]struct { operation: PhraseOp, total: []const u8 }{
         .{ .operation = .reshape_sum, .total = "sum" },
         .{ .operation = .reshape_product, .total = "product" },
     }) |phrase| {
         entries[index] = .{
-            .context = .direct,
+            .context = .phrase,
             .pattern = &.{},
-            .operation = .{ .direct = phrase.operation },
+            .operation = .{ .phrase = phrase.operation },
             .source_word = "reshape",
-            .following = &.{.{ .spelling = phrase.total, .binding = .source }},
+            .following = &.{.{ .spelling = phrase.total }},
         };
         index += 1;
     }
     entries[index] = .{
-        .context = .direct,
+        .context = .phrase,
         .pattern = &.{},
-        .operation = .{ .direct = .where_at },
+        .operation = .{ .phrase = .where_at },
         .source_word = "where",
-        .following = &.{.{ .spelling = "at", .binding = .builtin }},
+        .following = &.{.{ .spelling = "at" }},
     };
     index += 1;
     std.debug.assert(index == entries.len);
-    for (&entries) |*entry| {
-        if (entry.operation == .direct) entry.offers = entry.operation.direct.offers();
-    }
     break :blk entries;
 };
 
@@ -420,214 +211,77 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
     return entries_by_shape[@backingInt(context)][length];
 }
 
-/// Every trusted definition a direct entry can recognize, by name.
-pub const direct_names = blk: {
-    var names: [registry.len][]const u8 = undefined;
-    var count: usize = 0;
-    for (registry) |entry| {
-        // A phrase head asks from its own primitive; nothing freezes for it.
-        if (entry.context != .direct or entry.following.len != 0) continue;
-        const name = entry.source_word.?;
-        const seen = for (names[0..count]) |existing| {
-            if (std.mem.eql(u8, existing, name)) break true;
-        } else false;
-        if (seen) continue;
-        names[count] = name;
-        count += 1;
-    }
-    const final = names[0..count].*;
-    break :blk final;
-};
-
-/// Decides one trusted definition's direct entry when its environment
-/// freezes, against bindings that can no longer change.
-/// Name resolution against directories that can no longer change: a sealing
-/// group's own, then core. It admits only words written in that group's image
-/// or in core, as a word in one of its definitions resolves.
-pub const FrozenLookup = struct {
-    context: *const anyopaque,
-    resolve_fn: *const fn (*const anyopaque, value.Symbol) ?FrozenHit,
-
-    pub fn resolve(self: FrozenLookup, word: value.Symbol) ?FrozenHit {
-        return self.resolve_fn(self.context, word);
-    }
-};
-
-pub const FrozenHit = struct {
-    definition: *const env.Definition,
-    in_core: bool,
-};
-
-pub fn recognizeTrusted(lookup: FrozenLookup, name: []const u8, definition: *const env.Definition) ?env.DirectIdiom {
-    const phrase: Value = .{ .list = definition.code().source.code() };
-    for (registry, 0..) |entry, index| {
-        if (entry.context != .direct or !std.mem.eql(u8, entry.source_word.?, name)) continue;
-        if (entry.following.len != 0) continue;
-        const capture = matchPhrase(.{ .frozen = lookup }, phrase, entry) orelse continue;
-        return .{
-            .entry = @intCast(index),
-            .constant = capture.constant,
-            .active_word = capture.active_word,
-            .active_index = capture.active_index,
-        };
-    }
-    return null;
+/// Whether `word`, where the phrase runs, is the core binding expected: a
+/// builtin, and the given primitive when one is named.
+fn wordMatches(evaluator: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) bool {
+    if (!plainWord(word.slot)) return false;
+    return liveWord(evaluator.peekWord(word), primitive) != null;
 }
-
-/// How a pattern word's binding is checked: against a frozen environment,
-/// once, when a trusted definition is recognized; or where the phrase runs,
-/// when a quotation is offered.
-const WordGuard = union(enum) {
-    frozen: FrozenLookup,
-    live: *Fiber,
-
-    fn matches(
-        self: WordGuard,
-        word: value.Symbol,
-        binding: BindingKind,
-        primitive: ?env.PrimitiveImpl,
-        origin: ExpectedOrigin,
-    ) bool {
-        switch (self) {
-            .frozen => |lookup| return frozenBindingMatches(lookup, word, binding, primitive, origin),
-            .live => |evaluator| {
-                std.debug.assert(origin == .trusted);
-                if (!plainWord(word.slot)) return false;
-                return liveWord(evaluator.peekWord(word), binding, primitive) != null;
-            },
-        }
-    }
-};
-
-/// What a trusted word resolved to where a phrase runs.
-const LiveWord = struct {
-    trace_word: intern.TraceWord,
-    /// The word's own frozen recognition and body, for a source word.
-    idiom: ?env.DirectIdiom,
-    body: ?*value.ListHandle,
-};
 
 /// A following word, resolved as its own dispatch would resolve it: through
 /// the fiber's resolutions, so a phrase that runs on every iteration pays one
 /// probe rather than a full lookup. A word the fiber has not resolved is
 /// looked up in full and remembered, since the phrase consumes it instead of
-/// dispatching it. Either way it must be the trusted binding expected.
-fn followingWord(evaluator: *Fiber, word: value.Symbol, binding: BindingKind) error{OutOfMemory}!?LiveWord {
+/// dispatching it. Either way it must be the core builtin expected; its trace
+/// word is what a fault inside the phrase names.
+fn followingWord(evaluator: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
     if (!plainWord(word.slot)) return null;
-    return liveWord(try evaluator.resolveForRecognition(word), binding, null);
+    return liveWord(try evaluator.resolveForRecognition(word), null);
 }
 
-/// Resolves `word` where the phrase runs and returns it only when it is the
-/// trusted binding expected. A word that resolves to nothing a plain word may
-/// run, or whose root has retired, is simply not that binding; generic
-/// execution reports any error. A frozen binding outlives the call that
-/// matched it, so what it returns stays valid for the call.
-fn liveWord(peeked: ?machine.PeekedWord, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?LiveWord {
+/// Resolves `word` where the phrase runs and returns its trace word only when
+/// it is the trusted binding expected. A word that resolves to nothing a plain
+/// word may run, or whose root has retired, is simply not that binding;
+/// generic execution reports any error.
+fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.TraceWord {
     const resolved = peeked orelse return null;
     if (resolved.origin != .core and resolved.origin != .standard_library) return null;
-    const definition = resolved.definition;
-    const code = definition.code();
-    switch (binding) {
-        .builtin => if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null,
-        .source => if (code != .source) return null,
-    }
-    return .{
-        .trace_word = resolved.trace_word,
-        .idiom = definition.direct_idiom,
-        .body = if (code == .source) code.source.code() else null,
-    };
+    const code = resolved.definition.code();
+    if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null;
+    return resolved.trace_word;
 }
 
-/// The one atom matcher, shared by every site; only the guard differs. The
-/// phrase matches when every atom does, at every nesting level.
-fn matchPhrase(guard: WordGuard, phrase: Value, entry: RegistryEntry) ?Capture {
+/// Matches an offered quotation against one entry's pattern, checking each
+/// pattern word's binding where the quotation runs.
+fn matchPhrase(evaluator: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture {
+    if (phrase != .list or phrase.list.length() != entry.pattern.len) return null;
     var capture: Capture = .{};
-    if (!matchAtoms(guard, phrase, entry.pattern, entry.operation, &capture, null)) return null;
-    return capture;
-}
-
-/// `top` is the top-level position of the quotation holding a nested
-/// pattern: a capture records where in the phrase a fault is reported.
-fn matchAtoms(
-    guard: WordGuard,
-    phrase: Value,
-    pattern: []const PatternAtom,
-    operation: Operation,
-    capture: *Capture,
-    top: ?u32,
-) bool {
-    if (phrase != .list or phrase.list.length() != pattern.len) return false;
-    for (pattern, 0..) |atom, atom_index| {
+    for (entry.pattern, 0..) |atom, atom_index| {
         const actual = list.atUnchecked(phrase, atom_index);
-        const site: u32 = top orelse @intCast(atom_index);
         switch (atom) {
             .constant => {
-                if (capture.constant != null or actual == .symbol) return false;
+                if (capture.constant != null or actual == .symbol) return null;
                 capture.constant = actual;
             },
-            .literal => if (actual == .symbol) return false,
-            .int => |expected| if (actual != .int or actual.int != expected) return false,
-            .quotation => |inner| if (!matchAtoms(guard, actual, inner, operation, capture, site)) return false,
             .operation => {
                 // A quoted occurrence pushes its symbol; it is never the operation.
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
-                    !std.mem.eql(u8, intern.get(actual.symbol.name), operation.spelling())) return false;
-                const binding = operationBinding(operation);
-                const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
-                if (!guard.matches(actual.symbol, binding, primitive, .trusted)) return false;
+                    !std.mem.eql(u8, intern.get(actual.symbol.name), entry.operation.spelling())) return null;
+                if (!wordMatches(evaluator, actual.symbol, operationPrimitive(entry.operation))) return null;
                 capture.active_word = actual.symbol.name;
-                capture.active_index = site;
+                capture.active_index = @intCast(atom_index);
             },
             .word => |expected| {
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
-                    !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return false;
-                if (!guard.matches(actual.symbol, expected.binding, null, expected.origin)) return false;
-                if (expected.active) {
-                    capture.active_word = actual.symbol.name;
-                    capture.active_index = site;
-                }
+                    !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return null;
+                if (!wordMatches(evaluator, actual.symbol, null)) return null;
             },
         }
     }
-    return true;
-}
-
-/// The binding guard, decided once. A trusted word may resolve in the frozen
-/// environment or core; a candidate-module word only in the frozen image.
-fn frozenBindingMatches(
-    lookup: FrozenLookup,
-    word: value.Symbol,
-    binding: BindingKind,
-    primitive: ?env.PrimitiveImpl,
-    origin: ExpectedOrigin,
-) bool {
-    const hit = lookup.resolve(word) orelse return false;
-    const definition = hit.definition;
-    const code = definition.code();
-    const binding_matches = switch (binding) {
-        .builtin => code == .builtin and
-            (primitive == null or code.builtin == primitive.?),
-        .source => code == .source,
-    };
-    const origin_matches = switch (origin) {
-        .trusted => true,
-        .candidate_module => !hit.in_core,
-    };
-    return binding_matches and origin_matches;
+    return capture;
 }
 
 pub fn tryApply(
     evaluator: *Fiber,
     request: machine.IdiomRequest,
-    source: machine.FallbackSource,
+    fallback: machine.IdiomFallback,
 ) MachineError!void {
-    const decline: Decline = .{ .deferred = source };
-    if (evaluator.inherited.idiom_mode == .generic_only) return decline.run(evaluator);
-    const candidate = requestCandidate(evaluator, request) orelse return decline.run(evaluator);
+    if (evaluator.inherited.idiom_mode == .generic_only) return fallback(evaluator);
+    const candidate = requestCandidate(evaluator, request) orelse return fallback(evaluator);
     const entries = entriesShaped(candidate.context, candidate.phrase.list.length());
     // A quotation of any length may be a scalar program.
     if (entries.len == 0 and candidate.context == .lex_cmp)
-        return decline.run(evaluator);
+        return fallback(evaluator);
     // Inside a finite iteration's call the phrase's words keep their bindings,
     // so the phrase it offered before matches the same way again.
     const planned = try evaluator.planEntry();
@@ -636,43 +290,11 @@ pub fn tryApply(
             .constant = offered.constant,
             .active_word = offered.active_word,
             .active_index = offered.active_index,
-        }, decline);
-    return matchOffered(evaluator, candidate, entries, decline, request, planned);
+        }, fallback);
+    return matchOffered(evaluator, candidate, entries, fallback, request, planned);
 }
 
-/// What an offered match runs if it declines: still the caller's source while
-/// the match is synchronous, and a made fallback once a match that must wait
-/// carries it into a driver.
-const Decline = union(enum) {
-    deferred: machine.FallbackSource,
-    made: machine.IdiomFallback,
-
-    fn take(self: Decline, evaluator: *Fiber) machine.IdiomFallback {
-        return switch (self) {
-            .deferred => |source| source.make(evaluator),
-            .made => |fallback| fallback,
-        };
-    }
-
-    fn run(self: Decline, evaluator: *Fiber) MachineError!void {
-        var owned = self.take(evaluator);
-        defer owned.deinit(evaluator.releases, evaluator.allocator);
-        return owned.run(evaluator);
-    }
-
-    fn discard(self: Decline, evaluator: *Fiber) void {
-        switch (self) {
-            .deferred => {},
-            .made => |fallback| {
-                var owned = fallback;
-                owned.deinit(evaluator.releases, evaluator.allocator);
-            },
-        }
-    }
-};
-
-/// A user quotation offered to a combinator. Trusted definitions never reach
-/// the driver: their recognition was decided when their environment froze.
+/// A quotation offered to a combinator.
 const Candidate = struct {
     context: Context,
     phrase: Value,
@@ -699,23 +321,6 @@ fn requestCandidate(evaluator: *Fiber, request: machine.IdiomRequest) ?Candidate
     return .{ .context = context, .phrase = phrase };
 }
 
-/// Applies a trusted word's recognized entry when this call's operands admit
-/// it. A declined call runs the word's body, so nothing is prepared for it.
-/// `fold1` is the combinator itself: it offers the caller's quotation, and the
-/// body is the fallback should that be declined.
-pub fn applyTrusted(evaluator: *Fiber, call: machine.TrustedCall) MachineError!machine.TrustedOutcome {
-    if (evaluator.inherited.idiom_mode == .generic_only) return .declined;
-    const entry = registry[call.idiom.entry];
-    if (entry.offers) |request| return .{ .offered = request };
-    if (!canApplyEntry(evaluator, entry)) return .declined;
-    try applyRecognized(evaluator, .{ .list = call.body }, .{ .entry = entry }, .{
-        .constant = call.idiom.constant,
-        .active_word = call.idiom.active_word,
-        .active_index = call.idiom.active_index,
-    });
-    return .applied;
-}
-
 /// The first registry entry headed by the kernel word `spelling`, or null
 /// when it heads none. A head's entries are consecutive (checked below).
 pub fn firstPhraseEntry(comptime spelling: []const u8) ?u16 {
@@ -729,7 +334,7 @@ pub fn firstPhraseEntry(comptime spelling: []const u8) ?u16 {
 comptime {
     for (registry, 0..) |entry, index| {
         if (entry.following.len == 0) continue;
-        if (entry.context != .direct) @compileError("a phrase entry must be direct");
+        if (entry.context != .phrase) @compileError("a phrase entry must have the phrase context");
         const first = firstPhraseEntry(entry.source_word.?).?;
         for (registry[first..index]) |between| {
             if (between.following.len == 0 or !std.mem.eql(u8, between.source_word.?, entry.source_word.?))
@@ -779,75 +384,66 @@ fn phraseAtom(entry: u16, position: usize) error{OutOfMemory}!u32 {
 pub fn applyHeaded(evaluator: *Fiber, first: u16) MachineError!bool {
     if (evaluator.inherited.idiom_mode == .generic_only) return false;
     if (evaluator.active_word.atom() != try phraseAtom(first, 0)) return false;
-    return try applyPhrase(evaluator, first) == .applied;
+    return applyPhrase(evaluator, first);
 }
 
 /// A builtin head continued by the words after it. Each entry the head
 /// heads is tried in registry order; the first whose following words are
-/// the expected trusted bindings, here, and whose operands admit it, applies
-/// and consumes those words. A fault is reported as the last following word
-/// would report it when it runs alone: its own recognition names the active
-/// word and the site in its body, and the word is the trace parent.
-fn applyPhrase(evaluator: *Fiber, first: u16) MachineError!machine.TrustedOutcome {
+/// the expected core builtins, here, and whose operands admit it, applies
+/// and consumes those words. The fused pass reports a fault as the last
+/// following word would: it is the only word that can fault, and a builtin
+/// has no site inside a body.
+fn applyPhrase(evaluator: *Fiber, first: u16) MachineError!bool {
     const name = registry[first].source_word.?;
     var index = first;
     while (index < registry.len) : (index += 1) {
         const entry = registry[index];
         if (entry.following.len == 0 or !std.mem.eql(u8, entry.source_word.?, name)) break;
         const count: u32 = @intCast(entry.following.len);
-        const forms = evaluator.followingForms(count) orelse return .declined;
-        var last: ?LiveWord = null;
-        const matched = for (entry.following, 0..) |expected, offset| {
+        const forms = evaluator.followingForms(count) orelse return false;
+        var last: ?intern.TraceWord = null;
+        const matched = for (0..entry.following.len) |offset| {
             const form = forms.at(@intCast(offset));
             if (form != .symbol or env.isQuoted(form.symbol.slot) or form.symbol.name != try phraseAtom(index, offset + 1)) break false;
-            last = try followingWord(evaluator, form.symbol, expected.binding) orelse break false;
+            last = try followingWord(evaluator, form.symbol) orelse break false;
         } else true;
         if (!matched) continue;
-        const owner = last.?;
-        if (entry.operation.direct == .where_at) {
-            if (!compressShape(evaluator)) continue;
-            evaluator.idiom_hits += 1;
-            evaluator.phrase_hits += 1;
-            evaluator.skipFollowingForms(count);
-            _ = evaluator.commitDirectIdiomTrace();
-            // The fused pass reports as `at` would: it is the only word that
-            // can fault, and a builtin has no site inside a body.
-            evaluator.active_word = owner.trace_word;
-            var mask = try evaluator.popValue();
-            defer mask.deinit();
-            var source = try evaluator.popValue();
-            defer source.deinit();
-            try sequence.compress(evaluator, &source, &mask);
-            return .applied;
+        switch (entry.operation.phrase) {
+            .where_at => {
+                if (!compressShape(evaluator)) continue;
+                commitPhrase(evaluator, count, last.?);
+                var mask = try evaluator.popValue();
+                defer mask.deinit();
+                var source = try evaluator.popValue();
+                defer source.deinit();
+                try sequence.compress(evaluator, &source, &mask);
+            },
+            .reshape_sum, .reshape_product => |operation| {
+                const shape = columnFoldShape(evaluator, operation) orelse continue;
+                commitPhrase(evaluator, count, last.?);
+                var shape_owner = try evaluator.popValue();
+                defer shape_owner.deinit();
+                var input = try evaluator.popValue();
+                defer input.deinit();
+                try numeric.foldColumns(evaluator, columnOperation(operation), &input, shape.rows, shape.columns);
+            },
         }
-        const shape = columnFoldShape(evaluator, entry.operation.direct) orelse continue;
-        const idiom = owner.idiom orelse continue;
-        evaluator.idiom_hits += 1;
-        evaluator.phrase_hits += 1;
-        evaluator.skipFollowingForms(count);
-        _ = evaluator.commitDirectIdiomTrace();
-        if (idiom.active_word) |word| evaluator.active_word = .plain(word);
-        var shape_owner = try evaluator.popValue();
-        defer shape_owner.deinit();
-        var input = try evaluator.popValue();
-        defer input.deinit();
-        const attribution: Attribution = .{
-            .site = if (idiom.active_index) |site| .{ .code = owner.body.?, .index = site } else null,
-            .parent = owner.trace_word,
-        };
-        try attribution.started(evaluator, numeric.foldColumns(
-            evaluator,
-            columnOperation(entry.operation.direct),
-            &input,
-            shape.rows,
-            shape.columns,
-        ));
-        return .applied;
+        return true;
     }
-    return .declined;
+    return false;
 }
 
-fn columnOperation(operation: DirectOp) numeric.BinaryOp {
+/// Consumes a matched phrase's following words, whose last one is now the
+/// active word.
+fn commitPhrase(evaluator: *Fiber, count: u32, last: intern.TraceWord) void {
+    evaluator.idiom_hits += 1;
+    evaluator.phrase_hits += 1;
+    evaluator.skipFollowingForms(count);
+    evaluator.commitPhraseTrace();
+    evaluator.active_word = last;
+}
+
+fn columnOperation(operation: PhraseOp) numeric.BinaryOp {
     return switch (operation) {
         .reshape_sum => .add,
         .reshape_product => .mul,
@@ -867,7 +463,7 @@ fn compressShape(evaluator: *Fiber) bool {
 /// rows can run on the list itself: a two-axis shape of positive ints whose
 /// volume is the list's length, and a numeric leaf the operation keeps typed.
 /// Anything else runs the words as written.
-fn columnFoldShape(evaluator: *Fiber, operation: DirectOp) ?struct { rows: usize, columns: usize } {
+fn columnFoldShape(evaluator: *Fiber, operation: PhraseOp) ?struct { rows: usize, columns: usize } {
     if (evaluator.available() < 2) return null;
     const stack = evaluator.stack.items;
     const shape = stack[stack.len - 1];
@@ -889,22 +485,14 @@ fn columnFoldShape(evaluator: *Fiber, operation: DirectOp) ?struct { rows: usize
 const Recognized = union(enum) {
     entry: RegistryEntry,
     program: *const OfferedProgram,
-
-    fn context(self: Recognized) Context {
-        return switch (self) {
-            inline else => |selected| selected.context,
-        };
-    }
 };
 
 /// Every recognized application starts here: it counts the hit and reports
-/// a fault or a continuing driver at the phrase's active word, through the
-/// trusted definition it stands for.
+/// a fault or a continuing driver at the phrase's active word.
 inline fn applyRecognized(evaluator: *Fiber, phrase: Value, recognized: Recognized, capture: Capture) MachineError!void {
     evaluator.idiom_hits += 1;
     const attribution: Attribution = .{
         .site = if (capture.active_index) |index| .{ .code = phrase.list, .index = index } else null,
-        .parent = if (recognized.context().tracesDefinition()) evaluator.commitDirectIdiomTrace() else null,
     };
     return attribution.started(evaluator, switch (recognized) {
         .entry => |entry| applyEntry(evaluator, entry, capture),
@@ -913,23 +501,16 @@ inline fn applyRecognized(evaluator: *Fiber, phrase: Value, recognized: Recogniz
 }
 
 /// Where a recognized application's fault, or the driver it leaves, is
-/// reported: the source position it ran in place of, and the definition
-/// whose frame it elides. A fault that already names an inner definition
-/// keeps it.
+/// reported: the source position it ran in place of.
 const Attribution = struct {
     site: ?struct { code: *value.ListHandle, index: u32 } = null,
-    parent: ?intern.TraceWord = null,
 
     fn started(self: Attribution, evaluator: *Fiber, result: MachineError!void) MachineError!void {
         result catch |err| {
-            if (err == error.Ecl) {
-                if (self.site) |site| evaluator.setFailureSite(site.code, site.index);
-                if (self.parent) |word| evaluator.setFailureTraceParent(word);
-            }
+            if (err == error.Ecl) if (self.site) |site| evaluator.setFailureSite(site.code, site.index);
             return err;
         };
         if (self.site) |site| evaluator.setWorkDriverSite(site.code, site.index);
-        if (self.parent) |word| evaluator.setWorkDriverTraceParent(word);
     }
 };
 
@@ -942,19 +523,18 @@ fn matchOffered(
     evaluator: *Fiber,
     candidate: Candidate,
     entries: []const u16,
-    decline: Decline,
+    fallback: machine.IdiomFallback,
     request: machine.IdiomRequest,
     planned: ?*machine.PlanEntry,
 ) MachineError!void {
     var capture: Capture = .{};
     const matched: ?u16 = for (entries) |index| {
-        if (matchPhrase(.{ .live = evaluator }, candidate.phrase, registry[index])) |found| {
+        if (matchPhrase(evaluator, candidate.phrase, registry[index])) |found| {
             capture = found;
             break index;
         }
     } else null;
     if (matched == null) if (recognizeProgram(evaluator, candidate)) |program| {
-        decline.discard(evaluator);
         return applyRecognized(evaluator, candidate.phrase, .{ .program = &program }, .{});
     };
     if (planned) |entry| if (entry.offered == null) {
@@ -968,7 +548,7 @@ fn matchOffered(
             .active_index = capture.active_index,
         };
     };
-    return applyMatched(evaluator, candidate.phrase, matched, capture, decline);
+    return applyMatched(evaluator, candidate.phrase, matched, capture, fallback);
 }
 
 /// The numeric operations a scalar program may contain, by spelling, each with
@@ -997,7 +577,7 @@ const ProgramStackWord = enum { dup, swap, pop, over };
 /// expects, and the quotation must leave exactly one value from its inputs.
 /// Operations keep their order, including one whose result is later popped,
 /// so a fault happens where the quotation's own would.
-fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarProgram {
+fn compileProgram(evaluator: *Fiber, phrase: Value, inputs: u8) ?numeric.ScalarProgram {
     const Program = numeric.ScalarProgram;
     var program: Program = .{ .inputs = inputs, .registers = inputs };
     // SAFETY: only the first `depth` entries are read.
@@ -1022,8 +602,7 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
         if (env.isQuoted(word.slot)) return null;
         const spelling = intern.get(word.name);
         if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
-            const binding: BindingKind = if (stack_word == .over) .source else .builtin;
-            if (!guard.matches(word, binding, null, .trusted)) return null;
+            if (!wordMatches(evaluator, word, null)) return null;
             switch (stack_word) {
                 .dup => {
                     if (depth < 1 or depth == stack.len) return null;
@@ -1049,9 +628,7 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
         const operation = for (program_operations) |candidate| {
             if (std.mem.eql(u8, candidate.spelling, spelling)) break candidate.operation;
         } else return null;
-        const binding = operationBinding(operation);
-        const primitive = if (binding == .builtin) operationPrimitive(operation) else null;
-        if (!guard.matches(word, binding, primitive, .trusted)) return null;
+        if (!wordMatches(evaluator, word, operationPrimitive(operation))) return null;
         if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
         program.instructions[program.len] = switch (operation) {
             .unary => |selected| unary: {
@@ -1063,7 +640,6 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
                     .destination = program.registers,
                     .word = word.name,
                     .index = @intCast(position),
-                    .defined = binding == .source,
                 };
             },
             .binary => |selected| binary: {
@@ -1076,7 +652,6 @@ fn compileProgram(guard: WordGuard, phrase: Value, inputs: u8) ?numeric.ScalarPr
                     .destination = program.registers,
                     .word = word.name,
                     .index = @intCast(position),
-                    .defined = binding == .source,
                 };
             },
             else => unreachable,
@@ -1108,7 +683,7 @@ fn recognizeProgram(evaluator: *Fiber, candidate: Candidate) ?OfferedProgram {
         .zip_with, .fold, .fold1, .scan => 2,
         else => return null,
     };
-    const compiled = compileProgram(.{ .live = evaluator }, candidate.phrase, inputs) orelse return null;
+    const compiled = compileProgram(evaluator, candidate.phrase, inputs) orelse return null;
     const admitted = switch (candidate.context) {
         .each, .zip_with => numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1]),
         // The accumulator is input 0 and the element input 1.
@@ -1150,22 +725,17 @@ fn startProgram(evaluator: *Fiber, program: *const OfferedProgram) MachineError!
 
 /// Applies a matched entry when this application's operands admit it, and
 /// declines otherwise.
-fn applyMatched(evaluator: *Fiber, phrase: Value, matched: ?u16, capture: Capture, decline: Decline) MachineError!void {
-    const index = matched orelse return decline.run(evaluator);
+fn applyMatched(evaluator: *Fiber, phrase: Value, matched: ?u16, capture: Capture, fallback: machine.IdiomFallback) MachineError!void {
+    const index = matched orelse return fallback(evaluator);
     const selected = registry[index];
-    if (!canApplyEntry(evaluator, selected)) return decline.run(evaluator);
-    decline.discard(evaluator);
+    if (!canApplyEntry(evaluator, selected)) return fallback(evaluator);
     return applyRecognized(evaluator, phrase, .{ .entry = selected }, capture);
 }
 
 fn canApplyEntry(evaluator: *Fiber, entry: RegistryEntry) bool {
     const stack = evaluator.stack.items;
     return switch (entry.operation) {
-        .unary => switch (entry.context) {
-            .direct => evaluator.available() >= 1,
-            .each => stack[stack.len - 2] == .list,
-            else => false,
-        },
+        .unary => entry.context == .each and stack[stack.len - 2] == .list,
         .binary => switch (entry.context) {
             .each => stack[stack.len - 2] == .list,
             .zip_with => blk: {
@@ -1176,36 +746,18 @@ fn canApplyEntry(evaluator: *Fiber, entry: RegistryEntry) bool {
             },
             .fold, .scan => stack[stack.len - 3] == .list,
             .fold1 => stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0,
-            .direct => evaluator.available() >= 2,
-            .lex_cmp => false,
+            .phrase, .lex_cmp => false,
         },
         .length, .match => entry.context == .each and stack[stack.len - 2] == .list,
         .cmp => order.lexCompareCandidate(stack[stack.len - 3], stack[stack.len - 2]),
-        // `dip` is the one direct entry that needs a second input, and a
-        // non-list top must reach the generic composition so the type error
-        // still names the word that observed it.
-        .direct => |operation| switch (operation) {
-            .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
-            .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
-            .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
-            .str_format => evaluator.available() >= 2,
-            // Any other operand reaches the definition, so its error is the
-            // definition's.
-            .sum, .product => evaluator.available() >= 1 and stack[stack.len - 1] == .list,
-            .reshape_sum, .reshape_product, .where_at => unreachable, // See `applyPhrase`.
-            else => evaluator.available() >= 1,
-        },
+        .phrase => unreachable, // See `applyPhrase`.
     };
 }
 
 fn applyEntry(evaluator: *Fiber, entry: RegistryEntry, capture: Capture) MachineError!void {
     if (capture.active_word) |word| evaluator.active_word = .plain(word);
     try switch (entry.operation) {
-        .unary => |operation| switch (entry.context) {
-            .direct => unaryPrimitive(operation)(evaluator),
-            .each => applyUnaryEach(evaluator, operation),
-            else => unreachable,
-        },
+        .unary => |operation| applyUnaryEach(evaluator, operation),
         .binary => |operation| switch (entry.context) {
             .each => applyConstantEach(
                 evaluator,
@@ -1215,41 +767,13 @@ fn applyEntry(evaluator: *Fiber, entry: RegistryEntry, capture: Capture) Machine
             ),
             .zip_with => applyZipWith(evaluator, operation),
             .fold, .fold1, .scan => applyReduction(evaluator, operation, entry.context),
-            .direct => binaryPrimitive(operation)(evaluator),
-            .lex_cmp => unreachable,
+            .phrase, .lex_cmp => unreachable,
         },
         .match => applyMatchEach(evaluator, capture.constant.?),
         .length => applyLengthEach(evaluator),
         .cmp => applyLexCompare(evaluator),
-        .direct => |operation| applyDirect(evaluator, operation),
+        .phrase => unreachable, // See `applyPhrase`.
     };
-}
-
-fn applyDirect(evaluator: *Fiber, operation: DirectOp) MachineError!void {
-    try switch (operation) {
-        .fold1, .lex_cmp_with => unreachable, // Offers its quotation instead; see `applyTrusted`.
-        .sort => order.sortForIdiom(evaluator),
-        .find => applyMatchFind(evaluator),
-        .rest => sequence.restForIdiom(evaluator),
-        .reverse => sequence.reverseForIdiom(evaluator),
-        .dip => combinators.dipForIdiom(evaluator),
-        .str_format => dict_text.formatForIdiom(evaluator),
-        .sum => applyTotal(evaluator, .add, 0),
-        .product => applyTotal(evaluator, .mul, 1),
-        .reshape_sum, .reshape_product, .where_at => unreachable, // See `applyPhrase`.
-    };
-}
-
-/// `sum`/`product` over a list: the empty seed, or `(op) fold1` without the
-/// definition's dispatch. The list is the reduction's only consumed value.
-fn applyTotal(evaluator: *Fiber, operation: numeric.BinaryOp, empty: i64) MachineError!void {
-    const stack = evaluator.stack.items;
-    const input = stack[stack.len - 1];
-    if (input.list.length() == 0) {
-        popRelease(evaluator, 1);
-        return evaluator.pushOwned(.{ .int = empty });
-    }
-    return startReduction(evaluator, operation, false, input, list.atUnchecked(input, 0), 1, 1);
 }
 
 /// `(cmp) lex-cmp-with`: the comparator is consumed with the lists.
@@ -1522,68 +1046,6 @@ const MatchEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn applyMatchFind(evaluator: *Fiber) MachineError!void {
-    const stack = evaluator.stack.items;
-    const input = stack[stack.len - 2];
-    std.debug.assert(input == .list);
-    try evaluator.startDriver(MatchFindDriver{
-        .input = input,
-        .needle = stack[stack.len - 1],
-    });
-}
-
-/// The recognized `find` source word compares until its first hit and returns
-/// the miss sentinel directly. Atomic pairs share `match?`'s scalar authority;
-/// structured pairs retain the same allocation-fallible bounded cursor.
-const MatchFindDriver = struct {
-    pub const inline_driver = true;
-
-    input: Value,
-    needle: Value,
-    index: usize = 0,
-    cursor: ?heap.Owned(equal.MatchCursor) = null,
-
-    fn finish(self: *MatchFindDriver, evaluator: *Fiber, index: usize) machine.WorkProgress {
-        if (self.cursor) |*cursor| cursor.deinit(evaluator.releases, evaluator.allocator);
-        self.cursor = null;
-        popRelease(evaluator, 2);
-        return .{ .output = .{ .int = @intCast(index) } };
-    }
-
-    pub fn advance(evaluator: *Fiber, self: *MatchFindDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const count: usize = @intCast(self.input.list.length());
-        const work = evaluator.workBudget();
-        while (self.index != count and work.spend()) {
-            const item = list.atUnchecked(self.input, self.index);
-            if (self.cursor == null) {
-                if (equal.matchWithoutStructure(item, self.needle)) |matches| {
-                    if (matches) return self.finish(evaluator, self.index);
-                    self.index += 1;
-                    continue;
-                }
-                self.cursor = .init(try .init(evaluator.allocator, item, self.needle));
-            }
-            switch (try self.cursor.?.borrowMut().advance(work)) {
-                .pending => return .stepped,
-                .complete => |matches| {
-                    self.cursor.?.deinit(evaluator.releases, evaluator.allocator);
-                    self.cursor = null;
-                    if (matches) return self.finish(evaluator, self.index);
-                    self.index += 1;
-                    // The comparison drew on the same budget, so the next
-                    // element continues within the turn while it lasts.
-                    continue;
-                },
-            }
-        }
-        if (self.index != count) return .stepped;
-        return self.finish(evaluator, count);
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
 fn applyReduction(
     evaluator: *Fiber,
     operation: numeric.BinaryOp,
@@ -1596,210 +1058,8 @@ fn applyReduction(
     const stack = evaluator.stack.items;
     const input = stack[stack.len - consumed];
     const initial = if (from_first) list.atUnchecked(input, 0) else stack[stack.len - 2];
-    return startReduction(evaluator, operation, scan, input, initial, start, consumed);
+    return numeric.startReduction(evaluator, operation, scan, input, initial, start, consumed);
 }
-
-/// `consumed` stack values lie under the result: the list is the deepest,
-/// and `start` is 1 when `initial` is its first element.
-fn startReduction(
-    evaluator: *Fiber,
-    operation: numeric.BinaryOp,
-    scan: bool,
-    input: Value,
-    initial: Value,
-    start: usize,
-    consumed: usize,
-) MachineError!void {
-    const from_first = start == 1;
-    std.debug.assert(input == .list);
-    const count: usize = @intCast(input.list.length());
-    if (count == start) {
-        if (from_first) {
-            try evaluator.pushBorrowed(initial);
-            var result = try evaluator.popValue();
-            defer result.deinit();
-            popRelease(evaluator, consumed);
-            return evaluator.pushOwned(result.take());
-        }
-        if (scan) return finishCollected(evaluator, &.{}, 3);
-        popRelease(evaluator, 1);
-        var accumulator = try evaluator.popValue();
-        defer accumulator.deinit();
-        popRelease(evaluator, 1);
-        try evaluator.pushOwned(accumulator.take());
-        return;
-    }
-    // Over a numeric leaf with an accumulator that stabilizes after at most
-    // one scalar step, reduction is one typed sequential pass instead of one
-    // cursor and one scheduler turn per element. Association stays left-to-right, so
-    // float sums keep the generic route's bits.
-    if (numeric.typedReduceCandidate(operation, input, initial)) {
-        return numeric.idiomReduceStart(operation)(evaluator, input, initial, scan, start, consumed);
-    }
-    const results: ?heap.OwnedValueBuffer = if (scan)
-        try .init(evaluator.releases, count)
-    else
-        null;
-    try evaluator.startDriver(ReductionDriver{
-        .operation = operation,
-        .scan = scan,
-        .input = input,
-        .initialized = start,
-        .consumed = consumed,
-        .accumulator = .init(.{ .borrowed = initial }),
-        .results = if (results) |owned_results| .init(owned_results) else null,
-        .materializer = null,
-    });
-}
-
-const ReductionDriver = struct {
-    /// Like a typed kernel's driver, it lives for one reduction and
-    /// releases the slot when it publishes, so it qualifies for the slot on
-    /// lifetime; a fold whose rows apply directly would otherwise spend its
-    /// largest fixed cost on this driver's allocation.
-    pub const inline_driver = true;
-
-    consumed: usize,
-    operation: numeric.BinaryOp,
-    scan: bool,
-    input: Value,
-    accumulator: heap.Owned(Accumulator),
-    results: ?heap.Owned(heap.OwnedValueBuffer),
-    initialized: usize = 0,
-    materializing: bool = false,
-    materializer: ?heap.Owned(list.ValueMaterializer),
-    // Not optional: emptying a `?Owned` of this size clears it whole, and
-    // the cursor is emptied once per row.
-    cursor: heap.Owned(numeric.PervadeCursor) = .none,
-
-    pub fn advance(
-        evaluator: *Fiber,
-        self: *ReductionDriver,
-    ) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        // A fold whose accumulator and next row are typed leaves of one class
-        // and length applies whole rows here, each charged before it runs,
-        // without a cursor or a machine turn per row. Anything else, and any
-        // row the remaining budget cannot pay for, takes the cursor below.
-        if (!self.scan) while (!self.cursor.isPresent() and self.initialized < self.input.list.length()) {
-            const accumulator = self.accumulator.borrowMut();
-            const owned = accumulator.* == .owned;
-            switch (try numeric.foldLeafRow(
-                evaluator,
-                self.operation,
-                accumulator.value(),
-                owned,
-                list.atUnchecked(self.input, self.initialized),
-            )) {
-                .declined => break,
-                .in_place => |next| accumulator.* = .{ .owned = next },
-                .fresh => |next| accumulator.replaceOwned(evaluator.releases, next),
-            }
-            self.initialized += 1;
-            if (evaluator.remainingKernelFuel() == 0) return .stepped;
-        };
-        if (!self.materializing and self.initialized < self.input.list.length()) {
-            if (!self.cursor.isPresent()) {
-                const row = list.atUnchecked(self.input, self.initialized);
-                // A fold's intermediate accumulator is solely this driver's,
-                // so the step may take over its buffer. A seed is borrowed
-                // from the caller and a scan accumulator is a retained
-                // output; both are only lent.
-                self.cursor = .init(if (!self.scan and self.accumulator.borrow() == .owned)
-                    try .initBinaryOwningLeft(
-                        evaluator.releases,
-                        evaluator.allocator,
-                        self.operation,
-                        .init(evaluator.releases, self.accumulator.borrowMut().takeOwned()),
-                        row,
-                    )
-                else
-                    try .initBinary(
-                        evaluator.releases,
-                        evaluator.allocator,
-                        self.operation,
-                        self.accumulator.borrow().value(),
-                        row,
-                    ));
-            }
-            const next = switch (try self.cursor.borrowMut().advance(evaluator, evaluator.workBudget())) {
-                .pending => return .stepped,
-                .complete => |result| result,
-            };
-            self.cursor.deinit(evaluator.releases, evaluator.allocator);
-            if (self.scan) {
-                self.results.?.borrowMut().appendOwned(next);
-                self.accumulator.borrowMut().* = .{ .borrowed = next };
-            } else {
-                self.accumulator.borrowMut().replaceOwned(evaluator.releases, next);
-            }
-            self.initialized += 1;
-            return .stepped;
-        }
-        if (!self.scan) {
-            popRelease(evaluator, self.consumed);
-            return .{ .output = self.accumulator.borrowMut().takeOwned() };
-        }
-        if (!self.materializing) {
-            self.materializer = .init(.init(
-                evaluator.allocator,
-                self.results.?.borrow().values(),
-            ));
-            self.materializing = true;
-        }
-        return switch (try self.materializer.?.borrowMut().advance(evaluator.workBudget())) {
-            .pending => .stepped,
-            .complete => |result| completed: {
-                popRelease(evaluator, 3);
-                break :completed .{ .output = result };
-            },
-        };
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-/// `transferred` is observed both after final publication and mid-fold, while
-/// the step's cursor owns the previous accumulator; `replaceOwned` then
-/// installs the step's result without releasing anything.
-const Accumulator = union(enum) {
-    borrowed: Value,
-    owned: Value,
-    transferred,
-
-    fn value(self: Accumulator) Value {
-        return switch (self) {
-            .borrowed, .owned => |item| item,
-            .transferred => unreachable,
-        };
-    }
-
-    fn replaceOwned(self: *Accumulator, releases: *heap.ReleaseDomain, next: Value) void {
-        switch (self.*) {
-            .borrowed, .transferred => {},
-            .owned => |item| releases.releaseValue(item),
-        }
-        self.* = .{ .owned = next };
-    }
-
-    fn takeOwned(self: *Accumulator) Value {
-        return switch (self.*) {
-            .borrowed => unreachable,
-            .owned => |item| taken: {
-                self.* = .transferred;
-                break :taken item;
-            },
-            .transferred => unreachable,
-        };
-    }
-
-    pub fn deinit(self: Accumulator, releases: *heap.ReleaseDomain) void {
-        switch (self) {
-            .borrowed, .transferred => {},
-            .owned => |item| releases.releaseValue(item),
-        }
-    }
-};
 
 fn finishCollected(evaluator: *Fiber, values: []const Value, consumed: usize) MachineError!void {
     std.debug.assert(values.len == 0);
@@ -1816,23 +1076,7 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
-        .match, .length, .cmp => null,
-        .direct => null,
-    };
-}
-
-fn operationBinding(operation: Operation) BindingKind {
-    return switch (operation) {
-        .unary => |selected| switch (selected) {
-            .neg, .abs => .source,
-            else => .builtin,
-        },
-        .binary => |selected| switch (selected) {
-            .mod, .ne, .le, .ge, .and_word, .or_word => .source,
-            else => .builtin,
-        },
-        .match, .length, .cmp => .builtin,
-        .direct => .source,
+        .match, .length, .cmp, .phrase => null,
     };
 }
 

@@ -422,3 +422,29 @@ test "kernel: bitwise words are pattern words over the integer bit pattern" {
         },
     });
 }
+
+test "numeric: derived comparisons, negation, remainder, and totals" {
+    try helper.expectStacks(&.{
+        .{ .name = "negation and magnitude", .source = "-2 neg -0.0 neg [-2 3] abs", .expected = "2 0.0 [2 3]" },
+        .{ .name = "remainder", .source = "7 3 mod -7 3 mod", .expected = "1 -1" },
+        .{
+            .name = "comparisons and booleans",
+            .source = "[1 2] [1 3] <> 1 2 <= 2 1 >= [0 1] [1 1] and [0 1] [1 0] or",
+            .expected = "[0 1] 1 1 [0 1] [1 1]",
+        },
+        .{
+            .name = "totals start from the first element",
+            .source = "[1 2 3] sum [] sum [[1 2] [3 4] [5 6]] sum [-0.0 -0.0] sum [2 3 4] product [] product",
+            .expected = "6 0 [9 12] -0.0 24 1",
+        },
+    });
+    try helper.expectErrors(&.{
+        .{ .name = "abs overflow", .source = "-9223372036854775808 abs", .kind = "overflow", .word = "abs" },
+        .{ .name = "neg overflow", .source = "-9223372036854775808 neg", .kind = "overflow", .word = "neg" },
+        .{ .name = "mod by zero", .source = "7 0 mod", .kind = "domain", .word = "mod" },
+        .{ .name = "and of a non-boolean", .source = "2 1 and", .kind = "type", .word = "and" },
+        .{ .name = "sum of an atom", .source = "5 sum", .kind = "type", .word = "sum" },
+        .{ .name = "sum of a dict", .source = "{a 1} sum", .kind = "type", .word = "sum" },
+        .{ .name = "sum of an incompatible row", .source = "[[1 2] [3 bad]] sum", .kind = "type", .word = "sum" },
+    });
+}

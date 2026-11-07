@@ -24,12 +24,15 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "*Inline.* Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``." },
         .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "*Inline.* At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized." },
         .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "*Inline.* Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level." },
+        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "*Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results." },
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "*Inline.* Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized." },
         .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "*Inline.* The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Every test runs against the operand stack checkpoint taken after the clause list is consumed. Tests may inspect that stack destructively; only their top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded. The first true test selects its action; otherwise the final else runs, in either case from the original checkpoint. Stack rollback does not roll back environment or IO effects performed by tests." },
         .{ .name = "each", .primitive = each, .effect = "collection (a -- b) -- collection", .doc = "*Isolated*. For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``." },
         .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (a b -- c) -- list", .doc = "*Isolated*. Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `partial` compositions." },
         .{ .name = "for", .primitive = forWord, .effect = "collection (a --) --", .doc = "*Isolated*. Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing." },
         .{ .name = "fold", .primitive = fold, .effect = "list accumulator (acc a -- acc) -- accumulator", .doc = "*Isolated*. Reduce left-to-right from the supplied accumulator." },
+        .{ .name = "fold1", .primitive = fold1, .effect = "list (acc a -- acc) -- value", .doc = "*Isolated*. Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`." },
+        .{ .name = "lex-cmp-with", .primitive = lexCmpWith, .effect = "left right (left-element right-element -- order) -- order", .doc = "*Isolated*. Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length." },
         .{ .name = "scan", .primitive = scan, .effect = "list accumulator (acc a -- acc) -- list", .doc = "*Isolated*. Like `fold` but returns every intermediate accumulator; same length as the input." },
         .{ .name = "stencil", .primitive = stencil, .effect = "list width (window -- result) -- list", .doc = "*Isolated*. Apply to each overlapping window of a positive int width, left-to-right. A width larger than the input returns `()` without applying the quotation; zero and negative widths are `` `domain ``. The result has `max(len-width+1, 0)` elements." },
         .{ .name = "unfold", .primitive = unfold, .effect = "state (predicate: state -- bool) (step: state -- state item) -- state list", .doc = "*Isolated*. Before every step, apply the predicate. When it returns 0, return the current state and all generated items. When it returns 1, apply the step, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`." },
@@ -318,12 +321,10 @@ fn times(evaluator: *Fiber) MachineError!void {
     try evaluator.beginInlineApplication(state.application());
 }
 
-/// The private callback behind `dip` recognition. The prelude definition
-/// `(swap literal append call)` stays authoritative; matching it lets the
-/// protected value ride in a continuation instead of building a capture
-/// quotation and a composition on every application.
-pub fn dipForIdiom(evaluator: *Fiber) MachineError!void {
-    std.debug.assert(evaluator.available() >= 2);
+/// The protected value rides in a continuation rather than in a capture
+/// quotation composed onto `q`.
+fn dip(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     var protected = try evaluator.popValue();
@@ -335,9 +336,7 @@ pub fn dipForIdiom(evaluator: *Fiber) MachineError!void {
         .site = evaluator.applicationSite(),
         .word = evaluator.active_word,
     };
-    const word = state.word;
     try evaluator.beginInlineApplication(state.application());
-    evaluator.setApplicationTraceParent(word);
 }
 
 const DipState = struct {
@@ -894,7 +893,7 @@ const CondDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const IterationKind = enum { each, zip_with, for_word, fold, scan, infra };
+const IterationKind = enum { each, zip_with, for_word, fold, scan, lex_cmp, infra };
 const IterationState = struct {
     kind: IterationKind,
     left: heap.Owned(Value),
@@ -935,7 +934,7 @@ const IterationState = struct {
                 .{
                     .seeded = 0,
                     .expected = switch (self.kind) {
-                        .each, .zip_with, .fold, .scan => 1,
+                        .each, .zip_with, .fold, .scan, .lex_cmp => 1,
                         .for_word => 0,
                         .infra => unreachable,
                     },
@@ -947,6 +946,7 @@ const IterationState = struct {
             .each, .zip_with => self.resumeCollect(evaluator, site, observed),
             .for_word => self.resumeFor(evaluator, site, observed),
             .fold, .scan => self.resumeFold(evaluator, site, observed),
+            .lex_cmp => self.resumeLexCompare(evaluator, site, observed),
             .infra => resumeInfra(evaluator, base),
         };
     }
@@ -1036,6 +1036,39 @@ const IterationState = struct {
         return self.step(2);
     }
 
+    /// A comparator's 0 moves to the next pair; any other int is the order.
+    /// A shared prefix that is equal throughout orders by length.
+    fn resumeLexCompare(
+        self: *IterationState,
+        evaluator: *Fiber,
+        site: *machine.ApplicationContractSite,
+        observed: usize,
+    ) MachineError!?ApplicationStep {
+        if (observed != 1) {
+            return evaluator.applicationContractError(
+                site,
+                self.quotation.borrow(),
+                self.expected.?.borrow(),
+                .{ .seeded = 2, .expected = 1, .observed = observed },
+                self.index,
+            );
+        }
+        var result = try evaluator.popValue();
+        defer result.deinit();
+        if (result.borrow() != .int) return evaluator.typeError("an int comparator result");
+        if (result.borrow().int != 0) {
+            try evaluator.pushOwned(result.take());
+            return null;
+        }
+        self.index += 1;
+        if (self.index == self.count) {
+            try pushLengthOrder(evaluator, self.left.borrow(), self.right.?.borrow());
+            return null;
+        }
+        try self.pushInputs(evaluator);
+        return self.step(2);
+    }
+
     fn resumeInfra(evaluator: *Fiber, base: usize) MachineError!?ApplicationStep {
         try InfraResultDriver.install(evaluator, base);
         return null;
@@ -1056,7 +1089,7 @@ const IterationState = struct {
             dict.valueAt(left.dict, self.index)
         else
             inputAt(left, self.index));
-        if (self.kind == .zip_with) try evaluator.pushBorrowed(inputAt(
+        if (self.kind == .zip_with or self.kind == .lex_cmp) try evaluator.pushBorrowed(inputAt(
             self.right.?.borrow(),
             self.index,
         ));
@@ -1979,9 +2012,9 @@ const InfraBootstrapDriver = struct {
 };
 
 fn each(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.each, statelessFallback(eachGeneric));
+    return evaluator.continueWithIdiom(.each, eachGeneric);
 }
-fn eachGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
+fn eachGeneric(evaluator: *Fiber) MachineError!void {
     return startUnaryIteration(evaluator, .each);
 }
 
@@ -2053,9 +2086,9 @@ fn startUnaryIteration(evaluator: *Fiber, kind: IterationKind) MachineError!void
 }
 
 fn zipWith(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.zip_with, statelessFallback(zipWithGeneric));
+    return evaluator.continueWithIdiom(.zip_with, zipWithGeneric);
 }
-fn zipWithGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
+fn zipWithGeneric(evaluator: *Fiber) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -2102,29 +2135,101 @@ fn zipWithGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
 }
 
 fn fold(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.fold, statelessFallback(foldGeneric));
+    return evaluator.continueWithIdiom(.fold, foldGeneric);
 }
-fn foldGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
+fn foldGeneric(evaluator: *Fiber) MachineError!void {
     return startFold(evaluator, .fold);
 }
 
-fn scan(evaluator: *Fiber) MachineError!void {
-    return evaluator.continueWithIdiom(.scan, statelessFallback(scanGeneric));
+fn fold1(evaluator: *Fiber) MachineError!void {
+    return evaluator.continueWithIdiom(.fold1, fold1Generic);
 }
-fn scanGeneric(evaluator: *Fiber, _: ?*anyopaque) MachineError!void {
-    return startFold(evaluator, .scan);
+fn fold1Generic(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    var quotation = try evaluator.popValue();
+    defer quotation.deinit();
+    var input = try evaluator.popValue();
+    defer input.deinit();
+    if (quotation.borrow() != .list or input.borrow() != .list)
+        return evaluator.typeError("a list and quotation");
+    const count: usize = @intCast(input.borrow().list.length());
+    if (count == 0) return evaluator.fail(.domain, "fold1 requires a non-empty list");
+    if (count == 1) return evaluator.pushBorrowed(list.atUnchecked(input.borrow(), 0));
+    var expected = heap.OwnedValue.init(
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "acc", "a", "--", "acc" }),
+    );
+    defer expected.deinit();
+    var state_owner: ?*IterationState = try createIteration(
+        evaluator,
+        .fold,
+        &input,
+        null,
+        &quotation,
+        &expected,
+        count,
+    );
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    const state = state_owner.?;
+    // The first element is the accumulator, so the walk starts at the second.
+    state.index = 1;
+    try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
+    try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 1));
+    state_owner = null;
+    try evaluator.beginIsolatedApplication(state.application(2));
 }
 
-fn statelessFallback(
-    comptime run: *const fn (*Fiber, ?*anyopaque) MachineError!void,
-) machine.FallbackSource {
-    return .{ .make_fn = struct {
-        fn make(_: ?*const anyopaque, _: *Fiber) machine.IdiomFallback {
-            return .{ .run_fn = run, .deinit_fn = deinitStatelessFallback };
-        }
-    }.make };
+fn lexCmpWith(evaluator: *Fiber) MachineError!void {
+    return evaluator.continueWithIdiom(.lex_cmp, lexCmpWithGeneric);
 }
-fn deinitStatelessFallback(_: *heap.ReleaseDomain, _: std.mem.Allocator, _: ?*anyopaque) void {}
+fn lexCmpWithGeneric(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(3);
+    var quotation = try evaluator.popValue();
+    defer quotation.deinit();
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
+    if (quotation.borrow() != .list or left.borrow() != .list or right.borrow() != .list)
+        return evaluator.typeError("two lists and a comparator");
+    const shared: usize = @intCast(@min(left.borrow().list.length(), right.borrow().list.length()));
+    if (shared == 0) return pushLengthOrder(evaluator, left.borrow(), right.borrow());
+    var expected = heap.OwnedValue.init(
+        evaluator.releases,
+        try effectValue(evaluator.allocator, &.{ "left-element", "right-element", "--", "order" }),
+    );
+    defer expected.deinit();
+    var state_owner: ?*IterationState = try createIteration(
+        evaluator,
+        .lex_cmp,
+        &left,
+        &right,
+        &quotation,
+        &expected,
+        shared,
+    );
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releases, evaluator.allocator, state);
+    const state = state_owner.?;
+    try state.pushInputs(evaluator);
+    state_owner = null;
+    try evaluator.beginIsolatedApplication(state.application(2));
+}
+
+/// Two lists whose shared prefix is equal order by length.
+fn pushLengthOrder(evaluator: *Fiber, left: Value, right: Value) error{OutOfMemory}!void {
+    try evaluator.pushOwned(.{ .int = switch (std.math.order(left.list.length(), right.list.length())) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    } });
+}
+
+fn scan(evaluator: *Fiber) MachineError!void {
+    return evaluator.continueWithIdiom(.scan, scanGeneric);
+}
+fn scanGeneric(evaluator: *Fiber) MachineError!void {
+    return startFold(evaluator, .scan);
+}
 
 fn startFold(evaluator: *Fiber, kind: IterationKind) MachineError!void {
     try evaluator.require(3);

@@ -136,9 +136,19 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "custom lexicographic comparison stops at the first difference",
-            .source = "0 `lex-calls set [1 2 3] [9 0 0] " ++
-                "(lex-calls 1 + `lex-calls set cmp) lex-cmp-with lex-calls",
-            .expected = "-1 1",
+            .source = "[1 a] [2 b] (- signum) lex-cmp-with",
+            .expected = "-1",
+        },
+        .{
+            .name = "custom lexicographic comparison orders an equal prefix by length",
+            .source = "[1 2] [1 2 3] (cmp) lex-cmp-with [1 2] [1 2] (- signum) lex-cmp-with " ++
+                "[[1] [2]] [[1] [3]] (cmp) lex-cmp-with [] [1] (pop pop 9) lex-cmp-with",
+            .expected = "-1 0 -1 -1",
+        },
+        .{
+            .name = "fold1 reduces from the first element through any quotation",
+            .source = "[[1 2] [3 4]] (+) fold1 [\"a\" \"b\" \"c\"] (swap \"-\" cat swap cat) fold1",
+            .expected = "[4 6] \"a-b-c\"",
         },
         .{
             .name = "cyclic rotation",
