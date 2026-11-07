@@ -112,6 +112,9 @@ Conventions:
 ### /
 `( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
 
+### 2dup
+`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
+
 ### 2keep
 `( x y (... -- ...) -- ... x y )` — Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top of the quotation's results.
 
@@ -451,6 +454,16 @@ Ex:
 # => (next-member open-tgz read-member sha256 unpack-tgz)
 ```
 
+### filter
+`( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
+
+#### Examples
+
+```ecl
+[1 2 3 4] (2 mod 0 =) filter
+# => [2 4]
+```
+
 ### find
 `( list needle -- index )` — Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches.
 
@@ -588,6 +601,9 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ### join
 `( strings separator -- string )` — Join a list of strings with a separator string.
 
+### keep
+`( x (... -- ...) -- ... x )` — Apply a quotation to a value, then restore the value on top of the quotation's results.
+
 ### last
 `( list -- value )` — Return the final element of a nonempty list.
 
@@ -692,6 +708,16 @@ Ex:
 ```ecl
 4 3 (+) partial call
 # => 7
+```
+
+### partition
+`( list (a -- bool) -- matches rejects )` — Split a list into the elements whose predicate returned 1 and those that returned 0.
+
+#### Examples
+
+```ecl
+[1 2 3 4] (2 mod 0 =) partition pair
+# => [[2 4] [1 3]]
 ```
 
 ### pop
@@ -981,14 +1007,14 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 # => [11 22 33]
 ```
 
-### 2dup
-`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
-
 ### @each
 `( list values (quotation: a ... -- b) -- results )` — Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit, with the element seeded to the unit stack. `values` is then seeded above the element.
 
 ### append
 `( list value -- list )` — Push `value` to the end of `list`.
+
+### bi
+`( x p q -- ... )` — Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
 
 ### chunk
 `( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
@@ -1015,16 +1041,6 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 ### fail
 `( msg -- )` — Raise a user-kind error whose message is `msg`: `{kind user msg msg}`.
 
-### filter
-`( list (a -- count) -- matches )` — Apply the predicate to every element, retaining each element as many times as its returned nonnegative int.
-
-#### Examples
-
-```ecl
-[1 2 3 4] (2 mod 0 =) filter
-# => [2 4]
-```
-
 ### iterations
 `( value count (a -- a) -- list )` — Return `value` followed by `count` successive quotation applications. `count` must be a nonnegative int, and a zero count returns a singleton list.
 
@@ -1035,21 +1051,8 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 # => [1 11 21 31]
 ```
 
-### keep
-`( x (... -- ...) -- ... x )` — Apply a quotation to a value, then restore the value on top of the quotation's results.
-
 ### parse-one
 `( string -- x )` — Parse source text holding exactly one form and return that form unevaluated. No form or several forms is `` `shape ``.
-
-### partition
-`( list (a -- bool) -- matches rejects )` — Split a list into the elements whose predicate returned 1 and those that returned 0.
-
-#### Examples
-
-```ecl
-[1 2 3 4] (2 mod 0 =) partition pair
-# => [[2 4] [1 3]]
-```
 
 ### scan1
 `( list (acc a -- acc) -- list )` — Return a nonempty list's first element followed by the successive accumulator values from reducing its remaining elements.
@@ -1073,6 +1076,9 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 -7 [10 10] to-digits
 # => [9 3]
 ```
+
+### tri
+`( x p q r -- ... )` — Apply three quotations to `x` in left-to-right order.
 
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial elements and last element.
@@ -1099,9 +1105,6 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 [1 2 3] (10 *) @each!
 # => [10 20 30]
 ```
-
-### bi
-`( x p q -- ... )` — Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
 
 ### case
 `( x clauses -- ... )` — Select and call the first action whose key matches the subject. The clause list should be shaped:
@@ -1140,9 +1143,6 @@ Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is t
 [1 2 3] [24 60 60] from-digits
 # => 3723
 ```
-
-### tri
-`( x p q r -- ... )` — Apply three quotations to `x` in left-to-right order.
 
 ## agent
 

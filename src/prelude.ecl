@@ -1,3 +1,7 @@
+### def 2dup
+(x y -- x y x y : "Copy the top two stack values onto the top, preserving their order.")
+(over over) `2dup def
+
 ### def 2keep
 (x y (... -- ...) -- ... x y :
  "Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top
@@ -55,6 +59,17 @@
 (list -- bool : "Return 1 when a list has no elements and 0 otherwise.")
 (len 0 =) `empty? def
 
+### def filter
+(list (a -- count) -- matches :
+ "Apply the predicate to every element, retaining each element as many times as its returned
+  nonnegative int.")
+(over swap each where at) `filter def
+
+### def keep
+(x (... -- ...) -- ... x :
+ "Apply a quotation to a value, then restore the value on top of the quotation's results.")
+(over (call) dip) `keep def
+
 ### def last
 (list -- value : "Return the final element of a nonempty list.")
 (dup len 1 - at) `last def
@@ -66,10 +81,6 @@
 ### def nip
 (x y -- y : "Discard the second value on the stack.")
 (swap pop) `nip def
-
-### def over
-(x y -- x y x : "Copy the value beneath the top of the stack onto the top.")
-(swap dup (swap) dip) `over def
 
 ### def pack
 (... n -- list : "Collect the top `n` values into a list.")
@@ -89,6 +100,11 @@
     `w () partial
   (`w)")
 (swap literal swap cons) `partial def
+
+### def partition
+(list (a -- bool) -- matches rejects :
+ "Split a list into the elements whose predicate returned 1 and those that returned 0.")
+(|l q| l q each l over where at swap not l swap where at) `partition def
 
 ### def rolldown
 (x y z -- y z x : "Rotate the top three stack values downward.")
@@ -131,10 +147,6 @@
 ### def wrap
 (value -- list : "Wrap `value` in a list.")
 (() cons) `wrap def
-
-### def 2dup
-(x y -- x y x y : "Copy the top two stack values onto the top, preserving their order.")
-(over over) `2dup def
 
 ### def @each
 (list values (quotation: a ... -- b) -- results :
@@ -179,6 +191,12 @@
 ### def append
 (list value -- list : "Push `value` to the end of `list`.")
 (wrap cat) `append def
+
+### def bi
+(x p q -- ... :
+ "Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath
+  `q`'s.")
+((keep) dip call) `bi def
 
 ### def chunk
 (list size -- pieces :
@@ -257,12 +275,6 @@
 (msg -- : "Raise a user-kind error whose message is `msg`: `{kind user msg msg}`.")
 (wrap (kind user msg) swap cat dict.core.from-flat raise) `fail def
 
-### def filter
-(list (a -- count) -- matches :
- "Apply the predicate to every element, retaining each element as many times as its returned
-  nonnegative int.")
-(over swap each where at) `filter def
-
 ### def iterations
 (value count (a -- a) -- list :
  "Return `value` followed by `count` successive quotation applications. `count` must be a
@@ -270,22 +282,12 @@
 (|value count quotation|
  value wrap count range value (pop) quotation cat scan cat) `iterations def
 
-### def keep
-(x (... -- ...) -- ... x :
- "Apply a quotation to a value, then restore the value on top of the quotation's results.")
-(over (call) dip) `keep def
-
 ### def parse-one
 (string -- x :
  "Parse source text holding exactly one form and return that form unevaluated. No form or several
   forms is `` `shape ``.")
 (parse dup len 1 = {kind shape msg "parse-one requires exactly one form"} assert first) `parse-one
 def
-
-### def partition
-(list (a -- bool) -- matches rejects :
- "Split a list into the elements whose predicate returned 1 and those that returned 0.")
-(|l q| l q each l over where at swap not l swap where at) `partition def
 
 ### def scan1
 (list (acc a -- acc) -- list :
@@ -320,6 +322,10 @@ def
   (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) call)
  fold 1 at) `to-digits def
 
+### def tri
+(x p q r -- ... : "Apply three quotations to `x` in left-to-right order.")
+(((keep) dip keep) dip call) `tri def
+
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")
 (reverse uncons reverse swap) `unappend def
@@ -337,12 +343,6 @@ def
 ### def @each!
 (list (a -- b) -- results : "Call @each with an empty seed list.")
 (|list quotation| list [] quotation @each) `@each! def
-
-### def bi
-(x p q -- ... :
- "Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath
-  `q`'s.")
-((keep) dip call) `bi def
 
 ### def case
 # Validate the clause container before inspecting any clause.
@@ -399,7 +399,3 @@ def
  (|b n| b wrap n take)
  if
  zip 0 (|acc p| acc p 1 at * p 0 at +) fold) `from-digits def
-
-### def tri
-(x p q r -- ... : "Apply three quotations to `x` in left-to-right order.")
-(((keep) dip keep) dip call) `tri def

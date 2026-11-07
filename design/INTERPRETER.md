@@ -1205,9 +1205,8 @@ therefore never stands in for a definition's frame, and a fault inside a
 recognized application is reported at the user's own word.
 
 Recognition is guarded by binding identity. Every named token in the pattern
-must resolve, where the quotation runs, to the binding the entry expects from
-the core or standard-library modules: a builtin, or, for `over` in a scalar
-program, its prelude definition.
+must resolve, where the quotation runs, to the builtin the entry expects from
+the core or standard-library modules.
 Shadowing, escaped code from another module, wrong literal shape, or any other
 mismatch selects the combinator's generic path. A quotation is checked when it
 is offered, against the definitions current then, since user scopes can

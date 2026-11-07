@@ -61,9 +61,6 @@ pub const Operation = union(enum) {
         };
     }
 };
-/// What a pattern word must resolve to: a core or standard-library builtin,
-/// or, for the stack word `over` in a scalar program, its prelude definition.
-pub const BindingKind = enum { builtin, source };
 pub const ExpectedWord = struct {
     spelling: []const u8,
 };
@@ -216,9 +213,9 @@ fn entriesShaped(context: Context, length: usize) []const u16 {
 
 /// Whether `word`, where the phrase runs, is the core binding expected: a
 /// builtin, and the given primitive when one is named.
-fn wordMatches(evaluator: *Fiber, word: value.Symbol, binding: BindingKind, primitive: ?env.PrimitiveImpl) bool {
+fn wordMatches(evaluator: *Fiber, word: value.Symbol, primitive: ?env.PrimitiveImpl) bool {
     if (!plainWord(word.slot)) return false;
-    return liveWord(evaluator.peekWord(word), binding, primitive) != null;
+    return liveWord(evaluator.peekWord(word), primitive) != null;
 }
 
 /// A following word, resolved as its own dispatch would resolve it: through
@@ -229,21 +226,18 @@ fn wordMatches(evaluator: *Fiber, word: value.Symbol, binding: BindingKind, prim
 /// word is what a fault inside the phrase names.
 fn followingWord(evaluator: *Fiber, word: value.Symbol) error{OutOfMemory}!?intern.TraceWord {
     if (!plainWord(word.slot)) return null;
-    return liveWord(try evaluator.resolveForRecognition(word), .builtin, null);
+    return liveWord(try evaluator.resolveForRecognition(word), null);
 }
 
 /// Resolves `word` where the phrase runs and returns its trace word only when
 /// it is the trusted binding expected. A word that resolves to nothing a plain
 /// word may run, or whose root has retired, is simply not that binding;
 /// generic execution reports any error.
-fn liveWord(peeked: ?machine.PeekedWord, binding: BindingKind, primitive: ?env.PrimitiveImpl) ?intern.TraceWord {
+fn liveWord(peeked: ?machine.PeekedWord, primitive: ?env.PrimitiveImpl) ?intern.TraceWord {
     const resolved = peeked orelse return null;
     if (resolved.origin != .core and resolved.origin != .standard_library) return null;
     const code = resolved.definition.code();
-    switch (binding) {
-        .builtin => if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null,
-        .source => if (code != .source) return null,
-    }
+    if (code != .builtin or (primitive != null and code.builtin != primitive.?)) return null;
     return resolved.trace_word;
 }
 
@@ -263,14 +257,14 @@ fn matchPhrase(evaluator: *Fiber, phrase: Value, entry: RegistryEntry) ?Capture 
                 // A quoted occurrence pushes its symbol; it is never the operation.
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
                     !std.mem.eql(u8, intern.get(actual.symbol.name), entry.operation.spelling())) return null;
-                if (!wordMatches(evaluator, actual.symbol, .builtin, operationPrimitive(entry.operation))) return null;
+                if (!wordMatches(evaluator, actual.symbol, operationPrimitive(entry.operation))) return null;
                 capture.active_word = actual.symbol.name;
                 capture.active_index = @intCast(atom_index);
             },
             .word => |expected| {
                 if (actual != .symbol or env.isQuoted(actual.symbol.slot) or
                     !std.mem.eql(u8, intern.get(actual.symbol.name), expected.spelling)) return null;
-                if (!wordMatches(evaluator, actual.symbol, .builtin, null)) return null;
+                if (!wordMatches(evaluator, actual.symbol, null)) return null;
             },
         }
     }
@@ -608,8 +602,7 @@ fn compileProgram(evaluator: *Fiber, phrase: Value, inputs: u8) ?numeric.ScalarP
         if (env.isQuoted(word.slot)) return null;
         const spelling = intern.get(word.name);
         if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
-            const binding: BindingKind = if (stack_word == .over) .source else .builtin;
-            if (!wordMatches(evaluator, word, binding, null)) return null;
+            if (!wordMatches(evaluator, word, null)) return null;
             switch (stack_word) {
                 .dup => {
                     if (depth < 1 or depth == stack.len) return null;
@@ -635,7 +628,7 @@ fn compileProgram(evaluator: *Fiber, phrase: Value, inputs: u8) ?numeric.ScalarP
         const operation = for (program_operations) |candidate| {
             if (std.mem.eql(u8, candidate.spelling, spelling)) break candidate.operation;
         } else return null;
-        if (!wordMatches(evaluator, word, .builtin, operationPrimitive(operation))) return null;
+        if (!wordMatches(evaluator, word, operationPrimitive(operation))) return null;
         if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
         program.instructions[program.len] = switch (operation) {
             .unary => |selected| unary: {
