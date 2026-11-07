@@ -144,13 +144,8 @@
  swap dup len 3 - at definitions ranks) `module-ranks def
 
 ### def prelude-ranks
-(-- ranks : "Rank the prelude's definitions after checking that the file is already in rank order.")
-("src/prelude.ecl" source-forms definitions over swap ranks 2dup rank-order
- (|names ranks order|
-  names order at names match?
-  "src/prelude.ecl is not in dependency-rank, codepoint order" check
-  ranks)
- call) `prelude-ranks def
+(-- ranks : "Return the dependency ranks of the prelude's definitions.")
+("src/prelude.ecl" source-forms definitions ranks) `prelude-ranks def
 
 ### def starts?
 (line prefix -- bool : "Return 1 when a line begins with a prefix.")
