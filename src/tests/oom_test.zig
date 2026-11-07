@@ -501,7 +501,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         // per allocation point.
         "[[1 2] [3]] 10 * pop [0 1] exp pop [0 1] [1 1] atan2 pop " ++
             "[1 2] 1 + pop [1 2] (1 +) each pop [1 2] 0 (+) fold pop " ++
-            "\"aλ\" 1 + pop \"aλ\" \"bβ\" - pop",
+            "\"aλ\" 1 + pop \"aλ\" \"bβ\" - pop " ++
+            // A straight-line chain and an `each` program, planned and not.
+            "[1 2] 2 * 1 + pop [1 2] (2 * 1 +) each pop [1 2] 1.5 min 1 + pop",
     );
     try runOk(
         &runtime,

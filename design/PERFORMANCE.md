@@ -857,6 +857,34 @@ P-core, median of five runs after a warmup:
 | `1000 spectralnorm`, row dots and weighted rows, ms | 223 | 135 |
 | `1000 spectralnorm`, weighted columns, ms | 90 | 91 |
 
+## Scalar programs write their result leaf directly — 2026-11-07
+
+One compiler and one executor now serve `each`-family quotations and
+straight-line arithmetic chains (`xs 2 * 1 + 3 * 7 -`), which compile to the
+same scalar program. The executor used to compute every element into a
+full-length staging array and copy it into a builder in a second phase, so it
+could narrow an all-byte int result to bytes; a planned program now stores each
+block into its result leaf, which may take over a uniquely held input. Before
+that change a fused chain was about twice as slow as its words run one at a
+time: the staging allocation, its safe-mode fill, and the copy outweighed the
+passes fusion saved.
+
+Zig 0.17.0 ReleaseSafe, native x86_64 Linux (Intel Core Ultra 5 125U, kernel
+7.1.13-2-MANJARO), whole process, median of seven runs, each workload 50
+passes over `1000000 range`. The unfused control wraps each word after the
+first in `(…) call`, which no chain crosses.
+
+| Workload | Two-phase executor, ms | Direct leaf, ms | Words one at a time, ms |
+|---|---:|---:|---:|
+| int chain, `2 * 1 + 3 * 7 -` | 306 | 166 | 175 |
+| int chain, `2 * 1 +` | 256 | 126 | 121 |
+| `(2 * 1 + 3 * 7 -) each` | 301 | 177 | — |
+| float chain, `2.0 * 1.0 + 3.0 * 7.0 -` | — | 130 | 172 |
+
+The int chains are bound by the overflow-checked multiply, which costs the
+same fused or not (39% of samples under `perf`), and by allocating and
+releasing the result, which both routes pay.
+
 ## Reference-free objects skip the retirement queue — 2026-10-18
 
 Every object whose count reached zero went through the retirement queue: an

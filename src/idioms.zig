@@ -571,39 +571,82 @@ const program_operations = blk: {
 /// they compile to register choices.
 const ProgramStackWord = enum { dup, swap, pop, over };
 
-/// Compiles a quotation applied to `inputs` values into a scalar program, or
-/// returns null when it is not one: every form must be a numeric constant, a
-/// stack word, or a numeric operation, each word bound as its registry entry
-/// expects, and the quotation must leave exactly one value from its inputs.
-/// Operations keep their order, including one whose result is later popped,
-/// so a fault happens where the quotation's own would.
-fn compileProgram(evaluator: *Fiber, phrase: Value, inputs: u8) ?numeric.ScalarProgram {
+/// One form a scalar program can hold.
+const ProgramForm = union(enum) {
+    constant: Value,
+    stack: ProgramStackWord,
+    /// A unary or binary numeric operation.
+    operation: Operation,
+
+    /// How many program values the form reads, and how many it leaves.
+    fn effect(self: ProgramForm) struct { reads: usize, leaves: usize } {
+        return switch (self) {
+            .constant => .{ .reads = 0, .leaves = 1 },
+            .stack => |word| switch (word) {
+                .dup => .{ .reads = 1, .leaves = 2 },
+                .swap => .{ .reads = 2, .leaves = 2 },
+                .pop => .{ .reads = 1, .leaves = 0 },
+                .over => .{ .reads = 2, .leaves = 3 },
+            },
+            .operation => |operation| switch (operation) {
+                .unary => .{ .reads = 1, .leaves = 1 },
+                .binary => .{ .reads = 2, .leaves = 1 },
+                else => unreachable,
+            },
+        };
+    }
+};
+
+/// What `form` is to a scalar program where it runs, or null when no program
+/// can hold it: a numeric constant, a stack word, or a numeric operation, each
+/// word bound as the program expects.
+fn programForm(evaluator: *Fiber, form: Value) ?ProgramForm {
+    if (form != .symbol) return if (form == .int or form == .float) .{ .constant = form } else null;
+    const word = form.symbol;
+    // A quoted occurrence pushes a symbol, which no program register holds.
+    if (env.isQuoted(word.slot)) return null;
+    const spelling = intern.get(word.name);
+    if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
+        if (!wordMatches(evaluator, word, null)) return null;
+        return .{ .stack = stack_word };
+    }
+    const operation = chainHead(spelling) orelse return null;
+    if (!wordMatches(evaluator, word, operationPrimitive(operation))) return null;
+    return .{ .operation = operation };
+}
+
+/// The numeric operation `spelling` names, which heads a straight-line chain.
+pub fn chainHead(spelling: []const u8) ?Operation {
+    for (program_operations) |candidate| {
+        if (std.mem.eql(u8, candidate.spelling, spelling)) return candidate.operation;
+    }
+    return null;
+}
+
+/// Compiles `length` forms of `code` from `start`, applied to `inputs`
+/// values, into a scalar program, or returns null when they are not one: every
+/// form must be a `programForm`, and the forms must leave exactly one value
+/// from their inputs. Operations keep their order, including one whose result
+/// is later popped, so a fault happens where the code's own would.
+fn compileProgram(evaluator: *Fiber, code: Value, start: usize, length: usize, inputs: u8) ?numeric.ScalarProgram {
     const Program = numeric.ScalarProgram;
     var program: Program = .{ .inputs = inputs, .registers = inputs };
     // SAFETY: only the first `depth` entries are read.
     var stack: [Program.max_registers]Program.Register = undefined;
     var depth: usize = inputs;
     for (0..inputs) |input| stack[input] = @intCast(input);
-    const length: usize = @intCast(phrase.list.length());
-    for (0..length) |position| {
-        const form = list.atUnchecked(phrase, position);
-        if (form != .symbol) {
-            if (form != .int and form != .float) return null;
-            if (program.registers == Program.max_registers or depth == stack.len) return null;
-            program.constants[program.constant_count] = .{ .register = program.registers, .value = form };
-            program.constant_count += 1;
-            stack[depth] = program.registers;
-            depth += 1;
-            program.registers += 1;
-            continue;
-        }
-        const word = form.symbol;
-        // A quoted occurrence pushes a symbol, which no program register holds.
-        if (env.isQuoted(word.slot)) return null;
-        const spelling = intern.get(word.name);
-        if (std.meta.stringToEnum(ProgramStackWord, spelling)) |stack_word| {
-            if (!wordMatches(evaluator, word, null)) return null;
-            switch (stack_word) {
+    for (start..start + length) |position| {
+        const form = list.atUnchecked(code, position);
+        switch (programForm(evaluator, form) orelse return null) {
+            .constant => |constant| {
+                if (program.registers == Program.max_registers or depth == stack.len) return null;
+                program.constants[program.constant_count] = .{ .register = program.registers, .value = constant };
+                program.constant_count += 1;
+                stack[depth] = program.registers;
+                depth += 1;
+                program.registers += 1;
+            },
+            .stack => |stack_word| switch (stack_word) {
                 .dup => {
                     if (depth < 1 or depth == stack.len) return null;
                     stack[depth] = stack[depth - 1];
@@ -622,49 +665,116 @@ fn compileProgram(evaluator: *Fiber, phrase: Value, inputs: u8) ?numeric.ScalarP
                     stack[depth] = stack[depth - 2];
                     depth += 1;
                 },
-            }
-            continue;
+            },
+            .operation => |operation| {
+                if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
+                program.instructions[program.len] = switch (operation) {
+                    .unary => |selected| unary: {
+                        if (depth < 1) return null;
+                        depth -= 1;
+                        break :unary .{
+                            .operation = .{ .unary = selected },
+                            .left = stack[depth],
+                            .destination = program.registers,
+                            .word = form.symbol.name,
+                            .index = @intCast(position),
+                        };
+                    },
+                    .binary => |selected| binary: {
+                        if (depth < 2) return null;
+                        depth -= 2;
+                        break :binary .{
+                            .operation = .{ .binary = selected },
+                            .left = stack[depth],
+                            .right = stack[depth + 1],
+                            .destination = program.registers,
+                            .word = form.symbol.name,
+                            .index = @intCast(position),
+                        };
+                    },
+                    else => unreachable,
+                };
+                program.len += 1;
+                stack[depth] = program.registers;
+                depth += 1;
+                program.registers += 1;
+            },
         }
-        const operation = for (program_operations) |candidate| {
-            if (std.mem.eql(u8, candidate.spelling, spelling)) break candidate.operation;
-        } else return null;
-        if (!wordMatches(evaluator, word, operationPrimitive(operation))) return null;
-        if (program.len == Program.max_instructions or program.registers == Program.max_registers) return null;
-        program.instructions[program.len] = switch (operation) {
-            .unary => |selected| unary: {
-                if (depth < 1) return null;
-                depth -= 1;
-                break :unary .{
-                    .operation = .{ .unary = selected },
-                    .left = stack[depth],
-                    .destination = program.registers,
-                    .word = word.name,
-                    .index = @intCast(position),
-                };
-            },
-            .binary => |selected| binary: {
-                if (depth < 2) return null;
-                depth -= 2;
-                break :binary .{
-                    .operation = .{ .binary = selected },
-                    .left = stack[depth],
-                    .right = stack[depth + 1],
-                    .destination = program.registers,
-                    .word = word.name,
-                    .index = @intCast(position),
-                };
-            },
-            else => unreachable,
-        };
-        program.len += 1;
-        stack[depth] = program.registers;
-        depth += 1;
-        program.registers += 1;
     }
     // A quotation that computes nothing is no faster compiled.
     if (depth != 1 or program.len == 0) return null;
     program.result = stack[0];
     return program;
+}
+
+/// How far a straight-line chain reaches: its forms, counting the head, and
+/// the stack values beneath it that they read.
+const ChainExtent = struct { length: usize, inputs: u8 };
+
+/// The longest run of forms from `head` that one scalar program can take: the
+/// head is `operation`, every form a `programForm`, at least one operation
+/// follows the head, and the run leaves exactly one value from everything it
+/// read. Inputs are read from beneath as the forms need them. Null when no
+/// such run exists.
+fn chainExtent(evaluator: *Fiber, code: Value, head: usize, operation: Operation) ?ChainExtent {
+    const Program = numeric.ScalarProgram;
+    const count: usize = @intCast(code.list.length());
+    var depth: usize = 0;
+    var reached: usize = 0;
+    var instructions: usize = 0;
+    var registers: usize = 0;
+    var longest: ?ChainExtent = null;
+    for (head..count) |position| {
+        const form = programForm(evaluator, list.atUnchecked(code, position)) orelse break;
+        if (position == head and !(form == .operation and std.meta.eql(form.operation, operation))) return null;
+        const effect = form.effect();
+        if (depth < effect.reads) {
+            registers += effect.reads - depth;
+            reached += effect.reads - depth;
+            depth = effect.reads;
+        }
+        depth = depth - effect.reads + effect.leaves;
+        switch (form) {
+            .constant => registers += 1,
+            .operation => {
+                instructions += 1;
+                registers += 1;
+            },
+            .stack => {},
+        }
+        if (reached > numeric.max_chain_inputs or instructions > Program.max_instructions or
+            registers > Program.max_registers or depth > Program.max_registers) break;
+        if (depth == 1 and instructions >= 2) longest = .{ .length = position + 1 - head, .inputs = @intCast(reached) };
+    }
+    return longest;
+}
+
+/// A numeric builtin dispatched from straight-line code, continued there by
+/// more arithmetic, runs the whole chain as one scalar program over its list
+/// operands, the same program `each` runs for a quotation of those words. The
+/// program is observed as the words would be, each pervading the whole list
+/// before the next, so a fault is the one they would meet first. Any other
+/// shape runs the words as written.
+pub fn applyChain(evaluator: *Fiber, operation: Operation) MachineError!bool {
+    if (evaluator.inherited.idiom_mode == .generic_only) return false;
+    const forms = evaluator.followingForms(0) orelse return false;
+    const code: Value = .{ .list = forms.code };
+    const head = forms.start - 1;
+    const extent = chainExtent(evaluator, code, head, operation) orelse return false;
+    if (evaluator.available() < extent.inputs) return false;
+    const stack = evaluator.stack.items;
+    const operands = stack[stack.len - extent.inputs ..];
+    if (!numeric.programCandidate(operands)) return false;
+    const program = compileProgram(evaluator, code, head, extent.length, extent.inputs) orelse return false;
+    // A result no list operand reaches is scalar code, which the words
+    // already run as such.
+    if (!numeric.programResultVaries(&program, operands)) return false;
+    evaluator.idiom_hits += 1;
+    evaluator.phrase_hits += 1;
+    evaluator.skipFollowingForms(@intCast(extent.length - 1));
+    evaluator.commitPhraseTrace();
+    try numeric.startProgramChain(evaluator, forms.code, program);
+    return true;
 }
 
 const OfferedProgram = struct {
@@ -683,7 +793,7 @@ fn recognizeProgram(evaluator: *Fiber, candidate: Candidate) ?OfferedProgram {
         .zip_with, .fold, .fold1, .scan => 2,
         else => return null,
     };
-    const compiled = compileProgram(evaluator, candidate.phrase, inputs) orelse return null;
+    const compiled = compileProgram(evaluator, candidate.phrase, 0, @intCast(candidate.phrase.list.length()), inputs) orelse return null;
     const admitted = switch (candidate.context) {
         .each, .zip_with => numeric.programCandidate(stack[stack.len - 1 - inputs .. stack.len - 1]),
         // The accumulator is input 0 and the element input 1.
