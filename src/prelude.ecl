@@ -366,7 +366,8 @@ def
 ### def cleave
 (x quotations -- ... :
  "Apply each quotation in `quotations` to `x`, leaving each quotation's results above the previous
-  one's. An empty list consumes the input and leaves nothing.")
+  one's. The list and each of its elements must be quotations, or the word fails with `` `type ``
+  before any quotation runs. An empty list consumes the input and leaves nothing.")
 (|x qs|
  qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
  qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
@@ -376,7 +377,8 @@ def
 ### def cleave-n
 (... n quotations -- ... :
  "N-ary cleave. Consume the top `n` values from the stack, and pass them to each quotation in
-  `quotations` in order.")
+  `quotations` in order. `n` must be a nonnegative int, and the list and each of its elements must
+  be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs.")
 (|n qs|
  n type `int match? {kind type msg "cleave-n expected an int arity"} assert
  n 0 >= {kind domain msg "cleave-n arity must be nonnegative"} assert
@@ -392,7 +394,9 @@ def
 
 ### def cleave2
 (x y quotations -- ... :
- "Binary cleave. Consume `x` and `y`, and pass them to each quotation in `quotations` in order.")
+ "Binary cleave. Consume `x` and `y`, and pass them to each quotation in `quotations` in order. The
+  list and each of its elements must be quotations, or the word fails with `` `type `` before any
+  quotation runs.")
 (|x y qs|
  qs type `list match? {kind type msg "cleave2 expected a list of quotations"} assert
  qs (type `list match?) all? {kind type msg "cleave2 expected a list of quotations"} assert

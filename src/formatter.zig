@@ -966,6 +966,10 @@ const Formatter = struct {
         }
         var output: std.ArrayList(*const Doc) = .empty;
         defer output.deinit(self.allocator());
+        // A verbatim first paragraph keeps its indentation only if the first line
+        // has a column of its own; beside the quote the next pass would fold it.
+        if (lines.items.len > 0 and lines.items[0].verbatim)
+            try output.append(self.allocator(), try self.docs.hardline());
         for (lines.items, 0..) |line, index| {
             const last = index + 1 == lines.items.len;
             try output.append(self.allocator(), if (line.verbatim)

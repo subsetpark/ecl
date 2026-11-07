@@ -1062,13 +1062,13 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( x p q -- ... )` — Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
 
 ### cleave
-`( x quotations -- ... )` — Apply each quotation in `quotations` to `x`, leaving each quotation's results above the previous one's. An empty list consumes the input and leaves nothing.
+`( x quotations -- ... )` — Apply each quotation in `quotations` to `x`, leaving each quotation's results above the previous one's. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
 
 ### cleave-n
-`( ... n quotations -- ... )` — N-ary cleave. Consume the top `n` values from the stack, and pass them to each quotation in `quotations` in order.
+`( ... n quotations -- ... )` — N-ary cleave. Consume the top `n` values from the stack, and pass them to each quotation in `quotations` in order. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs.
 
 ### cleave2
-`( x y quotations -- ... )` — Binary cleave. Consume `x` and `y`, and pass them to each quotation in `quotations` in order.
+`( x y quotations -- ... )` — Binary cleave. Consume `x` and `y`, and pass them to each quotation in `quotations` in order. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs.
 
 ### converge
 `( x (a -- a) -- y )` — Return the last value before repeated application reaches a fixed point or returns to the initial value.

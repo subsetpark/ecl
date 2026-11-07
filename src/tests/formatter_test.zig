@@ -591,3 +591,10 @@ test "formatter: synthesizes and normalizes test navigation headers" {
         "### module ordinary\n[] (\n    ### def value\n    # test stale\n    (1) `value def) `ordinary @defm\n",
     );
 }
+
+test "formatter keeps a ragged first documentation paragraph stable" {
+    try expectFormat(
+        "(x -- y : \"\n    first\n      second\")\n[] `f def\n",
+        "### def f\n(x -- y :\n \"\n  first\n    second\")\n[] `f def\n",
+    );
+}
