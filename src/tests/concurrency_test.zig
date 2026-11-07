@@ -502,7 +502,7 @@ test "concurrency: @each is a reflective prelude definition and task-join is abs
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.buffered(),
-        "@each -> @each def public (sequence values quotation -- results)\n",
+        "@each -> @each def public (list values (quotation: a ... -- b) -- results)\n",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@spawn") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@each") != null);
