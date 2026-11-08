@@ -1223,7 +1223,10 @@ be recognized in one of those places and missed in another.
 
 A builtin can head a phrase continued by the words after it in the same code:
 `list [rows columns] reshape sum` folds the columns of the list's one buffer
-instead of building the rows `sum` would fold. Every kernel family binds its
+instead of building the rows `sum` would fold, and `x (q) cons call` or
+`x (q) cons dip` runs `q` with `x` on the stack, as calling `(x q...)` would,
+without building that quotation; a symbol head, which the built quotation
+would run as a word, runs the words as written. Every kernel family binds its
 words through one comptime wrapper derived from the table: a word that heads
 phrases asks, as its primitive starts, whether the words after it continue
 one, as a combinator offers its quotation; every other word keeps its

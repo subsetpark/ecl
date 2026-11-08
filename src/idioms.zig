@@ -10,6 +10,7 @@ const equal = @import("equal.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
+const combinators = @import("combinators.zig");
 
 const Value = value.Value;
 const Fiber = machine.Fiber;
@@ -33,11 +34,18 @@ pub const PhraseOp = enum {
     /// `where` continued by `at`: the elements a mask selects, without the
     /// index list `where` would build.
     where_at,
+    /// `cons` continued by `call`: `x (q) cons call` runs `q` with `x` on
+    /// the stack, which is what calling `(x q...)` does, without building it.
+    cons_call,
+    /// `cons` continued by `dip`: `x (q) cons dip` protects the value beneath
+    /// `x` and runs `q` with `x` on the stack, without building `(x q...)`.
+    cons_dip,
 
     pub fn spelling(self: PhraseOp) []const u8 {
         return switch (self) {
             .reshape_sum, .reshape_product => "reshape",
             .where_at => "where",
+            .cons_call, .cons_dip => "cons",
         };
     }
 };
@@ -92,7 +100,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 4 + 18 + 3]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 4 + 18 + 5]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -175,6 +183,19 @@ pub const registry = blk: {
         .following = &.{.{ .spelling = "at" }},
     };
     index += 1;
+    for ([_]struct { operation: PhraseOp, consumer: []const u8 }{
+        .{ .operation = .cons_call, .consumer = "call" },
+        .{ .operation = .cons_dip, .consumer = "dip" },
+    }) |phrase| {
+        entries[index] = .{
+            .context = .phrase,
+            .pattern = &.{},
+            .operation = .{ .phrase = phrase.operation },
+            .source_word = "cons",
+            .following = &.{.{ .spelling = phrase.consumer }},
+        };
+        index += 1;
+    }
     std.debug.assert(index == entries.len);
     break :blk entries;
 };
@@ -427,10 +448,33 @@ fn applyPhrase(evaluator: *Fiber, first: u16) MachineError!bool {
                 defer input.deinit();
                 try numeric.foldColumns(evaluator, columnOperation(operation), &input, shape.rows, shape.columns);
             },
+            .cons_call => {
+                if (!consShape(evaluator, 2)) continue;
+                commitPhrase(evaluator, count, last.?);
+                var quotation = try evaluator.popValue();
+                try evaluator.callOwned(quotation.take().list);
+            },
+            .cons_dip => {
+                if (!consShape(evaluator, 3)) continue;
+                commitPhrase(evaluator, count, last.?);
+                try combinators.dipBelowHead(evaluator);
+            },
         }
         return true;
     }
     return false;
+}
+
+/// Whether `x quotation cons` followed by a word that runs the result can
+/// skip building it: `depth` operands, a list on top, and a head that is not
+/// a symbol. A symbol consed onto code becomes a word of it, so running the
+/// built list differs from having the symbol on the stack; anything else is
+/// pushed by the list exactly as it already sits. Any other shape runs the
+/// words as written, which reports `cons`'s own type error.
+fn consShape(evaluator: *Fiber, depth: usize) bool {
+    if (evaluator.available() < depth) return false;
+    const stack = evaluator.stack.items;
+    return stack[stack.len - 1] == .list and stack[stack.len - 2] != .symbol;
 }
 
 /// Consumes a matched phrase's following words, whose last one is now the

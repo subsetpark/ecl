@@ -332,6 +332,26 @@ fn dip(evaluator: *Fiber) MachineError!void {
     defer quotation.deinit();
     var protected = try evaluator.popValue();
     defer protected.deinit();
+    try startDip(evaluator, &quotation, &protected);
+}
+
+/// `x quotation cons dip` without the list: the value beneath `x` is
+/// protected and `x` stays on the stack for the quotation, as the first form
+/// of `(x quotation...)` would have pushed it. The `cons call` and `cons dip`
+/// phrases in `idioms.zig` reach this.
+pub fn dipBelowHead(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(3);
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    var head = try evaluator.popValue();
+    defer head.deinit();
+    var protected = try evaluator.popValue();
+    defer protected.deinit();
+    try evaluator.pushOwned(head.take());
+    try startDip(evaluator, &quotation, &protected);
+}
+
+fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *heap.OwnedValue) MachineError!void {
     const state = try evaluator.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),

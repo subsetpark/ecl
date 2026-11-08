@@ -359,6 +359,24 @@ fn headedInput(operation: ecl.idioms.PhraseOp, variant: Variant) []const u8 {
             .float => "[0.1 -0.0 0.2] [1 1 0]",
             .failure => "\"abc\" [1 0 1 1]",
         },
+        // The head and the quotation it is consed onto. `empty` is the empty
+        // quotation, which leaves the head alone; the failure variant
+        // underflows at the quotation's second `pop`.
+        .cons_call => switch (variant) {
+            .atom => "5 (dup)",
+            .empty => "7 ()",
+            .spine => "[1 2] (reverse)",
+            .float => "1.5 (dup)",
+            .failure => "1 (pop pop)",
+        },
+        // As above, beneath a protected value.
+        .cons_dip => switch (variant) {
+            .atom => "9 5 (dup)",
+            .empty => "9 7 ()",
+            .spine => "9 [1 2] (reverse)",
+            .float => "9 1.5 (dup)",
+            .failure => "9 1 (pop pop)",
+        },
     };
 }
 

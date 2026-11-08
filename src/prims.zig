@@ -13,7 +13,6 @@ const machine = @import("machine.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
-const sequence = @import("kernel_sequence.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const kernel_flat = @import("kernel_flat.zig");
 const task_prims = @import("task_prims.zig");
@@ -32,7 +31,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
         .{ .name = "rolldown", .primitive = rolldown, .effect = "x y z -- y z x", .doc = "Rotate the top three stack values downward." },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the operand stack into a bottom-to-top list while leaving every original value in place." },
-        .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Prepend `value` to the left end of `list`.\n\nNB: An unquoted symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data." },
         .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Whole-value structural equality.\n\nEx.:\n```\n  [1 2] [1 2] =\n[1 1]\n  [1 2] [1 2] match?\n1\n```" },
         .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value's kind as a symbol: one of `int`, `float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`." },
         .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Evaluate a symbol's binding and dispatch. Non-symbols are `` `type ``; missing words are `` `undefined-word ``." },
@@ -171,9 +169,6 @@ const StackSnapshotDriver = struct {
     }
 };
 
-fn cons(evaluator: *Fiber) MachineError!void {
-    return sequence.consForPrims(evaluator);
-}
 fn match(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();

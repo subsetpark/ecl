@@ -286,7 +286,7 @@ test "errors: source effect contract preserves absence for runtime-built code" {
     const source =
         \\[] (
         \\ (-- )
-        \\ (1 () cons call)
+        \\ (1 wrap call)
         \\ `run def)
         \\`runtime @defm
         \\runtime.run

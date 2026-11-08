@@ -857,6 +857,44 @@ P-core, median of five runs after a warmup:
 | `1000 spectralnorm`, row dots and weighted rows, ms | 223 | 135 |
 | `1000 spectralnorm`, weighted columns, ms | 90 | 91 |
 
+## Short-spine `cons` in place, and `cons call` / `cons dip` phrases — 2026-11-08
+
+Partial application written at run time, `x (q) cons call`, paid for a list
+the next word consumed at once. Each spine `cons` allocated a scratch value
+array, ran the copy driver, then the materializer's profiling pass and a
+second allocation for the header: about 0.15 µs against a refcount bump for
+pushing the same quotation as a pre-nested literal. Two changes:
+
+- **Short spines in place.** A `cons` whose head no leaf can hold (a list,
+  symbol, dict, ...) decides the representation by itself, so with a tail of
+  at most 16 elements it fills one header where the word runs, with no
+  driver, scratch array, or profiling pass. Longer tails keep the budgeted
+  copy.
+- **`cons call` and `cons dip` phrases.** `x (q) cons call` runs `q` with `x`
+  on the stack, which is what calling `(x q...)` does, and `x (q) cons dip`
+  protects the value beneath `x` and does the same; neither builds the list.
+  A symbol head would become a word of the built quotation, so it runs the
+  words as written. `cons` moved into the sequence kernel family to head the
+  phrases; the following words are checked against the live bindings like
+  every phrase's.
+
+A 3-local loop of 300,000 iterations, ReleaseFast `-Dcpu=native`, x86_64 Linux
+(Intel Core Ultra 5 125U), one P-core, internal ms net of the 41 ms loop that
+pushes a literal and pops it; control `f15e191`:
+
+| Body | Control | Treatment |
+|---|---:|---:|
+| `(1 -) (dip) cons pop` | 44 | 31 |
+| `(1 -) (dip) cons dip` | 89 | 52 |
+| `(1 -) (dip) cons (dip) cons call` | 143 | 88 |
+| `(((1 -) dip) dip) call` (pre-nested) | 55 | 55 |
+
+Fused `cons dip` now costs what calling the pre-nested literal costs. The
+double-cons form still builds its inner list, since the outer `call` consumes
+it as a value. `tak(22,16,8)` on top of the native `cleave-n` branch,
+whole process: the `(1 -) (dip) cons dip` form 400 → 364 ms, level with the
+pre-nested 363 ms; the double-cons form 442 → 396 ms.
+
 ## Scalar programs write their result leaf directly — 2026-11-07
 
 One compiler and one executor now serve `each`-family quotations and
