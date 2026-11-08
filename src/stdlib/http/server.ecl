@@ -236,7 +236,7 @@
    500 ("Internal Server Error")
    503 ("Service Unavailable")
    505 ("HTTP Version Not Supported")
-   ("")]
+   (pop "")]
   case) `reason defp
 
  ### defp reserved-header?
@@ -624,7 +624,7 @@
  (dup `kind at
   [timeout (pop 408 answer)
    io (pop pop pop)
-   (dup `data {} dict.get `status 0 dict.get dup 0 =
+   (pop dup `data {} dict.get `status 0 dict.get dup 0 =
     (pop fail-request)
     (nip answer)
     if)]

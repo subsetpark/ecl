@@ -294,13 +294,17 @@ def
      else]
 
   Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is the quotation to
-  apply for the first case that matches.
+  apply for the first case that matches. A matching action is called with `x` consumed.
 
-  `else` is obligatory and is applied when no case matches.")
+  `else` is obligatory and is applied when no case matches, with `x` still on the stack.")
 (dup type `list match?
  # A case table is [key action ... else]: nonempty and odd in length.
  (dup len dup 0 > swap 2 mod 1 = and
   ((|subject clauses|
+
+    # The subject stays below the selected action; a matched key drops it
+    # and the else quotation receives it.
+    subject
 
     # Collect every action plus the mandatory else quotation. Running
     # `len pop` in isolation validates that each choice is a quotation
@@ -312,12 +316,23 @@ def
     # Search the even key slots. Find's length-on-miss result selects the
     # final else quotation when no key matched.
     clauses dup len 2 div range 2 * at
-    subject find at call)
+    subject find
+    dup clauses len 2 div =
+    rollup at
+    swap (nip) unless
+    call)
    call)
   (pop pop {kind shape msg "case requires a nonempty odd clause list ending in else"} raise)
   if)
  (pop pop {kind type msg "case expected a clause list"} raise)
  if) `case def
+
+### def case-with
+(x clauses (key: x -- k) -- ... :
+ "Like `case`, but match the clause keys against the result of applying `key` to `x`, and call the
+  selected action with `x` itself on the stack. `x [ ... ] (k) case-with` is `x dup k [ ... ] case`,
+  so the else quotation receives `x` and the unmatched key.")
+(|x clauses key| x x key call clauses case) `case-with def
 
 ### def converge
 (x (a -- a) -- y :

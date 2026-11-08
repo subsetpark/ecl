@@ -114,6 +114,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "7 9 30 70 -1 0 1 4",
         },
         .{
+            .name = "case-with dispatches on a key and keeps the subject",
+            .source = "{type b v 5} [a (pop 1) b (`v at) (pop 0)] (`type at) case-with " ++
+                "{type z} [a (pop 1) (nip)] (`type at) case-with " ++
+                "7 [1 (10 +) (0 *)] (2 mod) case-with",
+            .expected = "5 z 17",
+        },
+        .{
             .name = "sequence construction",
             .source = "[1 2 3] last 7 wrap 7 8 pair 1 2 3 3 pack [1 2] 3 append " ++
                 "[1 2 3] uncons [1 2 3] unappend [] empty? [1] empty? " ++
@@ -204,6 +211,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "rotate",      "windows",      "each-prior", "fold1",    "scan1",
         "iterations",  "while-values", "converges",  "converge", "chunk",
         "from-digits", "to-digits",    "collect",    "2dup",     "2keep",
+        "case-with",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

@@ -228,7 +228,6 @@ test "errors: source effect contract locates an empty selected quotation" {
         \\[] (
         \\ (x -- )
         \\ (
-        \\  dup
         \\  [0
         \\   (pop)
         \\   ()]
@@ -240,7 +239,7 @@ test "errors: source effect contract locates an empty selected quotation" {
     const failure = (try runtime.runUnit("fixture.ecl", source)).err;
     defer runtime.release(failure);
     const data = try expectContractCore(allocator, failure, "empty.pick", 1, 1);
-    try expectLocation(allocator, data, "\"fixture.ecl\"", 7, 4);
+    try expectLocation(allocator, data, "\"fixture.ecl\"", 6, 4);
 }
 
 test "errors: nested effect checks restore outer tail provenance" {

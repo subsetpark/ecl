@@ -302,7 +302,7 @@ fn awaitTimerEntries(runtime: *Runtime, count: usize) void {
 
 const ok_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
 const ok_row = "\"/ok\" (pop {status 200 headers {} body \"ok\"}) ";
-const not_found_default = "(pop http.response.not-found)";
+const not_found_default = "(pop pop http.response.not-found)";
 const close_listener_request = "GET /close-listener HTTP/1.1\r\nHost: h\r\n\r\n";
 
 /// A serving fiber under `srv`: `prelude` runs first (a gate task, say), the
@@ -444,7 +444,7 @@ test "http server: malformed request lines and headers are answered 400 and clos
     defer runtime.close();
     const port = try runtime.listen("l");
     // The default row answers 200 too, so a 400 proves the handler never ran.
-    const server = try Server.start(&runtime, port, "", "{}", ok_row, "(pop {status 200 headers {} body \"ok\"})");
+    const server = try Server.start(&runtime, port, "", "{}", ok_row, "(pop pop {status 200 headers {} body \"ok\"})");
     defer server.deinit();
     try expectStatus(try exchange(port, "GARBAGE\r\n\r\n"), "HTTP/1.1 400 Bad Request");
     try expectStatus(try exchange(port, "GET / HTTP/1.1\r\nHost: h\r\nNoColon\r\n\r\n"), "HTTP/1.1 400 Bad Request");
@@ -662,7 +662,7 @@ test "http server: concurrent requests under the worker pool are each answered e
     try runtime.open(.{}, .{ .worker_pool = 8 });
     defer runtime.close();
     const port = try runtime.listen("l");
-    const server = try Server.start(&runtime, port, "", "{}", "", "(`path at {status 200 headers {} body \"\"} `body rolldown put)");
+    const server = try Server.start(&runtime, port, "", "{}", "", "(nip {status 200 headers {} body \"\"} `body rolldown put)");
     defer server.deinit();
     var peers: [8]*Peer = undefined;
     var requests: [8][]u8 = undefined;
