@@ -109,7 +109,7 @@ The name is last, matching `def` and `set`: the bound name sits nearest the defi
 ### @give
 `( ports values quotation -- task )` — Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The ports are seeded onto the resulting stack followed by `values`.
 
-Include a port in `ports` which isn't owned by the calling unit is `` `domain ``. At most 16 ports may be given at once; more is `` `domain ``.
+Including a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.
 
 Ownership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency).
 
@@ -296,7 +296,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### cons
 `( value list -- list )` — Prepend `value` to the left end of `list`.
 
-NB: A symbol, consed to a program, will be evaluated if that program is pushed to the stack; use `partial` when every value should be prepended only as inert data.
+NB: A symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data.
 
 ### cos
 `( x -- y )` — Cosine; float transcendental.
@@ -529,7 +529,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### intern
-`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. Any symbol which is not yet interned will be inturned and returned. Interned symbols survive for the duration of the session. See [Conversions](SPEC.md#conversions).
+`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A spelling which is not yet interned is interned, so this never fails on a valid spelling; a string that is not a valid symbol spelling is `` `domain ``. Interned symbols live for the whole process and are never reclaimed. See [Conversions](SPEC.md#conversions).
 
 #### Examples
 

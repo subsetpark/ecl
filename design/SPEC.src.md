@@ -545,8 +545,8 @@ Three quotation-application behaviors exist:
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
-  `fold`, `scan`, `update`, `stencil`, `unfold`, `infra`, `@attempt`, `@spawn`,
-  `@each`, and `@defm`.
+  `fold`, `fold1`, `scan`, `lex-cmp-with`, `update`, `stencil`, `unfold`,
+  `infra`, `@attempt`, `@spawn`, `@each`, and `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
 quotation argument as that argument's nested effect (see
@@ -599,8 +599,8 @@ seed values.
 
 Words that are isolated but *not* marked, with their reasons:
 
-- `each`, `zip-with`, `fold`, `scan`, `stencil`, `unfold`, `for` — they
-  apply in the **same** unit, on a substack, and are implicitly fed their
+- `each`, `zip-with`, `fold`, `fold1`, `scan`, `lex-cmp-with`, `stencil`,
+  `unfold`, `for` — they apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
 - `import`, `importp` — they publish without taking a quotation.
