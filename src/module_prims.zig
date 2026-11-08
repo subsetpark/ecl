@@ -740,7 +740,7 @@ const ExportsDriver = struct {
                 const names = fill.names.borrow().items();
                 const filled = fill.values.borrow().len();
                 if (filled != names.len) {
-                    fill.values.borrowMut().appendOwned(.{ .symbol = .{ .name = names[filled] } });
+                    fill.values.borrowMut().appendOwned(value.datum(.{ .symbol = .{ .name = names[filled] } }));
                     continue;
                 }
                 const materializer = list.ValueMaterializer.initOwned(self.allocator, fill.values.take());
@@ -815,7 +815,7 @@ const ModuleDocDriver = struct {
 fn stdlibWord(evaluator: *Fiber) MachineError!void {
     const names = comptime stdlib.sortedNames();
     var values: [names.len]Value = undefined;
-    for (names, &values) |name, *slot| slot.* = .{ .symbol = .{ .name = try intern.intern(name) } };
+    for (names, &values) |name, *slot| slot.* = value.datum(.{ .symbol = .{ .name = try intern.intern(name) } });
     return evaluator.pushOwned(try list.fromValues(evaluator.allocator, &values));
 }
 

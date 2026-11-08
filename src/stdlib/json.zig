@@ -271,13 +271,16 @@ const ParseDriver = struct {
     /// element, or the document root. The value is owned on entry, so a failed
     /// append releases it rather than stranding it.
     fn place(self: *ParseDriver, evaluator: *Fiber, item: Value) error{OutOfMemory}!void {
+        // A parsed `null`, `true`, or `false` is a symbol value entering a list
+        // or a dict: data, like every value a word stores.
+        const stored = value.datum(item);
         if (self.frames.items.len == 0) {
-            self.root = item;
+            self.root = stored;
             return;
         }
         const frame = &self.frames.items[self.frames.items.len - 1];
-        frame.values.append(self.allocator, item) catch |err| {
-            evaluator.releases.releaseValue(item);
+        frame.values.append(self.allocator, stored) catch |err| {
+            evaluator.releases.releaseValue(stored);
             return err;
         };
     }

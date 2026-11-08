@@ -517,7 +517,7 @@ const OrdinaryErrorCursor = struct {
             },
             .trace_copy => |*trace| result: {
                 if (trace.index != self.resolved.trace.len) {
-                    trace.items[trace.index] = .{ .symbol = .{ .name = self.resolved.trace[trace.index] } };
+                    trace.items[trace.index] = value.datum(.{ .symbol = .{ .name = self.resolved.trace[trace.index] } });
                     trace.index += 1;
                 } else {
                     const next = @FieldType(State, "trace_build"){
@@ -971,7 +971,7 @@ const RaisedErrorCursor = struct {
             },
             .trace_copy => |*trace| result: {
                 if (trace.index != self.resolved.trace.len) {
-                    trace.items[trace.index] = .{ .symbol = .{ .name = self.resolved.trace[trace.index] } };
+                    trace.items[trace.index] = value.datum(.{ .symbol = .{ .name = self.resolved.trace[trace.index] } });
                     trace.index += 1;
                 } else {
                     self.state = .{ .trace_build = .{

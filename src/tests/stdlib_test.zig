@@ -53,10 +53,10 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
         \\ [] () "computed" symbol @defm
         \\ [] () `sample.two @defm
         \\ [] () `sample.one @defm) source.declarations
-    , "(sample.one sample.two sample.one)");
+    , "(`sample.one `sample.two `sample.one)");
     try expectDisplay(&runtime, "pop inspection-side-effect", "0");
     try expectDisplay(&runtime, "pop () source.declarations", "()");
-    try expectDisplay(&runtime, "pop \"[] () `parsed @defm\" parse source.declarations", "(parsed)");
+    try expectDisplay(&runtime, "pop \"[] () `parsed @defm\" parse source.declarations", "(`parsed)");
     try expectDisplay(&runtime, "pop (" ++ support.repeated("`many @defm ", 4097) ++ ") source.declarations len", "4097");
     try support.expectError(.{
         .name = "source inspection rejects non-list input",
@@ -119,13 +119,13 @@ test "stdlib: an imported standard-library builtin is that builtin under its imp
         .{
             .name = "a kernel failure names the kernel",
             .source = "[] ([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
-            .expected = "dict.core.get (dict.core.get)",
+            .expected = "dict.core.get (`dict.core.get)",
         },
         .{
             .name = "a session import binds the same way",
             .source = "`dict.core [get] import [] ([1 2] 0 9 get) @attempt `err at dup `word at swap `trace at " ++
                 "{a 5} `a 0 get",
-            .expected = "dict.core.get (dict.core.get) 5",
+            .expected = "dict.core.get (`dict.core.get) 5",
         },
         .{
             .name = "too few values are the kernel's underflow",

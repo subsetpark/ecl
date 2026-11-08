@@ -4,7 +4,8 @@ const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const machine = @import("../machine.zig");
 const reader = @import("../reader.zig");
-const Value = @import("../value.zig").Value;
+const value = @import("../value.zig");
+const Value = value.Value;
 
 /// The module's documentation, which `module-doc` reflects.
 pub const doc =
@@ -41,7 +42,7 @@ const DeclarationsDriver = struct {
         while (self.index < end) : (self.index += 1) {
             if (self.scan.feed(list.atUnchecked(forms, self.index))) |name| {
                 if (self.output) |*output| {
-                    output.borrowMut().appendBorrowed(.{ .symbol = .{ .name = name } });
+                    output.borrowMut().appendBorrowed(value.datum(.{ .symbol = .{ .name = name } }));
                 } else self.count += 1;
             }
         }

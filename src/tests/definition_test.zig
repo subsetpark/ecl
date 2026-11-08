@@ -221,7 +221,7 @@ test "exports lists a module's public words and stdlib the embedded modules" {
             "`core exports (`effect match?) any? " ++
             "[] ((1) `shown def (2) `hidden defp) `m @defm `m exports " ++
             "stdlib (`dict match?) any?",
-        "(next-member open-tgz read-member sha256 unpack-tgz) 1 (shown) 1",
+        "(`next-member `open-tgz `read-member `sha256 `unpack-tgz) 1 (`shown) 1",
     );
     try support.expectErrors(&.{
         .{ .name = "unknown module", .source = "`no-such-module exports", .kind = "undefined-word", .word = "exports" },

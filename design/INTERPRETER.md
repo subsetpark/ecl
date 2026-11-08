@@ -351,14 +351,17 @@ core. Equality and hashing ignore the link. A quoted occurrence, the reader's
 dispatch pushes the symbol with the link and without the flag, and the printer
 writes the flag as the quote where it is read back, on a list element; a
 symbol on its own or in a dict entry prints bare, since it is the symbol as
-data either way. The flag has one other producer: a stack value stored into a
-list at run time enters as data, so the Fiber's `popDatum` sets the flag on a
-symbol, and every word that moves a stack value into a list cell (`cons`, the
-collectors of `each`, `zip-with`, `scan`, and `unfold`) pops through it; the
+data either way. The flag has one other producer: a value that enters a list
+or a dict other than by the reader enters as data. `value.datum` sets the flag on a symbol, the
+Fiber's `popDatum` applies it to every stack value a word stores into a list
+cell (`cons`, the collectors of `each`, `zip-with`, `scan`, and `unfold`), the
 captures of a whole stack (`stack`, `infra`, and a unit's success outcome)
-apply the same function to each value. Copies between lists carry each
-occurrence as written. Running a symbol a
-quotation pushes is `execute`'s job, so there is no word that inserts a
+apply it to each value, the dict materializer applies it to every key and
+value it stores, and a native that assembles a list of symbols for itself
+(`exports`, `stdlib`, `source.declarations`, an error's `trace`, `json.parse`)
+applies it as it writes. Copies between lists carry each occurrence as written,
+and `effect` returns an annotation as written, since it is parsed text.
+Running a symbol a quotation pushes is `execute`'s job, so there is no word that inserts a
 runtime value as code. Nothing else distinguishes "code" from "data": a
 locals declaration rewrites only its body's own unquoted top-level
 occurrences, since a symbol inside a nested list or dict is the symbol it

@@ -948,7 +948,7 @@ test "runtime errors are dicts on stderr" {
             "kind custom",
             "msg \"raised custom\"",
             "word raise",
-            "trace (raise)",
+            "trace (`raise)",
             "source \"<command>\"",
         },
     });
@@ -1923,6 +1923,6 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
         .exit_code = 1,
         // The name is taken first, so a misplaced name is refused before
         // anything else is examined.
-        .stderr_contains = &.{ "kind type", "@defm expected a symbol name", "trace (@defm)" },
+        .stderr_contains = &.{ "kind type", "@defm expected a symbol name", "trace (`@defm)" },
     });
 }

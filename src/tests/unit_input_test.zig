@@ -111,7 +111,7 @@ test "unit inputs: every constructor diagnoses its own values operand" {
     try expectErrorContains(&runtime, "9 [] (1 +) `missing @defm", &.{
         "isolation @defm",
         "constructor's values operand",
-        "trace (+)",
+        "trace (`+)",
     });
     try expectErrorContains(&runtime, "[] (1 +) @spawn task.await `err at raise", &.{
         "isolation @spawn",
@@ -121,7 +121,7 @@ test "unit inputs: every constructor diagnoses its own values operand" {
     try expectErrorContains(&runtime, "[1] [] (+) @each", &.{
         "isolation @spawn",
         "constructor's values operand",
-        "trace (+)",
+        "trace (`+)",
     });
 }
 

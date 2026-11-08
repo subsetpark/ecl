@@ -64,6 +64,9 @@ pub const Materializer = struct {
     table: ?[]u32,
     state: State,
 
+    /// Every entry enters the dict as data through `value.datum`, whatever
+    /// path wrote it: a dict entry never runs, and `dict.keys` and `dict.vals`
+    /// hand the stored lists back as they are.
     pub fn init(
         allocator: std.mem.Allocator,
         pairs: []const Pair,
@@ -78,8 +81,8 @@ pub const Materializer = struct {
         errdefer allocator.free(hashes);
         const table = try allocateIndex(allocator, pairs.len);
         for (pairs, 0..) |pair, index| {
-            keys[index] = pair[0];
-            vals[index] = pair[1];
+            keys[index] = value.datum(pair[0]);
+            vals[index] = value.datum(pair[1]);
         }
         return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
     }
@@ -185,8 +188,8 @@ pub const Materializer = struct {
             .copy_pairs => |*source| {
                 const end = source.index + work.take(source.pairs.len - source.index);
                 for (source.index..end) |index| {
-                    self.keys[index] = source.pairs[index][0];
-                    self.vals[index] = source.pairs[index][1];
+                    self.keys[index] = value.datum(source.pairs[index][0]);
+                    self.vals[index] = value.datum(source.pairs[index][1]);
                 }
                 source.index = end;
                 if (end != source.pairs.len) return .pending;
@@ -194,8 +197,10 @@ pub const Materializer = struct {
             },
             .copy => |*source| {
                 const end = source.index + work.take(source.keys.len - source.index);
-                @memcpy(self.keys[source.index..end], source.keys[source.index..end]);
-                @memcpy(self.vals[source.index..end], source.vals[source.index..end]);
+                for (source.index..end) |index| {
+                    self.keys[index] = value.datum(source.keys[index]);
+                    self.vals[index] = value.datum(source.vals[index]);
+                }
                 source.index = end;
                 if (end != source.keys.len) return .pending;
                 self.state = if (self.table != null) .{ .table_init = 0 } else .{ .hash = .{} };

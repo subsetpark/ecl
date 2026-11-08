@@ -564,7 +564,7 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     try std.testing.expect(std.mem.indexOf(
         u8,
         rendered.bytes(),
-        "trace (linrec-runner.run)",
+        "trace (`linrec-runner.run)",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -859,7 +859,7 @@ test "locals: the reserved backend words behave and blame as before" {
         .{
             .name = "the owner is traced once",
             .source = "(|x| x) `f def ([] (f 1) @attempt `err at `trace at) `g def g",
-            .expected = "(f g)",
+            .expected = "(`f `g)",
         },
         .{
             .name = "an anonymous binding has no word",

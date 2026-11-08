@@ -302,7 +302,7 @@ test "module: privacy module-body contract top-level private and qualified trace
     try expectErrorContains(&runtime, "[] (( -- n ) (missing) `boom def) `trace-module @defm", &.{ "kind undefined-word", "word missing" });
     try expectErrorContains(&runtime, "trace-module.boom", &.{"kind undefined-word"});
     try expectOk(&runtime, "[] (( n -- n ) (dup 0 > (1 - f 1 +) (pop missing) if) `f def) `recursive @defm");
-    try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (missing recursive.f recursive.f recursive.f)"});
+    try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (`missing `recursive.f `recursive.f `recursive.f)"});
 }
 
 test "module: qualified import replacement and alias collisions" {
@@ -1165,6 +1165,6 @@ test "module: core-qualified words link to core's slot wherever they are written
     try expectOk(&runtime, "(9) `first def (`k) call `k match? {kind user msg \"a session shadow does not reach a quote\"} assert");
     // The qualified spelling stays on the trace, and a missing core word is
     // reported as the qualified name.
-    try expectErrorContains(&runtime, "() core.first", &.{ "word core.first", "trace (core.first)" });
+    try expectErrorContains(&runtime, "() core.first", &.{ "word core.first", "trace (`core.first)" });
     try expectErrorContains(&runtime, "core.nope", &.{ "kind undefined-word", "word core.nope" });
 }

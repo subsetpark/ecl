@@ -130,10 +130,12 @@ pub fn isQuotedSlot(slot: u32) bool {
 /// run time. Every value but a symbol pushes itself when the list runs; a
 /// bare symbol would run as a word, so it enters as its quoted occurrence,
 /// linked as it was, and the built list pushes the symbol. This is the one
-/// rule that makes a runtime value data wherever it is stored: `cons` and
-/// the collecting combinators apply it, while copies between lists (`cat`,
-/// `rest`, `reverse`, ...) carry each occurrence as written. Code is written
-/// or parsed; `execute` runs a symbol a list pushes.
+/// rule that makes a runtime value data wherever it is stored: `cons`, the
+/// collecting combinators, every dict entry, and every list a native builds
+/// for itself (`exports`, an error's `trace`, `json.parse`) apply it, while
+/// copies between lists (`cat`, `rest`, `reverse`, ...) carry each occurrence
+/// as written. Code is written or parsed, and `effect` returns an annotation
+/// as written; `execute` runs a symbol a list pushes.
 pub fn datum(item: Value) Value {
     return switch (item) {
         .symbol => |word| .{ .symbol = .{ .name = word.name, .slot = word.slot | quote_flag } },

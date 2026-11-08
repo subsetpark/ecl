@@ -181,12 +181,15 @@ characters. An atom is classified whole-token, in this order:
    push the same value. As data the occurrence is the symbol itself, so
    `` [`a `b] `` is a two-element list equal to `[a b]`; the quote is
    occurrence metadata, like a symbol's link, and travels with the occurrence
-   when lists are copied or spliced. A symbol stored into a list from the
-   stack at run time, by `cons` or by a combinator collecting results, is
-   stored as a quoted occurrence: a runtime value is data wherever it lands,
-   and `` `w (dup) cons call `` pushes `w` twice. A list that runs a symbol
-   it was handed as a value says so with `execute`. `{ }` rejects a quote,
-   since dict entries are data and never run.
+   when lists are copied or spliced. The reader is the only way a
+   symbol enters a list as a word. A symbol that enters a list any other way,
+   stored from the stack by `cons` or a collecting combinator, held as a dict
+   entry, or listed by a reflective word such as `exports`, `dict.keys`, or an
+   error's `trace`, is stored as a quoted occurrence: a runtime value is data
+   wherever it lands, and `` `w (dup) cons call `` pushes `w` twice. A list
+   that runs a symbol it was handed as a value says so with `execute`. `{ }`
+   rejects a quote, since dict entries are data and never run; `effect`
+   returns its annotation as written.
    `` ` `` is reserved token-initially and banned inside symbols.
 4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
