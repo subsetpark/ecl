@@ -848,7 +848,6 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         "[1.5 2.5 3.5 4.5] [2 2] reshape product",
         "[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each",
         "([1 2 3 4 5 6] [2 3] reshape sum) call",
-        "[2 3] ([1 2 3 4 5 6] swap reshape sum) partial call",
         "([2 3] reshape sum) `columns def [1 2 3 4 5 6] columns",
         // Past one turn's budget the fold continues as a driver.
         "300000 range 1.5 + [3 100000] reshape sum",
@@ -861,6 +860,11 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         };
     }
     for (fused) |source| try expectPhraseHits(source, 1);
+    // `partial call` is itself a phrase, so the quotation it runs adds its
+    // own fused phrase: two hits.
+    const partial_source = "[2 3] ([1 2 3 4 5 6] swap reshape sum) partial call";
+    try compareModesExactly(partial_source);
+    try expectPhraseHits(partial_source, 2);
     try expectHits("[1 2 3 4 5 6] [2 3] reshape sum", 1);
     try expectHits("[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each", 1);
 
