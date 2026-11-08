@@ -418,7 +418,9 @@ const IndexCursor = struct {
         materializer: ?list.ValueMaterializer = null,
         result: ?Value = null,
     };
-    const Frame = union(enum) { node: Node, build: Build };
+    /// A typed selector over a typed source gathers as one leaf kernel, which
+    /// continues here when it outlasts the turn.
+    const Frame = union(enum) { node: Node, build: Build, typed: support.ErasedDriver };
     releases: *heap.ReleaseDomain,
     allocator: std.mem.Allocator,
     frames: @import("poll.zig").ChunkStack(Frame),
@@ -444,6 +446,10 @@ const IndexCursor = struct {
     fn deinitFrame(self: *IndexCursor, frame_value: Frame) void {
         switch (frame_value) {
             .node => {},
+            .typed => |driver| {
+                var typed = driver;
+                typed.retire(self.releases, self.allocator);
+            },
             .build => |build_value| {
                 var build = build_value;
                 if (build.materializer) |*materializer| materializer.retire(self.releases);
@@ -455,6 +461,7 @@ const IndexCursor = struct {
     fn delegates(frame: *const Frame) bool {
         return switch (frame.*) {
             .build => |*build| build.result == null and !build.waiting and build.index == build.values.capacity(),
+            .typed => true,
             .node => false,
         };
     }
@@ -481,7 +488,15 @@ const IndexCursor = struct {
                     // the only collection this cursor ever descends is a list.
                     if (node.collection != .list) return evaluator.typeError("a list or dict");
                     {
-                        if (node.index == .list) {
+                        if (try startNestedGather(evaluator, node.collection, node.index)) |outcome| switch (outcome) {
+                            .value => |result| self.last = result,
+                            .frame => |driver| {
+                                var typed = driver;
+                                errdefer typed.retire(self.releases, self.allocator);
+                                try self.frames.reserve(1);
+                                self.frames.pushReserved(.{ .typed = typed });
+                            },
+                        } else if (node.index == .list) {
                             var values = try heap.OwnedValueBuffer.init(
                                 self.releases,
                                 @intCast(node.index.list.length()),
@@ -505,6 +520,15 @@ const IndexCursor = struct {
                             heap.retainValue(result);
                             self.last = result;
                         }
+                    }
+                },
+                .typed => |*typed| {
+                    try self.frames.reserve(1);
+                    if (try typed.advance(evaluator)) |result| {
+                        self.last = result;
+                    } else {
+                        self.frames.pushReserved(frame);
+                        return .pending;
                     }
                 },
                 .build => |*build| {
@@ -3020,6 +3044,31 @@ pub fn consForPrims(evaluator: *Fiber) MachineError!void {
     defer item.deinit();
     if (try startTypedCons(evaluator, item.borrow(), &collection)) return;
     try ListCopyDriver.installCons(evaluator, &item, &collection);
+}
+
+/// A nested typed index list over a typed source, gathered as one leaf kernel
+/// inside the index cursor, or null when either is not a typed leaf. The
+/// kernel checks each index in order, as the per-element walk would.
+fn startNestedGather(evaluator: *Fiber, source: Value, indices: Value) MachineError!?support.NestedOutcome {
+    if (source != .list or indices != .list) return null;
+    const length: usize = @intCast(indices.list.length());
+    if (length == 0) return null;
+    const source_kind = source.list.kind();
+    const index_kind = indices.list.kind();
+    inline for (leaf_kinds) |candidate| {
+        inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
+            if (candidate == source_kind and candidate_index == index_kind) {
+                return try support.Kernel(CopyKernels(candidate, candidate, candidate_index).Gather).nested(
+                    evaluator,
+                    .{ source, indices },
+                    null,
+                    .gather,
+                    length,
+                );
+            }
+        }
+    }
+    return null;
 }
 
 fn startTypedGather(

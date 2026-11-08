@@ -700,9 +700,6 @@ Ex:
 ### raze
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
 
-### reduce-groups
-`( values groups reducer -- results )` — Reduce each top-level index list, preserving group and index order, including repeated indices. Reducer symbols are `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Sum uses checked numeric addition from zero, left to right; count accepts any selected value. Min/max use whole-value comparison and preserve the first value on ties. Empty groups yield zero for sum/count and raise `` `domain `` for min/max. Noninteger selectors raise `` `type ``; negative or out-of-range indices and unknown symbols raise `` `domain ``. Built-in reducer meanings do not depend on word bindings.
-
 ### reshape
 `( list shape -- list )` — Cycle the data into the exact nested-list shape; a zero axis must be final.
 
@@ -2383,7 +2380,7 @@ Every operation except `valid?` first validates the ordinary column dict as a ta
 `( table names -- groups )` — Group row indices by the named columns. Groups follow first-occurrence order and indices within each group are ascending; an empty name list yields one global group keyed by the empty list.
 
 ### aggregate
-`( table names specs -- table )` — Group by `names` and aggregate each group with `[output-name input-name reducer]` specifications. A reducer is a quotation or one of `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Symbols use `reduce-groups`; quotations receive gathered slices and retain ordinary resolution and shadowing. All names and specifications are validated before a quotation runs. The result contains the key columns first, followed by the aggregate columns in specification order, with one row per group.
+`( table names specs -- table )` — Group by `names` and aggregate each group with `[output-name input-name reducer]` specifications. A reducer is a `( slice -- value )` quotation applied to each group's slice of the input column, such as `(sum)`, `(len)`, or `((min) fold1)`; it resolves and shadows as ordinary code. All names and specifications are validated before a reducer runs. The result contains the key columns first, followed by the aggregate columns in specification order, with one row per group.
 
 ## task
 

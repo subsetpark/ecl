@@ -1560,7 +1560,7 @@ test "native: column primitives cancel active work and reuse the session" {
         .{ .setup = "\"x\" 8000000 str.repeat dup \"😀\" swap cat 1 drop pair", .body = "match?", .word = "match?" },
         .{ .setup = "500000 range dup pair wrap", .body = "group-columns", .word = "group-columns" },
         .{ .setup = "\"x\" 2000000 str.repeat dup pair wrap", .body = "group", .word = "group" },
-        .{ .setup = "[1] [0] 8000000 take wrap pair", .body = "`sum reduce-groups", .word = "reduce-groups" },
+        .{ .setup = "[1] 8000000 take [0] 8000000 take wrap pair", .body = "at", .word = "at" },
         .{ .setup = "{0 1} [0] 2000000 take 0 3 pack", .body = "dict.at-or", .word = "dict.core.at-or" },
     };
     for (cases) |case| {
@@ -1573,7 +1573,7 @@ test "native: column primitives cancel active work and reuse the session" {
             std.log.err("column cancellation failed for {s}: cancelled={d}, word={d}", .{ case.body, runtime.stackItems()[0].int, runtime.stackItems()[1].int });
         try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
         try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
-        try expectOk(&runtime, "pop pop [1 2] [[0 1]] `sum reduce-groups first");
+        try expectOk(&runtime, "pop pop [1 2] [[0 1]] at first sum");
         try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
         try expectOk(&runtime, "pop");
     }

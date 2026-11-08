@@ -282,22 +282,10 @@
   table names (group-keys) partial partial
   if) `group-by def
 
- ### defp apply-aggregate
- (column quotation -- value :
-  "Apply an isolated ( column -- value ) quotation to one column slice.
-
-   The quotation must return exactly one value.")
- (|column quotation| column wrap quotation each first) `apply-aggregate defp
-
  ### defp aggregate-column
  (spec table groups -- column :
-  "Reduce group selectors with a symbol or apply a quotation to gathered slices.")
- (|spec table groups|
-  table spec 1 at at groups dict.vals spec 2 at
-  dup type `symbol match?
-  (reduce-groups)
-  ((at) dip (apply-aggregate) partial each)
-  if) `aggregate-column defp
+  "Gather each group's slice of the input column and apply the reducer to every slice.")
+ (|spec table groups| table spec 1 at at groups dict.vals at spec 2 at each) `aggregate-column defp
 
  ### defp key-columns
  (groups names -- columns : "Return grouping-key columns in name order.")
@@ -310,18 +298,11 @@
  (groups names -- columns : "Split composite group keys into one column per name.")
  (|groups names| groups dict.keys names len transpose) `composite-key-columns defp
 
- ### defp reducer?
- (candidate -- bool : "Accept a quotation or one of the fixed built-in reducer symbols.")
- (dup type `list match?
-  (pop 1)
-  (dup type `symbol match? ([sum count min max] in?) (pop 0) if)
-  if) `reducer? defp
-
  ### defp spec-shaped?
  (spec -- bool : "Return 1 for an [output-name input-name reducer] aggregate specification.")
  (dup type `list match?
   (dup len 3 =
-   (dup first string? over 1 at string? and swap 2 at reducer? and)
+   (dup first string? over 1 at string? and swap 2 at type `list match? and)
    (pop 0)
    if)
   (pop 0)
@@ -339,11 +320,10 @@
  ### def aggregate
  (table names specs -- table :
   "Group by `names` and aggregate each group with `[output-name input-name reducer]` specifications.
-   A reducer is a quotation or one of `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Symbols
-   use `reduce-groups`; quotations receive gathered slices and retain ordinary resolution and
-   shadowing. All names and specifications are validated before a quotation runs. The result
-   contains the key columns first, followed by the aggregate columns in specification order, with
-   one row per group.")
+   A reducer is a `( slice -- value )` quotation applied to each group's slice of the input column,
+   such as `(sum)`, `(len)`, or `((min) fold1)`; it resolves and shadows as ordinary code. All names
+   and specifications are validated before a reducer runs. The result contains the key columns
+   first, followed by the aggregate columns in specification order, with one row per group.")
  (|table names specs|
   table checked pop
   names type `list match?

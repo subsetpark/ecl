@@ -21,34 +21,31 @@ test "order: composite grouping and indexed lookup preserve whole keys and order
     });
 }
 
-test "order: grouped reducers preserve selector order and validate errors" {
+test "order: grouped reductions compose from nested selectors" {
     try helper.expectStack(
-        "[10 20 30] [[2 0 2] []] `sum reduce-groups " ++
-            "[\"a\" [1]] [[1 0 1] []] `count reduce-groups " ++
-            "[4 2.5 9] [[0 1] [2]] `min reduce-groups " ++
-            "[\"a\" \"λ\" \"😀\"] [[2 0 1]] `max reduce-groups " ++
-            "[1e16 -1e16 1.0] [[0 1 2] [0 2 1]] `sum reduce-groups " ++
-            "[[1 2] [3] [1]] [[0 1 2]] `max reduce-groups [[1 2] [3] [1]] [[0 1 2]] `min reduce-groups",
-        "[70 0] [3 0] (2.5 9) (\"😀\") [1.0 0.0] ([3]) ([1])",
+        "[10 20 30] [[2 0 2] []] at (sum) each " ++
+            "[\"a\" [1]] [[1 0 1] []] at (len) each " ++
+            "[4 2.5 9] [[0 1] [2]] at ((min) fold1) each " ++
+            "[1e16 -1e16 1.0] [[0 1 2] [0 2 1]] at (sum) each",
+        "[70 0] [3 0] (2.5 9) [1.0 0.0]",
     );
     try helper.expectErrors(&.{
-        .{ .name = "negative index", .source = "[1] [[-1]] `count reduce-groups", .kind = "domain", .word = "reduce-groups" },
-        .{ .name = "out of range", .source = "[1] [[1]] `sum reduce-groups", .kind = "domain", .word = "reduce-groups" },
-        .{ .name = "nested selector", .source = "[1] [[[0]]] `sum reduce-groups", .kind = "type", .word = "reduce-groups" },
-        .{ .name = "empty min", .source = "[] [[]] `min reduce-groups", .kind = "domain", .word = "reduce-groups" },
-        .{ .name = "unknown reducer", .source = "[] [] `median reduce-groups", .kind = "domain", .word = "reduce-groups" },
-        .{ .name = "sum overflow", .source = "[9223372036854775807 1] [[0 1]] `sum reduce-groups", .kind = "overflow", .word = "reduce-groups" },
-        .{ .name = "sum overflow uses value position", .source = "[1 0 9223372036854775807] [[1] [0 2]] `sum reduce-groups", .kind = "overflow", .word = "reduce-groups", .data = &.{.{ .name = "index", .expected = .{ .int = 2 } }} },
-        .{ .name = "non numeric sum", .source = "[\"a\"] [[0]] `sum reduce-groups", .kind = "type", .word = "reduce-groups" },
+        .{ .name = "negative index", .source = "[1] [[-1]] at", .kind = "domain", .word = "at" },
+        .{ .name = "out of range", .source = "[1] [[0] [1]] at", .kind = "domain", .word = "at" },
+        .{ .name = "empty min", .source = "[] [[]] at ((min) fold1) each", .kind = "domain", .word = "fold1" },
+        .{ .name = "sum overflow", .source = "[9223372036854775807 1] [[0 1]] at (sum) each", .kind = "overflow", .word = "sum" },
     });
 }
 
-test "order: aggregate symbols have fixed meaning while quotations resolve normally" {
+test "order: aggregate reducers are quotations that resolve normally" {
     try helper.expectStack(
         "(pop 999) `sum def {\"v\" [1 2]} [] " ++
-            "[[\"fixed\" \"v\" sum] [\"quoted\" \"v\" (sum)]] table.aggregate",
-        "{\"fixed\" [3] \"quoted\" [999]}",
+            "[[\"quoted\" \"v\" (sum)] [\"core\" \"v\" (core.sum)]] table.aggregate",
+        "{\"quoted\" [999] \"core\" [3]}",
     );
+    try helper.expectErrors(&.{
+        .{ .name = "symbol reducer", .source = "{\"v\" [1 2]} [] [[\"s\" \"v\" `sum]] table.aggregate", .kind = "type", .word = "raise" },
+    });
 }
 
 test "order: cmp and grade share exact whole-value ordering" {

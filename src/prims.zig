@@ -23,7 +23,6 @@ const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "reduce-groups", .primitive = @import("kernel_numeric.zig").reduceGroups, .effect = "values groups reducer -- results", .doc = "Reduce each top-level index list, preserving group and index order, including repeated indices. Reducer symbols are `` `sum ``, `` `count ``, `` `min ``, and `` `max ``. Sum uses checked numeric addition from zero, left to right; count accepts any selected value. Min/max use whole-value comparison and preserve the first value on ties. Empty groups yield zero for sum/count and raise `` `domain `` for min/max. Noninteger selectors raise `` `type ``; negative or out-of-range indices and unknown symbols raise `` `domain ``. Built-in reducer meanings do not depend on word bindings." },
         .{ .name = "dup", .primitive = dup, .effect = "x -- x x", .doc = "Duplicate the top stack value." },
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
         .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },

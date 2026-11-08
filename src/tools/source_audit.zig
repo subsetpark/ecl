@@ -908,7 +908,6 @@ const KernelDriverException = struct {
 const kernel_driver_exceptions = [_]KernelDriverException{
     .{ .file = "kernel_numeric.zig", .function = "binaryPrimitive" },
     .{ .file = "kernel_numeric.zig", .function = "unaryPrimitive" },
-    .{ .file = "kernel_numeric.zig", .function = "reduceGroups" },
     .{ .file = "kernel_numeric.zig", .function = "startReduction" },
     .{ .file = "kernel_sequence.zig", .function = "atPrimitive" },
     .{ .file = "kernel_sequence.zig", .function = "inPrimitive" },
