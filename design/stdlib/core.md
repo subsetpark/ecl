@@ -554,6 +554,13 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => "three"
 ```
 
+The else quotation receives the unmatched subject:
+
+```ecl
+5 [1 (10) 3 (30) (100 *)] case
+# => 500
+```
+
 ### chunk
 
 #### Examples

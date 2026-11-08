@@ -18,7 +18,7 @@
   "Return 1 when a value is a string, a list whose every element is a char, and 0 for every other
    value. The empty string answers 1, and so does the empty list: they are one value. Never
    raises.")
- (dup str.core.kind [string (pop 1) generic ((type `char match?) all?) (pop 0)] case) `str? def
+ (dup str.core.kind [string (pop 1) generic ((type `char match?) all?) (pop pop 0)] case) `str? def
 
  ### defp checked-error
  (candidate failure -- string :

@@ -1065,15 +1065,22 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
    else]
 ```
 
-Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is the quotation to apply for the first case that matches.
+Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is the quotation to apply for the first case that matches. A matching action is called with `x` consumed.
 
-`else` is obligatory and is applied when no case matches.
+`else` is obligatory and is applied when no case matches, with `x` still on the stack.
 
 #### Examples
 
 ```ecl
 3 [1 ("one") 3 ("three") ("other")] case
 # => "three"
+```
+
+The else quotation receives the unmatched subject:
+
+```ecl
+5 [1 (10) 3 (30) (100 *)] case
+# => 500
 ```
 
 ### converge
@@ -1092,6 +1099,9 @@ Where `caseN` is a value to be compared against `x` with `match?`, and `qN` is t
 [1 2 3] [24 60 60] from-digits
 # => 3723
 ```
+
+### case-with
+`( x clauses (key: x -- k) -- ... )` — Like `case`, but match the clause keys against the result of applying `key` to `x`, and call the selected action with `x` itself on the stack. `x [ ... ] (k) case-with` is `x dup k [ ... ] case`, so the else quotation receives `x` and the unmatched key.
 
 ## agent
 
