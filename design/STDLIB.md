@@ -79,9 +79,7 @@
 `( x y -- bool )` — Compare conforming values for greater-than-or-equal order.
 
 ### @attempt
-`( values quotation -- result )` — Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. Use `[]` for no initial values. Always pushes exactly one result: `{ok (values)}` with the successful stack values as a list, or `{err <error dict>}`.
-
-Observationally `@spawn task.await` — same result shape, same error protocol, same self-contained-quotation contract — differing only in scheduling. That identity is what makes the isolation non-arbitrary rather than an implementation accident. The complete form is `values (q) @attempt`. See Errors.
+`( values quotation -- result )` — Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`.
 
 #### Examples
 
@@ -91,7 +89,7 @@ Observationally `@spawn task.await` — same result shape, same error protocol, 
 ```
 
 ### @attempt!
-`( quotation -- result )` — `@attempt` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @attempt`.
+`( quotation -- result )` — `@attempt` with no values operand.
 
 #### Examples
 
@@ -109,13 +107,11 @@ The name is last, matching `def` and `set`: the bound name sits nearest the defi
 `( body module-name -- )` — `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too.
 
 ### @give
-`( ports values quotation -- task )` — Like `@spawn`, and additionally move every port in the ports list into the new unit, which owns them from before it starts running: the child's end closes them and the calling unit's end no longer does. The child stack is the given ports, deepest, then the explicit values. Use `[]` for no ports, which is exactly `@spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules).
+`( ports values quotation -- task )` — Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The ports are seeded onto the resulting stack followed by `values`.
 
-Every kind of port can be given: listeners, connections, and process ports alike. A port may only be given by the unit that owns it, so a unit holding a port another unit owns cannot give it away; that is `` `domain ``, as is giving a closed port or the same port twice. The move and the child's construction are one step: the port is never unowned, and the child never runs before it owns the port.
+Include a port in `ports` which isn't owned by the calling unit is `` `domain ``. At most 16 ports may be given at once; more is `` `domain ``.
 
-At most 16 ports may be given at once; more is `` `domain ``. That limit is checked before the list's elements are examined, so an oversized list of non-ports reports the limit rather than the element type. The ports list is otherwise validated in order, and a list holding a non-port is `` `type ``.
-
-Giving does not restrict use. The caller may still name a given port and read or write it, exactly as a child may use a port its parent owns; what changed is which unit's end closes it. See [Concurrency](SPEC.md#concurrency).
+Ownership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency).
 
 #### Examples
 
@@ -126,7 +122,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @give!
-`( ports quotation -- task )` — `@give` with no values operand: the child stack is the given ports alone, exactly as `ports [] (q) @give`.
+`( ports quotation -- task )` — `@give` with no values operand: the child stack contains only the given ports.
 
 ### @load
 `( values path -- )` — Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
@@ -145,7 +141,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @spawn!
-`( quotation -- task )` — `@spawn` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @spawn`.
+`( quotation -- task )` — `@spawn` with no seeded values.
 
 #### Examples
 
@@ -226,7 +222,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( x y -- z )` — Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns.
 
 ### bytes
-`( value -- bytes )` — Encode a string as UTF-8 into a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged, so the word is idempotent. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions).
+`( value -- bytes )` — Encode a UTF-8 string as a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions).
 
 #### Examples
 
@@ -255,7 +251,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### chars
-`( value -- string )` — Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. Unlike `str`, the result is content rather than representation: `` (`foo) first chars `` is `"foo"`, while `` (`foo) first str `` is `"`foo"`. See [Conversions](SPEC.md#conversions).
+`( value -- string )` — Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. See [Conversions](SPEC.md#conversions).
 
 #### Examples
 
@@ -298,7 +294,9 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### cons
-`( value list -- list )` — Raw structural prepend. On data, `1 [2 3] cons` is `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not safe partial application — that is `partial`.
+`( value list -- list )` — Prepend `value` to the left end of `list`.
+
+NB: A symbol, consed to a program, will be evaluated if that program is pushed to the stack; use `partial` when every value should be prepended only as inert data.
 
 ### cos
 `( x -- y )` — Cosine; float transcendental.
@@ -378,7 +376,7 @@ Ex:
 `( list -- bool )` — Return 1 when a list has no elements and 0 otherwise.
 
 ### execute
-`( word -- ... )` — Resolve a symbol now, in the root it was written in, and invoke what it names as dispatch would. Non-symbols are `` `type ``; missing words are `` `undefined-word ``. Module homes, private resolution, annotations, tracing, builtins, native calls, and cancellation are preserved.
+`( word -- ... )` — Evaluate a symbol's binding and dispatch. Non-symbols are `` `type ``; missing words are `` `undefined-word ``.
 
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status.
@@ -466,7 +464,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( collection (a --) -- )` — Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing.
 
 ### getenv
-`( name -- string )` — The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`result.or-default` is the defaulting idiom. Absent host IO is `` `io ``.
+`( name -- string )` — The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error. Absent host IO is `` `io ``.
 
 ### grade
 `( list -- indices )` — The stable ascending sort permutation. Orders by `cmp`, so every element pair must be mutually comparable; the error's index names the later element of a pair that is not.
@@ -531,7 +529,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### intern
-`( value -- symbol )` — Return a symbol unchanged, or create the symbol for a string, interning the spelling when it is new. A string that is not a valid symbol spelling is `` `domain ``; any other value is `` `type ``. Interned names live for the whole process and are never reclaimed, so never apply this to unbounded external input; `symbol` is the lookup-only form. The symbol links to the root of the activation that built it. See [Conversions](SPEC.md#conversions).
+`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. Any symbol which is not yet interned will be inturned and returned. Interned symbols survive for the duration of the session. See [Conversions](SPEC.md#conversions).
 
 #### Examples
 
@@ -559,7 +557,9 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( predicate base pre post -- ... )` — Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level.
 
 ### literal
-`( value -- form )` — Return the form that pushes a value when a quotation runs it. A symbol becomes its quoted occurrence, so `` `x literal `` is `` `x `` and running it pushes `x` instead of executing it. Any other value already pushes itself and is returned unchanged. Wrap the form to get a quotation: `` v literal wrap `` pushes `v` when called.
+`( value -- form )` — "Quote" a value, such that when the resulting form is evaluated in a quotation, the value is pushed to the stack.
+
+Any literal besides a symbol has this property naturally; when applied to a symbol, `literal` allows the symbol to behave under quotation like an inert value rather than a binding word.
 
 #### Examples
 
@@ -572,7 +572,17 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( x -- y )` — Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
 
 ### match?
-`( left right -- bool )` — Whole-value structural equality; **not** pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
+`( left right -- bool )` — Whole-value structural equality.
+
+```
+Ex.:
+```
+  [1 2] [1 2] =
+[1 1]
+  [1 2] [1 2] match?
+1
+```
+```
 
 #### Examples
 
@@ -625,7 +635,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( first second -- list )` — Collect two stack values into a two-element list.
 
 ### parse
-`( string -- quotation )` — The reader, reified: parse source text into an unevaluated quotation. Reading interns every symbol and word in the text, so this is a load-class word for trusted source, not a conversion: use `int`, `float`, and `symbol` on data.
+`( string -- quotation )` — Parse source text into an unevaluated quotation. Reading interns every symbol and word in the string.
 
 #### Examples
 
@@ -663,7 +673,7 @@ Ex:
 ```
 
 ### pop
-`( x -- )` — Discard the top stack value. (`drop` is the sequence word.)
+`( x -- )` — Discard the top stack value.
 
 ### pow
 `( x y -- z )` — Exponentiation; returns float.
@@ -685,7 +695,7 @@ Ex:
 `( module-name binding-name -- qualified-word )` — Validate a module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed.
 
 ### raise
-`( error -- )` — Raise a language error from an error dict.
+`( error -- )` — Raise an error from an error dict.
 
 ### range
 `( bound -- list )` — The ints `[0 1 … bound-1]`; the bound must be a nonnegative int.
@@ -781,7 +791,7 @@ Ex:
 `( x -- y )` — Square root. `` `domain `` on negative inputs (the result would be NaN).
 
 ### stack
-Copy the visible operand stack into a bottom-to-top list while leaving every original value in place.
+Copy the operand stack into a bottom-to-top list while leaving every original value in place.
 
 ### stdlib
 `( -- names )` — Return the names of the embedded standard-library modules as a list of symbols in codepoint order.
@@ -824,7 +834,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( x y -- y x )` — Exchange the top two stack values.
 
 ### symbol
-`( value -- symbol )` — Return a symbol unchanged, or the already-interned symbol whose spelling a string names. A spelling that is not yet interned is `` `domain ``, as is a string that is not a valid symbol spelling; any other value is `` `type ``. Every symbol written in loaded source is interned, so this succeeds for any key a program compares against and never grows the interned name space; use `intern` to create one. The symbol links to the root of the activation that built it, so `"dup" symbol wrap` executes the same `dup` as `(dup)` written there. See [Conversions](SPEC.md#conversions).
+`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A spelling that is not yet interned is `` `domain ``, as is a string that is not a valid symbol spelling; any other value is `` `type ``. Every symbol written in loaded source is interned, so this succeeds for any key a program compares against and never grows the interned name space; use `intern` to create one. See [Conversions](SPEC.md#conversions).
 
 #### Examples
 
@@ -2414,7 +2424,7 @@ Request and reply:
 `( task -- )` — Request cancellation; the task's result becomes `{err {kind cancelled …}}`. No-op when already terminal.
 
 ### cancel-self
-`( -- )` — Request cancellation of the current task, exactly as `task.cancel` does with its handle. It is only a request: execution continues, and the task observes it at its next safe point. `` `domain `` outside a task. There is deliberately no way to obtain the current task's handle, so a task's result can never retain its own task.
+`( -- )` — Request cancellation of the current task.
 
 ### pending
 `( -- tasks )` — Pending descendant tasks in deterministic spawn preorder.
