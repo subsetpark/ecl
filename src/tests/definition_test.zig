@@ -123,7 +123,7 @@ test "every primitive exposes meaningful reflective documentation" {
     try expectOk(&runtime, "`nip see `call see");
     try std.testing.expectEqualStrings(
         "(x y -- y : \"Discard the second value on the stack.\") (swap pop)\n" ++
-            "(quotation -- ... :\n \"*Inline.* Run a quotation on the current stack. A data list pushes its elements.\") <primitive>\n",
+            "(quotation -- ... : \"Run a quotation on the current stack. A data list pushes its elements.\")\n<primitive>\n",
         output.written(),
     );
 }

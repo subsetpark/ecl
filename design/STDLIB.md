@@ -1,72 +1,14 @@
 <!-- Generated from design/stdlib by design/stdlib/assemble.ecl; edit the fragments. -->
 
-# ecl — core and standard library reference
-
-Every public binding below ships in the core image or embedded standard
-library, one entry per word. Prelude and core come first; standard-library
-modules then appear by module name. Each section is layered by dependency: a
-word defined in ecl appears after every word of its section that its definition
-uses, directly or through private helpers, so builtins and leaf definitions
-open the section and each later layer builds only on earlier ones. Mutually
-recursive definitions share a layer. Within a layer, words are ordered by
-codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
-words precede letter-spelled ones. An entry gives the word's successful stack
-effect followed by its semantics. For a word defined in ecl, the entry is the
-definition's own annotation, the same effect and documentation that `which`,
-`see`, and `doc` reflect; words without a declared effect state their shape in
-documentation. A module section opens with the module's own documentation, the
-text `module-doc` returns.
-At module boundaries, declared output contracts are checked when the invocation
-completes, including any deferred work. The language rules behind those effects live in the
-[`language specification`](SPEC.md); this document owns the exhaustive list of
-what ships.
-Conventions:
-
-- Words marked **pervasive** follow
-  [Pervasion and conformability](SPEC.md#pervasion-and-conformability).
-- "Equivalent to `…`" names a word defined in ecl itself; the definition
-  is normative and `see` renders it.
-- Words applying quotations are marked *inline* or *unit constructor*
-  (see [Application contexts](SPEC.md#application-contexts)); a unit constructor states the contract
-  required of its quotation, enforced at each application.
-- An effect ending in `...` declares a fixed before row and a variable
-  after row (see [Definition annotations](SPEC.md#definition-annotations)) and is the word's real declared
-  effect. A typographic `…` *inside* an effect is only an informal picture.
-- Indexing is 0-based throughout: `range` counts from 0, `at` indexes
-  from 0, `where` and `grade` produce 0-based indices, and `find` returns
-  the length on a miss.
-- Operands are ordered subject first. The subject is the operand the word
-  acts on or the result describes, and it is deepest: a collection, string,
-  state, task, address, port, or a filesystem root and path. What the word
-  does with it comes above: a key, count, or payload to write or send, then
-  any quotation, then any deadline on top. Thus `dict key value put`,
-  `connection bytes net.write`, `root path text fs.publish-text`, and
-  `address quotation milliseconds agent.call-for`. A search is about
-  whichever operand its result describes: `find` returns an index into its
-  sequence, so `sequence needle find`, while `in?` returns a mask shaped
-  like the sought value, so `value list in?`.
-- Constructors take their operands in the order they appear in the result:
-  `value list cons` puts the value first and `list value append` puts it
-  last, as `pair` and `cat` do; `key value dict.associate` builds
-  `{key value}`.
-- Naming words are the exception to both: `set`, `def`, and `@defm` take the
-  name on top of what it binds.
-- Booleans are the ints 0 and 1; a word requiring a boolean rejects every
-  other value.
-- Predicate words end in `?`. Symbolic comparisons (`=`, `<>`, `<`, `<=`,
-  `>`, `>=`) and the boolean combinators `and`, `or`, and `not` keep their
-  conventional spellings.
-- Example blocks are complete expressions unless their surrounding text says
-  otherwise. A `# =>` comment shows the value or values left for the command
-  printer; it is not part of the word's behavior.
+# ECL standard library reference
 
 ## Prelude and core
 
 ### \*
-`( x y -- z )` — **Pervasive.** Multiply. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Multiply. Integer overflow is `` `overflow ``.
 
 ### \*%
-`( x y -- z )` — **Pervasive.** Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two.
+`( x y -- z )` — Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two.
 
 #### Examples
 
@@ -84,7 +26,7 @@ Conventions:
 `( -- module-name )` — Return the canonical registration name selected by the current module activation. The same image registered under different names reports the name through which it was called; an alias reports its target's canonical name. `` `domain `` at top level or through an escaped quotation whose image has no invoking registration.
 
 ### +
-`( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``.
 
 #### Examples
 
@@ -94,7 +36,7 @@ Conventions:
 ```
 
 ### +%
-`( x y -- z )` — **Pervasive.** Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
+`( x y -- z )` — Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
 
 #### Examples
 
@@ -104,13 +46,13 @@ Conventions:
 ```
 
 ### -
-`( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``.
+`( x y -- z )` — Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``.
 
 ### -%
-`( x y -- z )` — **Pervasive.** Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
+`( x y -- z )` — Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``.
 
 ### /
-`( x y -- z )` — **Pervasive.** Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
+`( x y -- z )` — Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
 
 ### 2dup
 `( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
@@ -119,7 +61,7 @@ Conventions:
 `( x y (... -- ...) -- ... x y )` — Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top of the quotation's results.
 
 ### <
-`( x y -- bool )` — **Pervasive.** Ascending comparison, producing 0/1 masks.
+`( x y -- bool )` — Ascending comparison, producing 0/1 masks.
 
 ### <=
 `( x y -- bool )` — Compare conforming values for less-than-or-equal order.
@@ -128,16 +70,16 @@ Conventions:
 `( x y -- bool )` — Compare conforming values for inequality.
 
 ### =
-`( x y -- bool )` — **Pervasive.** Equality; numbers compare numerically across int and float. Whole-value equality is `match?`.
+`( x y -- bool )` — Equality; numbers compare numerically across int and float. Whole-value equality is `match?`.
 
 ### >
-`( x y -- bool )` — **Pervasive.** Descending comparison, producing 0/1 masks.
+`( x y -- bool )` — Descending comparison, producing 0/1 masks.
 
 ### >=
 `( x y -- bool )` — Compare conforming values for greater-than-or-equal order.
 
 ### @attempt
-`( values quotation -- result )` — *Unit constructor.* Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. Use `[]` for no initial values. Always pushes exactly one result: `{ok (values)}` with the successful stack values as a list, or `{err <error dict>}`.
+`( values quotation -- result )` — Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. Use `[]` for no initial values. Always pushes exactly one result: `{ok (values)}` with the successful stack values as a list, or `{err <error dict>}`.
 
 Observationally `@spawn task.await` — same result shape, same error protocol, same self-contained-quotation contract — differing only in scheduling. That identity is what makes the isolation non-arbitrary rather than an implementation accident. The complete form is `values (q) @attempt`. See Errors.
 
@@ -149,7 +91,7 @@ Observationally `@spawn task.await` — same result shape, same error protocol, 
 ```
 
 ### @attempt!
-`( quotation -- result )` — *Unit constructor.* `@attempt` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @attempt`.
+`( quotation -- result )` — `@attempt` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @attempt`.
 
 #### Examples
 
@@ -159,15 +101,15 @@ Observationally `@spawn task.await` — same result shape, same error protocol, 
 ```
 
 ### @defm
-`( values body module-name -- )` — *Unit constructor.* The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.
+`( values body module-name -- )` — The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.
 
 The name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``values (body) `name @defm``. See Modules.
 
 ### @defm!
-`( body module-name -- )` — *Unit constructor.* `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too.
+`( body module-name -- )` — `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too.
 
 ### @give
-`( ports values quotation -- task )` — *Unit constructor.* Like `@spawn`, and additionally move every port in the ports list into the new unit, which owns them from before it starts running: the child's end closes them and the calling unit's end no longer does. The child stack is the given ports, deepest, then the explicit values. Use `[]` for no ports, which is exactly `@spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules).
+`( ports values quotation -- task )` — Like `@spawn`, and additionally move every port in the ports list into the new unit, which owns them from before it starts running: the child's end closes them and the calling unit's end no longer does. The child stack is the given ports, deepest, then the explicit values. Use `[]` for no ports, which is exactly `@spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules).
 
 Every kind of port can be given: listeners, connections, and process ports alike. A port may only be given by the unit that owns it, so a unit holding a port another unit owns cannot give it away; that is `` `domain ``, as is giving a closed port or the same port twice. The move and the child's construction are one step: the port is never unowned, and the child never runs before it owns the port.
 
@@ -184,16 +126,16 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @give!
-`( ports quotation -- task )` — *Unit constructor.* `@give` with no values operand: the child stack is the given ports alone, exactly as `ports [] (q) @give`.
+`( ports quotation -- task )` — `@give` with no values operand: the child stack is the given ports alone, exactly as `ports [] (q) @give`.
 
 ### @load
-`( values path -- )` — *Unit constructor.* Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
+`( values path -- )` — Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
 
 ### @load!
-`( path -- )` — *Unit constructor.* `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`.
+`( path -- )` — `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`.
 
 ### @spawn
-`( values quotation -- task )` — *Unit constructor.* Initialize a child stack from the explicit values list and run the quotation concurrently. Use `[]` for no initial values; the ambient stack never crosses the boundary. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
+`( values quotation -- task )` — Initialize a child stack from the explicit values list and run the quotation concurrently. Use `[]` for no initial values; the ambient stack never crosses the boundary. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
 
 #### Examples
 
@@ -203,7 +145,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @spawn!
-`( quotation -- task )` — *Unit constructor.* `@spawn` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @spawn`.
+`( quotation -- task )` — `@spawn` with no values operand: the quotation runs on an empty stack, exactly as `[] (q) @spawn`.
 
 #### Examples
 
@@ -257,31 +199,31 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( ds l -- x )` — Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty path returns `ds` unchanged.
 
 ### atan2
-`( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
+`( y x -- z )` — Two-argument arctangent; returns float.
 
 ### band
-`( x y -- z )` — **Pervasive.** Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``.
+`( x y -- z )` — Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``.
 
 ### bi2
 `( x y p q -- ... )` — Apply each of two quotations to the same pair of operands.
 
 ### bnot
-`( x -- y )` — **Pervasive.** Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`.
+`( x -- y )` — Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`.
 
 ### bor
-`( x y -- z )` — **Pervasive.** Bitwise or. See `band`.
+`( x y -- z )` — Bitwise or. See `band`.
 
 ### both
 `( x y q -- ... )` — Apply one quotation to each of two operands.
 
 ### bsl
-`( x count -- y )` — **Pervasive.** Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``.
+`( x count -- y )` — Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``.
 
 ### bsr
-`( x count -- y )` — **Pervasive.** Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``.
+`( x count -- y )` — Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``.
 
 ### bxor
-`( x y -- z )` — **Pervasive.** Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns.
+`( x y -- z )` — Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns.
 
 ### bytes
 `( value -- bytes )` — Encode a string as UTF-8 into a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged, so the word is idempotent. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions).
@@ -294,13 +236,13 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### call
-`( quotation -- ... )` — *Inline.* Run a quotation on the current stack. A data list pushes its elements.
+`( quotation -- ... )` — Run a quotation on the current stack. A data list pushes its elements.
 
 ### cat
 `( left right -- list )` — Concatenate two lists.
 
 ### ceil
-`( x -- integer )` — **Pervasive.** Round up; the result is int64, `` `overflow `` outside its range.
+`( x -- integer )` — Round up; the result is int64, `` `overflow `` outside its range.
 
 ### char
 `( value -- chars )` — Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``.
@@ -346,7 +288,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### cond
-`( clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Every test runs against the operand stack checkpoint taken after the clause list is consumed. Tests may inspect that stack destructively; only their top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded. The first true test selects its action; otherwise the final else runs, in either case from the original checkpoint. Stack rollback does not roll back environment or IO effects performed by tests.
+`( clauses -- ... )` — The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Every test runs against the operand stack checkpoint taken after the clause list is consumed. Tests may inspect that stack destructively; only their top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded. The first true test selects its action; otherwise the final else runs, in either case from the original checkpoint. Stack rollback does not roll back environment or IO effects performed by tests.
 
 #### Examples
 
@@ -359,7 +301,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( value list -- list )` — Raw structural prepend. On data, `1 [2 3] cons` is `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not safe partial application — that is `partial`.
 
 ### cos
-`( x -- y )` — **Pervasive.** Cosine; float transcendental.
+`( x -- y )` — Cosine; float transcendental.
 
 ### cut
 `( list starts -- pieces )` — Split a list into one piece per start index. Each piece runs from its start up to the next start, and the last runs to the end of the list; elements before the first start belong to no piece. Starts must be integers from zero through the length, in nondecreasing order, so equal starts give empty pieces. A start out of range or below its predecessor fails with `` `domain `` at that start's position. Strings cut into strings.
@@ -383,13 +325,13 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( collection selector -- collection )` — Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys.
 
 ### dip
-`( x (q: ... -- ...) -- ... x )` — *Inline.* Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results.
+`( x (q: ... -- ...) -- ... x )` — Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results.
 
 ### distinct
 `( list -- list )` — First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`.
 
 ### div
-`( x y -- z )` — **Pervasive.** Checked integer division. Division by zero is `` `domain ``.
+`( x y -- z )` — Checked integer division. Division by zero is `` `domain ``.
 
 ### doc
 `( name -- string )` — Return the canonical documentation string of a resolved binding. Missing documentation is `` `domain ``.
@@ -401,7 +343,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( x -- x x )` — Duplicate the top stack value.
 
 ### each
-`( collection (a -- b) -- collection )` — *Isolated*. For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``.
+`( collection (a -- b) -- collection )` — For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``.
 
 #### Examples
 
@@ -442,7 +384,7 @@ Ex:
 `( status -- )` — Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status.
 
 ### exp
-`( x -- y )` — **Pervasive.** Natural exponential; float transcendental.
+`( x -- y )` — Natural exponential; float transcendental.
 
 ### exports
 `( module-name -- names )` — Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``.
@@ -505,10 +447,10 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### floor
-`( x -- integer )` — **Pervasive.** Round down; the result is int64, `` `overflow `` outside its range.
+`( x -- integer )` — Round down; the result is int64, `` `overflow `` outside its range.
 
 ### fold
-`( list accumulator (acc a -- acc) -- accumulator )` — *Isolated*. Reduce left-to-right from the supplied accumulator.
+`( list accumulator (acc a -- acc) -- accumulator )` — Reduce left-to-right from the supplied accumulator.
 
 #### Examples
 
@@ -518,10 +460,10 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### fold1
-`( list (acc a -- acc) -- value )` — *Isolated*. Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`.
+`( list (acc a -- acc) -- value )` — Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`.
 
 ### for
-`( collection (a --) -- )` — *Isolated*. Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing.
+`( collection (a --) -- )` — Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing.
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an immutable snapshot taken once at session start. An unset variable is an error, never a blank: absence is absence, and `@attempt`/`result.or-default` is the defaulting idiom. Absent host IO is `` `io ``.
@@ -550,7 +492,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( columns -- groups )` — Group rows from a nonempty list of equal-length columns. Keys are whole composite lists, in first-occurrence order; row indices within each group are ascending. Zero rows produces an empty dictionary. An empty column list or ragged columns raises `` `shape ``; non-list columns raise `` `type ``.
 
 ### if
-`( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
+`( bool then else -- ... )` — Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``.
 
 ### import
 `( module-name q -- )` — Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: every dispatch and explicit lookup follows it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once.
@@ -569,7 +511,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### infra
-`( list (... -- ...) -- list )` — *Isolated*. Run the quotation with the list's elements as the entire substack; the substack that remains is the result list.
+`( list (... -- ...) -- list )` — Run the quotation with the list's elements as the entire substack; the substack that remains is the result list.
 
 #### Examples
 
@@ -611,10 +553,10 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( list -- count )` — Top-level list element count. Lists may be ragged. Dictionary entry count is provided by `dict.size`.
 
 ### lex-cmp-with
-`( left right (left-element right-element -- order) -- order )` — *Isolated*. Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length.
+`( left right (left-element right-element -- order) -- order )` — Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length.
 
 ### linrec
-`( predicate base pre post -- ... )` — *Inline.* Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level.
+`( predicate base pre post -- ... )` — Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level.
 
 ### literal
 `( value -- form )` — Return the form that pushes a value when a quotation runs it. A symbol becomes its quoted occurrence, so `` `x literal `` is `` `x `` and running it pushes `x` instead of executing it. Any other value already pushes itself and is returned unchanged. Wrap the form to get a quotation: `` v literal wrap `` pushes `v` when called.
@@ -627,7 +569,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### log
-`( x -- y )` — **Pervasive.** Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
+`( x -- y )` — Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
 
 ### match?
 `( left right -- bool )` — Whole-value structural equality; **not** pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
@@ -640,13 +582,13 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### max
-`( x y -- z )` — **Pervasive.** The greater of two comparable atoms.
+`( x y -- z )` — The greater of two comparable atoms.
 
 ### mean
 `( list -- mean )` — Return the arithmetic mean of a nonempty numeric list.
 
 ### min
-`( x y -- z )` — **Pervasive.** The lesser of two comparable atoms.
+`( x y -- z )` — The lesser of two comparable atoms.
 
 ### mod
 `( x y -- z )` — Compute remainder of `x` / `y`.
@@ -661,7 +603,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( x y -- y )` — Discard the second value on the stack.
 
 ### not
-`( bool -- bool )` — **Pervasive.** Invert 0/1 values.
+`( bool -- bool )` — Invert 0/1 values.
 
 ### or
 `( x y -- bool )` — Compute boolean or over 0 and 1 values.
@@ -724,7 +666,7 @@ Ex:
 `( x -- )` — Discard the top stack value. (`drop` is the sequence word.)
 
 ### pow
-`( x y -- z )` — **Pervasive.** Exponentiation; returns float.
+`( x y -- z )` — Exponentiation; returns float.
 
 ### product
 `( list -- product )` — Multiply every element of a numeric list; 1 when the list is empty. A nonempty list's product starts from its first element, so a list of rows multiplies to a row.
@@ -794,10 +736,10 @@ Ex:
 ```
 
 ### round
-`( x -- integer )` — **Pervasive.** Round to nearest; the result is int64, `` `overflow `` outside its range.
+`( x -- integer )` — Round to nearest; the result is int64, `` `overflow `` outside its range.
 
 ### scan
-`( list accumulator (acc a -- acc) -- list )` — *Isolated*. Like `fold` but returns every intermediate accumulator; same length as the input.
+`( list accumulator (acc a -- acc) -- list )` — Like `fold` but returns every intermediate accumulator; same length as the input.
 
 #### Examples
 
@@ -816,7 +758,7 @@ Ex:
 `( number -- sign )` — Return the int −1, 0, or 1 according to the sign of a number.
 
 ### sin
-`( x -- y )` — **Pervasive.** Sine; float transcendental.
+`( x -- y )` — Sine; float transcendental.
 
 ### sort
 `( list -- sorted )` — Return a stable ascending sort of a list by `cmp`.
@@ -839,7 +781,7 @@ Ex:
 ```
 
 ### sqrt
-`( x -- y )` — **Pervasive.** Square root. `` `domain `` on negative inputs (the result would be NaN).
+`( x -- y )` — Square root. `` `domain `` on negative inputs (the result would be NaN).
 
 ### stack
 Copy the visible operand stack into a bottom-to-top list while leaving every original value in place.
@@ -848,7 +790,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( -- names )` — Return the names of the embedded standard-library modules as a list of symbols in codepoint order.
 
 ### stencil
-`( list width (window -- result) -- list )` — *Isolated*. Apply to each overlapping window of a positive int width, left-to-right. A width larger than the input returns `()` without applying the quotation; zero and negative widths are `` `domain ``. The result has `max(len-width+1, 0)` elements.
+`( list width (window -- result) -- list )` — Apply to each overlapping window of a positive int width, left-to-right. A width larger than the input returns `()` without applying the quotation; zero and negative widths are `` `domain ``. The result has `max(len-width+1, 0)` elements.
 
 #### Examples
 
@@ -911,7 +853,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( -- descriptors )` — Test-Session-only discovery of current canonical registrations, including root sources' private registrations, sorted by module then test name and source identifier. Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``. File-private registrations also include an integer `` `source `` identifier local to the test Session, distinguishing equal names in different files. Descriptors never contain executable bodies or authority handles. Aliases do not duplicate entries. Ordinary Sessions receive `` `domain ``.
 
 ### times
-`( n quotation -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized.
+`( n quotation -- ... )` — Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized.
 
 ### tri2
 `( x y p q r -- ... )` — Apply each of three quotations to the same pair of operands in left-to-right order.
@@ -930,7 +872,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( list -- first rest )` — Split a nonempty list into its first element and remaining elements.
 
 ### unfold
-`( state (predicate: state -- bool) (step: state -- state item) -- state list )` — *Isolated*. Before every step, apply the predicate. When it returns 0, return the current state and all generated items. When it returns 1, apply the step, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`.
+`( state (predicate: state -- bool) (step: state -- state item) -- state list )` — Before every step, apply the predicate. When it returns 0, return the current state and all generated items. When it returns 1, apply the step, append the item, and continue from the returned state. The predicate is therefore always checked before the first step, and a false initial predicate returns the initial state and `()`.
 
 #### Examples
 
@@ -969,7 +911,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( name -- )` — Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition.
 
 ### while
-`( cond body -- ... )` — *Inline.* At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized.
+`( cond body -- ... )` — At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized.
 
 ### windows
 `( list width -- windows )` — Return overlapping windows of width `width`.
@@ -998,7 +940,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( value -- list )` — Wrap `value` in a list.
 
 ### zip-with
-`( left right (a b -- c) -- list )` — *Isolated*. Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `partial` compositions.
+`( left right (a b -- c) -- list )` — Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `partial` compositions.
 
 #### Examples
 
@@ -1742,7 +1684,7 @@ l {read-timeout-ms 5000} (handler) http.server.@serve
 ```
 
 ### route
-`( request routes -- response )` — *Inline.* Dispatch a request over a list of `[method pattern handler]` rows. The method is a string compared exactly against the request's `` `method ``. A pattern is a slash path such as `"/users/:id"` whose segments must equal the request's `` `path `` segments one for one, except that a segment beginning with `:` binds any nonempty path segment under its name in a string dictionary. The first row whose pattern and method both match has the request, with `` `params `` set to that dictionary, passed to its handler, which is applied inline with the contract `( request -- response )`. Middleware is composition: wrap the handler quotation with `cat`.
+`( request routes -- response )` — Dispatch a request over a list of `[method pattern handler]` rows. The method is a string compared exactly against the request's `` `method ``. A pattern is a slash path such as `"/users/:id"` whose segments must equal the request's `` `path `` segments one for one, except that a segment beginning with `:` binds any nonempty path segment under its name in a string dictionary. The first row whose pattern and method both match has the request, with `` `params `` set to that dictionary, passed to its handler, which is applied inline with the contract `( request -- response )`. Middleware is composition: wrap the handler quotation with `cat`.
 
 When some pattern matches but no matching row's method does, the result is `405 "method not allowed" text` with an `allow` header joining the matching rows' methods with `,`; when no pattern matches, the result is `http.response.not-found`. Every row is checked before any comparison: a non-list routes value is `` `type ``, a row that is not a list of three elements is `` `shape ``, and a non-string method, non-string pattern, or non-quotation handler is `` `type ``.
 
