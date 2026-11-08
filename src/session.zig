@@ -1571,7 +1571,7 @@ test "source-defined failures retain provenance after their unit" {
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\"defs.ecl\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "word div") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "trace (div boom)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "trace (`div `boom)") != null);
     const runtime_error = (try session.runUnit(
         "assembled.ecl",
         "1 0 (div) cons cons call",

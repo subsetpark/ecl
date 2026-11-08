@@ -100,12 +100,12 @@
  ### def starts?
  (string prefix -- bool : "Return 1 when the string starts with the prefix.")
  ("str.starts? expects a string and a string prefix" checked-pair
-  (|s p| s len p len >= s p pair (opens-with?) with (0) if) call) `starts? def
+  (|s p| s len p len >= s p pair (opens-with?) cat (0) if) call) `starts? def
 
  ### def ends?
  (string suffix -- bool : "Return 1 when the string ends with the suffix.")
  ("str.ends? expects a string and a string suffix" checked-pair
-  (|s p| s len p len >= s p pair (closes-with?) with (0) if) call) `ends? def
+  (|s p| s len p len >= s p pair (closes-with?) cat (0) if) call) `ends? def
 
  ### def contains?
  (string needle -- bool :
@@ -124,7 +124,7 @@
    (split dup len 1 >
     `domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
     first len)
-   with
+   cat
    if)
   call) `index-of def
 
@@ -141,7 +141,7 @@
   (|s n| n 0 >=
    `domain error.new "str.repeat requires a nonnegative count" error.with-message assert
    n 0 > s len 0 > and
-   s s len n * pair (take) with
+   s s len n * pair (take) cat
    ("")
    if)
   call) `repeat def

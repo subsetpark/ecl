@@ -4,11 +4,11 @@
 (
  ### defp node-member?
  (nodes node -- bool : "Return 1 when an exact [name version] node occurs in a list.")
- ((match?) partial any?) `node-member? defp
+ ((match?) cons any?) `node-member? defp
 
  ### defp manifest-node
  (manifest -- node : "Return a manifest's [name version] identity.")
- ([name version] swap (swap at) partial each) `manifest-node defp
+ ([name version] swap (swap at) cons each) `manifest-node defp
 
  ### defp node-named?
  (node name -- bool : "Return 1 when an exact node has the given package name.")
@@ -38,7 +38,7 @@
   (`ok at first)
   package required version 3 pack
   (|attempt-result package required version| package required version malformed-version)
-  with
+  cat
   if) `resolve-version-checked defp
 
  ### defp precheck-requirement-value
@@ -57,7 +57,7 @@
   requirement type `dict match?
   requirement `version dict.has?
   and
-  requirement pair package 3 pack (precheck-requirement-value) with
+  requirement pair package 3 pack (precheck-requirement-value) cat
   when) `precheck-present-requirement defp
 
  ### defp precheck-own-version
@@ -67,14 +67,14 @@
 
  ### defp precheck-requirements-dict
  (requirements package -- : "Validate every version in a requirements dict.")
- (|requirements package| requirements dict.pairs package (precheck-requirement) partial for)
+ (|requirements package| requirements dict.pairs package (precheck-requirement) cons for)
  `precheck-requirements-dict defp
 
  ### defp precheck-requirements-value
  (requirements package -- : "Validate requirement versions when the field is a dict.")
  (|requirements package|
   requirements type `dict match?
-  requirements package pair (precheck-requirements-dict) with
+  requirements package pair (precheck-requirements-dict) cat
   ()
   if) `precheck-requirements-value defp
 
@@ -98,10 +98,10 @@
   "Attach provenance to version failures, then validate a manifest.")
  (|candidate package|
   candidate `version dict.has?
-  candidate package pair (precheck-own-version) with
+  candidate package pair (precheck-own-version) cat
   when
   candidate `requires dict.has?
-  candidate package pair (precheck-manifest-requirements) with
+  candidate package pair (precheck-manifest-requirements) cat
   when
   candidate pkg.manifest.validate) `precheck-and-validate-manifest defp
 
@@ -127,8 +127,8 @@
   name
   version
   left-package right-package cmp -1 =
-  left-package left-hash right-package right-hash 4 pack (declaration-pairs) with
-  right-package right-hash left-package left-hash 4 pack (declaration-pairs) with
+  left-package left-hash right-package right-hash 4 pack (declaration-pairs) cat
+  right-package right-hash left-package left-hash 4 pack (declaration-pairs) cat
   if
   raise-hash-conflict) `hash-conflict defp
 
@@ -218,7 +218,7 @@
    prior (`requirer at) (`hash at) bi
    package requirement `hash at)
   infra
-  (hash-conflict) with
+  (hash-conflict) cat
   when
   prior `git-commit prior `git-commit at requirement `source at `commit "" dict.get merge-commit put
   `source prior requirement canonical-source put
@@ -229,7 +229,7 @@
  (|left right|
   left empty? right empty? or left right match? or
   `domain error.new "one package version has conflicting Git commits" error.with-message assert
-  left empty? right () partial left () partial if) `merge-commit defp
+  left empty? right () cons left () cons if) `merge-commit defp
 
  ### defp canonical-source
  (prior requirement -- source : "Reject conflicting Git commits and order equivalent mirrors.")
@@ -239,13 +239,13 @@
  (left right -- source : "Choose a source by canonical encoding after checking Git identity.")
  (|left right|
   left pkg.manifest.write-source right pkg.manifest.write-source cmp 1 =
-  right () partial left () partial if) `canonical-source-pair defp
+  right () cons left () cons if) `canonical-source-pair defp
 
  ### defp lex-min
  (left right -- minimum : "Return the lexicographically lesser of two strings.")
  (|left right|
   left right cmp 1 =
-  right () partial left () partial if) `lex-min defp
+  right () cons left () cons if) `lex-min defp
 
  ### defp existing-source
  (sources node name requirement package -- record : "Merge a declaration into an existing node.")
@@ -257,8 +257,8 @@
   "Return the canonical source record after one declaration.")
  (|sources node name requirement package|
   sources node dict.has?
-  sources node name requirement package 5 pack (existing-source) with
-  requirement package pair (source-record) with
+  sources node name requirement package 5 pack (existing-source) cat
+  requirement package pair (source-record) cat
   if) `source-for defp
 
  ### defp record-source
@@ -287,8 +287,8 @@
   package version pair
   state `root at manifest-node
   match?
-  state (root-manifest) partial
-  state package version requirer 4 pack (catalog-manifest) with
+  state (root-manifest) cons
+  state package version requirer 4 pack (catalog-manifest) cat
   if
   package version matching-manifest) `manifest-for defp
 
@@ -310,8 +310,8 @@
   and
   state `catalog at package {} dict.get version dict.has?
   and
-  state package version 3 pack (catalog-value) with
-  requirer package version 3 pack (missing-manifest) with
+  state package version 3 pack (catalog-value) cat
+  requirer package version 3 pack (missing-manifest) cat
   if) `catalog-manifest defp
 
  ### defp matching-manifest
@@ -329,7 +329,7 @@
  (state manifest -- state : "Visit every requirement of one manifest in canonical name order.")
  (|state manifest|
   manifest `requires at pkg.data.sorted-entries
-  state manifest `name at (walk-edge) partial fold) `walk-manifest defp
+  state manifest `name at (walk-edge) cons fold) `walk-manifest defp
 
  ### defp walk-edge
  (state pair requirer -- state :
@@ -353,11 +353,11 @@
   "Skip a visited node or visit a new exact node.")
  (|state node requirer package requirement|
   state `active at node node-member?
-  state node pair (raise-cycle) with
+  state node pair (raise-cycle) cat
   when
   state `visited at node node-member?
-  state () partial
-  state node requirer package requirement 5 pack (visit-new-node) with
+  state () cons
+  state node requirer package requirement 5 pack (visit-new-node) cat
   if) `visit-node defp
 
  ### defp visit-new-node
@@ -401,7 +401,7 @@
  (name state -- node : "Return the highest reached exact node for a package name.")
  (|name state|
   state `sources at dict.keys
-  name (node-named?) partial filter
+  name (node-named?) cons filter
   dup (1 at) each pkg.version.max
   node-with-version) `selected-node defp
 
@@ -411,7 +411,7 @@
 
  ### defp node-with-version
  (nodes version -- node : "Return the exact node with a given version.")
- (|nodes version| nodes version (node-has-version?) partial filter first) `node-with-version defp
+ (|nodes version| nodes version (node-has-version?) cons filter first) `node-with-version defp
 
  ### defp selection-pair
  (name state -- pair : "Return one selected package entry.")
@@ -421,7 +421,7 @@
 
  ### defp selected-packages
  (state -- packages : "Build the selected package map from reached artifact sources.")
- (|state| state selected-names state (selection-pair) partial each raze dict.from-flat)
+ (|state| state selected-names state (selection-pair) cons each raze dict.from-flat)
  `selected-packages defp
 
  ### defp minimum-map
@@ -445,7 +445,7 @@
  (state -- requires : "Build the root-plus-selected per-requirer requirement table.")
  (|state|
   state ([root name] at-path) (`root at minimum-map) bi pair wrap
-  state selected-names state (requires-pair) partial each
+  state selected-names state (requires-pair) cons each
   cat raze dict.from-flat) `resolved-requires defp
 
  ### defp resolved-lock
@@ -474,8 +474,8 @@
  ### defp reach-name
  (state name -- state : "Skip already reached names before adding selected dependency edges.")
  (|state name|
-  state `seen at name (match?) partial any?
-  state () partial state name pair (reach-new) with if) `reach-name defp
+  state `seen at name (match?) cons any?
+  state () cons state name pair (reach-new) cat if) `reach-name defp
 
  ### defp reach-new
  (state name -- state : "Record one selected package and enqueue its direct dependencies.")
@@ -489,13 +489,13 @@
  (|lock|
   {seen []} `pending lock `root at wrap put `requires lock `requires at put
   (dup `pending at empty? not) (reach-step) while `seen at
-  lock (prune-names) partial call) `prune defp
+  lock (prune-names) cons call) `prune defp
 
  ### defp prune-names
  (names lock -- lock : "Keep the selected graph portable and entirely root-reachable.")
  (|names lock|
   lock `requires lock `requires at names dict.take put
-  `packages lock `packages at names lock `root at (match? not) partial filter dict.take put)
+  `packages lock `packages at names lock `root at (match? not) cons filter dict.take put)
  `prune-names defp
 
  ### def resolve

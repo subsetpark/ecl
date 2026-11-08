@@ -115,7 +115,7 @@
   "Return every value of a header as a list, matching the name regardless of letter case and in
    dictionary order; a string value counts as one. `()` when the header is absent. A non-response or
    non-string name is `` `type ``.")
- (checked-name swap checked `headers at dict.pairs swap (values-of) partial each raze) `header def
+ (checked-name swap checked `headers at dict.pairs swap (values-of) cons each raze) `header def
 
  ### def header?
  (response name -- bool : "Return 1 when the response carries the header under any letter case.")

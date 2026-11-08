@@ -21,13 +21,13 @@
   "Honor an existing lock unless dependency selection was explicitly requested.")
  (|work manifest update|
   work `project at `directory at "ecl.lock" fs.exists? update not and
-  work `project at manifest pair (existing-lock) with
-  work manifest pair (resolve) with if) `selection def
+  work `project at manifest pair (existing-lock) cat
+  work manifest pair (resolve) cat if) `selection def
 
  ### def recover
  (project -- : "Complete a validated pending publication under the caller's mutation lock.")
  (|project|
-  project `directory at project `path at (pkg.verify.publication) partial pkg.transaction.recover)
+  project `directory at project `path at (pkg.verify.publication) cons pkg.transaction.recover)
  `recover def
 
  ### def activate
@@ -35,7 +35,7 @@
   "Journal the published candidate and activate it through the recovery protocol.")
  (|work lock-text|
   work `project at `directory at work `location at lock-text
-  work `project at `path at (pkg.verify.publication) partial pkg.transaction.prepare
+  work `project at `path at (pkg.verify.publication) cons pkg.transaction.prepare
   work `project at recover) `activate def
 
  ### defp location
@@ -50,14 +50,14 @@
   project recover
   project `directory at "ecl.pkg" fs.read-text
   project vendor location offline pkg.generation.start
-  update (synchronize-work) partial call) `synchronize-held defp
+  update (synchronize-work) cons call) `synchronize-held defp
 
  ### defp synchronize-work
  (manifest-text work update -- :
   "Build against one observed manifest and one portable lock selection.")
  (|manifest-text work update|
   work manifest-text pkg.manifest.read update selection
-  manifest-text work pair (publish) with call) `synchronize-work defp
+  manifest-text work pair (publish) cat call) `synchronize-work defp
 
  ### defp publish
  (lock-text manifest-text work -- :

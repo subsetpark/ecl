@@ -18,7 +18,7 @@
  (context hash -- bytes : "An absent or damaged previous generation is only an optimization miss.")
  (|context hash|
   context `active at empty? ([])
-  context hash pair (pair (active-read) @attempt optional) with if) `previous defp
+  context hash pair (pair (active-read) @attempt optional) cat if) `previous defp
 
  ### defp network
  (context requirement -- bytes : "Offline operation never starts a network request.")
@@ -32,25 +32,25 @@
   "Try the captured generation and cache before the pinned network source.")
  (|context requirement|
   context requirement `hash at previous
-  context requirement pair (cached-or-network) with call) `external defp
+  context requirement pair (cached-or-network) cat call) `external defp
 
  ### defp cached-or-network
  (bytes context requirement -- bytes :
   "Fill one missing artifact from the optional cache or source.")
  (|bytes context requirement|
   bytes empty?
-  context requirement pair (cache-or-network) with bytes () partial if) `cached-or-network defp
+  context requirement pair (cache-or-network) cat bytes () cons if) `cached-or-network defp
 
  ### defp cache-or-network
  (context requirement -- bytes : "Require exact bytes even when a shared cache is present.")
  (|context requirement|
   context `cache at requirement `hash at pkg.cache.read
-  context requirement pair (network-if-empty) with call) `cache-or-network defp
+  context requirement pair (network-if-empty) cat call) `cache-or-network defp
 
  ### defp network-if-empty
  (bytes context requirement -- bytes : "Fetch only an artifact unavailable from local inputs.")
  (|bytes context requirement|
-  bytes empty? context requirement pair (network) with bytes () partial if) `network-if-empty defp
+  bytes empty? context requirement pair (network) cat bytes () cons if) `network-if-empty defp
 
  ### defp pin
  (context requirement -- bytes :
@@ -69,11 +69,11 @@
   "Obtain an exact pin, with a private copy independent of cache lifetime.")
  (|context requirement|
   context `downloads at requirement `hash at pkg.cache.read-at
-  context requirement pair (pin-if-empty) with call) `requirement def
+  context requirement pair (pin-if-empty) cat call) `requirement def
 
  ### defp pin-if-empty
  (bytes context requirement -- bytes :
   "Reuse an already pinned artifact or materialize it exactly once.")
  (|bytes context requirement|
-  bytes empty? context requirement pair (pin) with bytes () partial if) `pin-if-empty defp
+  bytes empty? context requirement pair (pin) cat bytes () cons if) `pin-if-empty defp
 ) `pkg.obtain @defm

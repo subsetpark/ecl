@@ -274,7 +274,7 @@ test "native: competing message receivers reject overlap and cancellation restor
 
 test "native: cancellation interrupts message producers under shared budget pressure" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgramWithLimits(workers, .{ .message_capacity = 1, .message_queue_bytes = 8 }, "portprobe.factory [] port.open `p set p portprobe.messages [] port.begin `x set " ++
-        "x portprobe.sender port.endpoint wrap (|s| [7] 64 take s (swap port.send) partial for) @spawn `producer set " ++
+        "x portprobe.sender port.endpoint wrap (|s| [7] 64 take s (swap port.send) cons for) @spawn `producer set " ++
         "x portprobe.receiver port.endpoint port.receive `value at x port.cancel " ++
         "producer task.await `err at `kind at x port.close p port.close portprobe.cleaned", "7 cancelled 1");
 }
@@ -348,8 +348,8 @@ test "native: endpoint attenuation rejects other directions and ownership transf
 test "native: media pipeline drains output and diagnostics concurrently under pressure" {
     for ([_]u32{ 1, 8 }) |workers| for ([_]u32{ 1, 8 }) |capacity| try expectPortProgramAtCapacity(workers, 4, capacity, "portprobe.factory [] port.open `p set p portprobe.pipeline [] port.begin `x set " ++
         "x portprobe.input port.endpoint `w set " ++
-        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) partial while r 8 fd.read) @spawn `a set " ++
-        "x portprobe.diagnostics port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) partial while r 8 fd.read) @spawn `b set " ++
+        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) cons while r 8 fd.read) @spawn `a set " ++
+        "x portprobe.diagnostics port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) cons while r 8 fd.read) @spawn `b set " ++
         "w [3] 32 take fd.write w port.finish " ++
         "a task.await `ok at dup first [3] 32 take match? swap 1 at len " ++
         "b task.await `ok at dup first [252] 32 take match? swap 1 at len " ++
@@ -375,7 +375,7 @@ test "native: input finish preserves an accepted writer through its final byte" 
 test "native: concurrent writes remain contiguous through repeated byte pressure" {
     for ([_]u32{ 1, 8 }) |workers| try expectPortProgram(workers, 4, "portprobe.factory [] port.open `p set p portprobe.echo [] port.begin `x set " ++
         "x portprobe.input port.endpoint `w set " ++
-        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) partial while) @spawn `reader set " ++
+        "x portprobe.output port.endpoint wrap (|r| [] (dup len 32 <) r (8 fd.read cat) cons while) @spawn `reader set " ++
         "w wrap ([1] 16 take fd.write) @spawn `a set w wrap ([2] 16 take fd.write) @spawn `b set " ++
         "a task.await `ok at pop b task.await `ok at pop w port.finish " ++
         "reader task.await `ok at first dup [1] 16 take [2] 16 take cat match? " ++

@@ -221,7 +221,7 @@ test "exports lists a module's public words and stdlib the embedded modules" {
             "`core exports (`effect match?) any? " ++
             "[] ((1) `shown def (2) `hidden defp) `m @defm `m exports " ++
             "stdlib (`dict match?) any?",
-        "(next-member open-tgz read-member sha256 unpack-tgz) 1 (shown) 1",
+        "(`next-member `open-tgz `read-member `sha256 `unpack-tgz) 1 (`shown) 1",
     );
     try support.expectErrors(&.{
         .{ .name = "unknown module", .source = "`no-such-module exports", .kind = "undefined-word", .word = "exports" },
@@ -502,15 +502,15 @@ test "long annotation traversal and reflection observe cancellation" {
 }
 
 // ── Milestone 10 (one-definition-merge) ──────────────────────────────────────
-// The merge makes `v 'name set` observationally `v literal wrap 'name def`:
+// The merge makes `v 'name set` observationally `v wrap 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
-// a "value" is a word whose body is the literal capture: `(v)`, or
+// a "value" is a word whose body is the capture: `(v)`, or
 // `(`v)` for a word `v`. Since M11 made source annotations optional
 // everywhere, the sugar synthesizes no metadata at all and the equivalence is
 // exact.
 
-test "definitions: set publishes a literal-capture word with no synthesized metadata" {
-    // A constant is a word whose body is the literal capture, so referencing
+test "definitions: set publishes a capture word with no synthesized metadata" {
+    // A constant is a word whose body is the capture, so referencing
     // it applies that body and pushes exactly the captured value. The capture
     // is inert for every kind of value: a quotation is pushed rather than run,
     // and a bare word stays data rather than resolving.
@@ -531,7 +531,7 @@ test "definitions: which reports a def while see prints the set capture body" {
     defer runtime.deinit();
     // Reflection reports what is stored: one kind, and no metadata, because
     // the sugar supplies none. `which` reports the public def while `see`
-    // prints only its stored literal-capture body.
+    // prints only its stored capture body.
     try expectOk(&runtime, "3 `x set `x which `x see");
     try std.testing.expectEqualStrings(
         "x -> x def public\n" ++
@@ -695,8 +695,9 @@ test "quotes: one quoted occurrence that pushes its symbol" {
         // A quote in a locals body is the symbol, not the local.
         .{ .name = "locals", .source = "5 (|x| `x x) call", .expected = "x 5" },
         .{ .name = "module body", .source = "[] ((|a| `a) `w def) `quoting @defm 5 quoting.w", .expected = "a" },
-        // A quoted operation pushes its symbol; no idiom takes it as the word.
-        .{ .name = "no idiom", .source = "[1 2] (pop `+) each", .expected = "(+ +)" },
+        // A quoted operation pushes its symbol; no idiom takes it as the word,
+        // and the collected symbols are data in the result.
+        .{ .name = "no idiom", .source = "[1 2] (pop `+) each", .expected = "(`+ `+)" },
     });
     try support.expectErrors(&.{
         .{ .name = "dict entry", .source = "{`a 1}", .kind = "parse" },

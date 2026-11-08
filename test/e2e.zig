@@ -948,7 +948,7 @@ test "runtime errors are dicts on stderr" {
             "kind custom",
             "msg \"raised custom\"",
             "word raise",
-            "trace (raise)",
+            "trace (`raise)",
             "source \"<command>\"",
         },
     });
@@ -1357,7 +1357,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] ((-- value) 40 literal wrap `k def) `m @defm m.k `m.k which",
+        "[] ((-- value) 40 wrap `k def) `m @defm m.k `m.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -1740,7 +1740,7 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
     var unchanged = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (\"original\" fail) @attempt dup (result.or-raise) partial [] swap @attempt `err at swap `err at match?",
+        "[] (\"original\" fail) @attempt dup (result.or-raise) cons [] swap @attempt `err at swap `err at match?",
     });
     defer unchanged.deinit();
     try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -1923,6 +1923,6 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
         .exit_code = 1,
         // The name is taken first, so a misplaced name is refused before
         // anything else is examined.
-        .stderr_contains = &.{ "kind type", "@defm expected a symbol name", "trace (@defm)" },
+        .stderr_contains = &.{ "kind type", "@defm expected a symbol name", "trace (`@defm)" },
     });
 }

@@ -30,7 +30,7 @@
   metadata `path at ".ecl-package.tgz" match? not require
   metadata `path at ".ecl-package.catalog" match? not require
   metadata `path at "ecl.pkg" match?
-  metadata (`kind at `file match? require) partial when) `member-policy defp
+  metadata (`kind at `file match? require) cons when) `member-policy defp
 
  ### defp manifest-member
  (state metadata -- state :
@@ -42,7 +42,7 @@
   metadata `size at state `size at + dup 67108864 <= require
   `size swap put
   metadata `path at "ecl.pkg" match?
-  state `archive at (read-manifest) partial
+  state `archive at (read-manifest) cons
   () if) `manifest-member defp
 
  ### defp read-manifest
@@ -65,12 +65,12 @@
  (metadata manifest -- bool : "Select only regular source files named by the manifest's globs.")
  (|metadata manifest|
   metadata `kind at `file match?
-  manifest `sources at metadata `path at (pkg.glob.matches?) partial any? and) `selected? defp
+  manifest `sources at metadata `path at (pkg.glob.matches?) cons any? and) `selected? defp
 
  ### defp exported?
  (declaration manifest -- bool : "Keep only module names explicitly exported by this package.")
  (|declaration manifest|
-  manifest `exports at declaration (match?) partial any?) `exported? defp
+  manifest `exports at declaration (match?) cons any?) `exported? defp
 
  ### defp source-artifact
  (state metadata -- state :
@@ -78,7 +78,7 @@
  (|state metadata|
   state `artifacts at len 4096 < require
   state `archive at 16777216 contents chars parse source.declarations (chars) each
-  state `manifest at (exported?) partial filter
+  state `manifest at (exported?) cons filter
   state metadata record-artifact) `source-artifact defp
 
  ### defp record-artifact

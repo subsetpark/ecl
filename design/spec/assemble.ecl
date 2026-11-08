@@ -74,7 +74,7 @@
    assert
    current marker fragment str.replace)
   call)
- partial
+ cons
  fold
  dup "<!-- include:" str.contains? not
  `domain error.new

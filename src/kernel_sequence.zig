@@ -45,6 +45,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
         .reverse => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return a list with its top-level element order reversed." },
         .rest => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return all but the first element of a nonempty list." },
         .find => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list needle -- index", .doc = "Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches." },
+        .cons => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- list", .doc = "Prepend `value` to the left end of `list` as data: when the list runs, it pushes `value`. A symbol therefore enters as a quoted occurrence rather than a word; `execute` runs a symbol a quotation pushes.\n\nEx:\n  3 (+) cons\n(3 +)\n  `w () cons\n(`w)" },
     };
 }
 
@@ -70,6 +71,7 @@ fn primitive(evaluator: *Fiber, comptime operation: Op) MachineError!void {
         .first => firstPrimitive(evaluator),
         .rest => restPrimitive(evaluator),
         .find => findPrimitive(evaluator),
+        .cons => consPrimitive(evaluator),
         .range => rangePrimitive(evaluator),
         .shape => shapePrimitive(evaluator),
         .len => lenPrimitive(evaluator),
@@ -3034,16 +3036,54 @@ fn startTypedCons(evaluator: *Fiber, item: Value, collection: *heap.OwnedValue) 
     return false;
 }
 
-/// `cons`: a typed copy when the atom and the list join into one leaf, and
-/// otherwise the boxed copy every mixed move takes, profiled into its result.
-pub fn consForPrims(evaluator: *Fiber) MachineError!void {
+/// `cons`: a typed copy when the atom and the list join into one leaf, a
+/// short spine built in place, and otherwise the boxed copy every mixed move
+/// takes, profiled into its result. The head enters as data (`popDatum`), so
+/// the built list pushes it whatever it is.
+fn consPrimitive(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var collection = try evaluator.popList();
     defer collection.deinit();
-    var item = try evaluator.popValue();
+    var item = try evaluator.popDatum();
     defer item.deinit();
-    if (try startTypedCons(evaluator, item.borrow(), &collection)) return;
-    try ListCopyDriver.installCons(evaluator, &item, &collection);
+    try consValues(evaluator, &item, &collection);
+}
+
+fn consValues(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+    if (try startTypedCons(evaluator, item.borrow(), collection)) return;
+    if (try consSmallSpine(evaluator, item, collection)) return;
+    try ListCopyDriver.installCons(evaluator, item, collection);
+}
+
+/// The longest tail a spine `cons` copies where the word is invoked. Below
+/// it the copy is a fixed handful of slot writes, so it needs neither the
+/// copy driver nor the materializer's profiling pass.
+const small_spine_cons = 16;
+
+/// `item` onto a short list when the result is a generic spine whatever the
+/// tail holds: a head no leaf can hold (a list, symbol, dict, ...) decides
+/// the representation by itself. One allocation: the head takes the first
+/// slot and each tail element is retained into the next. Quotations built by
+/// partial application, `x (q) cons`, are the common case.
+fn consSmallSpine(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) error{OutOfMemory}!bool {
+    if (list.ListProfile.of(item.borrow()).kind != .mixed) return false;
+    const tail = collection.borrow();
+    const count: usize = @intCast(tail.list.length());
+    if (count > small_spine_cons) return false;
+    var builder = try heap.ListBuilder(.generic_spine).initCode(evaluator.allocator, count + 1, count + 1, .none);
+    const slots = builder.items()[0 .. count + 1];
+    slots[0] = item.take();
+    for (slots[1..], 0..) |*slot, index| {
+        const element = list.atUnchecked(tail, index);
+        heap.retainValue(element);
+        slot.* = element;
+    }
+    const header = builder.finish();
+    evaluator.pushOwned(.{ .list = header }) catch |err| {
+        evaluator.releases.releaseHeader(header);
+        return err;
+    };
+    return true;
 }
 
 /// A nested typed index list over a typed source, gathered as one leaf kernel

@@ -31,7 +31,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized." },
         .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Every test runs against the operand stack checkpoint taken after the clause list is consumed. Tests may inspect that stack destructively; only their top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded. The first true test selects its action; otherwise the final else runs, in either case from the original checkpoint. Stack rollback does not roll back environment or IO effects performed by tests." },
         .{ .name = "each", .primitive = each, .effect = "collection (a -- b) -- collection", .doc = "For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``." },
-        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (a b -- c) -- list", .doc = "Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `partial` compositions." },
+        .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (a b -- c) -- list", .doc = "Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `cons` compositions." },
         .{ .name = "for", .primitive = forWord, .effect = "collection (a --) --", .doc = "Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing." },
         .{ .name = "fold", .primitive = fold, .effect = "list accumulator (acc a -- acc) -- accumulator", .doc = "Reduce left-to-right from the supplied accumulator." },
         .{ .name = "fold1", .primitive = fold1, .effect = "list (acc a -- acc) -- value", .doc = "Reduce a nonempty list left to right from its first element rather than from an explicit accumulator; an empty list requires `fold`." },
@@ -332,6 +332,26 @@ fn dip(evaluator: *Fiber) MachineError!void {
     defer quotation.deinit();
     var protected = try evaluator.popValue();
     defer protected.deinit();
+    try startDip(evaluator, &quotation, &protected);
+}
+
+/// `x quotation cons dip` without the list: the value beneath `x` is
+/// protected and `x` stays on the stack for the quotation, as the first form
+/// of `(x quotation...)` would have pushed it. The `cons call` and `cons dip`
+/// phrases in `idioms.zig` reach this.
+pub fn dipBelowHead(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(3);
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    var head = try evaluator.popValue();
+    defer head.deinit();
+    var protected = try evaluator.popValue();
+    defer protected.deinit();
+    try evaluator.pushOwned(head.take());
+    try startDip(evaluator, &quotation, &protected);
+}
+
+fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *heap.OwnedValue) MachineError!void {
     const state = try evaluator.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
@@ -1147,7 +1167,7 @@ const IterationState = struct {
                 self.index,
             );
         }
-        var result = try evaluator.popValue();
+        var result = try evaluator.popDatum();
         self.results.?.borrowMut().appendOwned(result.take());
         self.index += 1;
         if (self.index == self.count) {
@@ -1197,7 +1217,7 @@ const IterationState = struct {
         var accumulator = try evaluator.popValue();
         defer accumulator.deinit();
         const accumulator_value = accumulator.borrow();
-        if (self.kind == .scan) self.results.?.borrowMut().appendOwned(accumulator.take());
+        if (self.kind == .scan) self.results.?.borrowMut().appendOwned(value.datum(accumulator.take()));
         self.index += 1;
         if (self.index == self.count) {
             if (self.kind == .scan) {
@@ -1852,7 +1872,7 @@ const StencilApplication = struct {
                 .{ .seeded = 1, .expected = 1, .observed = observed },
                 control.index,
             );
-        var result = try evaluator.popValue();
+        var result = try evaluator.popDatum();
         control.results.appendOwned(result.take());
         control.index += 1;
         if (control.index == control.count) {
@@ -2039,7 +2059,7 @@ const UnfoldState = struct {
                 .{ .seeded = 1, .expected = 2, .observed = observed },
                 self.index,
             );
-        var item = try evaluator.popValue();
+        var item = try evaluator.popDatum();
         defer item.deinit();
         var next_state = try evaluator.popValue();
         defer next_state.deinit();
@@ -2136,6 +2156,9 @@ const InfraResultDriver = struct {
     result: ?heap.Owned(Value) = null,
 
     fn install(evaluator: *Fiber, base: usize) error{OutOfMemory}!void {
+        // The isolated stack becomes a list, so each value enters as data
+        // (`value.datum`); the operands are discarded once materialized.
+        for (evaluator.stack.items[base..]) |*item| item.* = value.datum(item.*);
         try evaluator.startDriver(InfraResultDriver{
             .base = base,
             .materializer = .init(.init(evaluator.allocator, evaluator.stack.items[base..])),

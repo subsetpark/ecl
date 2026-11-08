@@ -36,7 +36,7 @@
  ### def from-keys
  (keys value -- dict :
   "Build a dictionary assigning one value to every distinct key. Duplicate keys are `` `domain ``.")
- (|keys value| keys keys value (nip) partial each dict.core.from-lists) `from-keys def
+ (|keys value| keys keys value (nip) cons each dict.core.from-lists) `from-keys def
 
  ### def keys-exactly?
  (candidate declared -- bool :
@@ -45,7 +45,7 @@
  (|candidate declared|
   candidate dict.core.keys len declared len =
   declared distinct len declared len = and
-  declared candidate (swap dict.core.has?) partial all? and) `keys-exactly? def
+  declared candidate (swap dict.core.has?) cons all? and) `keys-exactly? def
 
  ### def update-or
  (dict key default quotation -- dict :
@@ -62,21 +62,21 @@
   "Call the quotation for every entry, replacing values while preserving keys and insertion order.")
  (|d transform|
   d dict.core.keys
-  d pairs transform ((dup first swap 1 wrap at-path) dip call) partial each
+  d pairs transform ((dup first swap 1 wrap at-path) dip call) cons each
   dict.core.from-lists) `map def
 
  ### def filter
  (dict (key value -- bool) -- dict :
   "Call the predicate in insertion order and retain the entries for which it returns 1.")
  (|d predicate|
-  d pairs dup predicate ((dup first swap 1 wrap at-path) dip call) partial each
+  d pairs dup predicate ((dup first swap 1 wrap at-path) dip call) cons each
   where wrap at-path from-pairs) `filter def
 
  ### def reject
  (dict (key value -- bool) -- dict :
   "Call the predicate in insertion order and discard the entries for which it returns 1.")
  (|d predicate|
-  d pairs dup predicate ((dup first swap 1 wrap at-path) dip call not) partial each
+  d pairs dup predicate ((dup first swap 1 wrap at-path) dip call not) cons each
   where wrap at-path from-pairs) `reject def
 
  ### def split

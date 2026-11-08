@@ -105,7 +105,7 @@
   (|entry packages|
    packages entry 1 at `package at `version pair at-path
    entry 1 at `version at pkg.version.less? not)
-  partial
+  cons
   all?
   1 equal)
  `resolution test

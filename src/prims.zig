@@ -13,7 +13,6 @@ const machine = @import("machine.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
-const sequence = @import("kernel_sequence.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const kernel_flat = @import("kernel_flat.zig");
 const task_prims = @import("task_prims.zig");
@@ -32,11 +31,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
         .{ .name = "rolldown", .primitive = rolldown, .effect = "x y z -- y z x", .doc = "Rotate the top three stack values downward." },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the operand stack into a bottom-to-top list while leaving every original value in place." },
-        .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Prepend `value` to the left end of `list`.\n\nNB: An unquoted symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data." },
         .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Whole-value structural equality.\n\nEx.:\n```\n  [1 2] [1 2] =\n[1 1]\n  [1 2] [1 2] match?\n1\n```" },
         .{ .name = "type", .primitive = typeWord, .effect = "value -- type", .doc = "Return the value's kind as a symbol: one of `int`, `float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`." },
         .{ .name = "execute", .primitive = execute, .effect = "word -- ...", .doc = "Evaluate a symbol's binding and dispatch. Non-symbols are `` `type ``; missing words are `` `undefined-word ``." },
-        .{ .name = "literal", .primitive = literal, .effect = "value -- form", .doc = "\"Quote\" a value, such that when the resulting form is evaluated in a quotation, the value is pushed to the stack.\n\nAny literal besides a symbol has this property naturally; when applied to a symbol, `literal` allows the symbol to behave under quotation like an inert value rather than a binding word." },
         .{ .name = "parse", .primitive = parse, .effect = "string -- quotation", .doc = "Parse source text into an unevaluated quotation. Reading interns every symbol and word in the string." },
         .{ .name = "chars", .primitive = chars, .effect = "value -- string", .doc = "Return a value's text content as a string: a string unchanged, the spelling of a symbol, a char as a one-element string, or a byte list decoded as UTF-8. Bytes that are not valid UTF-8 are `` `domain `` with `` `reason `invalid-utf8 ``; a list that is neither a string nor a byte list, or any other kind, is `` `type ``. See [Conversions](SPEC.md#conversions)." },
         .{ .name = "bytes", .primitive = bytesWord, .effect = "value -- bytes", .doc = "Encode a UTF-8 string as a byte list: an integer list whose elements are 0 through 255. A byte list is returned unchanged. Any other value is `` `type ``. Inverse of `chars`; see [Conversions](SPEC.md#conversions)." },
@@ -120,8 +117,10 @@ const StackSnapshot = struct {
     fn advanceCapture(self: *StackSnapshot, evaluator: *Fiber) bool {
         std.debug.assert(evaluator.available() == self.depth);
         const end = self.index + evaluator.workBudget().take(self.depth - self.index);
+        // The snapshot is a list built from stack values, so each enters as
+        // data (`value.datum`), as `cons` would store it.
         while (self.index != end) : (self.index += 1)
-            self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
+            self.values.appendBorrowed(value.datum(evaluator.visibleOperandBorrowed(self.index)));
         return self.index == self.depth;
     }
 
@@ -171,9 +170,6 @@ const StackSnapshotDriver = struct {
     }
 };
 
-fn cons(evaluator: *Fiber) MachineError!void {
-    return sequence.consForPrims(evaluator);
-}
 fn match(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
@@ -223,18 +219,6 @@ fn typeWord(evaluator: *Fiber) MachineError!void {
         .address => "address",
     };
     try evaluator.pushOwned(.{ .symbol = .{ .name = try intern.intern(spelling) } });
-}
-/// Every value but a symbol pushes itself when a quotation runs it; a symbol
-/// would execute, so its form is its quoted occurrence, linked as written.
-fn literal(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(1);
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    const form: Value = switch (item.borrow()) {
-        .symbol => |word| .{ .symbol = .{ .name = word.name, .slot = word.slot | value.quote_flag } },
-        else => item.take(),
-    };
-    return evaluator.pushOwned(form);
 }
 fn execute(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();

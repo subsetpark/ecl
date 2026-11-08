@@ -131,7 +131,7 @@
   `domain error.new "an exported module has a canonical name" error.with-message assert
   candidate `exports at dup distinct len swap len =
   `domain error.new "manifest exports are distinct module names" error.with-message assert
-  candidate `exports at candidate `name at (export-owned?) partial all?
+  candidate `exports at candidate `name at (export-owned?) cons all?
   `domain error.new "a package owns every module it exports" error.with-message assert
   candidate `requires at type `dict match?
   `type error.new "manifest requirements are a dict from local alias to requirement"

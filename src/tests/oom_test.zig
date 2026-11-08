@@ -543,7 +543,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "1 `oom-rebind set 2 `oom-rebind set " ++
             "[] (1 0 div) @attempt pop [] (5 6 +) @attempt pop " ++
             "[] ({kind custom data {detail 7}} raise) @attempt pop " ++
-            "[3 4] (+) with call pop 2 3 (+) (*) (-) tri2 pop pop pop " ++
+            "[3 4] (+) cat call pop 2 3 (+) (*) (-) tri2 pop pop pop " ++
             "[5 6] (+) @attempt pop " ++
             "[7 8] (+) @spawn task.await pop " ++
             "[1] (2) @attempt pop " ++
@@ -581,7 +581,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // Capture-shape recognition allocates on its own path (the fused
             // kernel) and on the rejected one (the generic frame machine);
             // both belong in the consolidated allocation-failure sweep.
-            "[1 2 3] 3 (+) partial each pop " ++
+            "[1 2 3] 3 (+) cons each pop " ++
             "[1 2 3] ((3 4) first +) each pop",
     );
     try runOk(

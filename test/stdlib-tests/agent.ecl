@@ -18,11 +18,11 @@
  (-- : "Re-raise a failing quotation in the caller and leave the agent's stack as it was.")
  ([7 0] agent.start
   (|g|
-   g ((1 0 div) agent.call) partial `domain raises
+   g ((1 0 div) agent.call) cons `domain raises
    g (dup) agent.call [7 0] equal
-   g ((pop) agent.call) partial `domain raises
+   g ((pop) agent.call) cons `domain raises
    g (dup) agent.call [7 0] equal
-   g ((pop pop) agent.call) partial `underflow raises
+   g ((pop pop) agent.call) cons `underflow raises
    g (dup) agent.call [7 0] equal) call)
  `state-isolation test
 
@@ -40,9 +40,9 @@
  ([7 0] agent.start
   (|g|
    g (dup 1 +) 1000 agent.call-for [8 1] equal
-   g ((100 clock.sleep 1) 20 agent.call-for) partial `timeout raises
-   g ((1 +) -1 agent.call-for) partial `domain raises
-   g ((1 +) `x agent.call-for) partial `type raises
+   g ((100 clock.sleep 1) 20 agent.call-for) cons `timeout raises
+   g ((1 +) -1 agent.call-for) cons `domain raises
+   g ((1 +) `x agent.call-for) cons `type raises
    g (dup) agent.call [7 0] equal) call)
  `call-for test
 
@@ -53,8 +53,8 @@
    server task.cancel server task.await pop
    server task.address
    (|g|
-    g ((dup) agent.call) partial `io raises
-    g ((dup) 100 agent.call-for) partial `io raises) call) call)
+    g ((dup) agent.call) cons `io raises
+    g ((dup) 100 agent.call-for) cons `io raises) call) call)
  `dead-agent test
 
  ### test call-for-full-mailbox
@@ -63,7 +63,7 @@
   (|g|
    g (200 clock.sleep) agent.send
    g 16 (dup (dup pop) agent.send) times pop
-   g ((1 +) 20 agent.call-for) partial `timeout raises) call)
+   g ((1 +) 20 agent.call-for) cons `timeout raises) call)
  `call-for-full-mailbox test
 
  ### test direct-serve

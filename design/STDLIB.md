@@ -70,7 +70,7 @@
 `( x y -- bool )` — Compare conforming values for inequality.
 
 ### =
-`( x y -- bool )` — Equality; numbers compare numerically across int and float. Whole-value equality is `match?`.
+`( x y -- bool )` — Equality; numbers compare numerically across int and float, symbols by name, and a symbol equals no number. Whole-value equality is `match?`.
 
 ### >
 `( x y -- bool )` — Descending comparison, producing 0/1 masks.
@@ -303,9 +303,27 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### cons
-`( value list -- list )` — Prepend `value` to the left end of `list`.
+`( value list -- list )` — Prepend `value` to the left end of `list` as data: when the list runs, it pushes `value`. A symbol therefore enters as a quoted occurrence rather than a word; `execute` runs a symbol a quotation pushes.
 
-NB: An unquoted symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data.
+```
+Ex:
+  3 (+) cons
+(3 +)
+  `w () cons
+(`w)
+```
+
+#### Examples
+
+```ecl
+4 3 (+) cons call
+# => 7
+```
+
+```ecl
+`w (dup) cons call
+# => w w
+```
 
 ### cos
 `( x -- y )` — Cosine; float transcendental.
@@ -565,18 +583,6 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ### linrec
 `( predicate base pre post -- ... )` — Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level.
 
-### literal
-`( value -- form )` — "Quote" a value, such that when the resulting form is evaluated in a quotation, the value is pushed to the stack.
-
-Any literal besides a symbol has this property naturally; when applied to a symbol, `literal` allows the symbol to behave under quotation like an inert value rather than a binding word.
-
-#### Examples
-
-```ecl
-`x literal wrap call
-# => x
-```
-
 ### log
 `( x -- y )` — Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
 
@@ -651,24 +657,6 @@ Ex.:
 ```ecl
 "[1 2]" parse first
 # => [1 2]
-```
-
-### partial
-`( value quotation -- quotation )` — Add `value` to the left of `quotation`, preserving the quotedness of symbols.
-
-```
-Ex:
-  3 (+) partial
-(3 +)
-  `w () partial
-(`w)
-```
-
-#### Examples
-
-```ecl
-4 3 (+) partial call
-# => 7
 ```
 
 ### partition
@@ -765,7 +753,7 @@ Ex:
 ```
 
 ### see
-`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and literal-capture body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
+`( name -- )` — Print the binding's combined annotation, when present, followed by its body through the standard source formatter, with its width-aware layout and no navigation header, name, or `def`/`defp` terminator. What prints is what is stored: a name bound by `set` prints its annotation and captured body; the producing `set` spelling is discarded. Reader-built bodies retain a shared slice of the source they were read from, so locals declarations print with their authored local names even though execution uses the lowered `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source provenance fall back to their canonical value form. Native origins are displayed in native body descriptors.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `` `shape `` error on ragged data (`len` is the word that works on anything).
@@ -949,16 +937,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 # => [[1 2 3] [2 3 4]]
 ```
 
-### with
-`( values quotation -- quotation )` — Push each of `values` to the left of `quotation`, preserving the quotedness of symbols.
-
-#### Examples
-
-```ecl
-[3] (dup) with call
-# => 3 3
-```
-
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
 
@@ -966,7 +944,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 `( value -- list )` — Wrap `value` in a list.
 
 ### zip-with
-`( left right (a b -- c) -- list )` — Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `partial` compositions.
+`( left right (a b -- c) -- list )` — Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `cons` compositions.
 
 #### Examples
 

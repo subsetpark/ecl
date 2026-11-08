@@ -302,7 +302,7 @@ test "module: privacy module-body contract top-level private and qualified trace
     try expectErrorContains(&runtime, "[] (( -- n ) (missing) `boom def) `trace-module @defm", &.{ "kind undefined-word", "word missing" });
     try expectErrorContains(&runtime, "trace-module.boom", &.{"kind undefined-word"});
     try expectOk(&runtime, "[] (( n -- n ) (dup 0 > (1 - f 1 +) (pop missing) if) `f def) `recursive @defm");
-    try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (missing recursive.f recursive.f recursive.f)"});
+    try expectErrorContains(&runtime, "2 recursive.f", &.{"trace (`missing `recursive.f `recursive.f `recursive.f)"});
 }
 
 test "module: qualified import replacement and alias collisions" {
@@ -599,7 +599,7 @@ test "reflection: which and see expose metadata while see omits the definition w
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +)\n") != null);
     // One binding kind: a session constant reports as a public def with no
     // metadata, because the sugar supplies none, and `see` prints the stored
-    // literal capture rather than reconstructing the `set` spelling.
+    // capture rather than reconstructing the `set` spelling.
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows m.f") == null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "[9]\n") != null);
@@ -773,7 +773,7 @@ test "modules: module set and setp publish unannotated constants" {
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // Registration succeeding is itself the proof that a module definition
-    // may carry no effect at all: `set` publishes the bare literal capture,
+    // may carry no effect at all: `set` publishes the bare capture,
     // so constants need no value exception and no synthesized metadata.
     try expectOk(&runtime, "[] (7 `x set 8 `h setp (-- n) (h) `peek def) `m @defm");
     try expectOk(&runtime, "m.x m.peek");
@@ -1165,6 +1165,6 @@ test "module: core-qualified words link to core's slot wherever they are written
     try expectOk(&runtime, "(9) `first def (`k) call `k match? {kind user msg \"a session shadow does not reach a quote\"} assert");
     // The qualified spelling stays on the trace, and a missing core word is
     // reported as the qualified name.
-    try expectErrorContains(&runtime, "() core.first", &.{ "word core.first", "trace (core.first)" });
+    try expectErrorContains(&runtime, "() core.first", &.{ "word core.first", "trace (`core.first)" });
     try expectErrorContains(&runtime, "core.nope", &.{ "kind undefined-word", "word core.nope" });
 }

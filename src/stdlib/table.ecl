@@ -92,7 +92,7 @@
 
  ### defp record-column
  (name records -- column : "Return one field from each record, preserving record order.")
- (|name records| records name (at) partial each) `record-column defp
+ (|name records| records name (at) cons each) `record-column defp
 
  ### def from-records
  (records -- table :
@@ -110,11 +110,11 @@
   `type error.new "table column names must be strings" error.with-message assert
   records first dict.keys (len) each 0 > 1 (and) fold
   `domain error.new "table column names must not be empty" error.with-message assert
-  records records first dict.keys (dict.keys-exactly?) partial all?
+  records records first dict.keys (dict.keys-exactly?) cons all?
   `domain error.new "every record must carry exactly the first record's keys" error.with-message
   assert
   records first dict.keys
-  records first dict.keys records (record-column) partial each
+  records first dict.keys records (record-column) cons each
   dict.from-lists) `from-records def
 
  ### def rows
@@ -130,7 +130,7 @@
  (table -- records :
   "Return one dict per row, with keys in schema order. A zero-row table returns an empty list, which
    necessarily loses its schema.")
- (checked dup dict.keys swap dict.vals column-rows swap (swap dict.from-lists) partial each)
+ (checked dup dict.keys swap dict.vals column-rows swap (swap dict.from-lists) cons each)
  `records def
 
  ### def column
@@ -151,7 +151,7 @@
   spec type `dict match?
   `type error.new "table.cast expects a dict from column name to quotation" error.with-message
   assert
-  spec dict.keys table (swap dict.has?) partial all?
+  spec dict.keys table (swap dict.has?) cons all?
   `domain error.new "table.cast requires existing column names" error.with-message assert
   spec dict.vals (type `list match?) all?
   `type error.new "table.cast expects a quotation for every named column" error.with-message assert
@@ -173,10 +173,10 @@
   `shape error.new "a table must have at least one column" error.with-message assert
   names distinct len names len =
   `domain error.new "table.select rejects duplicate column names" error.with-message assert
-  names table (swap dict.has?) partial all?
+  names table (swap dict.has?) cons all?
   `domain error.new "table.select requires existing column names" error.with-message assert
   names
-  names table (swap at) partial each
+  names table (swap at) cons each
   dict.from-lists) `select def
 
  ### def rename
@@ -187,13 +187,13 @@
   table checked pop
   mapping type `dict match?
   `type error.new "table.rename expects a dict from old name to new name" error.with-message assert
-  mapping dict.keys table (swap dict.has?) partial all?
+  mapping dict.keys table (swap dict.has?) cons all?
   `domain error.new "table.rename requires existing column names" error.with-message assert
   mapping dict.vals (string?) all?
   `type error.new "table column names must be strings" error.with-message assert
   mapping dict.vals (len) each 0 > 1 (and) fold
   `domain error.new "table column names must not be empty" error.with-message assert
-  table dict.keys mapping (swap dup dict.get) partial each
+  table dict.keys mapping (swap dup dict.get) cons each
   dup distinct len over len =
   `domain error.new "table.rename would collide two columns onto one name" error.with-message assert
   table dict.vals dict.from-lists) `rename def
@@ -217,8 +217,8 @@
  (lists count -- transposed :
   "Transpose whole cells, retaining the known output width when either axis is empty.")
  (|lists count| lists len 0 = count 0 = or
-  count ([] wrap swap take) partial
-  lists (flip) partial
+  count ([] wrap swap take) cons
+  lists (flip) cons
   if) `transpose defp
 
  ### defp column-rows
@@ -232,7 +232,7 @@
  ### defp exclude
  (names excluded -- names : "Remove excluded names while preserving the order of the input names.")
  (|names excluded|
-  names excluded name-set (swap dict.has? not) partial filter) `exclude defp
+  names excluded name-set (swap dict.has? not) cons filter) `exclude defp
 
  ### def where
  (table mask -- table : "Return the rows selected by a 0/1 mask whose length equals the row count.")
@@ -244,20 +244,20 @@
   `type error.new "a table mask holds only 0 and 1" error.with-message assert
   mask len table dict.vals first len =
   `shape error.new "a table mask must match the table's row count" error.with-message assert
-  table mask core.where (at) partial each) `where def
+  table mask core.where (at) cons each) `where def
 
  # --- grouping, aggregation, and joins -------------------------------------
 
  ### defp selected-groups
  (table names -- groups : "Group selected columns using whole composite row keys.")
- (|table names| names table (swap at) partial each group-columns) `selected-groups defp
+ (|table names| names table (swap at) cons each group-columns) `selected-groups defp
 
  ### defp group-keys
  (table names -- groups :
   "Group rows with scalar keys for one column and composite keys for multiple columns.")
  (|table names| names len 1 =
-  table names first (at group) partial partial
-  table names (selected-groups) partial partial if) `group-keys defp
+  table names first (at group) cons cons
+  table names (selected-groups) cons cons if) `group-keys defp
 
  ### defp global-group
  (table -- groups : "Return one group containing every row index.")
@@ -273,13 +273,13 @@
   `type error.new "table.group-by expects a list of column names" error.with-message assert
   names (string?) all?
   `type error.new "table column names must be strings" error.with-message assert
-  names table (swap dict.has?) partial all?
+  names table (swap dict.has?) cons all?
   `domain error.new "table.group-by requires existing column names" error.with-message assert
   names distinct len names len =
   `domain error.new "table.group-by rejects duplicate column names" error.with-message assert
   names len 0 =
-  table (global-group) partial
-  table names (group-keys) partial partial
+  table (global-group) cons
+  table names (group-keys) cons cons
   if) `group-by def
 
  ### defp aggregate-column
@@ -290,8 +290,8 @@
  ### defp key-columns
  (groups names -- columns : "Return grouping-key columns in name order.")
  (|groups names| names len 1 =
-  groups (dict.keys wrap) partial
-  groups names (composite-key-columns) partial partial
+  groups (dict.keys wrap) cons
+  groups names (composite-key-columns) cons cons
   if) `key-columns defp
 
  ### defp composite-key-columns
@@ -313,7 +313,7 @@
  (|table names specs groups|
   names specs (first) each cat
   groups names key-columns
-  specs table groups (aggregate-column) partial partial each
+  specs table groups (aggregate-column) cons cons each
   cat
   dict.from-lists) `aggregate-build defp
 
@@ -330,7 +330,7 @@
   `type error.new "table.aggregate expects a list of column names" error.with-message assert
   names (string?) all?
   `type error.new "table column names must be strings" error.with-message assert
-  names table (swap dict.has?) partial all?
+  names table (swap dict.has?) cons all?
   `domain error.new "table.aggregate requires existing column names" error.with-message assert
   names distinct len names len =
   `domain error.new "table.aggregate rejects duplicate column names" error.with-message assert
@@ -342,7 +342,7 @@
   assert
   specs (first) each (len) each 0 > 1 (and) fold
   `domain error.new "table column names must not be empty" error.with-message assert
-  specs (1 at) each table (swap dict.has?) partial all?
+  specs (1 at) each table (swap dict.has?) cons all?
   `domain error.new "table.aggregate requires existing input column names" error.with-message assert
   names specs (first) each cat dup distinct len swap len =
   `domain error.new "aggregate output names must not collide with each other or a key"
@@ -368,15 +368,15 @@
 
  ### defp fill-matches
  (indices missing -- indices : "Use the appended fill row when a left key has no matches.")
- (|indices missing| indices len 0 = missing (wrap) partial indices wrap if) `fill-matches defp
+ (|indices missing| indices len 0 = missing (wrap) cons indices wrap if) `fill-matches defp
 
  ### defp join-columns
  (left right-columns extra matches -- table :
   "Gather all joined columns from shared row selectors.")
  (|left right-columns extra matches|
   left dict.keys extra cat
-  left dict.vals matches (len) each core.where (at) partial each
-  right-columns matches raze (at) partial each
+  left dict.vals matches (len) each core.where (at) cons each
+  right-columns matches raze (at) cons each
   cat dict.from-lists) `join-columns defp
 
  ### defp pair-shaped?
@@ -398,16 +398,16 @@
   `domain error.new "a join needs at least one key pair" error.with-message assert
   pairs (pair-shaped?) all?
   `type error.new "join keys are a list of [left-name right-name] pairs" error.with-message assert
-  pairs (first) each left (swap dict.has?) partial all?
+  pairs (first) each left (swap dict.has?) cons all?
   `domain error.new "join keys must name existing left columns" error.with-message assert
-  pairs (1 at) each right (swap dict.has?) partial all?
+  pairs (1 at) each right (swap dict.has?) cons all?
   `domain error.new "join keys must name existing right columns" error.with-message assert
   pairs (first) each dup distinct len swap len =
   `domain error.new "a join may not repeat a left column" error.with-message assert
   pairs (1 at) each dup distinct len swap len =
   `domain error.new "a join may not repeat a right column" error.with-message assert
   right dict.keys pairs (1 at) each exclude
-  dup left dict.keys name-set (swap dict.has?) partial any? not
+  dup left dict.keys name-set (swap dict.has?) cons any? not
   `domain error.new "a join may not collide non-key column names; rename one first"
   error.with-message
   assert) `join-plan defp
@@ -416,7 +416,7 @@
  (left right pairs extra -- table : "Build a validated inner join with column gathers.")
  (|left right pairs extra|
   left
-  extra right (swap at) partial each
+  extra right (swap at) cons each
   extra
   left right pairs join-matches
   join-columns) `inner-join-checked defp
@@ -436,17 +436,17 @@
  ### defp left-join-checked
  (left right pairs fill extra -- table : "Build a left join from validated fill values.")
  (|left right pairs fill extra|
-  extra fill (swap dict.has?) partial all?
+  extra fill (swap dict.has?) cons all?
   `domain error.new "a fill must cover every appended right column" error.with-message assert
   extra len fill dict.size =
   `domain error.new "a fill must cover exactly the appended right columns" error.with-message assert
   left
-  extra right (swap at) partial each
-  extra fill (swap at) partial each
+  extra right (swap at) cons each
+  extra fill (swap at) cons each
   (append) zip-with
   extra
   left right pairs join-matches
-  right dict.vals first len (fill-matches) partial each
+  right dict.vals first len (fill-matches) cons each
   join-columns) `left-join-checked defp
 
  ### def left-join-with

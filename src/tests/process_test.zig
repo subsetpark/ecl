@@ -207,8 +207,8 @@ test "process: common selectors borrow process resources and separate output fro
     defer allocator.free(fixture_path);
     const program = try source(
         "{{executable \"{s}\" args (\"split\" \"abcd\" \"wxyz\")}} proc.spawn `p set " ++
-            "p proc.core.stdout port.endpoint wrap (|r| [] (dup len 4 <) r (8 fd.read cat) partial while chars) @spawn `out set " ++
-            "p proc.core.stderr port.endpoint wrap (|r| [] (dup len 4 <) r (8 fd.read cat) partial while chars) @spawn `err set " ++
+            "p proc.core.stdout port.endpoint wrap (|r| [] (dup len 4 <) r (8 fd.read cat) cons while chars) @spawn `out set " ++
+            "p proc.core.stderr port.endpoint wrap (|r| [] (dup len 4 <) r (8 fd.read cat) cons while chars) @spawn `err set " ++
             "out task.await `ok at first err task.await `ok at first p proc.wait `code at p port.close",
         .{fixture_path},
     );

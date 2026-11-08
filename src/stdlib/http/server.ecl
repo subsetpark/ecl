@@ -164,7 +164,7 @@
   dup len 0 = (400 "malformed header name" framing-error) when
   dup (blank?) any? (400 "malformed header name" framing-error) when
   swap
-  (|headers name value| headers name value wrap value (append) partial dict.update-or) call)
+  (|headers name value| headers name value wrap value (append) cons dict.update-or) call)
  `header-line defp
 
  ### def parse-headers
@@ -210,7 +210,7 @@
   dup len 0 =
   (pop 0)
   (dup first dup decimal? () (400 "malformed Content-Length" framing-error) if
-   swap over (match?) partial all? () (400 "conflicting Content-Length values" framing-error) if
+   swap over (match?) cons all? () (400 "conflicting Content-Length values" framing-error) if
    strip-zeros dup representable? ()
    (413 "Content-Length exceeds the representable range" framing-error) if
    int)
@@ -312,7 +312,7 @@
  (headers -- lines : "Render one `name: value` line per header value in dictionary order.")
  (dict.pairs
   (dup first swap 1 at dup str.str? (wrap) () if
-   swap ": " cat (swap cat) partial each)
+   swap ": " cat (swap cat) cons each)
   each
   raze) `header-lines defp
 
@@ -378,7 +378,7 @@
 
  ### defp route-matches
  (routes path -- rows : "Return the rows whose pattern matches the path.")
- ((|row path| path row 1 at match-pattern pop) partial filter) `route-matches defp
+ ((|row path| path row 1 at match-pattern pop) cons filter) `route-matches defp
 
  ### def route
  (request routes -- response :
@@ -401,7 +401,7 @@
   over `path at route-matches
   dup len 0 =
   (pop pop http.response.not-found)
-  (over `method at over swap (|row method| row 0 at method match?) partial filter
+  (over `method at over swap (|row method| row 0 at method match?) cons filter
    dup len 0 =
    (pop (0 at) each ", " join "allow" swap wrap pair dict.from-flat
     405 "method not allowed" http.response.text swap over `headers at swap dict.merge `headers swap

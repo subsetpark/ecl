@@ -1145,7 +1145,7 @@ fn isLiteralValueForm(form_item: *const Form) bool {
 }
 /// `values (body) 'name @defm` and `(body) 'name @defm!`: the fixed-arity
 /// registration shapes that earn a navigation header, mirroring definition navigation. A computed name gets
-/// no header, exactly as a definition does. A phrase using ordinary `with`
+/// no header, exactly as a definition does. A phrase using ordinary `cat`
 /// composition is not constructor metadata and therefore earns no registration
 /// header.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {

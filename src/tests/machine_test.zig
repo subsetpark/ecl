@@ -286,7 +286,7 @@ test "errors: source effect contract preserves absence for runtime-built code" {
     const source =
         \\[] (
         \\ (-- )
-        \\ (1 () cons call)
+        \\ (1 wrap call)
         \\ `run def)
         \\`runtime @defm
         \\runtime.run
@@ -618,7 +618,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     const rendered = try printer.toOwnedString(allocator, raised);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings(
-        "{kind custom msg \"hello\" word raise trace (raise) " ++
+        "{kind custom msg \"hello\" word raise trace (`raise) " ++
             "data {source \"fixture.ecl\" line 1 col 27}}",
         rendered,
     );
@@ -628,7 +628,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     const defaulted_rendered = try printer.toOwnedString(allocator, defaulted);
     defer allocator.free(defaulted_rendered);
     try std.testing.expectEqualStrings(
-        "{kind custom msg \"raised custom\" word raise trace (raise) " ++
+        "{kind custom msg \"raised custom\" word raise trace (`raise) " ++
             "data {source \"fixture.ecl\" line 1 col 15}}",
         defaulted_rendered,
     );
@@ -653,14 +653,14 @@ test "raise preserves valid user dicts and validates optional fields" {
 
     const complete = (try execute(
         &runtime,
-        "{kind custom msg \"old\" word origin trace (origin) " ++
+        "{kind custom msg \"old\" word origin trace (`origin) " ++
             "data {source \"old.ecl\" line 9 col 8} detail 7} raise",
     )).?;
     defer runtime.release(complete);
     const complete_rendered = try printer.toOwnedString(allocator, complete);
     defer allocator.free(complete_rendered);
     try std.testing.expectEqualStrings(
-        "{kind custom msg \"old\" word origin trace (origin) " ++
+        "{kind custom msg \"old\" word origin trace (`origin) " ++
             "data {source \"old.ecl\" line 9 col 8} detail 7}",
         complete_rendered,
     );

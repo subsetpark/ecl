@@ -271,15 +271,6 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => fresh-name
 ```
 
-### literal
-
-#### Examples
-
-```ecl
-`x literal wrap call
-# => x
-```
-
 ### match?
 
 #### Examples
@@ -482,13 +473,18 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => [1 11 21 31]
 ```
 
-### partial
+### cons
 
 #### Examples
 
 ```ecl
-4 3 (+) partial call
+4 3 (+) cons call
 # => 7
+```
+
+```ecl
+`w (dup) cons call
+# => w w
 ```
 
 ### while-values
@@ -498,15 +494,6 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```ecl
 1 (5 <) (1 +) while-values
 # => [1 2 3 4 5]
-```
-
-### with
-
-#### Examples
-
-```ecl
-[3] (dup) with call
-# => 3 3
 ```
 
 ### @each!

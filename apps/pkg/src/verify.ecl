@@ -11,7 +11,7 @@
  (state metadata -- state : "Compare one regular installed file with its sealed source archive.")
  (|state metadata|
   metadata `kind at `file match?
-  state metadata pair (file) with state () partial if) `member defp
+  state metadata pair (file) cat state () cons if) `member defp
 
  ### defp file
  (state metadata -- state : "Require a regular file and compare its exact bytes.")
@@ -32,7 +32,7 @@
    archive archive.next-member
    (dup dict.size 0 >) (member dup `archive at archive.next-member) while pop
    `files at archive port.close)
-  directory swap partial call) `archived-files defp
+  directory swap cons call) `archived-files defp
 
  ### defp entry
  (state entry -- state : "Reject links and special objects while enumerating the installed tree.")
@@ -77,7 +77,7 @@
   "Verify one selected seal, identity, contents, and exported artifact mapping.")
  (|state name|
   state `lock at `packages at name at `hash at
-  state name pair (selected-hash) with call) `selected defp
+  state name pair (selected-hash) cat call) `selected defp
 
  ### defp selected-hash
  (hash state name -- state :
@@ -86,7 +86,7 @@
   state `directory at "archives/" hash pkg.cache.filename cat fs.read-bytes hash pkg.fetch.checked
   state `directory at "packages/" name cat fs.child-dir
   (|bytes directory| bytes directory package directory port.close) call
-  state name pair (record-bundle) with call) `selected-hash defp
+  state name pair (record-bundle) cat call) `selected-hash defp
 
  ### defp record-bundle
  (bundle state name -- state : "Require the locked manifest and retain only inspected metadata.")
@@ -100,7 +100,7 @@
  (|project location|
   location pkg.layout.generation? require
   project `directory at location fs.child-dir
-  project location pair (opened) with call) `generation def
+  project location pair (opened) cat call) `generation def
 
  ### defp opened
  (directory project location -- :
@@ -108,7 +108,7 @@
  (|directory project location|
   directory "ecl.pkg" fs.read-text pkg.manifest.read
   directory "ecl.lock" fs.read-text pkg.resolution.read
-  directory project location 3 pack (snapshots) with call
+  directory project location 3 pack (snapshots) cat call
   directory port.close) `opened defp
 
  ### defp child
@@ -127,7 +127,7 @@
    {} `cursor cursor put `expected expected put cursor fs.next-entry
    (dup dict.size 0 >) (child dup `cursor at fs.next-entry) while pop
    `expected at dict.size 0 = require cursor port.close)
-  expected swap partial call) `children defp
+  expected swap cons call) `children defp
 
  ### defp layout
  (directory lock -- : "Require the closed immutable generation layout and every selected seal.")
@@ -147,7 +147,7 @@
   directory lock layout
   lock `packages at dict.keys sort
   {bundles {}} `lock lock put `directory directory put (selected) fold `bundles at
-  manifest lock location 3 pack (expected-map) with call
+  manifest lock location 3 pack (expected-map) cat call
   dup directory "ecl.modules" fs.read-text pkg.data.read-one match? require
   project `path at location "/ecl.modules" cat pair path.join pkg.map.validate) `snapshots defp
 

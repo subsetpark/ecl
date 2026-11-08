@@ -423,7 +423,7 @@ test "clock: calendar decomposition agrees with the standard library epoch oracl
         var source_buffer: [128]u8 = undefined;
         const source = try std.fmt.bufPrint(
             &source_buffer,
-            "{d} time.seconds time.from-unix time.to-utc [year month day hour minute second] swap (swap at) partial each",
+            "{d} time.seconds time.from-unix time.to-utc [year month day hour minute second] swap (swap at) cons each",
             .{secs},
         );
         try expectDisplay(runtime, source, expected);

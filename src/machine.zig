@@ -517,7 +517,7 @@ const OrdinaryErrorCursor = struct {
             },
             .trace_copy => |*trace| result: {
                 if (trace.index != self.resolved.trace.len) {
-                    trace.items[trace.index] = .{ .symbol = .{ .name = self.resolved.trace[trace.index] } };
+                    trace.items[trace.index] = value.datum(.{ .symbol = .{ .name = self.resolved.trace[trace.index] } });
                     trace.index += 1;
                 } else {
                     const next = @FieldType(State, "trace_build"){
@@ -971,7 +971,7 @@ const RaisedErrorCursor = struct {
             },
             .trace_copy => |*trace| result: {
                 if (trace.index != self.resolved.trace.len) {
-                    trace.items[trace.index] = .{ .symbol = .{ .name = self.resolved.trace[trace.index] } };
+                    trace.items[trace.index] = value.datum(.{ .symbol = .{ .name = self.resolved.trace[trace.index] } });
                     trace.index += 1;
                 } else {
                     self.state = .{ .trace_build = .{
@@ -5034,6 +5034,13 @@ pub const Fiber = struct {
         try self.require(1);
         return .init(self.releases, self.takeStackOwned().?);
     }
+    /// The top operand as the element a list built at run time stores: see
+    /// `value.datum`. Every word that moves a stack value into a list cell
+    /// pops it this way.
+    pub fn popDatum(self: *Fiber) MachineError!heap.OwnedValue {
+        try self.require(1);
+        return .init(self.releases, value.datum(self.takeStackOwned().?));
+    }
     /// The top two operands, the lower first, after one underflow check.
     pub fn popPair(self: *Fiber) MachineError!struct { heap.OwnedValue, heap.OwnedValue } {
         try self.require(2);
@@ -7735,6 +7742,9 @@ fn finishLoad(self: *Fiber, base: u32) MachineError!void {
     );
 }
 fn finishAttempt(self: *Fiber, base: u32) MachineError!void {
+    // The attempt's stack becomes the outcome's list, so each value enters
+    // as data (`value.datum`); the operands are released once materialized.
+    for (self.stack.items[base..]) |*item| item.* = value.datum(item.*);
     try self.startDriver(AttemptResultDriver.init(
         self.allocator,
         base,

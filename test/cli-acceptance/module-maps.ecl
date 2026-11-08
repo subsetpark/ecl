@@ -85,7 +85,7 @@
   # The diagnostic names the module and both declaring files.
   dup ["module `localmod`" "`src/duplicate.ecl`" "`src/entry.ecl`" "scope `local`"] swap
   (|fragment binary| binary ["maps/complete"] check fragment "duplicate diagnostic" diagnoses 0)
-  partial each pop
+  cons each pop
   `cwd "module-maps/maps/src/duplicate.ecl" fs.remove-file
   "{format 1 map \"reference\"}" "module-maps/maps/chain" write
   dup ["maps/chain"] check "chained map" invalid

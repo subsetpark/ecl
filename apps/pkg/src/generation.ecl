@@ -9,7 +9,7 @@
  ### defp optional-active
  (result -- generation : "Ignore missing or malformed previous state when building a replacement.")
  (dup result.ok? (`ok at first)
-  (`err at dup `kind at [io domain syntax type shape parse] swap (match?) partial any?
+  (`err at dup `kind at [io domain syntax type shape parse] swap (match?) cons any?
    (pop "") (raise) if) if) `optional-active defp
 
  ### def active
@@ -23,7 +23,7 @@
   `domain error.new "invalid generation destination" error.with-message assert
   project `directory at location path.dirname fs.mkdirs
   project `directory at location fs.stage-dir
-  project location offline 3 pack (started) with call) `start def
+  project location offline 3 pack (started) cat call) `start def
 
  ### defp started
  (stage project location offline -- work :
@@ -41,13 +41,13 @@
   "Validate and install one selected package without retaining archive payloads.")
  (|state name|
   state `work at `context at state `lock at `packages at name at pkg.obtain.requirement
-  state name pair (install-bytes) with call) `install defp
+  state name pair (install-bytes) cat call) `install defp
 
  ### defp install-bytes
  (bytes state name -- state : "Seal the exact source bytes and unpack only a validated package.")
  (|bytes state name|
   bytes pkg.bundle.inspect
-  state name bytes 3 pack (install-bundle) with call) `install-bytes defp
+  state name bytes 3 pack (install-bundle) cat call) `install-bytes defp
 
  ### defp install-bundle
  (bundle state name bytes -- state :
@@ -67,7 +67,7 @@
   lock-text pkg.resolution.read manifest-text pkg.manifest.read pkg.resolution.compatible
   {} swap `lock swap put `work work put `bundles {} put
   dup `lock at `packages at dict.keys sort swap (install) fold
-  `bundles at work manifest-text lock-text 3 pack (publish) with call) `finish def
+  `bundles at work manifest-text lock-text 3 pack (publish) cat call) `finish def
 
  ### defp publish
  (bundles work manifest-text lock-text -- :

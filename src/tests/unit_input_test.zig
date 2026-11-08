@@ -111,7 +111,7 @@ test "unit inputs: every constructor diagnoses its own values operand" {
     try expectErrorContains(&runtime, "9 [] (1 +) `missing @defm", &.{
         "isolation @defm",
         "constructor's values operand",
-        "trace (+)",
+        "trace (`+)",
     });
     try expectErrorContains(&runtime, "[] (1 +) @spawn task.await `err at raise", &.{
         "isolation @spawn",
@@ -121,7 +121,7 @@ test "unit inputs: every constructor diagnoses its own values operand" {
     try expectErrorContains(&runtime, "[1] [] (+) @each", &.{
         "isolation @spawn",
         "constructor's values operand",
-        "trace (+)",
+        "trace (`+)",
     });
 }
 
@@ -216,11 +216,11 @@ test "unit inputs: a runtime-built body acquires no attribution" {
     try expectStack(&runtime, "7 `k set [] [((k) `getc) (def)] raze `razed @defm razed.getc", "7");
     // Supplying explicit seeds changes the initial stack and nothing else.
     try expectStack(&runtime, "7 `k set [] ((k) `getd) (def) cat `seeded @defm seeded.getd", "7");
-    // `with` is ordinary composition, so its flattened result is runtime-built
+    // A body composed with `cat` is runtime-built
     // too: the superseded spelling still runs and takes no attribution.
     try expectErrorContains(
         &runtime,
-        "5 `k set [] [(k *)] (`scale def ( -- n ) (4 scale) `go def) with `flat @defm flat.go",
+        "5 `k set [] [(k *)] (`scale def ( -- n ) (4 scale) `go def) cat `flat @defm flat.go",
         &.{ "undefined-word", "scale" },
     );
 

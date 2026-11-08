@@ -364,3 +364,42 @@ test "sequence: rest reverse and find" {
         .{ .name = "find in an atom", .source = "5 1 find", .kind = "type", .word = "find" },
     });
 }
+
+test "sequence: cons builds short spines in place and long ones through the copy driver" {
+    try helper.expectStacks(&.{
+        .{ .name = "list head onto a quotation", .source = "(1 -) (dip) cons", .expected = "((1 -) dip)" },
+        .{ .name = "symbol head enters as data", .source = "`w (dip) cons `w () cons", .expected = "(`w dip) (`w)" },
+        .{ .name = "a symbol taken from code enters as data too", .source = "(w) first (dip) cons [`w] first (dip) cons", .expected = "(`w dip) (`w dip)" },
+        .{ .name = "the built quotation pushes the symbol", .source = "`w (dup) cons call", .expected = "w w" },
+        .{ .name = "execute runs a symbol the quotation pushes", .source = "5 `dup (execute 1) cons call", .expected = "5 5 1" },
+        .{ .name = "list head onto an empty list", .source = "[1] () cons [1] [] cons", .expected = "([1]) ([1])" },
+        .{ .name = "list head onto a typed leaf", .source = "[0] [1 2 3] cons \"ab\" \"cd\" cons", .expected = "([0] 1 2 3) (\"ab\" \\c \\d)" },
+        .{ .name = "dict head keeps the tail's elements", .source = "{a 1} [[2] [3]] cons", .expected = "({a 1} [2] [3])" },
+        .{ .name = "atom head onto a mixed spine", .source = "1 (x 2) cons", .expected = "(1 x 2)" },
+        .{ .name = "tail at the in-place limit", .source = "[] 16 range cons len", .expected = "17" },
+        .{ .name = "tail beyond the in-place limit", .source = "[] 17 range cons len [] 17 range cons first", .expected = "18 ()" },
+        .{ .name = "tail stays shared", .source = "(dip) dup (1 -) swap cons swap", .expected = "((1 -) dip) (dip)" },
+    });
+}
+
+test "sequence: cons call and cons dip run the quotation without building it" {
+    try helper.expectStacks(&.{
+        .{ .name = "cons call runs the tail with the head on the stack", .source = "5 (1 +) cons call", .expected = "6" },
+        .{ .name = "cons call with a quotation head", .source = "1 2 3 (1 -) (dip) cons (dip) cons call", .expected = "0 2 3" },
+        .{ .name = "cons call onto a data list pushes every element", .source = "1 [2 3] cons call", .expected = "1 2 3" },
+        .{ .name = "cons call onto an empty list pushes the head", .source = "7 () cons call", .expected = "7" },
+        .{ .name = "cons dip protects the value beneath the head", .source = "1 2 3 (1 -) (dip) cons dip", .expected = "0 2 3" },
+        .{ .name = "cons dip with an atom head", .source = "10 20 1 (+) cons dip", .expected = "11 20" },
+        .{ .name = "cons call with a symbol head", .source = "`w (dup) cons call", .expected = "w w" },
+        .{ .name = "cons call with a head taken from quoted code", .source = "[`w] first (dup) cons call", .expected = "w w" },
+        .{ .name = "cons dip with a symbol head", .source = "9 `w (dup) cons dip", .expected = "w w 9" },
+        .{ .name = "a shadowed call runs the words as written", .source = "(pop 42) `call def 1 (2) cons call", .expected = "42" },
+        .{ .name = "a definition's tail cons call", .source = "((2 *) cons call) `twice def 4 twice", .expected = "8" },
+    });
+    try helper.expectErrors(&.{
+        .{ .name = "cons call without a list keeps cons's error", .source = "1 2 cons call", .kind = "type", .word = "cons" },
+        .{ .name = "cons dip without a list keeps cons's error", .source = "1 2 3 cons dip", .kind = "type", .word = "cons" },
+        .{ .name = "cons dip needs the protected value", .source = "1 (2) cons dip", .kind = "underflow", .word = "dip" },
+        .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) cons call", .kind = "underflow", .word = "pop" },
+    });
+}

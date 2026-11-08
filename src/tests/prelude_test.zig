@@ -61,23 +61,23 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "30 \"Lin\" 42",
         },
         .{
-            .name = "literal values",
-            .source = "(foo) first literal wrap call 42 literal wrap call [1 2] literal wrap call",
+            .name = "wrapped values are data",
+            .source = "(foo) first wrap call 42 wrap call [1 2] wrap call",
             .expected = "foo 42 [1 2]",
         },
         .{
-            .name = "literal representation",
-            .source = "(foo) first literal dup type 42 literal type",
-            .expected = "`foo symbol int",
+            .name = "wrapped representation",
+            .source = "(foo) first wrap first dup type 42 wrap first type",
+            .expected = "foo symbol int",
         },
         .{
             .name = "partial application",
-            .source = "3 (2 *) partial call (foo) first (type) partial call",
+            .source = "3 (2 *) cons call (foo) first (type) cons call",
             .expected = "6 symbol",
         },
         .{
             .name = "quotation with initial values",
-            .source = "[2 3] (+) with call (type) first 7 pair (pop type) with call",
+            .source = "[2 3] (+) cat call (type) first 7 pair (pop type) cat call",
             .expected = "5 symbol",
         },
         .{
@@ -132,7 +132,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .name = "selection and aggregation",
             .source = "{a 1 b 2} dict.pairs [1 2 3 4] (2 >) filter [0 0 1] (0 >) any? " ++
                 "[1 1 0] (0 >) all? [1 2 3] mean",
-            .expected = "((a 1) (b 2)) [3 4] 1 0 2.0",
+            .expected = "((`a 1) (`b 2)) [3 4] 1 0 2.0",
         },
         .{
             .name = "exact dictionary keys",
@@ -197,21 +197,23 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose nonempty documentation" {
     const names = [_][]const u8{
-        "first",       "wrap",         "literal",    "dip",      "over",
-        "rollup",      "rolldown",     "partial",    "with",     "mod",
-        "neg",         "abs",          "<>",         "<=",       ">=",
-        "and",         "or",           "nip",        "keep",     "bi",
-        "tri",         "bi2",          "tri2",       "both",     "when",
-        "unless",      "case",         "signum",     "clamp",    "last",
-        "pair",        "pack",         "append",     "rest",     "reverse",
-        "uncons",      "unappend",     "empty?",     "zip",      "lex-cmp-with",
-        "sort",        "distinct",     "at-path",    "filter",   "partition",
-        "any?",        "all?",         "sum",        "product",  "mean",
-        "fail",        "find",         "set",        "setp",     "assert",
-        "rotate",      "windows",      "each-prior", "fold1",    "scan1",
-        "iterations",  "while-values", "converges",  "converge", "chunk",
-        "from-digits", "to-digits",    "collect",    "2dup",     "2keep",
-        "case-with",
+        "first",        "wrap",       "dip",          "over",
+        "rollup",       "rolldown",   "mod",          "neg",
+        "abs",          "<>",         "<=",           ">=",
+        "and",          "or",         "nip",          "keep",
+        "bi",           "tri",        "bi2",          "tri2",
+        "both",         "when",       "unless",       "case",
+        "signum",       "clamp",      "last",         "pair",
+        "pack",         "append",     "rest",         "reverse",
+        "uncons",       "unappend",   "empty?",       "zip",
+        "lex-cmp-with", "sort",       "distinct",     "at-path",
+        "filter",       "partition",  "any?",         "all?",
+        "sum",          "product",    "mean",         "fail",
+        "find",         "set",        "setp",         "assert",
+        "rotate",       "windows",    "each-prior",   "fold1",
+        "scan1",        "iterations", "while-values", "converges",
+        "converge",     "chunk",      "from-digits",  "to-digits",
+        "collect",      "2dup",       "2keep",        "case-with",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -284,8 +286,8 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         },
         .{ .name = "result.or-raise identity", .source = "[] (missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
         .{
-            .name = "cons inserts executable word forms",
-            .source = "(foo) first (7) cons call",
+            .name = "execute runs a symbol a quotation pushes",
+            .source = "(foo) first (execute 7) cons call",
             .kind = "undefined-word",
             .word = "foo",
         },

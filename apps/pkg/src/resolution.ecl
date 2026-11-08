@@ -41,7 +41,7 @@
   edges dict? require
   edges dict.keys (pkg.name.valid?) all? require
   edges dict.vals (`package at) each dup distinct len swap len = require
-  edges dict.vals selections (check-edge) partial for) `check-edges defp
+  edges dict.vals selections (check-edge) cons for) `check-edges defp
 
  ### defp visit-edge
  (state child -- state : "Visit a selected dependency with the current ancestor path.")
@@ -59,10 +59,10 @@
  ### defp visit
  (lock name path seen -- seen : "Check acyclic reachability without fetching any sources.")
  (|lock name path seen|
-  path name (match?) partial any? not require
-  seen name (match?) partial any?
-  seen () partial
-  lock name path seen 4 pack (descend) with
+  path name (match?) cons any? not require
+  seen name (match?) cons any?
+  seen () cons
+  lock name path seen 4 pack (descend) cat
   if) `visit defp
 
  ### defp root-manifest
@@ -85,7 +85,7 @@
   lock `root at wrap lock `packages at dict.keys cat
   dup pkg.name.collides? not require
   sort lock `requires at dict.keys sort match? require
-  lock `requires at dict.vals lock `packages at (check-edges) partial for
+  lock `requires at dict.vals lock `packages at (check-edges) cons for
   lock `root-requires at minimums lock `requires at lock `root at at match? require
   lock lock `root at [] [] visit len lock `packages at dict.size 1 + = require
   lock root-manifest lock swap check-manifest
@@ -98,7 +98,7 @@
   requirement `package del
   (|selection declared|
    selection `version at declared `version at match?
-   selection declared pair (match? require) with when)
+   selection declared pair (match? require) cat when)
   call) `check-pin defp
 
  ### def check-manifest
@@ -108,7 +108,7 @@
   lock manifest lock `root at manifest `name at match?
   (pop pop) (check-identity) if
   manifest `requires at minimums lock `requires at manifest `name at at match? require
-  manifest `requires at dict.vals lock (check-pin) partial for) `check-manifest def
+  manifest `requires at dict.vals lock (check-pin) cons for) `check-manifest def
 
  ### defp check-identity
  (lock manifest -- : "A selected artifact must declare its exact locked package version.")
@@ -139,7 +139,7 @@
  (value -- value : "Sort all metadata dictionary keys while preserving list order.")
  (dup dict?
   (|holder| holder dict.keys dup (str) each grade at
-   holder (canonical-entry) partial each dict.from-pairs)
+   holder (canonical-entry) cons each dict.from-pairs)
   (dup type `list match? ((canonical) each) () if)
   if) `canonical defp
 
