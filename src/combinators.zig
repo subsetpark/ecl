@@ -25,6 +25,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized." },
         .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level." },
         .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results." },
+        .{ .name = "cleave", .primitive = cleave, .effect = "x quotations -- ...", .doc = "Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing." },
+        .{ .name = "cleave2", .primitive = cleave2, .effect = "x y quotations -- ...", .doc = "Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs." },
+        .{ .name = "cleave-n", .primitive = cleaveN, .effect = "... n quotations -- ...", .doc = "N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs." },
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized." },
         .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Every test runs against the operand stack checkpoint taken after the clause list is consumed. Tests may inspect that stack destructively; only their top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded. The first true test selects its action; otherwise the final else runs, in either case from the original checkpoint. Stack rollback does not roll back environment or IO effects performed by tests." },
         .{ .name = "each", .primitive = each, .effect = "collection (a -- b) -- collection", .doc = "For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``." },
@@ -362,6 +365,183 @@ const DipState = struct {
         evaluator.chargeContinuationStep();
         try evaluator.pushOwned(self.protected.take());
         return null;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn cleave(evaluator: *Fiber) MachineError!void {
+    return cleaveFixed(evaluator, 1);
+}
+fn cleave2(evaluator: *Fiber) MachineError!void {
+    return cleaveFixed(evaluator, 2);
+}
+fn cleaveFixed(evaluator: *Fiber, arity: usize) MachineError!void {
+    try evaluator.require(arity + 1);
+    var quotations = try evaluator.popValue();
+    defer quotations.deinit();
+    if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
+    try startCleave(evaluator, &quotations, arity);
+}
+fn cleaveN(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    var quotations = try evaluator.popValue();
+    defer quotations.deinit();
+    var arity = try evaluator.popValue();
+    defer arity.deinit();
+    if (arity.borrow() != .int) return evaluator.typeError("an int arity");
+    if (arity.borrow().int < 0) return evaluator.fail(.domain, "cleave-n arity must be nonnegative");
+    if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
+    try startCleave(evaluator, &quotations, @intCast(arity.borrow().int));
+}
+
+/// Runs a cleave's setup where the word is invoked when the turn's budget
+/// covers it, so a small cleave launches its first quotation without
+/// installing a driver.
+fn startCleave(evaluator: *Fiber, quotations: *heap.OwnedValue, arity: usize) MachineError!void {
+    var control = heap.Owned(CleaveControl).init(.{
+        .quotations = .init(quotations.take()),
+        .arity = arity,
+        .site = evaluator.applicationSite(),
+        .word = evaluator.active_word,
+    });
+    defer control.deinit(evaluator.releases, evaluator.allocator);
+    switch (try control.borrowMut().advance(evaluator)) {
+        .finished => {},
+        .launch => |quotation| try launchCleave(evaluator, &control, quotation),
+        .pending => try evaluator.startDriver(CleaveDriver{ .control = .init(control.take()) }),
+    }
+}
+
+fn launchCleave(evaluator: *Fiber, control: *heap.Owned(CleaveControl), quotation: *Header) MachineError!void {
+    const state = try evaluator.allocator.create(CleaveState);
+    state.* = .{ .control = .init(control.take()) };
+    try evaluator.beginInlineApplication(state.application(quotation));
+}
+
+/// A cleave validates every quotation, moves its `arity` inputs off the stack
+/// into a retained buffer, and then, before each quotation, pushes fresh
+/// copies of them. Each phase is user-sized and advances only as far as the
+/// turn's budget allows; the inputs are retained values, so a symbol input
+/// stays a value rather than becoming code.
+const CleaveControl = struct {
+    quotations: heap.Owned(Value),
+    inputs: heap.Owned(heap.OwnedValueBuffer) = .none,
+    arity: usize,
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    /// The quotation the current restore seeds.
+    next: usize = 0,
+    index: usize = 0,
+    phase: enum { validate, capture, drop, restore } = .validate,
+
+    const Progress = union(enum) {
+        pending,
+        launch: *Header,
+        finished,
+    };
+
+    fn advance(self: *CleaveControl, evaluator: *Fiber) MachineError!Progress {
+        const work = evaluator.workBudget();
+        const quotations = self.quotations.borrow();
+        const count: usize = @intCast(quotations.list.length());
+        while (true) switch (self.phase) {
+            .validate => {
+                const end = self.index + work.take(count - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    if (list.atUnchecked(quotations, self.index) != .list)
+                        return evaluator.typeError("a list of quotations");
+                }
+                if (self.index != count) return .pending;
+                try evaluator.require(self.arity);
+                self.inputs = .init(try .init(evaluator.releases, self.arity));
+                self.index = 0;
+                self.phase = .capture;
+            },
+            .capture => {
+                const base = evaluator.available() - self.arity;
+                const inputs = self.inputs.borrowMut();
+                const end = self.index + work.take(self.arity - self.index);
+                while (self.index != end) : (self.index += 1)
+                    inputs.appendBorrowed(evaluator.visibleOperandBorrowed(base + self.index));
+                if (self.index != self.arity) return .pending;
+                self.index = 0;
+                self.phase = .drop;
+            },
+            .drop => {
+                const granted = work.take(self.arity - self.index);
+                evaluator.discard(granted);
+                self.index += granted;
+                if (self.index != self.arity) return .pending;
+                self.index = 0;
+                self.phase = .restore;
+            },
+            .restore => {
+                if (self.next == count) return .finished;
+                const inputs = self.inputs.borrow().values();
+                const end = self.index + work.take(self.arity - self.index);
+                while (self.index != end) : (self.index += 1)
+                    try evaluator.pushBorrowed(inputs[self.index]);
+                if (self.index != self.arity) return .pending;
+                self.index = 0;
+                const quotation = list.atUnchecked(quotations, self.next).list;
+                self.next += 1;
+                return .{ .launch = quotation };
+            },
+        };
+    }
+
+    pub fn retire(self: *CleaveControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.inputs.deinit(releases, allocator);
+        self.quotations.deinit(releases, allocator);
+    }
+};
+
+const CleaveDriver = struct {
+    control: heap.Owned(CleaveControl),
+
+    pub fn advance(evaluator: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
+        evaluator.active_word = self.control.borrow().word;
+        try evaluator.pollKernel();
+        const progress = try self.control.borrowMut().advance(evaluator);
+        if (progress == .pending) return .stepped;
+        var control = heap.Owned(CleaveControl).init(self.control.take());
+        defer control.deinit(evaluator.releases, evaluator.allocator);
+        evaluator.retireDriver(self);
+        switch (progress) {
+            .launch => |quotation| try launchCleave(evaluator, &control, quotation),
+            .finished, .pending => {},
+        }
+        return .detached;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// Each finished quotation seeds the next from the same continuation; only a
+/// restore the turn cannot finish hands the control back to a driver.
+const CleaveState = struct {
+    control: heap.Owned(CleaveControl),
+
+    fn application(self: *CleaveState, quotation: *Header) Application {
+        return machine.typedApplication(self, quotation, self.control.borrow().site, 0);
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Fiber,
+        self: *CleaveState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        evaluator.active_word = self.control.borrow().word;
+        evaluator.chargeContinuationStep();
+        switch (try self.control.borrowMut().advance(evaluator)) {
+            .finished => return null,
+            .launch => |quotation| return .{ .apply = .{ .quotation = quotation, .seeded = 0 } },
+            .pending => {
+                try evaluator.startDriver(CleaveDriver{ .control = .init(self.control.take()) });
+                return null;
+            },
+        }
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

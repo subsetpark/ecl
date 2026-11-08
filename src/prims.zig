@@ -27,6 +27,10 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "swap", .primitive = swap, .effect = "x y -- y x", .doc = "Exchange the top two stack values." },
         .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
+        .{ .name = "nip", .primitive = nip, .effect = "x y -- y", .doc = "Discard the second value on the stack." },
+        .{ .name = "2dup", .primitive = twoDup, .effect = "x y -- x y x y", .doc = "Copy the top two stack values onto the top, preserving their order." },
+        .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
+        .{ .name = "rolldown", .primitive = rolldown, .effect = "x y z -- y z x", .doc = "Rotate the top three stack values downward." },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the operand stack into a bottom-to-top list while leaving every original value in place." },
         .{ .name = "cons", .primitive = cons, .effect = "value list -- list", .doc = "Prepend `value` to the left end of `list`.\n\nNB: An unquoted symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data." },
         .{ .name = "match?", .primitive = match, .effect = "left right -- bool", .doc = "Whole-value structural equality.\n\nEx.:\n```\n  [1 2] [1 2] =\n[1 1]\n  [1 2] [1 2] match?\n1\n```" },
@@ -71,6 +75,30 @@ fn over(evaluator: *Fiber) MachineError!void {
 fn pop(evaluator: *Fiber) MachineError!void {
     var item = try evaluator.popValue();
     item.deinit();
+}
+fn nip(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    try swap(evaluator);
+    try pop(evaluator);
+}
+fn twoDup(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    var copies = try evaluator.reserveStack(2);
+    const items = evaluator.stack.items;
+    const x = items[items.len - 2];
+    const y = items[items.len - 1];
+    copies.pushBorrowed(x);
+    copies.pushBorrowed(y);
+}
+fn rollup(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(3);
+    const top = evaluator.stack.items[evaluator.stack.items.len - 3 ..];
+    std.mem.rotate(Value, top, 2);
+}
+fn rolldown(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(3);
+    const top = evaluator.stack.items[evaluator.stack.items.len - 3 ..];
+    std.mem.rotate(Value, top, 1);
 }
 
 /// A retained, bottom-to-top copy of the visible operand window. Capturing is

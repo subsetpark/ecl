@@ -1174,12 +1174,12 @@ that name.
   in. A quotation literal written
   inside a body is sealed the way the body's own references are: it resolves in
   the scope its text was written in, whoever ends up applying it. `all?` is
-  `(|l q| l q each 1 (and) fold)` and `nip` is `(swap pop)`, but a
+  `(|l q| l q each 1 (and) fold)` and `uncons` is `(dup first swap rest)`, but a
   session `and` or `swap` leaves both alone:
 
   ```ecl
   (pop pop 42) `and def   [1 1] (1 =) all?      -- 1
-  (pop pop 99) `swap def  1 2 nip               -- 2
+  (pop pop 99) `swap def  [1 2] uncons          -- 1 [2]
   ```
 
   Splicing or rearranging quotations preserves the roots of their existing
