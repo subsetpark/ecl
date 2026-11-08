@@ -1151,8 +1151,8 @@ const ScopeIndex = Directory(ScopeId, ScopeCell);
 /// drop. It names no root. Scope ids stay below it.
 pub const local_operand_flag: u32 = 1 << 30;
 
-/// See `value.quote_flag`. Scope ids stay below it, and a locals operation
-/// never carries it.
+/// See `value.quote_flag`. Scope ids stay below it. A locals operation carries
+/// it only once it has been stored as data, where it pushes itself.
 pub const quote_flag: u32 = value.quote_flag;
 
 /// Whether an occurrence is quoted.
@@ -1170,9 +1170,11 @@ pub fn localOperandSlot(operand: u32) u32 {
 }
 
 /// The count or index a locals operation carries, or null for any other word.
+/// The quote flag is occurrence metadata beside the operand, so a quoted copy
+/// of an operation decodes to the same operand.
 pub fn localOperand(raw: u32) ?u32 {
     if (raw & local_operand_flag == 0) return null;
-    return raw & ~local_operand_flag;
+    return raw & ~(local_operand_flag | quote_flag);
 }
 
 /// What a word's link names.
