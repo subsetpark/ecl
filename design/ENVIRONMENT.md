@@ -127,7 +127,7 @@ because stdin alone does not identify a relative-path base.
 ### Native modules
 
 A `<name>.eclmod` file is a target-specific shared library containing one
-module. Its descriptor declares the same canonical name requested by the
+module. Its descriptor declares the same module name requested by the
 loader. The complete word table validates before publication, and publication
 is atomic.
 

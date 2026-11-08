@@ -729,7 +729,7 @@ resolutions, because core's directory changes without a publication.
 An activation needs two related but non-identical facts:
 
 - `scope`: the root its own definitions land in, and whether they may; and
-- `home`: the module image and registration whose privacy it may use.
+- `home`: the module image whose privacy it may use.
 
 Whether definitions may land is a flag on the site. Top-level code and module
 construction set it; isolated combinator applications, `@attempt`, and tasks
@@ -748,7 +748,11 @@ authority facts cross a boundary as one nominal value.
 
 A module image is created already named, by `@defm` or by a loader that has
 validated the name, and it learns its generation number when the registry
-publishes it. While its construction body runs, `def`, `defp`, `import`, and
+publishes it. The name is part of the image's identity: registration consumes
+the sealed image and publishes it under that name, so no image is ever
+registered under a second one. An alias maps a short name to a module name,
+never to an image. Whatever names running code, `*module*`, a diagnostic's
+qualified spelling, or the private home, reads it from the image. While its construction body runs, `def`, `defp`, `import`, and
 `importp` stage names in the image; nothing staged is visible, so the body
 cannot run a definition it has made. When the body completes, the module is
 sealed as one group: the staged names become the image's directory, a name
@@ -764,8 +768,8 @@ stays in its construction frame throughout, and the frame's unwind discards it
 on failure. A construction body that leaves values on its stack is refused
 before sealing, so no image carries state out of its body.
 
-Module documentation is a property of the image, not of the registration. A
-source construction consumes its annotation before the body runs, a native
+Module documentation is a property of the image, like its name. A source
+construction consumes its annotation before the body runs, a native
 loader takes it from the validated descriptor, and a builtin loader from its
 manifest entry; each records it on the unpublished image, which owns that
 reference until it retires. Reload therefore never inherits documentation, and

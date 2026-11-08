@@ -23,7 +23,7 @@
 `( -- string )` — Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file.
 
 ### \*module\*
-`( -- module-name )` — Return the canonical registration name selected by the current module activation. The same image registered under different names reports the name through which it was called; an alias reports its target's canonical name. `` `domain `` at top level or through an escaped quotation whose image has no invoking registration.
+`( -- module-name )` — Return the name of the module whose code is running: the name `@defm` published it under, which a call through an alias reports too. A construction body reports the name it is being built under. `` `domain `` at top level, or for a quotation that escaped its module.
 
 ### +
 `( x y -- z )` — Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``.
@@ -161,7 +161,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( x -- y )` — Return the absolute value of `x`.
 
 ### alias
-`( short name -- )` — Register an unqualified short registry name for a canonical, possibly dotted module name. Aliases and module names may not collide in either direction.
+`( short name -- )` — Register an unqualified short registry name for a module name, possibly dotted; aliasing an alias targets its module. Aliases and module names may not collide in either direction.
 
 ### all?
 `( list (a -- bool) -- bool )` — Return 1 when the predicate returns 1 for every element; otherwise return 0.
@@ -682,7 +682,7 @@ Ex:
 ```
 
 ### qualify
-`( module-name binding-name -- qualified-word )` — Validate a canonical module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed.
+`( module-name binding-name -- qualified-word )` — Validate a module path, or the reserved qualifier `` `core ``, and one unqualified, non-reserved binding segment, then construct their qualified executable word directly from the interned components. It does not parse source, intern anything new, or grant lifecycle authority; use `execute` to invoke the result dynamically. `` `core `dup qualify `` reaches the primitive even where `dup` is shadowed.
 
 ### raise
 `( error -- )` — Raise a language error from an error dict.
@@ -850,7 +850,7 @@ Copy the visible operand stack into a bottom-to-top list while leaving every ori
 `( ... body name -- )` — An optional annotation may sit beneath the body. Declare a first-class test in the separate catalog of the exact direct module construction body. Accepts the same optional effect and documentation annotation forms as `def`. Tests may share names with words and are absent from application lookup, exports, imports, reflection, and module invocation. Top-level, nested-quotation, and child-Unit use is `` `domain ``. Application Sessions validate and discard declarations without retaining bodies or checking duplicate test names; Test Sessions retain them and reject duplicate names.
 
 ### tests
-`( -- descriptors )` — Test-Session-only discovery of current canonical registrations, including root sources' private registrations, sorted by module then test name and source identifier. Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``. File-private registrations also include an integer `` `source `` identifier local to the test Session, distinguishing equal names in different files. Descriptors never contain executable bodies or authority handles. Aliases do not duplicate entries. Ordinary Sessions receive `` `domain ``.
+`( -- descriptors )` — Test-Session-only discovery of the tests of every current module, including root sources' private tests, sorted by module then test name and source identifier. Each dictionary contains symbol fields `` `module `` and `` `name `` plus optional declared `` `effect `` and `` `doc ``. File-private tests also include an integer `` `source `` identifier local to the test Session, distinguishing equal names in different files. Descriptors never contain executable bodies or authority handles. Aliases do not duplicate entries. Ordinary Sessions receive `` `domain ``.
 
 ### times
 `( n quotation -- ... )` — Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized.
@@ -2446,7 +2446,7 @@ Request and reply:
 The bundled runner is ordinary ECL policy over the closed `tests` / `@test` substrate. Projects may replace it with any public qualified runner word. The host supplies only catalog discovery, protected invocation, and root dispatch.
 
 ### run
-`( -- )` — Discover canonical tests and invoke them sequentially in deterministic module and name order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures and request process status 1 if any failed.
+`( -- )` — Discover every module's tests and invoke them sequentially in deterministic module and name order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures and request process status 1 if any failed.
 
 ## time
 

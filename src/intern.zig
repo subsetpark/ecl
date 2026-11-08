@@ -62,12 +62,10 @@ pub fn qualifiedBinding(name: QualifiedName) BindingName {
 
 /// A word as a diagnostic names it.
 ///
-/// A plain atom is its own spelling. A module-local binding has no spelling of
-/// its own: an image carries no canonical name, and one image may be
-/// registered under several, so the qualified spelling depends on the
-/// registration the binding was reached through. Deferring qualification to
-/// whoever renders it keeps definition metadata reusable and keeps the
-/// interning cost off every module-word invocation.
+/// A plain atom is its own spelling. A module-local binding is the pair of its
+/// image's module name and its own local name; the qualified spelling is never
+/// interned. Deferring qualification to whoever renders it keeps the interning
+/// cost off every module-word invocation.
 pub const TraceWord = enum(u64) {
     none = (@as(u64, no_trace_module) << 32) | no_trace_atom,
     _,
@@ -115,8 +113,7 @@ pub const TraceWord = enum(u64) {
     /// A name too long for the caller's scratch is elided from the left rather
     /// than replaced by its unqualified atom: substituting the atom would make
     /// a diagnostic message name a *different* word than the same failure's
-    /// `word` field reports, which for an image registered under several names
-    /// is not merely terse but ambiguous.
+    /// `word` field reports, and two modules may define the same local name.
     pub fn render(self: TraceWord, buffer: []u8) []const u8 {
         std.debug.assert(self != .none);
         const local = get(self.atom());
@@ -127,7 +124,7 @@ pub const TraceWord = enum(u64) {
             @memcpy(buffer[prefix.len + 1 ..][0..local.len], local);
             return buffer[0 .. prefix.len + 1 + local.len];
         }
-        // Keep the definition's own name and as much of the registration's as
+        // Keep the definition's own name and as much of the module's as
         // fits, so the rendering still points at one binding.
         if (elision.len + 1 + local.len > buffer.len) return elision;
         const room = buffer.len - elision.len - 1 - local.len;

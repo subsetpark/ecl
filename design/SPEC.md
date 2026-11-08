@@ -1282,8 +1282,8 @@ the source name attached to its currently executing reader-authored occurrence;
 a definition therefore keeps reporting the file that authored its body when
 another file calls it. Runtime-assembled code has no source provenance, so
 `*file*` is `` `domain `` there rather than falling back to its caller.
-`*module*` returns the canonical name of the module whose code is running,
-including a construction body that has not yet published; at the root there is
+`*module*` returns the name of the module whose code is running, the name
+`@defm` published it under even when the call came through an alias, including a construction body that has not yet published; at the root there is
 no module and it is `` `domain ``. The stars are ordinary word characters with
 no reader meaning, and the convention applies to shipped vocabulary without
 reserving the spelling from user definitions.
@@ -1715,7 +1715,7 @@ that name.
   documentation, or `` `core ``, is `` `domain ``.
 - Modules are constructible by building the body quotation programmatically
   and enumerable and diffable through their names.
-- **Module names are validated paths.** A canonical module name is one or
+- **Module names are validated paths.** A module name is one or
   more nonempty binding-name segments joined by dots: `stats`, `core.utils`,
   and `company.data.csv` are valid; leading, trailing, and doubled dots are
   not. Definition names and aliases remain one unqualified segment. Qualified
@@ -1749,7 +1749,7 @@ that name.
 
 ---
 
-**canonical?** *module-name* ∨ **alias?** *module-name*.
+**module?** *module-name* ∨ **alias?** *module-name*.
 
 ∃ *call*: `Call`, *image*: `Image`, *definition*: `Definition`, ¬**call-created?** *call*, *image* = **image-of** *module-name*, **binding-present?** *image* *binding-name*, *definition* = **definition-at** *image* *binding-name*, **public?** *definition* · **call-created?**′ *call* ∧ **call-active?**′ *call* ∧ **call-image**′ *call* = *image* ∧ **call-definition**′ *call* = *definition* ∧ (∀ *other*: `Call`, *other* ≠ *call* · **call-created?**′ *other* = **call-created?** *other* ∧ **call-active?**′ *other* = **call-active?** *other* ∧ **call-image**′ *other* = **call-image** *other* ∧ **call-definition**′ *other* = **call-definition** *other*).
 
@@ -1757,7 +1757,7 @@ that name.
 
 ##### Domains
 
-> The model has one kind of module object: an immutable image, published under exactly one canonical name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live canonical name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration, and aliases follow it on later lookup.
+> The model has one kind of module object: an immutable image, published under exactly one module name as one generation. Reload publishes a new image under the same name and retires the previous one. No action removes a registration. A name is live while it maps to a published, non-retired image, which is that name's current generation. A live module name has zero or more direct aliases.  Definitions are immutable background relations. Each definition belongs to one image and binding name, binding names are unique within an image, and visibility controls which call actions may select it. The model begins with no constructed images, occupied names, published generations, or calls. Domain atoms are possibilities rather than initially existing language values.  Retirement is monotonic: replacement retires the former current image and no retired image becomes current again. A retired image stays published, so unqualified words whose occurrences retain it as their scope keep their meaning; qualified words select the current registration, and aliases follow it on later lookup.
 
 `Call`.
 
@@ -1789,7 +1789,7 @@ that name.
 
 {**`Construction`**} **constructed?** *image*: `Image` ⇒ `Bool`.
 
-{**`Registry`**} **canonical?** *name*: `RegistryName` ⇒ `Bool`.
+{**`Registry`**} **module?** *name*: `RegistryName` ⇒ `Bool`.
 
 {**`Registry`**} **alias?** *name*: `RegistryName` ⇒ `Bool`.
 
@@ -1821,17 +1821,17 @@ initially ∀ *image*: `Image`, *name*: `BindingName`, **binding-present?** *ima
 
 initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** *left* = **definition-image** *right*, **definition-name** *left* = **definition-name** *right* · *left* = *right*.
 
-∀ *registry-name*: `RegistryName` · ¬(**canonical?** *registry-name* ∧ **alias?** *registry-name*).
+∀ *registry-name*: `RegistryName` · ¬(**module?** *registry-name* ∧ **alias?** *registry-name*).
 
 > A live name maps to its current generation.
 
-∀ *registry-name*: `RegistryName`, (**canonical?** *registry-name* ∨ **alias?** *registry-name*) · **image-published?** (**image-of** *registry-name*) ∧ ¬**image-retired?** (**image-of** *registry-name*).
+∀ *registry-name*: `RegistryName`, (**module?** *registry-name* ∨ **alias?** *registry-name*) · **image-published?** (**image-of** *registry-name*) ∧ ¬**image-retired?** (**image-of** *registry-name*).
 
-∀ *registry-name*: `RegistryName`, **canonical?** *registry-name* · **image-name** (**image-of** *registry-name*) = *registry-name*.
+∀ *registry-name*: `RegistryName`, **module?** *registry-name* · **image-name** (**image-of** *registry-name*) = *registry-name*.
 
-> An alias resolves to the current image of a live canonical name.
+> An alias resolves to the current image of a live module name.
 
-∀ *registry-name*: `RegistryName`, **alias?** *registry-name* · **canonical?** (**image-name** (**image-of** *registry-name*)) ∧ **image-of** (**image-name** (**image-of** *registry-name*)) = **image-of** *registry-name*.
+∀ *registry-name*: `RegistryName`, **alias?** *registry-name* · **module?** (**image-name** (**image-of** *registry-name*)) ∧ **image-of** (**image-name** (**image-of** *registry-name*)) = **image-of** *registry-name*.
 
 ∀ *image*: `Image`, **image-published?** *image* · **constructed?** *image*.
 
@@ -1843,7 +1843,7 @@ initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** 
 
 > A published image that is not retired is current under its own name.
 
-∀ *image*: `Image`, **image-published?** *image*, ¬**image-retired?** *image* · **canonical?** (**image-name** *image*) ∧ **image-of** (**image-name** *image*) = *image*.
+∀ *image*: `Image`, **image-published?** *image*, ¬**image-retired?** *image* · **module?** (**image-name** *image*) ∧ **image-of** (**image-name** *image*) = *image*.
 
 ∀ *call*: `Call`, **call-active?** *call* · **call-created?** *call*.
 
@@ -1851,7 +1851,7 @@ initially ∀ *left*: `Definition`, *right*: `Definition`, **definition-image** 
 
 initially ∀ *image*: `Image` · ¬**constructed?** *image* ∧ ¬**image-published?** *image* ∧ ¬**image-retired?** *image*.
 
-initially ∀ *registry-name*: `RegistryName` · ¬**canonical?** *registry-name* ∧ ¬**alias?** *registry-name*.
+initially ∀ *registry-name*: `RegistryName` · ¬**module?** *registry-name* ∧ ¬**alias?** *registry-name*.
 
 initially ∀ *call*: `Call` · ¬**call-created?** *call* ∧ ¬**call-active?** *call*.
 
@@ -1863,25 +1863,25 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
 ##### Action
 
-> `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing canonical name creates the registration; publishing under an existing canonical name retires that name's current image, and every alias of the name resolves to the new image from then on. Nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Register` is `@defm`'s publication: it constructs a fresh image and publishes it in one step, because no program can observe an image between the two. It is an ordered upsert. Publishing under a missing module name creates the registration; publishing under an existing module name retires that name's current image, and every alias of the name resolves to the new image from then on. Nothing else carries over. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
 **`Registry`**, **`Construction`** ↝ Register *invoker*: `InvocationContext`, *image*: `Image`, *module-name*: `RegistryName`, ¬**constructed?** *image*, ¬**alias?** *module-name*.
 
 ---
 
-**canonical?**′ *module-name* ∧ ¬**alias?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ (**canonical?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name* → **image-of**′ *other-name* = *image*) ∧ (¬(**canonical?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name*) → **image-of**′ *other-name* = **image-of** *other-name*)) ∧ **image-published?**′ *image* ∧ ¬**image-retired?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image* ∧ **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ **canonical?** *module-name* ∧ *other-image* = **image-of** *module-name*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
+**module?**′ *module-name* ∧ ¬**alias?**′ *module-name* ∧ **image-of**′ *module-name* = *image* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *module-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ (**module?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name* → **image-of**′ *other-name* = *image*) ∧ (¬(**module?** *module-name* ∧ **alias?** *other-name* ∧ **image-of** *other-name* = **image-of** *module-name*) → **image-of**′ *other-name* = **image-of** *other-name*)) ∧ **image-published?**′ *image* ∧ ¬**image-retired?**′ *image* ∧ **image-name**′ *image* = *module-name* ∧ **constructed?**′ *image* ∧ (∀ *other-image*: `Image`, *other-image* ≠ *image* · **constructed?**′ *other-image* = **constructed?** *other-image* ∧ **image-published?**′ *other-image* = **image-published?** *other-image* ∧ **image-retired?**′ *other-image* = (**image-retired?** *other-image* ∨ **module?** *module-name* ∧ *other-image* = **image-of** *module-name*) ∧ **image-name**′ *other-image* = **image-name** *other-image*).
 
 #### Chapter 4
 
 ##### Action
 
-> `Add alias` resolves either kind of occupied target name and stores a direct reference to its current image; semantic alias chains do not exist. The alias follows the canonical name through reload. Canonical and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
+> `Add alias` resolves either kind of occupied target name and stores a direct reference to its current image; semantic alias chains do not exist. The alias follows the module name through reload. Module and alias names form one disjoint namespace, and an occupied name cannot be repointed. The supplied invocation context is the top-level evaluator or the exact call performing the mutation.
 
-**`Registry`** ↝ Add alias *invoker*: `InvocationContext`, *alias-name*: `RegistryName`, *target-name*: `RegistryName`, ¬**canonical?** *alias-name*, ¬**alias?** *alias-name*, (**canonical?** *target-name* ∨ **alias?** *target-name*).
+**`Registry`** ↝ Add alias *invoker*: `InvocationContext`, *alias-name*: `RegistryName`, *target-name*: `RegistryName`, ¬**module?** *alias-name*, ¬**alias?** *alias-name*, (**module?** *target-name* ∨ **alias?** *target-name*).
 
 ---
 
-¬**canonical?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **image-of**′ *alias-name* = **image-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **canonical?**′ *other-name* = **canonical?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ (∀ *image*: `Image` · **image-published?**′ *image* = **image-published?** *image* ∧ **image-retired?**′ *image* = **image-retired?** *image* ∧ **image-name**′ *image* = **image-name** *image*).
+¬**module?**′ *alias-name* ∧ **alias?**′ *alias-name* ∧ **image-of**′ *alias-name* = **image-of** *target-name* ∧ (∀ *other-name*: `RegistryName`, *other-name* ≠ *alias-name* · **module?**′ *other-name* = **module?** *other-name* ∧ **alias?**′ *other-name* = **alias?** *other-name* ∧ **image-of**′ *other-name* = **image-of** *other-name*) ∧ (∀ *image*: `Image` · **image-published?**′ *image* = **image-published?** *image* ∧ **image-retired?**′ *image* = **image-retired?** *image* ∧ **image-name**′ *image* = **image-name** *image*).
 
 #### Chapter 5
 
@@ -1922,8 +1922,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   only after an image exists. A failed registration leaves the previous
   directory entry and current generation exactly as they were.
 - The registry is flat. A module body may define another module with `@defm`,
-  but that registration creates an independent module with its own canonical name
-  and lifetime; it does not establish lexical nesting or parent ownership.
+  but that registration creates an independent module with its own name and
+  lifetime; it does not establish lexical nesting or parent ownership.
   Registrations commit independently, so a completed inner registration
   remains published if the outer construction body later fails.
 - **Privacy is set at the definition site**: inside a module body, `def` and
@@ -1951,15 +1951,16 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   atomically; removal removes both; and aliases never create another suite.
 - **Test discovery and execution form a closed Session mode.** Ordinary
   Sessions reject `tests` and `@test` with `` `domain ``. A test Session's
-  `tests` returns canonical registrations once each, including root sources'
-  private registrations, sorted by module, test name, and source identifier.
+  `tests` returns each current module's tests once, aliases contributing
+  none, including root sources' private tests, sorted by module, test name, and
+  source identifier.
   Descriptors contain symbol fields `` `module `` and `` `name `` plus any
-  declared `` `effect `` and `` `doc ``. Private registrations also carry an
+  declared `` `effect `` and `` `doc ``. Private tests also carry an
   integer `` `source `` identifier local to the Session, distinguishing equal
   names across files. Descriptors contain no body, generation handle, state
   handle, or executable capability.
 - `descriptor @test` validates and looks up the descriptor against the
-  current canonical registration and its source when specified. A present test
+  module's current generation and its source when specified. A present test
   runs as a task under that generation's private home, spawned in the current
   scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
@@ -2130,7 +2131,7 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   resolution.
 - **Qualified resolution observes registrations only.** A qualified name
   splits at its final dot into a module name and a public binding name. The
-  module name selects a canonical registration directly or through an alias,
+  module name selects a registered module directly or through an alias,
   except that the reserved module segment `core` selects the core scope (see
   Roots and names) and never consults the registry.
   A missing registration or public binding raises `` `undefined-word ``.

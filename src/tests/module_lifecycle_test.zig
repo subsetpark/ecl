@@ -190,22 +190,21 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     try std.testing.expectEqualStrings("[7]\n", output.written());
 }
 
-test "modules: *module* reports the active canonical registration" {
+test "modules: *module* reports the running module's name" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // Identity belongs to the registration the caller reached: two
-    // registrations of the same body report their own names.
+    // Two modules built from the same body report their own names.
     try expectStack(
         &runtime,
         "[] ((*module*) `name def) `left @defm [] ((*module*) `name def) `right @defm " ++
             "left.name right.name",
         "left right",
     );
-    // Aliases select their target registration and therefore report its
-    // canonical name rather than the spelling used at the call site.
+    // An alias resolves to its module, so the call reports that module's
+    // name rather than the spelling used at the call site.
     try expectStack(&runtime, "`short `left alias short.name", "left");
 
     // The root has no home and therefore no module name to manufacture.
