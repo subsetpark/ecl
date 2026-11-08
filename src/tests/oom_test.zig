@@ -526,7 +526,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var display = try runtime.stackDisplay();
     display.deinit();
     try runOk(&runtime, "oom-display-cleanup.ecl", "pop");
-    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop [[1 2] [2 1]] group-columns pop [1 2] [[0 1]] `sum reduce-groups pop [[[1]] [[0]]] grade pop [[1]] [[2]] cmp pop");
+    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop [[1 2] [2 1]] group-columns pop [1 2] [[0 1]] at pop [[[1]] [[0]]] grade pop [[1]] [[2]] cmp pop");
     try runOk(
         &runtime,
         "oom-dict-text.ecl",
@@ -909,8 +909,8 @@ fn stdlibSessionAllocationProbe(
                 "[1 2] (pair) fold1 pop " ++
                 "[\"λ😀\" \"λ😀\"] group pop " ++
                 "[[1 1] [\"a\" \"a\"]] group-columns dup dict.keys [] dict.at-or pop " ++
-                "[1 2] [[0 1] []] `sum reduce-groups pop " ++
-                "[\"a\" \"b\"] [[0 1]] `min reduce-groups pop",
+                "[1 2] [[0 1] []] at (sum) each pop " ++
+                "[\"a\" \"b\"] [[0 1]] at pop",
         ),
         .csv => try runOk(
             &runtime,
@@ -928,7 +928,7 @@ fn stdlibSessionAllocationProbe(
             &runtime,
             "oom-table.ecl",
             "{\"r\" [\"e\" \"w\"] \"v\" [1 2]} " ++
-                "[\"r\"] [[\"t\" \"v\" sum]] table.aggregate pop " ++
+                "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
                 "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
                 "{\"n\" 0} table.left-join-with pop",
         ),

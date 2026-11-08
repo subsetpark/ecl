@@ -49,11 +49,8 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
 
 pub const Visibility = enum { public, private };
 /// Where a definition was published. A module definition records only its own
-/// module-local name: the image it belongs to has no canonical name, and the
-/// registration through which a call reached it is what supplies the qualified
-/// spelling and the live state. Baking a name here would make one image
-/// unregisterable twice; baking a slot here would put a cycle in the value
-/// heap.
+/// module-local name; its home image supplies the module name. Baking a slot
+/// here would put a cycle in the value heap.
 pub const BindingOrigin = union(enum) {
     top,
     module_local: struct { trace_word: intern.BindingName },
@@ -860,8 +857,8 @@ pub const Scope = struct {
         return .{ .allocator = allocator, .storage = storage };
     }
 
-    /// A module image's root. It carries no canonical name: the same sealed
-    /// image may execute under any number of registrations.
+    /// A module image's root. The scope carries no name; the image that embeds
+    /// it does.
     pub fn moduleRoot(allocator: std.mem.Allocator) Scope {
         return direct(allocator, .module_root);
     }

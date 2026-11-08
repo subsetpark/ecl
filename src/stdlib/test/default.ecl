@@ -23,9 +23,9 @@
 
  ### def run
  (-- :
-  "Discover canonical tests and invoke them sequentially in deterministic module and name order,
-   printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures and
-   request process status 1 if any failed.")
+  "Discover every module's tests and invoke them sequentially in deterministic module and name
+   order, printing one `ok` or `FAIL` line for every result. Continue after ordinary test failures
+   and request process status 1 if any failed.")
  (tests (report) each sum
   dup 0 >
   (pop 1 exit)

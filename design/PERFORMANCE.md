@@ -885,6 +885,38 @@ The int chains are bound by the overflow-checked multiply, which costs the
 same fused or not (39% of samples under `perf`), and by allocating and
 releasing the result, which both routes pay.
 
+## Nested typed gathers, and aggregates without `reduce-groups` — 2026-11-07
+
+`table.aggregate` reducers are now only quotations, applied by `each` to each
+group's slice, which `at` gathers through the group index lists in one call.
+The fixed-symbol `reduce-groups` builtin is gone. A nested selector used to
+walk one boxed element per index-cursor frame, even when the selector and the
+source were both typed leaves. Such a pair now runs the same typed gather
+kernel a flat index vector does, as one frame of the cursor.
+
+Zig 0.17.0 ReleaseSafe, native x86_64 Linux (Intel Core Ultra 5 125U, kernel
+7.1.13-2-MANJARO). Each figure is the fastest of five in-process runs after a
+warmup, in milliseconds. The table has 1,000,000 int rows, keyed by row number
+modulo the group count. The control is the tree before this change.
+`reduce-groups` is that control's `` `sum ``, `` `count ``, and `` `min ``
+symbol reducers, and the quotations are `(sum)`, `(len)`, and `((min) fold1)`.
+Grouping alone takes about 105 ms at 100 groups and 208 ms at 200,000.
+
+| Groups | Reducer | `reduce-groups` | Quotation, control | Quotation, now |
+|---:|---|---:|---:|---:|
+| 100 | sum | 115 | 252 | 120 |
+| 100 | count | 114 | 268 | 119 |
+| 100 | min | 116 | 277 | 142 |
+| 200,000 | sum | 221 | 1,679 | 367 |
+| 200,000 | count | 233 | 1,078 | 305 |
+| 200,000 | min | 242 | 2,248 | 399 |
+
+The parts at 200,000 groups, now: the gather takes 72 ms (290 before),
+`(sum) each` 75, `((min) fold1) each` 101, and the recognized `(len) each` 4.
+At 100 groups the gather takes 11 ms, against 130 before. What still separates
+the quotation path from the removed builtin at many groups is a list
+allocated per group and generic per-group application of the reducer.
+
 ## Reference-free objects skip the retirement queue — 2026-10-18
 
 Every object whose count reached zero went through the retirement queue: an

@@ -54,26 +54,26 @@ fn totalPrimitive(comptime operation: BinaryOp, comptime empty: i64) env.Primiti
 
 fn binaryDefinition(comptime operation: BinaryOp) env.BuiltinWord {
     return switch (operation) {
-        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``." },
-        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``." },
-        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Multiply. Integer overflow is `` `overflow ``." },
-        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN)." },
-        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Checked integer division. Division by zero is `` `domain ``." },
-        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "**Pervasive.** Two-argument arctangent; returns float." },
-        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Exponentiation; returns float." },
-        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** The lesser of two comparable atoms." },
-        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** The greater of two comparable atoms." },
-        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "**Pervasive.** Equality; numbers compare numerically across int and float. Whole-value equality is `match?`." },
-        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "**Pervasive.** Ascending comparison, producing 0/1 masks." },
-        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "**Pervasive.** Descending comparison, producing 0/1 masks." },
-        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``." },
-        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Bitwise or. See `band`." },
-        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns." },
-        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "**Pervasive.** Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``." },
-        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "**Pervasive.** Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``." },
-        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
-        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
-        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "**Pervasive.** Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two." },
+        .add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add. Acts ordinally on chars: `char int +` (either order) is a char; `char char +` is `` `type ``. Integer overflow is `` `overflow ``." },
+        .sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract. Acts ordinally on chars: `char char -` is an int, `char int -` is a char, `int char -` is `` `type ``. Integer overflow is `` `overflow ``." },
+        .mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply. Integer overflow is `` `overflow ``." },
+        .div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN)." },
+        .int_div => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Checked integer division. Division by zero is `` `domain ``." },
+        .atan2 => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "y x -- z", .doc = "Two-argument arctangent; returns float." },
+        .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Exponentiation; returns float." },
+        .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "The lesser of two comparable atoms." },
+        .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "The greater of two comparable atoms." },
+        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Equality; numbers compare numerically across int and float. Whole-value equality is `match?`." },
+        .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Ascending comparison, producing 0/1 masks." },
+        .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Descending comparison, producing 0/1 masks." },
+        .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``." },
+        .bor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise or. See `band`." },
+        .bxor => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise exclusive or. On 0/1 masks `<>` does the same job on any leaf type; `bxor` is for whole patterns." },
+        .bsl => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift the bit pattern left by `count` places, truncating bits shifted off the top rather than raising `` `overflow ``: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is `` `domain ``." },
+        .bsr => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x count -- y", .doc = "Shift the bit pattern right by `count` places, filling zeros from the top. The logical shift makes `-1 1 bsr` produce `maxint`. A `count` outside `0..63` is `` `domain ``." },
+        .wrap_add => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Add integers modulo 2^64 in two's complement, wrapping where `+` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
+        .wrap_sub => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Subtract integers modulo 2^64 in two's complement, wrapping where `-` raises `` `overflow ``. Int-only: a float or a char is `` `type ``." },
+        .wrap_mul => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Multiply integers modulo 2^64 in two's complement, wrapping where `*` raises `` `overflow ``. Int-only: a float or a char is `` `type ``. With `band`, arithmetic modulo any power of two." },
         .mod => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Compute remainder of `x` / `y`." },
         .ne => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for inequality." },
         .le => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Compare conforming values for less-than-or-equal order." },
@@ -99,16 +99,16 @@ pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
 
 fn unaryDefinition(comptime operation: UnaryOp) env.BuiltinWord {
     return switch (operation) {
-        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Square root. `` `domain `` on negative inputs (the result would be NaN)." },
-        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round down; the result is int64, `` `overflow `` outside its range." },
-        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round up; the result is int64, `` `overflow `` outside its range." },
-        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "**Pervasive.** Round to nearest; the result is int64, `` `overflow `` outside its range." },
-        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Natural exponential; float transcendental." },
-        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN)." },
-        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Sine; float transcendental." },
-        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Cosine; float transcendental." },
-        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "**Pervasive.** Invert 0/1 values." },
-        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "**Pervasive.** Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`." },
+        .sqrt => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Square root. `` `domain `` on negative inputs (the result would be NaN)." },
+        .floor => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round down; the result is int64, `` `overflow `` outside its range." },
+        .ceil => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round up; the result is int64, `` `overflow `` outside its range." },
+        .round => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- integer", .doc = "Round to nearest; the result is int64, `` `overflow `` outside its range." },
+        .exp => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Natural exponential; float transcendental." },
+        .log => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN)." },
+        .sin => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Sine; float transcendental." },
+        .cos => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Cosine; float transcendental." },
+        .not_word => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "bool -- bool", .doc = "Invert 0/1 values." },
+        .bnot => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`." },
         .neg => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Negate a numeric value." },
         .abs => .{ .name = operation.spelling(), .primitive = bindUnary(operation), .effect = "x -- y", .doc = "Return the absolute value of `x`." },
     };
@@ -4228,161 +4228,3 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
         }.run,
     };
 }
-
-/// Reducer symbols select fixed semantics independently of language bindings.
-pub fn reduceGroups(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    var reducer = try evaluator.popValue();
-    defer reducer.deinit();
-    if (reducer.borrow() != .symbol) return evaluator.typeError("a reducer symbol");
-    const operation = std.meta.stringToEnum(GroupReducer, @import("intern.zig").get(reducer.borrow().symbol.name)) orelse
-        return evaluator.fail(.domain, "unknown group reducer");
-    var groups = try evaluator.popList();
-    defer groups.deinit();
-    var values = try evaluator.popList();
-    defer values.deinit();
-    try evaluator.startDriver(GroupReduceDriver{
-        .values = .init(values.take()),
-        .groups = .init(groups.take()),
-        .operation = operation,
-    });
-}
-
-const GroupReducer = enum { sum, count, min, max };
-/// Reduces each group in order. A typed numeric value leaf selected by a typed
-/// index leaf is reduced in granted runs: the run's indices are checked at
-/// once, and the elements before the first bad one are still reduced, so a
-/// fault earlier in a group is reported before a bad index after it. Any
-/// other group takes the per-element boxed loop. The results are profiled
-/// into a typed list like every other collected result.
-const GroupReduceDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    values: heap.Owned(Value),
-    groups: heap.Owned(Value),
-    operation: GroupReducer,
-    output: ?heap.Owned(heap.OwnedValueBuffer) = null,
-    materializer: ?heap.Owned(list.ValueMaterializer) = null,
-    group: usize = 0,
-    index: usize = 0,
-    accumulator: Value = .{ .int = 0 },
-    comparison: ?heap.Owned(@import("kernel_order.zig").CompareCursor) = null,
-
-    fn reduceRun(
-        self: *GroupReduceDriver,
-        comptime value_kind: value.HeapKind,
-        comptime index_kind: value.HeapKind,
-        evaluator: *Fiber,
-        work: *poll.WorkBudget,
-        indices: *heap.ListHandle,
-    ) MachineError!void {
-        const Element = heap.LeafElement(value_kind);
-        var values = heap.LeafReader(value_kind).acquire(self.values.borrow().list);
-        defer values.release(evaluator.releases);
-        var selectors = heap.LeafReader(index_kind).acquire(indices);
-        defer selectors.release(evaluator.releases);
-        const items = values.slice();
-        const run = selectors.slice()[self.index..][0..work.take(selectors.len() - self.index)];
-        const fault = flat.firstIndexFault(heap.LeafElement(index_kind), run, items.len);
-        for (run[0..if (fault) |found| found.position else run.len]) |selector| {
-            const position: usize = @intCast(selector);
-            const item: Element = items[position];
-            const boxed: Value = if (Element == f64) .{ .float = item } else .{ .int = item };
-            switch (self.operation) {
-                .count => self.accumulator.int += 1,
-                .sum => self.accumulator = add(self.accumulator, boxed) catch |err|
-                    return scalarFailure(evaluator, err, position),
-                .min, .max => {
-                    // The first element seeds the accumulator, which until
-                    // then holds the sum's integer zero.
-                    const replace = self.index == 0 or replace: {
-                        const current: Element = if (Element == f64) self.accumulator.float else @intCast(self.accumulator.int);
-                        break :replace if (self.operation == .min) item < current else item > current;
-                    };
-                    if (replace) self.accumulator = boxed;
-                },
-            }
-            self.index += 1;
-        }
-        if (fault != null) return evaluator.fail(.domain, "group index is out of bounds");
-    }
-
-    /// Reduces part of the current group through the typed run when both the
-    /// values and its selectors are typed numeric leaves; false otherwise.
-    fn typedRun(self: *GroupReduceDriver, evaluator: *Fiber, work: *poll.WorkBudget, indices: Value) MachineError!bool {
-        const values = self.values.borrow().list;
-        switch (values.kind()) {
-            inline .leaf_u8, .leaf_i64, .leaf_f64 => |value_kind| switch (indices.list.kind()) {
-                inline .leaf_u8, .leaf_i64 => |index_kind| {
-                    try self.reduceRun(value_kind, index_kind, evaluator, work, indices.list);
-                    return true;
-                },
-                else => return false,
-            },
-            else => return false,
-        }
-    }
-
-    pub fn advance(evaluator: *Fiber, self: *GroupReduceDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const count: usize = @intCast(self.groups.borrow().list.length());
-        if (self.output == null and self.materializer == null) self.output = .init(try .init(evaluator.releases, count));
-        const work = evaluator.workBudget();
-        while (self.group != count and !work.exhausted()) {
-            const indices = list.atUnchecked(self.groups.borrow(), self.group);
-            if (indices != .list) return evaluator.typeError("group index lists");
-            if (self.index == indices.list.length()) {
-                if (self.index == 0 and (self.operation == .min or self.operation == .max))
-                    return evaluator.fail(.domain, "first requires a non-empty list");
-                self.output.?.borrowMut().appendBorrowed(self.accumulator);
-                self.accumulator = .{ .int = 0 };
-                self.group += 1;
-                self.index = 0;
-                _ = work.spend();
-                continue;
-            }
-            if (try self.typedRun(evaluator, work, indices)) continue;
-            _ = work.spend();
-            const selector = list.atUnchecked(indices, self.index);
-            if (selector != .int) return evaluator.typeError("integer group indices");
-            if (selector.int < 0 or @as(u64, @intCast(selector.int)) >= self.values.borrow().list.length())
-                return evaluator.fail(.domain, "group index is out of bounds");
-            const item = list.atUnchecked(self.values.borrow(), @intCast(selector.int));
-            switch (self.operation) {
-                .count => self.accumulator.int += 1,
-                .sum => {
-                    if (!item.isNumber()) return evaluator.typeError("numeric group values");
-                    self.accumulator = add(self.accumulator, item) catch |err| return scalarFailure(evaluator, err, @intCast(selector.int));
-                },
-                .min, .max => {
-                    if (self.index == 0) self.accumulator = item;
-                    if (self.comparison == null) self.comparison = .init(.init(evaluator.allocator, self.accumulator, item));
-                    switch (try self.comparison.?.borrowMut().advance(work)) {
-                        .pending => continue,
-                        .not_comparable => return evaluator.typeError("comparable group values"),
-                        .complete => |order| {
-                            if ((self.operation == .min and order == .gt) or (self.operation == .max and order == .lt)) self.accumulator = item;
-                            self.comparison.?.deinit(evaluator.releases, evaluator.allocator);
-                            self.comparison = null;
-                        },
-                    }
-                },
-            }
-            self.index += 1;
-        }
-        if (self.group != count) return .stepped;
-        if (self.materializer == null) {
-            const results = self.output.?.take();
-            self.output = null;
-            self.materializer = .init(list.ValueMaterializer.initOwned(evaluator.allocator, results));
-        }
-        if (work.exhausted()) return .stepped;
-        return switch (try self.materializer.?.borrowMut().advance(work)) {
-            .pending => .stepped,
-            .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releases, evaluator.allocator);
-                self.materializer = null;
-                break :completed .{ .output = result };
-            },
-        };
-    }
-};

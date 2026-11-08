@@ -1011,7 +1011,7 @@ pub const ModuleHome = opaque {
     pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
         return &self.image().scope;
     }
-    /// The canonical name this code was built for, fixed before its body ran.
+    /// The module name this code was built for, fixed before its body ran.
     pub fn name(self: *const ModuleHome) intern.ModuleName {
         return self.image().name;
     }
@@ -1962,7 +1962,7 @@ pub const Registry = enum(usize) {
     }
 
     pub const NamespaceProgress = poll.StreamProgress(u32);
-    /// Snapshot-owning enumeration of canonical module and alias names. The
+    /// Snapshot-owning enumeration of module and alias names. The
     /// directory representation remains private and the lease survives until
     /// the cursor is explicitly released, including when iteration is
     /// abandoned early.
@@ -2029,7 +2029,8 @@ pub const Registry = enum(usize) {
     };
     pub const TestDiscoveryProgress = poll.StreamProgress(DiscoveredTest);
 
-    /// Canonical-only discovery over one directory snapshot. The cursor owns
+    /// Discovery over one directory snapshot, visiting each module once and no
+    /// alias. The cursor owns
     /// both the directory lease and each generation lease for the complete
     /// time it borrows that generation's catalog.
     pub const TestDiscoveryCursor = struct {
@@ -2459,10 +2460,11 @@ pub const Registry = enum(usize) {
                 .define => struct { name: intern.BindingName, entry: env.Entry },
             };
 
-            /// What validation establishes: the canonical name the edit is
-            /// about and, for a reload, the entry it replaces.
+            /// What validation establishes: the module name the edit is about
+            /// (an alias's resolved target) and, for a reload, the entry it
+            /// replaces.
             const Target = struct {
-                canonical: intern.ModuleName,
+                name: intern.ModuleName,
                 prior: ?*ModuleImage,
             };
             const Build = struct {
@@ -2592,31 +2594,31 @@ pub const Registry = enum(usize) {
                 switch (kind) {
                     .define => {
                         // SAFETY: a top-level definition edits no module
-                        // entry, so its target's canonical name is never read.
-                        return .{ .canonical = undefined, .prior = null };
+                        // entry, so its target's module name is never read.
+                        return .{ .name = undefined, .prior = null };
                     },
                     .register => {
                         const name = self.requestedName();
-                        const old = snapshot orelse return .{ .canonical = name, .prior = null };
+                        const old = snapshot orelse return .{ .name = name, .prior = null };
                         if (intern.moduleBindingName(name)) |short| {
                             if (old.aliases.find(short) != null) return error.NameConflict;
                         }
-                        return .{ .canonical = name, .prior = old.modules.find(name) };
+                        return .{ .name = name, .prior = old.modules.find(name) };
                     },
                     .alias => {
                         const old = snapshot orelse return error.MissingModule;
                         if (old.modules.find(intern.moduleNameFromBinding(self.request.short)) != null)
                             return error.NameConflict;
-                        const canonical = if (old.modules.find(self.request.target) != null)
+                        const target = if (old.modules.find(self.request.target) != null)
                             self.request.target
                         else if (intern.moduleBindingName(self.request.target)) |short|
                             old.aliases.find(short) orelse return error.MissingModule
                         else
                             return error.MissingModule;
                         if (old.aliases.find(self.request.short)) |existing| {
-                            if (existing == canonical) return null;
+                            if (existing == target) return null;
                         }
-                        return .{ .canonical = canonical, .prior = null };
+                        return .{ .name = target, .prior = null };
                     },
                 }
             }
@@ -2636,12 +2638,12 @@ pub const Registry = enum(usize) {
                     .names = source.names,
                 };
                 var modules = switch (kind) {
-                    .register => try old.modules.put(releases, target.canonical, self.request.borrow()),
+                    .register => try old.modules.put(releases, target.name, self.request.borrow()),
                     .alias, .define => old.modules.retain(),
                 };
                 errdefer modules.release(releases);
                 var aliases = switch (kind) {
-                    .alias => try old.aliases.put(releases, self.request.short, target.canonical),
+                    .alias => try old.aliases.put(releases, self.request.short, target.name),
                     .register, .define => old.aliases.retain(),
                 };
                 errdefer aliases.release(releases);
@@ -2697,7 +2699,7 @@ pub const Registry = enum(usize) {
     }
 
     pub const AcquireProgress = poll.Progress(?GenerationLease);
-    /// Resolution of a canonical name or an alias to an observation lease on
+    /// Resolution of a module name or an alias to an observation lease on
     /// its current generation. The directory lease held across the lookup is
     /// what makes the retain safe: the directory owns the entry until the
     /// lease is released.
@@ -2710,7 +2712,7 @@ pub const Registry = enum(usize) {
             absent,
             module: Directory.ModuleMap.RawLookupCursor,
             alias: Directory.AliasMap.RawLookupCursor,
-            canonical_module: Directory.ModuleMap.RawLookupCursor,
+            alias_target: Directory.ModuleMap.RawLookupCursor,
             complete,
         };
 
@@ -2753,14 +2755,14 @@ pub const Registry = enum(usize) {
                 },
                 .alias => |*lookup| switch (lookup.advance()) {
                     .pending => return .pending,
-                    .complete => |canonical_name| if (canonical_name) |canonical| {
-                        self.state = .{ .canonical_module = self.directory.directory.?.modules.rawLookup(canonical) };
+                    .complete => |target_name| if (target_name) |target| {
+                        self.state = .{ .alias_target = self.directory.directory.?.modules.rawLookup(target) };
                     } else {
                         self.state = .complete;
                         return .{ .complete = null };
                     },
                 },
-                .canonical_module => |*lookup| switch (lookup.advance()) {
+                .alias_target => |*lookup| switch (lookup.advance()) {
                     .pending => return .pending,
                     .complete => |image| return self.found(image orelse unreachable),
                 },

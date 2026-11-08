@@ -2478,8 +2478,8 @@ pub const Fiber = struct {
     active_index: u32 = 0,
     active_word: intern.TraceWord = no_word,
     /// Scratch for spelling one qualified trace word in a diagnostic message.
-    /// A module-local word's spelling depends on the invoking registration, so
-    /// there is no interned string to point at. Written before it is read on
+    /// A module-local word's qualified spelling is never interned, so there is
+    /// no string to point at. Written before it is read on
     /// every path; zeroed rather than left `undefined` so no default here can
     /// become a read of uninitialized bytes.
     word_scratch: [intern.trace_word_bytes]u8 = @splat(0),

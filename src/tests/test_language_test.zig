@@ -71,7 +71,7 @@ test "testing: test names are absent from application resolution" {
     try expectErr(&runtime, "visibility.hidden");
 }
 
-test "testing: test mode discovers canonical registrations without aliases" {
+test "testing: test mode discovers each module once, ignoring aliases" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();

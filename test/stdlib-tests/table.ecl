@@ -315,15 +315,15 @@
   documented)
  `documentation test
 
- ### test symbol-aggregates
- (-- : "Built-in reducer symbols coexist with quotations and are validated before execution.")
+ ### test reducer-quotations
+ (-- : "Reducers are quotations over group slices, validated before any runs.")
  ({"k" [1 2 1] "v" [10 20 30]} ["k"]
-  [["s" "v" sum] ["n" "v" (len)] ["lo" "v" min] ["hi" "v" max]]
+  [["s" "v" (sum)] ["n" "v" (len)] ["lo" "v" ((min) fold1)] ["hi" "v" ((max) fold1)]]
   table.aggregate {"k" [1 2] "s" [40 20] "n" [2 1] "lo" [10 20] "hi" [30 20]} equal
-  ({"v" [1]} [] [["a" "v" (`user error.new raise)] ["b" "v" median]] table.aggregate)
+  ({"v" [1]} [] [["a" "v" (`user error.new raise)] ["b" "v" `sum]] table.aggregate)
   `type "specification" raises-containing
-  {"v" []} [] [["s" "v" sum] ["n" "v" count]] table.aggregate
+  {"v" []} [] [["s" "v" (sum)] ["n" "v" (len)]] table.aggregate
   {"s" [0] "n" [0]} equal)
- `symbol-aggregates test
+ `reducer-quotations test
 
 ) `stdlib.test.table @defm

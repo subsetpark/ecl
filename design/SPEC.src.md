@@ -545,8 +545,8 @@ Three quotation-application behaviors exist:
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
-  `fold`, `scan`, `update`, `stencil`, `unfold`, `infra`, `@attempt`, `@spawn`,
-  `@each`, and `@defm`.
+  `fold`, `fold1`, `scan`, `lex-cmp-with`, `update`, `stencil`, `unfold`,
+  `infra`, `@attempt`, `@spawn`, `@each`, and `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
 quotation argument as that argument's nested effect (see
@@ -599,8 +599,8 @@ seed values.
 
 Words that are isolated but *not* marked, with their reasons:
 
-- `each`, `zip-with`, `fold`, `scan`, `stencil`, `unfold`, `for` — they
-  apply in the **same** unit, on a substack, and are implicitly fed their
+- `each`, `zip-with`, `fold`, `fold1`, `scan`, `lex-cmp-with`, `stencil`,
+  `unfold`, `for` — they apply in the **same** unit, on a substack, and are implicitly fed their
   elements, windows, or states.
 - `infra` — it applies on an explicitly supplied *other* stack.
 - `import`, `importp` — they publish without taking a quotation.
@@ -620,8 +620,8 @@ the source name attached to its currently executing reader-authored occurrence;
 a definition therefore keeps reporting the file that authored its body when
 another file calls it. Runtime-assembled code has no source provenance, so
 `*file*` is `` `domain `` there rather than falling back to its caller.
-`*module*` returns the canonical name of the module whose code is running,
-including a construction body that has not yet published; at the root there is
+`*module*` returns the name of the module whose code is running, the name
+`@defm` published it under even when the call came through an alias, including a construction body that has not yet published; at the root there is
 no module and it is `` `domain ``. The stars are ordinary word characters with
 no reader meaning, and the convention applies to shipped vocabulary without
 reserving the spelling from user definitions.
@@ -1053,7 +1053,7 @@ that name.
   documentation, or `` `core ``, is `` `domain ``.
 - Modules are constructible by building the body quotation programmatically
   and enumerable and diffable through their names.
-- **Module names are validated paths.** A canonical module name is one or
+- **Module names are validated paths.** A module name is one or
   more nonempty binding-name segments joined by dots: `stats`, `core.utils`,
   and `company.data.csv` are valid; leading, trailing, and doubled dots are
   not. Definition names and aliases remain one unqualified segment. Qualified
@@ -1081,8 +1081,8 @@ that name.
   only after an image exists. A failed registration leaves the previous
   directory entry and current generation exactly as they were.
 - The registry is flat. A module body may define another module with `@defm`,
-  but that registration creates an independent module with its own canonical name
-  and lifetime; it does not establish lexical nesting or parent ownership.
+  but that registration creates an independent module with its own name and
+  lifetime; it does not establish lexical nesting or parent ownership.
   Registrations commit independently, so a completed inner registration
   remains published if the outer construction body later fails.
 - **Privacy is set at the definition site**: inside a module body, `def` and
@@ -1110,15 +1110,16 @@ that name.
   atomically; removal removes both; and aliases never create another suite.
 - **Test discovery and execution form a closed Session mode.** Ordinary
   Sessions reject `tests` and `@test` with `` `domain ``. A test Session's
-  `tests` returns canonical registrations once each, including root sources'
-  private registrations, sorted by module, test name, and source identifier.
+  `tests` returns each current module's tests once, aliases contributing
+  none, including root sources' private tests, sorted by module, test name, and
+  source identifier.
   Descriptors contain symbol fields `` `module `` and `` `name `` plus any
-  declared `` `effect `` and `` `doc ``. Private registrations also carry an
+  declared `` `effect `` and `` `doc ``. Private tests also carry an
   integer `` `source `` identifier local to the Session, distinguishing equal
   names across files. Descriptors contain no body, generation handle, state
   handle, or executable capability.
 - `descriptor @test` validates and looks up the descriptor against the
-  current canonical registration and its source when specified. A present test
+  module's current generation and its source when specified. A present test
   runs as a task under that generation's private home, spawned in the current
   scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
@@ -1289,7 +1290,7 @@ that name.
   resolution.
 - **Qualified resolution observes registrations only.** A qualified name
   splits at its final dot into a module name and a public binding name. The
-  module name selects a canonical registration directly or through an alias,
+  module name selects a registered module directly or through an alias,
   except that the reserved module segment `core` selects the core scope (see
   Roots and names) and never consults the registry.
   A missing registration or public binding raises `` `undefined-word ``.

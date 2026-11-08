@@ -885,7 +885,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: `qualify doc
         \\exit: 0
         \\stdout:
-        \\"<411-characters-elided>"
+        \\"<401-characters-elided>"
         \\stderr:
         \\<empty>
         \\=== result ok ===

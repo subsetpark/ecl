@@ -382,8 +382,8 @@
 
  ### def route
  (request routes -- response :
-  "*Inline.* Dispatch a request over a list of `[method pattern handler]` rows. The method is a
-   string compared exactly against the request's `` `method ``. A pattern is a slash path such as
+  "Dispatch a request over a list of `[method pattern handler]` rows. The method is a string
+   compared exactly against the request's `` `method ``. A pattern is a slash path such as
    `\"/users/:id\"` whose segments must equal the request's `` `path `` segments one for one, except
    that a segment beginning with `:` binds any nonempty path segment under its name in a string
    dictionary. The first row whose pattern and method both match has the request, with `` `params ``

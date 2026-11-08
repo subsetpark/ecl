@@ -32,7 +32,7 @@ BindingName.
 > lookup performs the same fresh selection each time it runs.
 Calls ~> Begin qualified call @ module-name: RegistryName, binding-name: BindingName.
 ---
-canonical? module-name or alias? module-name.
+module? module-name or alias? module-name.
 some call: Call,
      image: Image,
      definition: Definition,
@@ -54,11 +54,11 @@ some call: Call,
 where
 
 > The model has one kind of module object: an immutable image, published
-> under exactly one canonical name as one generation. Reload publishes a new
+> under exactly one module name as one generation. Reload publishes a new
 > image under the same name and retires the previous one. No action removes a
 > registration. A name is live while it maps to a
 > published, non-retired image, which is that name's current generation. A
-> live canonical name has zero or more direct aliases.
+> live module name has zero or more direct aliases.
 >
 > Definitions are immutable background relations. Each definition belongs to
 > one image and binding name, binding names are unique within an image, and
@@ -91,7 +91,7 @@ invocation-call invoker: InvocationContext => Call.
 
 {Construction} constructed? image: Image => Bool.
 
-{Registry} canonical? name: RegistryName => Bool.
+{Registry} module? name: RegistryName => Bool.
 {Registry} alias? name: RegistryName => Bool.
 {Registry} image-of name: RegistryName => Image.
 {Registry} image-published? image: Image => Bool.
@@ -123,20 +123,20 @@ initially all left: Definition, right: Definition,
   left = right.
 
 all registry-name: RegistryName |
-  ~(canonical? registry-name and alias? registry-name).
+  ~(module? registry-name and alias? registry-name).
 
 > A live name maps to its current generation.
 all registry-name: RegistryName,
-    canonical? registry-name or alias? registry-name |
+    module? registry-name or alias? registry-name |
   image-published? (image-of registry-name) and
   ~image-retired? (image-of registry-name).
 
-all registry-name: RegistryName, canonical? registry-name |
+all registry-name: RegistryName, module? registry-name |
   image-name (image-of registry-name) = registry-name.
 
-> An alias resolves to the current image of a live canonical name.
+> An alias resolves to the current image of a live module name.
 all registry-name: RegistryName, alias? registry-name |
-  canonical? (image-name (image-of registry-name)) and
+  module? (image-name (image-of registry-name)) and
   image-of (image-name (image-of registry-name)) = image-of registry-name.
 
 all image: Image, image-published? image |
@@ -154,7 +154,7 @@ all image: Image, image-retired? image |
 all image: Image,
     image-published? image,
     ~image-retired? image |
-  canonical? (image-name image) and
+  module? (image-name image) and
   image-of (image-name image) = image.
 
 all call: Call, call-active? call |
@@ -168,7 +168,7 @@ initially all image: Image |
   ~constructed? image and ~image-published? image and ~image-retired? image.
 
 initially all registry-name: RegistryName |
-  ~canonical? registry-name and ~alias? registry-name.
+  ~module? registry-name and ~alias? registry-name.
 
 initially all call: Call |
   ~call-created? call and ~call-active? call.
@@ -181,8 +181,8 @@ where
 
 > `Register` is `@defm`'s publication: it constructs a fresh image and
 > publishes it in one step, because no program can observe an image between
-> the two. It is an ordered upsert. Publishing under a missing canonical name
-> creates the registration; publishing under an existing canonical name
+> the two. It is an ordered upsert. Publishing under a missing module name
+> creates the registration; publishing under an existing module name
 > retires that name's current image, and every alias of the name resolves to
 > the new image from then on. Nothing else carries over. The supplied
 > invocation context is the top-level evaluator or the exact call performing
@@ -193,17 +193,17 @@ Registry, Construction ~> Register @ invoker: InvocationContext,
                                      ~constructed? image,
                                      ~alias? module-name.
 ---
-  canonical?' module-name and
+  module?' module-name and
   ~alias?' module-name and
   image-of' module-name = image and
   (all other-name: RegistryName, other-name != module-name |
-    canonical?' other-name = canonical? other-name and
+    module?' other-name = module? other-name and
     alias?' other-name = alias? other-name and
-    ((canonical? module-name and
+    ((module? module-name and
       alias? other-name and
       image-of other-name = image-of module-name) ->
       image-of' other-name = image) and
-    (~(canonical? module-name and
+    (~(module? module-name and
        alias? other-name and
        image-of other-name = image-of module-name) ->
       image-of' other-name = image-of other-name)) and
@@ -217,29 +217,29 @@ Registry, Construction ~> Register @ invoker: InvocationContext,
     image-published?' other-image = image-published? other-image and
     image-retired?' other-image =
       (image-retired? other-image or
-       (canonical? module-name and other-image = image-of module-name)) and
+       (module? module-name and other-image = image-of module-name)) and
     image-name' other-image = image-name other-image).
 
 where
 
 > `Add alias` resolves either kind of occupied target name and stores a direct
 > reference to its current image; semantic alias chains do not exist. The
-> alias follows the canonical name through reload. Canonical and
+> alias follows the module name through reload. Module and
 > alias names form one disjoint namespace, and an occupied name cannot be
 > repointed. The supplied invocation context is the top-level evaluator or the
 > exact call performing the mutation.
 Registry ~> Add alias @ invoker: InvocationContext,
                         alias-name: RegistryName,
                         target-name: RegistryName,
-                        ~canonical? alias-name,
+                        ~module? alias-name,
                         ~alias? alias-name,
-                        canonical? target-name or alias? target-name.
+                        module? target-name or alias? target-name.
 ---
-  ~canonical?' alias-name and
+  ~module?' alias-name and
   alias?' alias-name and
   image-of' alias-name = image-of target-name and
   (all other-name: RegistryName, other-name != alias-name |
-    canonical?' other-name = canonical? other-name and
+    module?' other-name = module? other-name and
     alias?' other-name = alias? other-name and
     image-of' other-name = image-of other-name) and
 

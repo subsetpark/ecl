@@ -178,7 +178,7 @@ test "module registration: a construction body must leave its stack empty" {
     try expectStack(&runtime, "[4 5] (+ pop (1) `one def) `ok @defm ok.one", "1");
 }
 
-test "module registration: invocation context comes from the registration" {
+test "module registration: invocation context comes from the called module" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -186,8 +186,8 @@ test "module registration: invocation context comes from the registration" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
 
-    // Two registrations with identical bodies: the registration the call
-    // entered through supplies the reported spelling.
+    // Two modules with identical bodies: the module the call entered supplies
+    // the reported spelling.
     const body = "[] (" ++
         "(1) `tick defp " ++
         "(tick) `bump def " ++
@@ -198,11 +198,11 @@ test "module registration: invocation context comes from the registration" {
     try expectOk(&runtime, body ++ "`left @defm " ++ body ++ "`right @defm");
     try expectEmptyStack(&runtime);
 
-    // A private word reached through a public one resolves in either
-    // registration, regardless of which was registered last.
+    // A private word reached through a public one resolves in either module,
+    // regardless of which was registered last.
     try expectStack(&runtime, "left.bump left.bump right.bump", "1 1 1");
 
-    // Reflection reports the invoking registration's spelling and generation.
+    // Reflection reports the called module's spelling and generation.
     try expectOk(&runtime, "right.report left.report");
     try std.testing.expectEqualStrings(
         "bump -> right.bump def public generation 1\n" ++
@@ -211,12 +211,12 @@ test "module registration: invocation context comes from the registration" {
     );
 
     // A declared effect is a cross-home contract, and its diagnostic names the
-    // registration that was called.
+    // module that was called.
     try expectErrorContains(&runtime, "right.liar", &.{ "kind contract", "word right.liar" });
     try expectErrorContains(&runtime, "left.liar", &.{ "kind contract", "word left.liar" });
 
     // The same call from inside the image is same-home, so no contract check
-    // applies and both registrations agree.
+    // applies and both modules agree.
     try expectStack(&runtime, "left.same-home", "1 2");
     try expectStack(&runtime, "right.same-home", "1 2");
 }
@@ -229,9 +229,9 @@ test "module registration: a diagnostic spells the same word its failure reports
 
     // A module-local word has no interned qualified spelling, so a message
     // renders one into a scratch buffer while the `word` field is interned
-    // separately. The two must never name *different* words: for an image
-    // registered under several names, the unqualified atom alone would not say
-    // which registration failed. A name long enough to exhaust the scratch is
+    // separately. The two must never name *different* words: two modules may
+    // define the same local name, so the unqualified atom alone would not say
+    // which one failed. A name long enough to exhaust the scratch is
     // the case that used to substitute it.
     const long = &@as([330]u8, @splat('m'));
     const source = "[] (( -- n ) (1 2) `two def) `" ++ long ++ " @defm " ++ long ++ ".two";
@@ -356,7 +356,7 @@ test "module registration: reload history grows no faster than registrations" {
 // Formatter output is a documented artifact contract, so the navigation
 // header is asserted as output rather than by reading the formatter's source.
 // The runtime claim below is registration behaviour: every embedded module must
-// actually register its own canonical name. The
+// actually register under its own module name. The
 // *spelling* has no runtime consequence and is therefore build tooling's job —
 // `zig build check-ecl` reads each standard module's parsed top-level forms and
 // requires the terminal one to be the word `@defm`.
