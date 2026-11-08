@@ -63,7 +63,7 @@ fn binaryDefinition(comptime operation: BinaryOp) env.BuiltinWord {
         .pow => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Exponentiation; returns float." },
         .min => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "The lesser of two comparable atoms." },
         .max => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "The greater of two comparable atoms." },
-        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Equality; numbers compare numerically across int and float. Whole-value equality is `match?`." },
+        .eq => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Equality; numbers compare numerically across int and float, symbols by name, and a symbol equals no number. Whole-value equality is `match?`." },
         .lt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Ascending comparison, producing 0/1 masks." },
         .gt => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- bool", .doc = "Descending comparison, producing 0/1 masks." },
         .band => .{ .name = operation.spelling(), .primitive = bindBinary(operation), .effect = "x y -- z", .doc = "Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``." },
@@ -1153,6 +1153,18 @@ fn minMax(left: Value, right: Value, choose_min: bool) ScalarError!Value {
 }
 
 fn comparison(left: Value, right: Value, operation: BinaryOp) ScalarError!Value {
+    // Equality is total: two symbols are equal when they name the same
+    // symbol, whatever occurrence metadata either carries, and a symbol
+    // equals no number. Only the ordering words have nothing to say about a
+    // symbol.
+    if (left == .symbol or right == .symbol) {
+        const same = left == .symbol and right == .symbol and left.symbol.name == right.symbol.name;
+        return switch (operation) {
+            .eq => .{ .int = @intFromBool(same) },
+            .ne => .{ .int = @intFromBool(!same) },
+            else => error.Type,
+        };
+    }
     const ordering = equal.compareScalars(left, right) catch return error.Type;
     const result = switch (operation) {
         .eq => ordering == .eq,

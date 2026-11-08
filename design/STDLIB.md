@@ -70,7 +70,7 @@
 `( x y -- bool )` — Compare conforming values for inequality.
 
 ### =
-`( x y -- bool )` — Equality; numbers compare numerically across int and float. Whole-value equality is `match?`.
+`( x y -- bool )` — Equality; numbers compare numerically across int and float, symbols by name, and a symbol equals no number. Whole-value equality is `match?`.
 
 ### >
 `( x y -- bool )` — Descending comparison, producing 0/1 masks.

@@ -908,7 +908,9 @@ descent:
   aligns by key: matching keys combine, unmatched keys pass through
   unchanged (union with identity fill).
 - Symbols are not numeric: pervading into a quotation errors at the first
-  symbol leaf.
+  symbol leaf, except under `=` and `<>`, which are total. Two symbols are
+  equal when they name the same symbol, whatever occurrence metadata either
+  carries, and a symbol equals no number: `` [`a 1] [a 2] = `` is `[1 0]`.
 - Chars enter every numeric word (arithmetic, comparison, the bitwise and
   wrapping words) as their codepoints and leave as ints: `char int +` and
   `char char -` are ints, `char int =` compares the codepoint with the int,
