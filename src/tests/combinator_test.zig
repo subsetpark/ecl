@@ -816,6 +816,12 @@ test "locals: the reserved backend words behave and blame as before" {
         .{ .name = "different reads do not match", .source = "(|a b| a) (|a b| b) match?", .expected = "0" },
         .{ .name = "different bind counts do not match", .source = "(|a| a) (|a b| a) match?", .expected = "0" },
         .{ .name = "identical locals quotations match", .source = "(|a b| a) (|a b| a) match?", .expected = "1" },
+        // A lowered operation stored as data is a quoted occurrence of the same
+        // operation: it keeps its operand, matches its source, prints as the
+        // quote, and pushes itself where the drop would have run.
+        .{ .name = "a stored operation keeps its operand", .source = "(|x| x) last wrap", .expected = "(1 `_dl)" },
+        .{ .name = "a stored operation matches its source", .source = "(|x| x) last wrap (|x| x) 2 drop match?", .expected = "1" },
+        .{ .name = "a quoted drop after a final call is not the epilogue", .source = "0 (|y| (1 (2) call) (|x| x) last append call) call", .expected = "1 2 1 _dl" },
         .{
             .name = "different reads are separate keys",
             .source = "{} (|a b| a) 1 dict.put (|a b| b) 2 dict.put dup dict.keys len swap (|a b| a) at",

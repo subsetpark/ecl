@@ -5566,7 +5566,8 @@ pub const Fiber = struct {
         if (current.nextIndex() == length) return true;
         if (length - current.nextIndex() == 1) {
             const drop = list.atUnchecked(.{ .list = current.code }, current.nextIndex());
-            if (drop != .symbol or drop.symbol.name != self.environment.localsWords().drop) return false;
+            // A quoted copy of the operation pushes itself rather than dropping.
+            if (drop != .symbol or env.isQuoted(drop.symbol.slot) or drop.symbol.name != self.environment.localsWords().drop) return false;
             const count = env.localOperand(drop.symbol.slot) orelse return false;
             return count <= self.locals.items.len;
         }
