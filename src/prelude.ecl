@@ -82,17 +82,6 @@
 (first second -- list : "Collect two stack values into a two-element list.")
 (() cons cons) `pair def
 
-### def partial
-(value quotation -- quotation :
- "Add `value` to the left of `quotation`, preserving the quotedness of symbols.
-
-  Ex:
-    3 (+) partial
-  (3 +)
-    `w () partial
-  (`w)")
-(swap literal swap cons) `partial def
-
 ### def partition
 (list (a -- bool) -- matches rejects :
  "Split a list into the elements whose predicate returned 1 and those that returned 0.")

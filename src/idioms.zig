@@ -40,12 +40,18 @@ pub const PhraseOp = enum {
     /// `cons` continued by `dip`: `x (q) cons dip` protects the value beneath
     /// `x` and runs `q` with `x` on the stack, without building `(x q...)`.
     cons_dip,
+    /// `partial` continued by `call` or `dip`: as the `cons` phrases, for
+    /// every head. `partial` quotes a symbol head so the built quotation
+    /// pushes it, which is how the symbol already sits on the stack.
+    partial_call,
+    partial_dip,
 
     pub fn spelling(self: PhraseOp) []const u8 {
         return switch (self) {
             .reshape_sum, .reshape_product => "reshape",
             .where_at => "where",
             .cons_call, .cons_dip => "cons",
+            .partial_call, .partial_dip => "partial",
         };
     }
 };
@@ -100,7 +106,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 4 + 18 + 5]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 4 + 18 + 7]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -186,12 +192,14 @@ pub const registry = blk: {
     for ([_]struct { operation: PhraseOp, consumer: []const u8 }{
         .{ .operation = .cons_call, .consumer = "call" },
         .{ .operation = .cons_dip, .consumer = "dip" },
+        .{ .operation = .partial_call, .consumer = "call" },
+        .{ .operation = .partial_dip, .consumer = "dip" },
     }) |phrase| {
         entries[index] = .{
             .context = .phrase,
             .pattern = &.{},
             .operation = .{ .phrase = phrase.operation },
-            .source_word = "cons",
+            .source_word = phrase.operation.spelling(),
             .following = &.{.{ .spelling = phrase.consumer }},
         };
         index += 1;
@@ -459,6 +467,17 @@ fn applyPhrase(evaluator: *Fiber, first: u16) MachineError!bool {
                 commitPhrase(evaluator, count, last.?);
                 try combinators.dipBelowHead(evaluator);
             },
+            .partial_call => {
+                if (!partialShape(evaluator, 2)) continue;
+                commitPhrase(evaluator, count, last.?);
+                var quotation = try evaluator.popValue();
+                try evaluator.callOwned(quotation.take().list);
+            },
+            .partial_dip => {
+                if (!partialShape(evaluator, 3)) continue;
+                commitPhrase(evaluator, count, last.?);
+                try combinators.dipBelowHead(evaluator);
+            },
         }
         return true;
     }
@@ -475,6 +494,20 @@ fn consShape(evaluator: *Fiber, depth: usize) bool {
     if (evaluator.available() < depth) return false;
     const stack = evaluator.stack.items;
     return stack[stack.len - 1] == .list and stack[stack.len - 2] != .symbol;
+}
+
+/// Whether `x quotation partial` followed by a word that runs the result can
+/// skip building it: `depth` operands and a list on top. `partial` quotes a
+/// symbol head so the built quotation pushes the symbol, unquoted, which is
+/// what dispatch leaves on the stack; a head quoted by `literal` is unquoted
+/// here as that push would have unquoted it.
+fn partialShape(evaluator: *Fiber, depth: usize) bool {
+    if (evaluator.available() < depth) return false;
+    const stack = evaluator.stack.items;
+    if (stack[stack.len - 1] != .list) return false;
+    const head = &stack[stack.len - 2];
+    if (head.* == .symbol) head.symbol.slot = env.unquoted(head.symbol.slot);
+    return true;
 }
 
 /// Consumes a matched phrase's following words, whose last one is now the

@@ -377,6 +377,22 @@ fn headedInput(operation: ecl.idioms.PhraseOp, variant: Variant) []const u8 {
             .float => "9 1.5 (dup)",
             .failure => "9 1 (pop pop)",
         },
+        // As the `cons` phrases, with a symbol head in the spine variant: the
+        // built quotation pushes it as data.
+        .partial_call => switch (variant) {
+            .atom => "5 (dup)",
+            .empty => "7 ()",
+            .spine => "`w (dup)",
+            .float => "1.5 (dup)",
+            .failure => "1 (pop pop)",
+        },
+        .partial_dip => switch (variant) {
+            .atom => "9 5 (dup)",
+            .empty => "9 7 ()",
+            .spine => "9 `w (dup)",
+            .float => "9 1.5 (dup)",
+            .failure => "9 1 (pop pop)",
+        },
     };
 }
 

@@ -877,6 +877,12 @@ pushing the same quotation as a pre-nested literal. Two changes:
   words as written. `cons` moved into the sequence kernel family to head the
   phrases; the following words are checked against the live bindings like
   every phrase's.
+- **`partial` is a builtin with the same phrases.** As a prelude word,
+  `(swap literal swap cons)`, it paid a definition call and three words over
+  `cons`, and its `cons` ended the body, so `partial call` in the caller's
+  code never fused. `partial call` and `partial dip` now fuse for every head:
+  `partial` quotes a symbol head so the built quotation pushes it, which is
+  how the symbol already sits on the stack.
 
 A 3-local loop of 300,000 iterations, ReleaseFast `-Dcpu=native`, x86_64 Linux
 (Intel Core Ultra 5 125U), one P-core, internal ms net of the 41 ms loop that
@@ -887,11 +893,14 @@ pushes a literal and pops it; control `f15e191`:
 | `(1 -) (dip) cons pop` | 44 | 31 |
 | `(1 -) (dip) cons dip` | 89 | 52 |
 | `(1 -) (dip) cons (dip) cons call` | 143 | 88 |
+| `(1 -) (dip) partial pop` | 62 | 32 |
+| `(1 -) (dip) partial dip` | 108 | 53 |
+| `(1 -) (dip) partial call` | 94 | 36 |
 | `(((1 -) dip) dip) call` (pre-nested) | 55 | 55 |
 
-Fused `cons dip` now costs what calling the pre-nested literal costs. The
-double-cons form still builds its inner list, since the outer `call` consumes
-it as a value. `tak(22,16,8)` on top of the native `cleave-n` branch,
+Fused `cons dip` and `partial dip` now cost what calling the pre-nested
+literal costs, and `partial` costs what `cons` costs. The double-cons form
+still builds its inner list, since the outer `call` consumes it as a value. `tak(22,16,8)` on top of the native `cleave-n` branch,
 whole process: the `(1 -) (dip) cons dip` form 400 → 364 ms, level with the
 pre-nested 363 ms; the double-cons form 442 → 396 ms.
 

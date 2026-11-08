@@ -1226,7 +1226,9 @@ A builtin can head a phrase continued by the words after it in the same code:
 instead of building the rows `sum` would fold, and `x (q) cons call` or
 `x (q) cons dip` runs `q` with `x` on the stack, as calling `(x q...)` would,
 without building that quotation; a symbol head, which the built quotation
-would run as a word, runs the words as written. Every kernel family binds its
+would run as a word, runs the words as written. `partial call` and
+`partial dip` fuse the same way for every head, since `partial` quotes a
+symbol head and the built quotation would push it. Every kernel family binds its
 words through one comptime wrapper derived from the table: a word that heads
 phrases asks, as its primitive starts, whether the words after it continue
 one, as a combinator offers its quotation; every other word keeps its

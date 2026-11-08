@@ -399,3 +399,24 @@ test "sequence: cons call and cons dip run the quotation without building it" {
         .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) cons call", .kind = "underflow", .word = "pop" },
     });
 }
+
+test "sequence: partial quotes a symbol head and fuses with call and dip" {
+    try helper.expectStacks(&.{
+        .{ .name = "atom head", .source = "3 (+) partial", .expected = "(3 +)" },
+        .{ .name = "symbol head is quoted", .source = "`w () partial `w (dip) partial", .expected = "(`w) (`w dip)" },
+        .{ .name = "quotation head", .source = "(1 -) (dip) partial", .expected = "((1 -) dip)" },
+        .{ .name = "the built quotation pushes the symbol", .source = "`w (dup) partial call", .expected = "w w" },
+        .{ .name = "partial call with a symbol head", .source = "`w (dup) partial call", .expected = "w w" },
+        .{ .name = "partial call with a literal-quoted head", .source = "`w literal (dup) partial call", .expected = "w w" },
+        .{ .name = "partial call with an atom head", .source = "5 (1 +) partial call", .expected = "6" },
+        .{ .name = "partial dip", .source = "1 2 3 (1 -) (dip) partial dip", .expected = "0 2 3" },
+        .{ .name = "partial dip with a symbol head", .source = "9 `w (dup) partial dip", .expected = "w w 9" },
+        .{ .name = "a definition's tail partial call", .source = "((2 *) partial call) `twice def 4 twice", .expected = "8" },
+    });
+    try helper.expectErrors(&.{
+        .{ .name = "partial needs a quotation", .source = "1 2 partial", .kind = "type", .word = "partial" },
+        .{ .name = "partial call without a list keeps partial's error", .source = "1 2 partial call", .kind = "type", .word = "partial" },
+        .{ .name = "partial dip needs the protected value", .source = "1 (2) partial dip", .kind = "underflow", .word = "dip" },
+        .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) partial call", .kind = "underflow", .word = "pop" },
+    });
+}

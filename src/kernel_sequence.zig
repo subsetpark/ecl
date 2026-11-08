@@ -46,6 +46,7 @@ fn definition(comptime operation: Op) env.BuiltinWord {
         .rest => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list -- list", .doc = "Return all but the first element of a nonempty list." },
         .find => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "list needle -- index", .doc = "Return the index of the first element of `list` for which `needle match?` returns 1, or the list length when no element matches." },
         .cons => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value list -- list", .doc = "Prepend `value` to the left end of `list`.\n\nNB: An unquoted symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data." },
+        .partial => .{ .name = operation.spelling(), .primitive = bind(operation), .effect = "value quotation -- quotation", .doc = "Add `value` to the left of `quotation`, preserving the quotedness of symbols.\n\nEx:\n  3 (+) partial\n(3 +)\n  `w () partial\n(`w)" },
     };
 }
 
@@ -72,6 +73,7 @@ fn primitive(evaluator: *Fiber, comptime operation: Op) MachineError!void {
         .rest => restPrimitive(evaluator),
         .find => findPrimitive(evaluator),
         .cons => consPrimitive(evaluator),
+        .partial => partialPrimitive(evaluator),
         .range => rangePrimitive(evaluator),
         .shape => shapePrimitive(evaluator),
         .len => lenPrimitive(evaluator),
@@ -3045,9 +3047,29 @@ fn consPrimitive(evaluator: *Fiber) MachineError!void {
     defer collection.deinit();
     var item = try evaluator.popValue();
     defer item.deinit();
-    if (try startTypedCons(evaluator, item.borrow(), &collection)) return;
-    if (try consSmallSpine(evaluator, &item, &collection)) return;
-    try ListCopyDriver.installCons(evaluator, &item, &collection);
+    try consValues(evaluator, &item, &collection);
+}
+
+/// `partial`: `cons` whose head stays data when the quotation runs. A symbol
+/// head is quoted, as `literal` would quote it; every other value is pushed
+/// by the quotation as itself already.
+fn partialPrimitive(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    var collection = try evaluator.popList();
+    defer collection.deinit();
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    if (item.borrow() == .symbol) {
+        const word = item.borrow().symbol;
+        item = .init(item.domain, .{ .symbol = .{ .name = word.name, .slot = word.slot | value.quote_flag } });
+    }
+    try consValues(evaluator, &item, &collection);
+}
+
+fn consValues(evaluator: *Fiber, item: *heap.OwnedValue, collection: *heap.OwnedValue) MachineError!void {
+    if (try startTypedCons(evaluator, item.borrow(), collection)) return;
+    if (try consSmallSpine(evaluator, item, collection)) return;
+    try ListCopyDriver.installCons(evaluator, item, collection);
 }
 
 /// The longest tail a spine `cons` copies where the word is invoked. Below
