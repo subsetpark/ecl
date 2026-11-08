@@ -818,7 +818,7 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         "([2 3] reshape sum) `columns def [1 2 3 4 5 6] columns",
         // Past one turn's budget the fold continues as a driver.
         "300000 range 1.5 + [3 100000] reshape sum",
-        "300000 range 0 * 1 + [100000 3] reshape product",
+        "[1] 300000 take [100000 3] reshape product",
     };
     for (fused) |source| {
         compareModesExactly(source) catch |err| {
@@ -851,4 +851,59 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
     try expectHits("(pop 99) `sum def [1 2 3 4] [2 2] reshape sum", 0);
     try expectHits("[1 2 3] [2 2] reshape sum", 0);
     try expectHits("([2 2] reshape) `rows def [1 2 3 4] rows sum", 0);
+}
+
+test "idioms: straight-line arithmetic chains run as one program" {
+    // A numeric word meeting a list, followed by more arithmetic in the same
+    // code, runs the chain as the program `each` would run for those words.
+    // Results and failures must match running the words one at a time, which
+    // pervade the whole list in turn: the first fault is the earliest word to
+    // fault anywhere, at its first position, not the first element's.
+    const sources = [_][]const u8{
+        "[1 2 3] 2 * 1 +",
+        "[1 2 3] dup * 1 +",
+        "[1 2 3] [4 5 6] + 2 *",
+        "[1 2 3] 10 over - *",
+        "[1 2 3] 2 * 1 + 7",
+        "[1.5 2.5] 2.0 * floor 3 mod",
+        "[0.1 0.2] 0.3 + -0.0 *",
+        "[1 2 3] 3 > 1 +",
+        "[1 2 3] 2 * pop 4",
+        "[1 2 3] 2 * pop 3 4 +",
+        "[4611686018427387904 1] 2 * 0 0 div +",
+        "[1 2] 1 + 0 0 div +",
+        "2 [1 2 3] * 1 +",
+        "([1 2 3] 2 * 1 +) `f def f",
+        "[0] (pop [1 2 3] 2 * 1 +) each",
+        // Faults: a later word at an earlier position loses to an earlier
+        // word at a later one, in either arrangement, across blocks too.
+        "[4611686018427387904 9223372036854775807] 1 + 2 *",
+        "[9223372036854775807 4611686018427387904] 2 * 1 +",
+        "[1 0 2] 10 swap div 1 +",
+        "[2 1 0] 10 swap div 2 *",
+        "1000 range 600 4611686018427387904 put 900 9223372036854775807 put 1 + 2 *",
+        "1000 range 900 4611686018427387904 put 600 9223372036854775807 put 1 + 2 *",
+        "1000 range 1.0 * 500 -1.0 put sqrt 1 +",
+        // Shapes that do not fuse still agree.
+        "[1 2] [1 2 3] + 2 *",
+        "[[1] [2]] 2 * 1 +",
+        "[1 a] 2 * 1 +",
+        "\"abc\" 1 + 2 *",
+        "(pop pop 9) `+ def [1 2] 2 * 1 +",
+        "1 2 + 3 *",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("chain differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+    try expectPhraseHits("[1 2 3] 2 * 1 +", 1);
+    try expectPhraseHits("[1 2 3] dup * 1 +", 1);
+    try expectPhraseHits("[0] (pop [1 2 3] 2 * 1 +) each", 1);
+    // One operation is already one kernel; scalars gain nothing; a rebound
+    // word in the run ends it before itself.
+    try expectPhraseHits("[1 2 3] 2 *", 0);
+    try expectPhraseHits("1 2 + 3 *", 0);
+    try expectPhraseHits("(pop pop 9) `+ def [1 2] 2 * 1 +", 0);
 }

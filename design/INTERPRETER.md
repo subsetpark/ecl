@@ -1235,6 +1235,23 @@ from a source position, a phrase split across a definition, or a shape the fold
 cannot take runs the words as written. A fault inside the phrase is reported
 as the last following word's own.
 
+Numeric arithmetic has one compiled form, the scalar program: a run of numeric
+constants, stack words, and core numeric operations compiled to a
+straight-line function over registers, executed a block at a time through the
+typed kernels. One compiler and one executor serve every place such a run
+appears. A quotation offered to `each`, `zip-with`, `fold`, `fold1`, or `scan`
+compiles whole, over the inputs the combinator seeds. In straight-line code a
+numeric word whose operands include a list heads a chain: the longest run of
+following forms that leaves one value compiles over the stack values it
+reaches, provided they are numeric atoms and conforming numeric leaves. The
+two differ only in the order the program's applications are observed in, which
+the executor takes as a mode. A quotation applied per element meets an
+element's first fault before the next element starts. Words run one at a time
+pervade the whole list before the next word starts, so a chain's first fault is
+the earliest instruction to fault at any position, reported at that position;
+once a block faults, the executor searches the rest of the list for an earlier
+instruction's fault before reporting.
+
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
