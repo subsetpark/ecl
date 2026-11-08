@@ -9,7 +9,7 @@
  ### defp optional-active
  (result -- generation : "Ignore missing or malformed previous state when building a replacement.")
  (dup result.ok? (`ok at first)
-  (`err at dup `kind at [io domain syntax type shape parse] swap (match?) partial any?
+  (`err at dup `kind at [io domain syntax type shape parse] swap (match?) cons any?
    (pop "") (raise) if) if) `optional-active defp
 
  ### def active

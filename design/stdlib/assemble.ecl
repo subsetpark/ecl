@@ -56,11 +56,11 @@
  "Return the 0/1 matrix whose row for each definition marks the other definitions its body uses.")
 (swap (intern) each over len range swap
  (|body index symbols| symbols body code-symbols in? index 0 put)
- partial zip-with) `adjacency def
+ cons zip-with) `adjacency def
 
 ### def closure-step
 (reach -- reach : "Add to each row everything the definitions it already reaches reach.")
-(dup (|row reach| reach row where at row (max) fold) partial each) `closure-step def
+(dup (|row reach| reach row where at row (max) fold) cons each) `closure-step def
 
 ### def condensed
 (matrix -- matrix :
@@ -71,12 +71,12 @@
  dup len range
  matrix
  (|cycle index matrix| cycle index 1 put dup where matrix swap at (max) fold1 swap not and)
- partial zip-with) `condensed def
+ cons zip-with) `condensed def
 
 ### def rank-step
 (ranks matrix -- ranks :
  "Recompute every rank from the current ranks of the definitions each uses.")
-(swap (|row ranks| ranks row where at dup empty? (pop 0) ((max) fold1 1 +) if) partial each)
+(swap (|row ranks| ranks row where at dup empty? (pop 0) ((max) fold1 1 +) if) cons each)
 `rank-step def
 
 ### def ranks
@@ -84,7 +84,7 @@
  "Map each defined name to its rank: the longest chain of same-source definitions beneath it, with
   each mutually recursive cycle counted once.")
 (over swap adjacency condensed
- dup (pop 0) each swap (rank-step) partial converge
+ dup (pop 0) each swap (rank-step) cons converge
  dict.from-lists) `ranks def
 
 ### def rank-of
@@ -93,7 +93,7 @@
 
 ### def rank-order
 (names ranks -- indices : "Return the permutation ordering names by rank, then by codepoint.")
-(over swap (rank-of) partial each swap zip grade) `rank-order def
+(over swap (rank-of) cons each swap zip grade) `rank-order def
 
 ### def source-forms
 (path -- forms : "Read and parse one trusted first-party source.")
@@ -108,7 +108,7 @@
   (ecl-files)
   (dup ".ecl" str.ends? (wrap) (pop []) if)
   if)
- partial each raze) `ecl-files def
+ cons each raze) `ecl-files def
 
 ### def word-spelling
 (form -- text : "Return a word's spelling, or the empty string for any other form.")
@@ -207,7 +207,7 @@
 ### def require-all
 (names known message -- : "Fail, naming every name the known list lacks, unless it holds them all.")
 (|names known message|
- names known (member? not) partial each where names swap at
+ names known (member? not) cons each where names swap at
  dup empty? swap ", " join message swap cat check) `require-all def
 
 ### def fragment
@@ -273,7 +273,7 @@
 (|path title qualifier names ranks introduce|
  path title fragment swap introduce call swap names examples qualifier pair
  names ranks rank-order names swap at
- swap (|name context| name context first context 1 at render-entry) partial each
+ swap (|name context| name context first context 1 at render-entry) cons each
  cons "\n\n" join) `section def
 
 ### def documented-modules
@@ -288,7 +288,7 @@
  module "." cat
  module intern exports (chars) each
  known module {} dict.get
- module (module-header) partial
+ module (module-header) cons
  section) `module-section def
 
 ### def module-sections
@@ -300,7 +300,7 @@
  (|fragments modules|
   fragments modules "a module fragment names no standard-library module: " require-all
   "src/stdlib" ecl-files (module-ranks pair) each dict.from-pairs
-  modules swap (module-section) partial each)
+  modules swap (module-section) cons each)
  call) `module-sections def
 
 ### def document

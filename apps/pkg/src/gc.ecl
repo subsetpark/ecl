@@ -41,8 +41,8 @@
   "Keep unrecognized entries and all explicitly retained archive identities.")
  (|state entry|
   entry `kind at `file match? entry `name at archive-name? and
-  state `retained at entry `name at (match?) partial any? not and
-  state entry `name at pair (remove) with state () partial if) `entry defp
+  state `retained at entry `name at (match?) cons any? not and
+  state entry `name at pair (remove) with state () cons if) `entry defp
 
  ### def collect-at
  (directory hashes -- count :
@@ -69,7 +69,7 @@
   result result.ok?
   result hashes pair (|result hashes| result `ok at first dup hashes collect-at swap port.close)
   with
-  result (missing-cache) partial if) `collect-result defp
+  result (missing-cache) cons if) `collect-result defp
 
  ### defp missing-cache
  (result -- count : "Accept only the documented absent-directory case.")

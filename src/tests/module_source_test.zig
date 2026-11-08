@@ -599,7 +599,7 @@ test "reflection: which and see expose metadata while see omits the definition w
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +)\n") != null);
     // One binding kind: a session constant reports as a public def with no
     // metadata, because the sugar supplies none, and `see` prints the stored
-    // literal capture rather than reconstructing the `set` spelling.
+    // capture rather than reconstructing the `set` spelling.
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows m.f") == null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "[9]\n") != null);
@@ -773,7 +773,7 @@ test "modules: module set and setp publish unannotated constants" {
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // Registration succeeding is itself the proof that a module definition
-    // may carry no effect at all: `set` publishes the bare literal capture,
+    // may carry no effect at all: `set` publishes the bare capture,
     // so constants need no value exception and no synthesized metadata.
     try expectOk(&runtime, "[] (7 `x set 8 `h setp (-- n) (h) `peek def) `m @defm");
     try expectOk(&runtime, "m.x m.peek");

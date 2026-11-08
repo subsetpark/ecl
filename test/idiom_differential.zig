@@ -360,33 +360,18 @@ fn headedInput(operation: ecl.idioms.PhraseOp, variant: Variant) []const u8 {
             .failure => "\"abc\" [1 0 1 1]",
         },
         // The head and the quotation it is consed onto. `empty` is the empty
-        // quotation, which leaves the head alone; the failure variant
-        // underflows at the quotation's second `pop`.
+        // quotation, which leaves the head alone; the spine variant has a
+        // symbol head, which the built quotation pushes as data; the failure
+        // variant underflows at the quotation's second `pop`.
         .cons_call => switch (variant) {
-            .atom => "5 (dup)",
-            .empty => "7 ()",
-            .spine => "[1 2] (reverse)",
-            .float => "1.5 (dup)",
-            .failure => "1 (pop pop)",
-        },
-        // As above, beneath a protected value.
-        .cons_dip => switch (variant) {
-            .atom => "9 5 (dup)",
-            .empty => "9 7 ()",
-            .spine => "9 [1 2] (reverse)",
-            .float => "9 1.5 (dup)",
-            .failure => "9 1 (pop pop)",
-        },
-        // As the `cons` phrases, with a symbol head in the spine variant: the
-        // built quotation pushes it as data.
-        .partial_call => switch (variant) {
             .atom => "5 (dup)",
             .empty => "7 ()",
             .spine => "`w (dup)",
             .float => "1.5 (dup)",
             .failure => "1 (pop pop)",
         },
-        .partial_dip => switch (variant) {
+        // As above, beneath a protected value.
+        .cons_dip => switch (variant) {
             .atom => "9 5 (dup)",
             .empty => "9 7 ()",
             .spine => "9 `w (dup)",
@@ -482,24 +467,24 @@ test "idioms: partial captures preserve generic behavior" {
     // recognition is proven against the runtime-constructed value.
     const sources = [_][]const u8{
         // Constant on the right, then the swapped (constant-left) form.
-        "[1 2 3] 3 (+) partial each",
-        "[1 2 3] 3 (swap -) partial each",
-        "[1 2 3] 3 (-) partial each",
+        "[1 2 3] 3 (+) cons each",
+        "[1 2 3] 3 (swap -) cons each",
+        "[1 2 3] 3 (-) cons each",
         // Nested spines, empties, and dict pervasion.
-        "[[1 2] [3]] 10 (*) partial each",
-        "[] 4 (+) partial each",
+        "[[1 2] [3]] 10 (*) cons each",
+        "[] 4 (+) cons each",
         // A captured list is a constant too.
-        "[[1 2] [3 4]] [10 20] (+) partial each",
+        "[[1 2] [3 4]] [10 20] (+) cons each",
         // Floats must stay bit-identical, including signed zero.
-        "[0.1 0.2 0.3] 0.3 (+) partial each",
-        "[0.0 -0.0] -0.0 (+) partial each",
-        "[1 2] 0.5 (swap /) partial each",
+        "[0.1 0.2 0.3] 0.3 (+) cons each",
+        "[0.0 -0.0] -0.0 (+) cons each",
+        "[1 2] 0.5 (swap /) cons each",
         // Failures: type, overflow, and domain must carry identical dicts.
-        "[1 2] {} (+) partial each",
-        "[9223372036854775807 1] 1 (+) partial each",
-        "[1 0] 0 (swap div) partial each",
+        "[1 2] {} (+) cons each",
+        "[9223372036854775807 1] 1 (+) cons each",
+        "[1 0] 0 (swap div) cons each",
         // A captured word is quoted, so it is never a constant operand.
-        "[1 2 3] (dup) first (pop) partial each",
+        "[1 2 3] (dup) first (pop) cons each",
         // Shapes that must NOT be recognized still agree with the generic
         // path: a wrapper spelled by hand and a longer phrase.
         "[1 2 3] ((3) first +) each",
@@ -507,7 +492,7 @@ test "idioms: partial captures preserve generic behavior" {
     };
     for (sources) |source| {
         compareModesExactly(source) catch |err| {
-            std.log.err("partial-capture differential failed for `{s}`", .{source});
+            std.log.err("cons-capture differential failed for `{s}`", .{source});
             return err;
         };
     }
@@ -516,12 +501,12 @@ test "idioms: partial captures preserve generic behavior" {
     // hit for the three elements. A hand-written `((3) first +)` falls through
     // to the generic frame machine, which runs the `first` kernel per element
     // without recognizing anything.
-    try expectHits("[1 2 3] 3 (+) partial each", 1);
-    try expectHits("[1 2 3] 3 (swap -) partial each", 1);
+    try expectHits("[1 2 3] 3 (+) cons each", 1);
+    try expectHits("[1 2 3] 3 (swap -) cons each", 1);
     try expectHits("[1 2 3] ((3) first +) each", 0);
     // No `first` is written into a non-word capture, so shadowing it has
     // nothing to reach.
-    try expectHits("(pop 99) `first def [1 2 3] 3 (+) partial each", 1);
+    try expectHits("(pop 99) `first def [1 2 3] 3 (+) cons each", 1);
 }
 
 /// Phrase hits count only fused phrases, whatever else a source recognizes.
@@ -860,11 +845,11 @@ test "idioms: a phrase matches alike inline, inside combinators, and in definiti
         };
     }
     for (fused) |source| try expectPhraseHits(source, 1);
-    // `partial call` is itself a phrase, so the quotation it runs adds its
+    // `cons call` is itself a phrase, so the quotation it runs adds its
     // own fused phrase: two hits.
-    const partial_source = "[2 3] ([1 2 3 4 5 6] swap reshape sum) partial call";
-    try compareModesExactly(partial_source);
-    try expectPhraseHits(partial_source, 2);
+    const cons_source = "[2 3] ([1 2 3 4 5 6] swap reshape sum) cons call";
+    try compareModesExactly(cons_source);
+    try expectPhraseHits(cons_source, 2);
     try expectHits("[1 2 3 4 5 6] [2 3] reshape sum", 1);
     try expectHits("[0] (pop [1 2 3 4 5 6] [3 2] reshape sum) each", 1);
 

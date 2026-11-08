@@ -76,7 +76,7 @@
    ["fixture"] in-caller proc.run dup `term at `code at 0 match? not 1
    "invalid descriptor is refused" expect
    `stderr at chars "invalid installed application descriptor" "invalid descriptor message"
-   expect-contains 0) partial each pop
+   expect-contains 0) cons each pop
   # Built-in commands retain precedence over installed application names.
   `cwd "installed-apps/moved/share/ecl/apps/test" fs.mkdirs
   ["application.json" "ecl.modules" "library.ecl" "main.ecl"]

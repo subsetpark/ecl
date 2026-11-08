@@ -14,24 +14,24 @@
 
  ### defp row-of
  (element corpus -- pairs : "Pair one element with a corpus.")
- (|element corpus| corpus element (pair) partial each) `row-of defp
+ (|element corpus| corpus element (pair) cons each) `row-of defp
 
  ### defp pairs-of
  (corpus -- pairs : "Build the Cartesian square of a corpus.")
- (|corpus| corpus corpus (row-of) partial each raze) `pairs-of defp
+ (|corpus| corpus corpus (row-of) cons each raze) `pairs-of defp
 
  ### defp ascending-row
  (index reference -- flags : "Compare one item to every later reference item.")
  (|index reference|
   reference index 1 + drop
   reference index at
-  (swap pkg.version.less?) partial each) `ascending-row defp
+  (swap pkg.version.less?) cons each) `ascending-row defp
 
  ### defp ascending-flags
  (reference -- flags : "Compare every earlier version with every later one.")
  (|reference|
   reference len range
-  reference (ascending-row) partial each raze) `ascending-flags defp
+  reference (ascending-row) cons each raze) `ascending-flags defp
 
  ### test ordering-laws
  (-- : "Prove strict total ordering over generated and SemVer reference corpora.")
@@ -101,8 +101,8 @@
   ["0.1.0"] pkg.version.max "0.1.0" equal
   ["2.0.0" "1.9.9" "2.0.0-rc.1"] dup pkg.version.max
   (|corpus max|
-   corpus max (swap pkg.version.less?) partial each (1 =) any? not 1 equal
-   corpus max (match?) partial each (1 =) any? 1 equal)
+   corpus max (swap pkg.version.less?) cons each (1 =) any? not 1 equal
+   corpus max (match?) cons each (1 =) any? 1 equal)
   call
   ([] pkg.version.max) `shape "at least one version" raises-containing
   (5 pkg.version.max) `type "list of version strings" raises-containing

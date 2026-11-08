@@ -39,7 +39,7 @@
   "Fill one missing artifact from the optional cache or source.")
  (|bytes context requirement|
   bytes empty?
-  context requirement pair (cache-or-network) with bytes () partial if) `cached-or-network defp
+  context requirement pair (cache-or-network) with bytes () cons if) `cached-or-network defp
 
  ### defp cache-or-network
  (context requirement -- bytes : "Require exact bytes even when a shared cache is present.")
@@ -50,7 +50,7 @@
  ### defp network-if-empty
  (bytes context requirement -- bytes : "Fetch only an artifact unavailable from local inputs.")
  (|bytes context requirement|
-  bytes empty? context requirement pair (network) with bytes () partial if) `network-if-empty defp
+  bytes empty? context requirement pair (network) with bytes () cons if) `network-if-empty defp
 
  ### defp pin
  (context requirement -- bytes :
@@ -75,5 +75,5 @@
  (bytes context requirement -- bytes :
   "Reuse an already pinned artifact or materialize it exactly once.")
  (|bytes context requirement|
-  bytes empty? context requirement pair (pin) with bytes () partial if) `pin-if-empty defp
+  bytes empty? context requirement pair (pin) with bytes () cons if) `pin-if-empty defp
 ) `pkg.obtain @defm

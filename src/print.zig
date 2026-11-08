@@ -25,7 +25,11 @@ const DisplayScan = struct {
 };
 
 const Action = union(enum) {
-    render: struct { item: Value, indent: usize },
+    /// `element` is true for an item rendered as a list element, the one
+    /// place a quoted symbol occurrence prints its quote: there it is read
+    /// back as the same occurrence. A symbol on its own or in a dict entry
+    /// is the symbol as data, and prints bare.
+    render: struct { item: Value, indent: usize, element: bool = false },
     sequence: struct {
         collection: Value,
         index: usize,
@@ -102,8 +106,8 @@ pub const RenderCursor = struct {
                     // A lowered locals operation shows its count or index
                     // before its name; the reader does not read this back.
                     if (env.localOperand(id.slot)) |operand| try self.writeFmt(writer, "{d} ", .{operand});
-                    // A quoted occurrence prints as the quote that reads it back.
-                    if (env.isQuoted(id.slot)) try self.writeByte(writer, '`');
+                    // A quoted list element prints as the quote that reads it back.
+                    if (render.element and env.isQuoted(id.slot)) try self.writeByte(writer, '`');
                     const spelling = intern.get(id.name);
                     if (lexer.spellingReadsBare(spelling)) {
                         try self.pushBytes(spelling);
@@ -183,6 +187,7 @@ pub const RenderCursor = struct {
                 try self.actions.push(.{ .render = .{
                     .item = list.atUnchecked(continuation.collection, continuation.index),
                     .indent = continuation.indent,
+                    .element = true,
                 } });
                 if (indent and continuation.indent != 0)
                     try self.actions.push(.{ .spaces = continuation.indent });

@@ -114,8 +114,13 @@
 
 ### def with
 (values quotation -- quotation :
- "Push each of `values` to the left of `quotation`, preserving the quotedness of symbols.")
-(((literal) each) dip cat) `with def
+ "Add each of `values`, in order, to the left of `quotation` as data: the result pushes them before
+  running `quotation`.
+
+  Ex:
+    [2 `w] (+) with
+  (2 `w +)")
+(swap reverse swap (swap cons) fold) `with def
 
 ### def wrap
 (value -- list : "Wrap `value` in a list.")
@@ -134,7 +139,7 @@
  ({kind type msg "@each expected a list for its operand" word @each} raise) when
  list values quotation pair
  (|element seeds| element seeds first cons seeds 1 at @spawn)
- partial each
+ cons each
  dup
  (|failure entry tasks|
   failure entry tasks failure len 0 >
@@ -157,7 +162,7 @@
    (|tasks start failure| failure)
    if)
   if)
- partial
+ cons
  over dup len range swap (pair) zip-with [] rolldown fold
  dup len 0 > (nip first raise) (pop (task.await `ok at first) each) if) `@each def
 
@@ -196,7 +201,7 @@
   state 2 at wrap quotation each first
   3 pack
   state 2 at)
- partial
+ cons
  unfold nip value swap cons) `converges def
 
 ### def fail
@@ -228,11 +233,11 @@ def
  "(annotation value name -- ) *or* (value name -- ). Bind `value` as a constant word in the current
   scope. Reference applies the constant's body and pushes the exact captured value, quotations
   included. `annotation` is published as the constant's metadata.")
-(swap literal wrap swap def) `set def
+(swap wrap swap def) `set def
 
 ### def setp
 (... value name -- : "`set` as a private module name. A top-level `setp` is an error.")
-(swap literal wrap swap defp) `setp def
+(swap wrap swap defp) `setp def
 
 ### def to-digits
 (value radices -- digits :

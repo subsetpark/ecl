@@ -57,7 +57,7 @@
    "{format 1 local \"local\" scopes {\"local\" {root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}\n"
    over "ecl.modules" pair path.join write
    entry 2 at wrap "[] (({}) `value def) `fixture @defm" str.format
-   swap "fixture.ecl" pair path.join write 0) partial each pop
+   swap "fixture.ecl" pair path.join write 0) cons each pop
   "{format 2 name \"project\" version \"0.1.0\" requires {}}\n" directory "ecl.pkg" pair path.join
   write
   old-lock directory "ecl.lock" pair path.join write

@@ -52,12 +52,12 @@
 12 forms.complete io.pp
 10 forms.via-private io.pp
 
-### `set` is exactly literal capture plus `def`, including optional metadata.
+### `set` is exactly `wrap` plus `def`, including optional metadata.
 
 ### set answer
 (: "The answer.")
 42 `answer set
-42 literal wrap `spelled def
+42 wrap `spelled def
 answer spelled match? io.pp
 `answer see
 `spelled see

@@ -368,7 +368,10 @@ test "sequence: rest reverse and find" {
 test "sequence: cons builds short spines in place and long ones through the copy driver" {
     try helper.expectStacks(&.{
         .{ .name = "list head onto a quotation", .source = "(1 -) (dip) cons", .expected = "((1 -) dip)" },
-        .{ .name = "symbol head onto a quotation", .source = "`w (dip) cons", .expected = "(w dip)" },
+        .{ .name = "symbol head enters as data", .source = "`w (dip) cons `w () cons", .expected = "(`w dip) (`w)" },
+        .{ .name = "a symbol taken from code enters as data too", .source = "(w) first (dip) cons [`w] first (dip) cons", .expected = "(`w dip) (`w dip)" },
+        .{ .name = "the built quotation pushes the symbol", .source = "`w (dup) cons call", .expected = "w w" },
+        .{ .name = "execute runs a symbol the quotation pushes", .source = "5 `dup (execute 1) cons call", .expected = "5 5 1" },
         .{ .name = "list head onto an empty list", .source = "[1] () cons [1] [] cons", .expected = "([1]) ([1])" },
         .{ .name = "list head onto a typed leaf", .source = "[0] [1 2 3] cons \"ab\" \"cd\" cons", .expected = "([0] 1 2 3) (\"ab\" \\c \\d)" },
         .{ .name = "dict head keeps the tail's elements", .source = "{a 1} [[2] [3]] cons", .expected = "({a 1} [2] [3])" },
@@ -387,8 +390,9 @@ test "sequence: cons call and cons dip run the quotation without building it" {
         .{ .name = "cons call onto an empty list pushes the head", .source = "7 () cons call", .expected = "7" },
         .{ .name = "cons dip protects the value beneath the head", .source = "1 2 3 (1 -) (dip) cons dip", .expected = "0 2 3" },
         .{ .name = "cons dip with an atom head", .source = "10 20 1 (+) cons dip", .expected = "11 20" },
-        .{ .name = "a symbol head still becomes a word of the program", .source = "5 `dup (1) cons call", .expected = "5 5 1" },
-        .{ .name = "a symbol head under dip", .source = "8 9 `dup (+) cons dip", .expected = "16 9" },
+        .{ .name = "cons call with a symbol head", .source = "`w (dup) cons call", .expected = "w w" },
+        .{ .name = "cons call with a head taken from quoted code", .source = "[`w] first (dup) cons call", .expected = "w w" },
+        .{ .name = "cons dip with a symbol head", .source = "9 `w (dup) cons dip", .expected = "w w 9" },
         .{ .name = "a shadowed call runs the words as written", .source = "(pop 42) `call def 1 (2) cons call", .expected = "42" },
         .{ .name = "a definition's tail cons call", .source = "((2 *) cons call) `twice def 4 twice", .expected = "8" },
     });
@@ -397,26 +401,5 @@ test "sequence: cons call and cons dip run the quotation without building it" {
         .{ .name = "cons dip without a list keeps cons's error", .source = "1 2 3 cons dip", .kind = "type", .word = "cons" },
         .{ .name = "cons dip needs the protected value", .source = "1 (2) cons dip", .kind = "underflow", .word = "dip" },
         .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) cons call", .kind = "underflow", .word = "pop" },
-    });
-}
-
-test "sequence: partial quotes a symbol head and fuses with call and dip" {
-    try helper.expectStacks(&.{
-        .{ .name = "atom head", .source = "3 (+) partial", .expected = "(3 +)" },
-        .{ .name = "symbol head is quoted", .source = "`w () partial `w (dip) partial", .expected = "(`w) (`w dip)" },
-        .{ .name = "quotation head", .source = "(1 -) (dip) partial", .expected = "((1 -) dip)" },
-        .{ .name = "the built quotation pushes the symbol", .source = "`w (dup) partial call", .expected = "w w" },
-        .{ .name = "partial call with a symbol head", .source = "`w (dup) partial call", .expected = "w w" },
-        .{ .name = "partial call with a literal-quoted head", .source = "`w literal (dup) partial call", .expected = "w w" },
-        .{ .name = "partial call with an atom head", .source = "5 (1 +) partial call", .expected = "6" },
-        .{ .name = "partial dip", .source = "1 2 3 (1 -) (dip) partial dip", .expected = "0 2 3" },
-        .{ .name = "partial dip with a symbol head", .source = "9 `w (dup) partial dip", .expected = "w w 9" },
-        .{ .name = "a definition's tail partial call", .source = "((2 *) partial call) `twice def 4 twice", .expected = "8" },
-    });
-    try helper.expectErrors(&.{
-        .{ .name = "partial needs a quotation", .source = "1 2 partial", .kind = "type", .word = "partial" },
-        .{ .name = "partial call without a list keeps partial's error", .source = "1 2 partial call", .kind = "type", .word = "partial" },
-        .{ .name = "partial dip needs the protected value", .source = "1 (2) partial dip", .kind = "underflow", .word = "dip" },
-        .{ .name = "a fault in the quotation is the quotation's own", .source = "1 (pop pop) partial call", .kind = "underflow", .word = "pop" },
     });
 }

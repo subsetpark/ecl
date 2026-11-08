@@ -32,8 +32,8 @@
  ### defp matches
  (pattern input star? same? -- bool : "Match a token sequence with repeatable wildcard tokens.")
  (|pattern input star same|
-  input pattern [1] star (initial-step) partial fold
-  pattern star same 3 pack (row) partial fold last) `matches defp
+  input pattern [1] star (initial-step) cons fold
+  pattern star same 3 pack (row) cons fold last) `matches defp
 
  ### defp byte-match
  (pattern input -- bool : "Question mark matches one path byte.")

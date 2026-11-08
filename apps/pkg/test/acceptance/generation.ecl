@@ -116,7 +116,7 @@
   dup project `directory at "ecl.pkg" rolldown fs.publish-text
   work swap next-lock pkg.generation.finish
   project `directory at work `location at next-lock
-  project `path at (pkg.verify.publication) partial pkg.transaction.prepare
+  project `path at (pkg.verify.publication) cons pkg.transaction.prepare
   project `directory at "ecl.lock" next-lock fs.publish-text
   project wrap (pkg.install.verify) @attempt result.err? 1 equal
   project `directory at "ecl.modules" fs.read-text previous-map equal

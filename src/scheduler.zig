@@ -2699,6 +2699,9 @@ pub const WorkerScheduler = enum(usize) {
                 return true;
             },
             .success_unstarted => {
+                // The unit's final stack becomes the outcome's list, so each
+                // value enters as data (`value.datum`); the fiber is finished.
+                for (execution.fiber.stack.items) |*item| item.* = value.datum(item.*);
                 work.* = .{
                     .success_materializing = list.ValueMaterializer.init(
                         self.allocator(),

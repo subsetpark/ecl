@@ -11,7 +11,7 @@
  (state metadata -- state : "Compare one regular installed file with its sealed source archive.")
  (|state metadata|
   metadata `kind at `file match?
-  state metadata pair (file) with state () partial if) `member defp
+  state metadata pair (file) with state () cons if) `member defp
 
  ### defp file
  (state metadata -- state : "Require a regular file and compare its exact bytes.")
@@ -32,7 +32,7 @@
    archive archive.next-member
    (dup dict.size 0 >) (member dup `archive at archive.next-member) while pop
    `files at archive port.close)
-  directory swap partial call) `archived-files defp
+  directory swap cons call) `archived-files defp
 
  ### defp entry
  (state entry -- state : "Reject links and special objects while enumerating the installed tree.")
@@ -127,7 +127,7 @@
    {} `cursor cursor put `expected expected put cursor fs.next-entry
    (dup dict.size 0 >) (child dup `cursor at fs.next-entry) while pop
    `expected at dict.size 0 = require cursor port.close)
-  expected swap partial call) `children defp
+  expected swap cons call) `children defp
 
  ### defp layout
  (directory lock -- : "Require the closed immutable generation layout and every selected seal.")

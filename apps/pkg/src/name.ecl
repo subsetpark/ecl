@@ -8,7 +8,7 @@
   "Return 1 when a string is nonempty and contains only characters from the given set.")
  (|string characters|
   string empty? not
-  string characters (in?) partial all?
+  string characters (in?) cons all?
   and) `chars-in? defp
 
  ### setp lead-chars

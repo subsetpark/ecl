@@ -33,7 +33,7 @@
  ### defp checked-read
  (bytes hash -- bytes : "Treat corrupted cache contents as a miss without trusting their filename.")
  (|bytes hash|
-  bytes pkg.fetch.hash hash match? bytes () partial ([]) if) `checked-read defp
+  bytes pkg.fetch.hash hash match? bytes () cons ([]) if) `checked-read defp
 
  ### defp read-present
  (path hash -- bytes :

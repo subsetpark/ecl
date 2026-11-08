@@ -159,7 +159,7 @@ test "definitions: module def and defp accept all four annotation forms" {
     );
 }
 
-test "definitions: set and setp publish exact literal captures without synthesized metadata" {
+test "definitions: set and setp publish exact captures without synthesized metadata" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime_inputs = try runtime_fixture.Fixture.init();
@@ -167,10 +167,10 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // The equivalence is exact in the body and in the absent metadata: both
-    // spellings expose the same literal-capture body.
+    // spellings expose the same capture body.
     try expectStack(
         &runtime,
-        "42 `answer set 42 literal wrap `spelled def answer spelled match?",
+        "42 `answer set 42 wrap `spelled def answer spelled match?",
         "1",
     );
     try expectOk(&runtime, "`answer see `spelled see `answer which");

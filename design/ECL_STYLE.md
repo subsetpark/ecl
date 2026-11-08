@@ -156,17 +156,19 @@ quotation's input stack.
 
 ### Captures
 
-Use `partial` for one captured value. For several captures, collect them once
+Use `cons` for one captured value. For several captures, collect them once
 and use `with`:
 
 ```ecl
 state package version requirer 4 pack (catalog-manifest) with
 ```
 
-Do not build a chain of `partial` applications for the same quotation.
+Do not build a chain of `cons` applications for the same quotation.
 Reusable captures are explicit: a local may not cross a quotation
-boundary by name. Construct a new quotation with `partial` or `with`, then bind
-the captured value inside it.
+boundary by name. Construct a new quotation with `cons` or `with`, then bind
+the captured value inside it. A captured value is data in the new quotation
+whatever it is: a symbol is pushed, not run, so a quotation that must run a
+symbol it was handed writes `execute`.
 
 An operator's declared input and a unit constructor's values operand pass
 parameters across the boundary without capture. Pass those values directly
@@ -188,7 +190,7 @@ when it has a domain meaning:
 ```ecl
 ### defp manifest-node
 (manifest -- node : "Return a manifest's [name version] identity.")
-([name version] swap (swap at) partial each)
+([name version] swap (swap at) cons each)
 `manifest-node defp
 ```
 

@@ -57,7 +57,7 @@
    raises.")
  (dup type `dict match?
   (dup dict.keys [method target path query headers body peer params] in? (1 match?) all?
-   (dup [method target path query peer] swap (string-field?) partial all?
+   (dup [method target path query peer] swap (string-field?) cons all?
     over `headers {} dict.get headers? and
     over `body [] dict.get bytes? and
     over `params {} dict.get params? and

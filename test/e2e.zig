@@ -1357,7 +1357,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] ((-- value) 40 literal wrap `k def) `m @defm m.k `m.k which",
+        "[] ((-- value) 40 wrap `k def) `m @defm m.k `m.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -1740,7 +1740,7 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
     var unchanged = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (\"original\" fail) @attempt dup (result.or-raise) partial [] swap @attempt `err at swap `err at match?",
+        "[] (\"original\" fail) @attempt dup (result.or-raise) cons [] swap @attempt `err at swap `err at match?",
     });
     defer unchanged.deinit();
     try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });

@@ -108,11 +108,11 @@ test "mailbox: send and receive round trip in order" {
         "{ok [1000000]}",
     );
     // An address is an ordinary value to send, including inside a dict.
-    try expectStack(&runtime, "[] (task.receive type) @spawn dup task.address dup task.send task.await", "{ok (address)}");
+    try expectStack(&runtime, "[] (task.receive type) @spawn dup task.address dup task.send task.await", "{ok (`address)}");
     try expectStack(
         &runtime,
         "[] (task.receive `reply at type) @spawn dup task.address dup {} `reply rolldown put task.send task.await",
-        "{ok (address)}",
+        "{ok (`address)}",
     );
 }
 

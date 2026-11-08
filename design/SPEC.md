@@ -181,8 +181,12 @@ characters. An atom is classified whole-token, in this order:
    push the same value. As data the occurrence is the symbol itself, so
    `` [`a `b] `` is a two-element list equal to `[a b]`; the quote is
    occurrence metadata, like a symbol's link, and travels with the occurrence
-   when lists are copied or spliced. `{ }` rejects a quote, since dict entries
-   are data and never run.
+   when lists are copied or spliced. A symbol stored into a list from the
+   stack at run time, by `cons` or by a combinator collecting results, is
+   stored as a quoted occurrence: a runtime value is data wherever it lands,
+   and `` `w (dup) cons call `` pushes `w` twice. A list that runs a symbol
+   it was handed as a value says so with `execute`. `{ }` rejects a quote,
+   since dict entries are data and never run.
    `` ` `` is reserved token-initially and banned inside symbols.
 4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
@@ -241,9 +245,10 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
   `hi` = 20 — names read in argument order. Names must be distinct
   unqualified symbols; an empty locals declaration `(||)` is a parse error;
   the exact names `--` and `:` are parse errors as local names. A local is not
-  visible inside a nested quotation within the declaring body; referencing
-  one there is an error whose message identifies `partial` as construction of
-  a reusable capturing quotation. The sugar does not involve `set`; locals and
+  visible inside a nested quotation within the declaring body; a reference
+  there is an ordinary word lookup, so it resolves to a binding of that name or
+  fails as an undefined word. `cons` constructs a reusable capturing
+  quotation. The sugar does not involve `set`; locals and
   environment assignment are unrelated mechanisms. A declaration that finds
   fewer values than it names is an underflow. Opening a word's body, it is
   that word's arity check: the word is the failing word, as a primitive would
@@ -1318,7 +1323,7 @@ attribution; see Modules.
 Underflow against the floor of a constructed unit is reported specially:
 the message names the isolation and the constructor's values operand, and the
 error dict carries `` `isolation `` naming the constructor. It does not prescribe
-`partial` or `with`: those construct a different, reusable quotation rather
+`cons` or `with`: those construct a different, reusable quotation rather
 than pass arguments through this boundary. It is the one underflow
 whose cause is invisible — the values the caller meant to pass are on
 screen and out of reach.
@@ -1393,16 +1398,16 @@ representations but expose the same binding model.
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
 - ``annotation? value `name set`` binds a constant. It is sugar, defined in ecl
-  as `swap literal wrap swap def`: the value is captured with `literal`, so the
-  published body is `(value)`, or ``(`value)`` when the value is a word.
+  as `swap wrap swap def`: the value is wrapped, so the published body is
+  `(value)`, or ``(`value)`` when the value is a word.
   Reference applies that body and pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. ``v `name set`` is therefore
-  observationally ``v literal wrap `name def``: the sugar synthesizes no
+  observationally ``v wrap `name def``: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
-  prints its literal-capture body, preceded by the annotation when one is
+  prints its captured body, preceded by the annotation when one is
   present; an unannotated `set` has no effect or documentation, and nothing
-  distinguishes it from the corresponding `literal wrap` plus `def` spelling. `set`
+  distinguishes it from the corresponding `wrap` plus `def` spelling. `set`
   assigns the environment and introduces no lexical binding. For ordinary local
   values, prefer stack flow or locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
@@ -1458,7 +1463,7 @@ one marker of each kind, `--` before `:`, only slots (see
 after `:`. A malformed recognized annotation is a
 `` `domain `` error. The quotation adjacent to the name is unconditionally the
 body; only the value beneath it is considered for annotation recognition.
-`set`/`setp` capture their value with `literal` before `def`/`defp` sees it,
+`set`/`setp` wrap their value before `def`/`defp` sees it,
 so marker words belonging to the captured value sit nested inside the body
 and remain inert. A separate annotation beneath that value is still visible
 to `def`/`defp`, giving constants the same optional metadata as words.
@@ -2064,7 +2069,10 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
 
   Generic runtime list operations do not create lineage. A body produced by
   `cat`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
-  similar operation keeps the scopes already carried by its parts, but module
+  similar operation keeps the scopes already carried by its parts, and a stack
+  value that such an operation stores enters as data: a symbol becomes a quoted
+  occurrence, so the body pushes it rather than running it (see Lexical
+  structure). Module
   construction accepts it without traversing or re-scoping it. Reader-authored
   fragments do not make their runtime-built container reader-authored. For
   example, ``7 `k set [] ((k) `geta) (def) cat `m @defm`` builds the module body

@@ -122,7 +122,7 @@
   for
   result `err {} dict.get
   dup error.valid?
-  kinds (error.kind-in?) partial
+  kinds (error.kind-in?) cons
   (pop 0)
   if
   result `err dict.has? and
@@ -137,8 +137,8 @@
  (|result on-ok on-err|
   result checked pop
   result `ok dict.has?
-  result (`ok at) partial on-ok cat
-  result (`err at) partial on-err cat
+  result (`ok at) cons on-ok cat
+  result (`err at) cons on-err cat
   if) `either def
 
  ### def all

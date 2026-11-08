@@ -581,7 +581,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // Capture-shape recognition allocates on its own path (the fused
             // kernel) and on the rejected one (the generic frame machine);
             // both belong in the consolidated allocation-failure sweep.
-            "[1 2 3] 3 (+) partial each pop " ++
+            "[1 2 3] 3 (+) cons each pop " ++
             "[1 2 3] ((3 4) first +) each pop",
     );
     try runOk(

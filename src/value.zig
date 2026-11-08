@@ -126,6 +126,21 @@ pub fn isQuotedSlot(slot: u32) bool {
     return slot & quote_flag != 0;
 }
 
+/// A stack value as the list element it becomes when a word stores it at
+/// run time. Every value but a symbol pushes itself when the list runs; a
+/// bare symbol would run as a word, so it enters as its quoted occurrence,
+/// linked as it was, and the built list pushes the symbol. This is the one
+/// rule that makes a runtime value data wherever it is stored: `cons` and
+/// the collecting combinators apply it, while copies between lists (`cat`,
+/// `rest`, `reverse`, ...) carry each occurrence as written. Code is written
+/// or parsed; `execute` runs a symbol a list pushes.
+pub fn datum(item: Value) Value {
+    return switch (item) {
+        .symbol => |word| .{ .symbol = .{ .name = word.name, .slot = word.slot | quote_flag } },
+        else => item,
+    };
+}
+
 pub const Value = union(Tag) {
     int: i64,
     float: f64,

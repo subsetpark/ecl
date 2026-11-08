@@ -857,7 +857,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\(... value name -- :
         \\ "(annotation value name -- ) *or* (value name -- ). Bind `value` as a constant word in the current scope. Reference applies the constant's body and pushes the exact captured value, quotations included. `annotation` is published as the constant's metadata.")
-        \\(swap literal wrap swap def)
+        \\(swap wrap swap def)
         \\stderr:
         \\<empty>
         \\=== setp ===

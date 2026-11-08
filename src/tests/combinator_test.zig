@@ -926,7 +926,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try expectStack(&generic, "[1 2 3] (neg) each", "[-1 -2 -3]");
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
-    // Constant and partial-capture spellings of `match? each` produce their
+    // Constant and cons-capture spellings of `match? each` produce their
     // boolean mask in one bounded driver. Structured elements still compare
     // as whole values rather than inheriting `in?`'s recursive pervasion.
     try expectStack(&automatic, "pop [1 2 1] (1 match?) each", "[1 0 1]");
@@ -934,7 +934,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     try expectStack(
         &automatic,
-        "pop [1 1.0 [2] {a 3} x] [2] (match?) partial each",
+        "pop [1 1.0 [2] {a 3} x] [2] (match?) cons each",
         "[0 0 1 0 0]",
     );
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
@@ -944,19 +944,19 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     try expectStack(
         &generic,
-        "pop [1 1.0 [2] {a 3} x] [2] (match?) partial each",
+        "pop [1 1.0 [2] {a 3} x] [2] (match?) cons each",
         "[0 0 1 0 0]",
     );
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
-    // `partial` prefixes a non-word constant as itself, so it reaches the same
+    // `cons` prefixes a non-word constant as itself, so it reaches the same
     // constant-operand kernels a bare constant does, in both operand orders.
     // A wrapper spelled by hand is not a constant: it falls through to the
     // generic path, where `first` is a builtin and nothing fuses.
-    try expectStack(&automatic, "pop [1 2 3] 3 (+) partial each", "[4 5 6]");
+    try expectStack(&automatic, "pop [1 2 3] 3 (+) cons each", "[4 5 6]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
-    try expectStack(&automatic, "pop [1 2 3] 3 (swap -) partial each", "[2 1 0]");
+    try expectStack(&automatic, "pop [1 2 3] 3 (swap -) cons each", "[2 1 0]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
     try expectStack(&automatic, "pop [1 2 3] ((3 4) first +) each", "[4 5 6]");

@@ -32,7 +32,7 @@
  (offline project update vendor -- :
   "Coordinate generation publication while preserving caller process context.")
  (|offline project update vendor|
-  vendor project (read-lock pop) partial when
+  vendor project (read-lock pop) cons when
   project update offline vendor pkg.install.synchronize
   project read-lock `packages at dict.size wrap "synced {} packages" str.format io.print
   project project-close) `synchronize-project defp
@@ -67,10 +67,10 @@
  ### defp initialize
  (name project -- : "Validate the local map before publishing initial project state.")
  (|name project|
-  ["ecl.pkg" "ecl.lock" "ecl.modules"] project `directory at (absent) partial for
+  ["ecl.pkg" "ecl.lock" "ecl.modules"] project `directory at (absent) cons for
   project `directory at "src" fs.mkdirs
   {format 2 version "0.1.0" sources ["src/**/*.ecl"] exports [] requires {}} `name name put
-  project (initialize-manifest) partial call) `initialize defp
+  project (initialize-manifest) cons call) `initialize defp
 
  ### defp initialize-manifest
  (manifest project -- :
@@ -115,7 +115,7 @@
  (|arguments|
   arguments first pkg.name.valid? require arguments 1 at pkg.version.validate pop
   arguments 2 at pkg.fetch.archive
-  arguments (archive-bytes) partial call) `archive-requirement defp
+  arguments (archive-bytes) cons call) `archive-requirement defp
 
  ### defp archive-bytes
  (bytes arguments -- requirement bytes :
@@ -131,9 +131,9 @@
  (arguments -- requirement bytes :
   "Resolve an explicit Git selector and obtain identity from the source manifest.")
  (|arguments|
-  arguments 1 at ["--tag" "--commit"] swap (match?) partial any? require
+  arguments 1 at ["--tag" "--commit"] swap (match?) cons any? require
   arguments first arguments 1 at "--tag" match? (`tag) (`commit) if arguments 2 at pkg.fetch.git
-  arguments first (git-snapshot) partial call) `git-requirement defp
+  arguments first (git-snapshot) cons call) `git-requirement defp
 
  ### defp git-snapshot
  (snapshot url -- requirement bytes :
@@ -151,8 +151,8 @@
   (|arguments project|
    project pkg.project.lock project pkg.install.recover
    arguments first pkg.name.url?
-   arguments (git-requirement) partial arguments (archive-requirement) partial if
-   project (record) partial call port.close project project-close) call) `add defp
+   arguments (git-requirement) cons arguments (archive-requirement) cons if
+   project (record) cons call port.close project project-close) call) `add defp
 
  ### defp record
  (requirement bytes project -- :
