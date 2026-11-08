@@ -296,7 +296,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### cons
 `( value list -- list )` — Prepend `value` to the left end of `list`.
 
-NB: A symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data.
+NB: An unquoted symbol, consed to a program, will execute when that program is run; use `partial` when every value should be prepended only as inert data.
 
 ### cos
 `( x -- y )` — Cosine; float transcendental.
@@ -529,7 +529,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 ```
 
 ### intern
-`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A spelling which is not yet interned is interned, so this never fails on a valid spelling; a string that is not a valid symbol spelling is `` `domain ``. Interned symbols live for the whole process and are never reclaimed. See [Conversions](SPEC.md#conversions).
+`( value -- symbol )` — Given a string, return the symbol with the same spelling. Returns a symbol unchanged. A new valid spelling is added to the intern table; a string that is not a valid symbol spelling is `` `domain ``. Interned symbols live for the whole process and are never reclaimed, and the table's capacity is fixed, so interning unbounded external input can exhaust it and fail with out-of-memory. See [Conversions](SPEC.md#conversions).
 
 #### Examples
 
