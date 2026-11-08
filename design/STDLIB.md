@@ -937,22 +937,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 # => [[1 2 3] [2 3 4]]
 ```
 
-### with
-`( values quotation -- quotation )` — Add each of `values`, in order, to the left of `quotation` as data: the result pushes them before running `quotation`.
-
-```
-Ex:
-  [2 `w] (+) with
-(2 `w +)
-```
-
-#### Examples
-
-```ecl
-[3] (dup) with call
-# => 3 3
-```
-
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
 

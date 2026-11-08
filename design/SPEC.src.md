@@ -654,14 +654,14 @@ child stack, beneath the shared seeds.
 
 Keeping the two operands separate is what makes seeding compatible with module
 text: `@defm` knows exactly which list is the construction body.
-Generic quotation-building operations such as `with` may still produce a body,
+Generic quotation-building operations such as `cat` may still produce a body,
 but a runtime-built body has no reader lineage and therefore takes no module
 attribution; see Modules.
 
 Underflow against the floor of a constructed unit is reported specially:
 the message names the isolation and the constructor's values operand, and the
 error dict carries `` `isolation `` naming the constructor. It does not prescribe
-`cons` or `with`: those construct a different, reusable quotation rather
+`cons` or `cat`: those construct a different, reusable quotation rather
 than pass arguments through this boundary. It is the one underflow
 whose cause is invisible — the values the caller meant to pass are on
 screen and out of reach.
@@ -1227,7 +1227,7 @@ that name.
   nested inside it can scope its own body to its own image.
 
   Generic runtime list operations do not create lineage. A body produced by
-  `cat`, `cons`, `append`, `raze`, slicing, reversal, `with`, or a
+  `cat`, `cons`, `append`, `raze`, slicing, reversal, or a
   similar operation keeps the scopes already carried by its parts, and a stack
   value that such an operation stores enters as data: a symbol becomes a quoted
   occurrence, so the body pushes it rather than running it (see Lexical

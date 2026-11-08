@@ -496,15 +496,6 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => [1 2 3 4 5]
 ```
 
-### with
-
-#### Examples
-
-```ecl
-[3] (dup) with call
-# => 3 3
-```
-
 ### @each!
 
 #### Examples

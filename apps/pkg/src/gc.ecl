@@ -42,7 +42,7 @@
  (|state entry|
   entry `kind at `file match? entry `name at archive-name? and
   state `retained at entry `name at (match?) cons any? not and
-  state entry `name at pair (remove) with state () cons if) `entry defp
+  state entry `name at pair (remove) cat state () cons if) `entry defp
 
  ### def collect-at
  (directory hashes -- count :
@@ -56,7 +56,7 @@
    `retained hashes (pkg.cache.filename) each put cursor fs.next-entry
    (dup dict.size 0 >) (entry dup `cursor at fs.next-entry) while pop
    `removed at cursor port.close)
-  directory hashes pair swap with call) `collect-at def
+  directory hashes pair swap cat call) `collect-at def
 
  ### defp collect
  (path hashes -- count : "Join the cache directory after incremental collection.")
@@ -68,7 +68,7 @@
  (|result hashes|
   result result.ok?
   result hashes pair (|result hashes| result `ok at first dup hashes collect-at swap port.close)
-  with
+  cat
   result (missing-cache) cons if) `collect-result defp
 
  ### defp missing-cache

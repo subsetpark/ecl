@@ -112,16 +112,6 @@
 (list width -- windows : "Return overlapping windows of width `width`.")
 (() stencil) `windows def
 
-### def with
-(values quotation -- quotation :
- "Add each of `values`, in order, to the left of `quotation` as data: the result pushes them before
-  running `quotation`.
-
-  Ex:
-    [2 `w] (+) with
-  (2 `w +)")
-(swap reverse swap (swap cons) fold) `with def
-
 ### def wrap
 (value -- list : "Wrap `value` in a list.")
 (() cons) `wrap def

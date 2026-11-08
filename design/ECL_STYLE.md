@@ -157,15 +157,15 @@ quotation's input stack.
 ### Captures
 
 Use `cons` for one captured value. For several captures, collect them once
-and use `with`:
+and use `cat`:
 
 ```ecl
-state package version requirer 4 pack (catalog-manifest) with
+state package version requirer 4 pack (catalog-manifest) cat
 ```
 
 Do not build a chain of `cons` applications for the same quotation.
 Reusable captures are explicit: a local may not cross a quotation
-boundary by name. Construct a new quotation with `cons` or `with`, then bind
+boundary by name. Construct a new quotation with `cons` or `cat`, then bind
 the captured value inside it. A captured value is data in the new quotation
 whatever it is: a symbol is pushed, not run, so a quotation that must run a
 symbol it was handed writes `execute`.

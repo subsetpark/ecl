@@ -126,7 +126,7 @@
   (pop 0)
   if
   result `err dict.has? and
-  result handler pair (recover) with
+  result handler pair (recover) cat
   result wrap
   if) `recover-kinds def
 

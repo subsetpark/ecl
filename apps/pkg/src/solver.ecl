@@ -38,7 +38,7 @@
   (`ok at first)
   package required version 3 pack
   (|attempt-result package required version| package required version malformed-version)
-  with
+  cat
   if) `resolve-version-checked defp
 
  ### defp precheck-requirement-value
@@ -57,7 +57,7 @@
   requirement type `dict match?
   requirement `version dict.has?
   and
-  requirement pair package 3 pack (precheck-requirement-value) with
+  requirement pair package 3 pack (precheck-requirement-value) cat
   when) `precheck-present-requirement defp
 
  ### defp precheck-own-version
@@ -74,7 +74,7 @@
  (requirements package -- : "Validate requirement versions when the field is a dict.")
  (|requirements package|
   requirements type `dict match?
-  requirements package pair (precheck-requirements-dict) with
+  requirements package pair (precheck-requirements-dict) cat
   ()
   if) `precheck-requirements-value defp
 
@@ -98,10 +98,10 @@
   "Attach provenance to version failures, then validate a manifest.")
  (|candidate package|
   candidate `version dict.has?
-  candidate package pair (precheck-own-version) with
+  candidate package pair (precheck-own-version) cat
   when
   candidate `requires dict.has?
-  candidate package pair (precheck-manifest-requirements) with
+  candidate package pair (precheck-manifest-requirements) cat
   when
   candidate pkg.manifest.validate) `precheck-and-validate-manifest defp
 
@@ -127,8 +127,8 @@
   name
   version
   left-package right-package cmp -1 =
-  left-package left-hash right-package right-hash 4 pack (declaration-pairs) with
-  right-package right-hash left-package left-hash 4 pack (declaration-pairs) with
+  left-package left-hash right-package right-hash 4 pack (declaration-pairs) cat
+  right-package right-hash left-package left-hash 4 pack (declaration-pairs) cat
   if
   raise-hash-conflict) `hash-conflict defp
 
@@ -218,7 +218,7 @@
    prior (`requirer at) (`hash at) bi
    package requirement `hash at)
   infra
-  (hash-conflict) with
+  (hash-conflict) cat
   when
   prior `git-commit prior `git-commit at requirement `source at `commit "" dict.get merge-commit put
   `source prior requirement canonical-source put
@@ -257,8 +257,8 @@
   "Return the canonical source record after one declaration.")
  (|sources node name requirement package|
   sources node dict.has?
-  sources node name requirement package 5 pack (existing-source) with
-  requirement package pair (source-record) with
+  sources node name requirement package 5 pack (existing-source) cat
+  requirement package pair (source-record) cat
   if) `source-for defp
 
  ### defp record-source
@@ -288,7 +288,7 @@
   state `root at manifest-node
   match?
   state (root-manifest) cons
-  state package version requirer 4 pack (catalog-manifest) with
+  state package version requirer 4 pack (catalog-manifest) cat
   if
   package version matching-manifest) `manifest-for defp
 
@@ -310,8 +310,8 @@
   and
   state `catalog at package {} dict.get version dict.has?
   and
-  state package version 3 pack (catalog-value) with
-  requirer package version 3 pack (missing-manifest) with
+  state package version 3 pack (catalog-value) cat
+  requirer package version 3 pack (missing-manifest) cat
   if) `catalog-manifest defp
 
  ### defp matching-manifest
@@ -353,11 +353,11 @@
   "Skip a visited node or visit a new exact node.")
  (|state node requirer package requirement|
   state `active at node node-member?
-  state node pair (raise-cycle) with
+  state node pair (raise-cycle) cat
   when
   state `visited at node node-member?
   state () cons
-  state node requirer package requirement 5 pack (visit-new-node) with
+  state node requirer package requirement 5 pack (visit-new-node) cat
   if) `visit-node defp
 
  ### defp visit-new-node
@@ -475,7 +475,7 @@
  (state name -- state : "Skip already reached names before adding selected dependency edges.")
  (|state name|
   state `seen at name (match?) cons any?
-  state () cons state name pair (reach-new) with if) `reach-name defp
+  state () cons state name pair (reach-new) cat if) `reach-name defp
 
  ### defp reach-new
  (state name -- state : "Record one selected package and enqueue its direct dependencies.")

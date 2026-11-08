@@ -345,13 +345,6 @@ pub fn Group(comptime Cell: type, comptime Result: type, comptime lifetime: anyt
             }
             // Releasing the execution pin may destroy the cell and this group.
         }
-        /// The callback borrows the resource for exactly its dynamic extent.
-        /// A declined activity runs no callback and owns no release obligation.
-        pub fn with(self: *Self, args: anytype, comptime function: anytype) void {
-            if (!self.acquire()) return;
-            defer self.release();
-            @call(.auto, function, .{self.data().cell} ++ args);
-        }
         /// Failure returns all acquired lifetime to the group; arguments remain
         /// caller-owned. Success owns them until the shared executor joins.
         pub fn spawn(self: *Self, args: anytype, comptime run: anytype) error{ OutOfMemory, Io, Closed }!void {

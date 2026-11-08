@@ -35,7 +35,7 @@
  (state requirement -- state :
   "Skip exact nodes already discovered; the resolver checks all edges.")
  (|state requirement|
-  state requirement known? state () cons state requirement pair (visit-new) with if) `visit defp
+  state requirement known? state () cons state requirement pair (visit-new) cat if) `visit defp
 
  ### defp step
  (state -- state : "Remove one pending declaration before processing its artifact.")

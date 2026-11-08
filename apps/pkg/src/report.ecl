@@ -4,7 +4,7 @@
  ### defp edges
  (entry lock -- lines : "Render selected direct edges in canonical alias order.")
  (|entry lock|
-  entry 1 at pkg.data.sorted-entries entry first lock pair (edge) with each) `edges defp
+  entry 1 at pkg.data.sorted-entries entry first lock pair (edge) cat each) `edges defp
 
  ### defp edge
  (entry parent lock -- line : "Show one selected dependency version.")
@@ -23,7 +23,7 @@
  (state child -- state : "Enqueue each package once, bounding path search by the selected graph.")
  (|state child|
   state `seen at child (match?) cons any?
-  state () cons state child pair (enqueue-new) with if) `enqueue defp
+  state () cons state child pair (enqueue-new) cat if) `enqueue defp
 
  ### defp enqueue-new
  (state child -- state : "Record one canonical shortest path to an unseen child.")
@@ -55,7 +55,7 @@
  (|name lock|
   name lock `root at match? name () cons
   name lock pair (|name lock| name lock `packages at name at `version at pair "{} {}" str.format)
-  with if)
+  cat if)
  `node defp
 
  ### def why

@@ -62,7 +62,7 @@
   path name (match?) cons any? not require
   seen name (match?) cons any?
   seen () cons
-  lock name path seen 4 pack (descend) with
+  lock name path seen 4 pack (descend) cat
   if) `visit defp
 
  ### defp root-manifest
@@ -98,7 +98,7 @@
   requirement `package del
   (|selection declared|
    selection `version at declared `version at match?
-   selection declared pair (match? require) with when)
+   selection declared pair (match? require) cat when)
   call) `check-pin defp
 
  ### def check-manifest

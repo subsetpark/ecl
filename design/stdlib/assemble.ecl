@@ -221,8 +221,8 @@
   `cwd path fs.read-text blocks
   over "\n" split first "## " title cat match?
   "a section fragment's heading does not match its name" check)
- with
- title wrap ("## " swap cat []) with
+ cat
+ title wrap ("## " swap cat []) cat
  if) `fragment def
 
 ### def examples

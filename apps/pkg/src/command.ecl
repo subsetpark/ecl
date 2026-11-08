@@ -26,7 +26,7 @@
   "Run explicitly selected resolution policy and publish an immutable generation.")
  (|arguments update vendor|
   arguments offline pkg.project.find
-  update vendor pair (synchronize-project) with call) `synchronize defp
+  update vendor pair (synchronize-project) cat call) `synchronize defp
 
  ### defp synchronize-project
  (offline project update vendor -- :
@@ -77,7 +77,7 @@
   "Create manifest, lock, and usable local-source map without package bootstrap.")
  (|manifest project|
   manifest {} pkg.solver.resolve
-  manifest project pair (initialize-lock) with call) `initialize-manifest defp
+  manifest project pair (initialize-lock) cat call) `initialize-manifest defp
 
  ### defp initialize-lock
  (lock manifest project -- :

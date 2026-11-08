@@ -21,8 +21,8 @@
   "Honor an existing lock unless dependency selection was explicitly requested.")
  (|work manifest update|
   work `project at `directory at "ecl.lock" fs.exists? update not and
-  work `project at manifest pair (existing-lock) with
-  work manifest pair (resolve) with if) `selection def
+  work `project at manifest pair (existing-lock) cat
+  work manifest pair (resolve) cat if) `selection def
 
  ### def recover
  (project -- : "Complete a validated pending publication under the caller's mutation lock.")
@@ -57,7 +57,7 @@
   "Build against one observed manifest and one portable lock selection.")
  (|manifest-text work update|
   work manifest-text pkg.manifest.read update selection
-  manifest-text work pair (publish) with call) `synchronize-work defp
+  manifest-text work pair (publish) cat call) `synchronize-work defp
 
  ### defp publish
  (lock-text manifest-text work -- :

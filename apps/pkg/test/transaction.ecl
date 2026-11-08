@@ -59,15 +59,15 @@
  (fixture 3 pack
   (|state project lock|
    project prepare project old-lock old-map roots
-   state 1 >= project "ecl.lock" new-lock 3 pack (fs.publish-text) with when
+   state 1 >= project "ecl.lock" new-lock 3 pack (fs.publish-text) cat when
    state 2 >= project "ecl.modules" generation pkg.layout.reference 3 pack
-   (fs.publish-text) with when
+   (fs.publish-text) cat when
    project recover project recover
    project new-lock generation pkg.layout.reference roots
    project ".ecl/publication.ecl" fs.exists? 0 equal
    project generation "/ecl.lock" cat fs.read-text new-lock equal
    lock port.close project port.close)
-  with call) `boundary defp
+  cat call) `boundary defp
 
  ### test interruption-boundaries
  (-- : "Recovery is idempotent before publication, between root writes, and after activation.")
@@ -95,7 +95,7 @@
    project path fs.read-text "unrelated edit" equal
    project ".ecl/publication.ecl" fs.exists? 1 equal
    lock port.close project port.close)
-  with call) `conflict defp
+  cat call) `conflict defp
 
  ### test refuses-conflicts
  (-- :
