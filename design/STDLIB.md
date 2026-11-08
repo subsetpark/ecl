@@ -263,6 +263,15 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### clamp
 `( value lower upper -- bounded )` — Constrain a value to the inclusive interval between `lower` and `upper`.
 
+### cleave
+`( x quotations -- ... )` — Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
+
+### cleave-n
+`( ... n quotations -- ... )` — N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs.
+
+### cleave2
+`( x y quotations -- ... )` — Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs.
+
 ### cmp
 `( left right -- ordering )` — Three-way whole-value ordering, −1/0/1; **not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain: numbers (exact across int/float), chars by codepoint, and lists, which compare lexicographically: corresponding elements by `cmp` until the first nonzero result, then by length. Strings are char lists, so they order by codepoint. Anything else, including cross-kind pairs, is `` `type ``; elements after the first difference are never compared. Equivalent on two lists to `(cmp) lex-cmp-with`. `cmp` exists because the subtraction idiom is unsafe for ordering: `-` errors on int64 overflow where an ordering must be total.
 
@@ -920,6 +929,16 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ### while
 `( cond body -- ... )` — At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized.
 
+### while-values
+`( value (predicate: state -- bool) (step: state -- state) -- list )` — Return `value` and successive states through the first state for which the predicate is false.
+
+#### Examples
+
+```ecl
+1 (5 <) (1 +) while-values
+# => [1 2 3 4 5]
+```
+
 ### windows
 `( list width -- windows )` — Return overlapping windows of width `width`.
 
@@ -975,15 +994,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 # => [[0 1 2] [3 4 5] [6]]
 ```
 
-### cleave
-`( x quotations -- ... )` — Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing.
-
-### cleave-n
-`( ... n quotations -- ... )` — N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs.
-
-### cleave2
-`( x y quotations -- ... )` — Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs.
-
 ### converges
 `( value (a -- a) -- list )` — Return the initial value and successive applications until the next value is structurally equal to either the initial or immediately preceding value; that repeated boundary value is not appended.
 
@@ -1031,16 +1041,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial elements and last element.
-
-### while-values
-`( value (predicate: state -- bool) (step: state -- state) -- list )` — Return `value` and successive states through the first state for which the predicate is false.
-
-#### Examples
-
-```ecl
-1 (5 <) (1 +) while-values
-# => [1 2 3 4 5]
-```
 
 ### zip
 `( left right -- pairs )` — Pair corresponding elements of two conforming lists.

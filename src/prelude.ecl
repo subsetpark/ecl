@@ -1,7 +1,3 @@
-### def 2dup
-(x y -- x y x y : "Copy the top two stack values onto the top, preserving their order.")
-(over over) `2dup def
-
 ### def 2keep
 (x y (... -- ...) -- ... x y :
  "Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top
@@ -78,10 +74,6 @@
 (list -- mean : "Return the arithmetic mean of a nonempty numeric list.")
 (dup sum swap len /) `mean def
 
-### def nip
-(x y -- y : "Discard the second value on the stack.")
-(swap pop) `nip def
-
 ### def pack
 (... n -- list : "Collect the top `n` values into a list.")
 (() swap (cons) times) `pack def
@@ -105,14 +97,6 @@
 (list (a -- bool) -- matches rejects :
  "Split a list into the elements whose predicate returned 1 and those that returned 0.")
 (|l q| l q each l over where at swap not l swap where at) `partition def
-
-### def rolldown
-(x y z -- y z x : "Rotate the top three stack values downward.")
-((swap) dip swap) `rolldown def
-
-### def rollup
-(x y z -- z x y : "Rotate the top three stack values upward.")
-(swap (swap) dip) `rollup def
 
 ### def signum
 (number -- sign : "Return the int −1, 0, or 1 according to the sign of a number.")
@@ -205,51 +189,6 @@
 (|xs k|
  k 0 > {kind domain msg "chunk size must be positive"} assert
  xs xs len k div xs len k mod 0 > + range k * cut) `chunk def
-
-### def cleave
-(x quotations -- ... :
- "Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top.
-  A later quotation can consume earlier results. The list and each of its elements must be
-  quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes
-  the input and leaves nothing.")
-(|x qs|
- qs type `list match? {kind type msg "cleave expected a list of quotations"} assert
- qs (type `list match?) all? {kind type msg "cleave expected a list of quotations"} assert
- x wrap wrap qs len take [first] qs len take qs [call] qs len take 4 pack
- qs empty? (pop []) (flip raze) if call) `cleave def
-
-### def cleave-n
-(... n quotations -- ... :
- "N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations`
-  inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation
-  can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements
-  must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation
-  runs.")
-(|n qs|
- n type `int match? {kind type msg "cleave-n expected an int arity"} assert
- n 0 >= {kind domain msg "cleave-n arity must be nonnegative"} assert
- qs type `list match? {kind type msg "cleave-n expected a list of quotations"} assert
- qs (type `list match?) all? {kind type msg "cleave-n expected a list of quotations"} assert
- n qs qs empty?
- (pop pack pop [])
- (|n qs|
-  n pack (wrap) each qs
-  (|i qs| i wrap qs len take [first] qs len take 2 pack) partial each raze
-  qs wrap cat [call] qs len take wrap cat flip raze)
- if call) `cleave-n def
-
-### def cleave2
-(x y quotations -- ... :
- "Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current
-  stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier
-  results. The list and each of its elements must be quotations, or the word fails with `` `type ``
-  before any quotation runs.")
-(|x y qs|
- qs type `list match? {kind type msg "cleave2 expected a list of quotations"} assert
- qs (type `list match?) all? {kind type msg "cleave2 expected a list of quotations"} assert
- x wrap wrap qs len take [first] qs len take y wrap wrap qs len take [first] qs len take
- qs [call] qs len take 6 pack
- qs empty? (pop []) (flip raze) if call) `cleave2 def
 
 ### def converges
 (value (a -- a) -- list :

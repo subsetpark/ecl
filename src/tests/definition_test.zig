@@ -120,9 +120,9 @@ test "every primitive exposes meaningful reflective documentation" {
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings(expected.written(), display.bytes());
-    try expectOk(&runtime, "`nip see `call see");
+    try expectOk(&runtime, "`uncons see `call see");
     try std.testing.expectEqualStrings(
-        "(x y -- y : \"Discard the second value on the stack.\") (swap pop)\n" ++
+        "(list -- first rest : \"Split a nonempty list into its first element and remaining elements.\")\n(dup first swap rest)\n" ++
             "(quotation -- ... : \"Run a quotation on the current stack. A data list pushes its elements.\")\n<primitive>\n",
         output.written(),
     );
