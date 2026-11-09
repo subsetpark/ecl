@@ -517,7 +517,7 @@ const PagedControl = struct {
     placement: Placement,
     floor: machine.PagingFloor = .{ .floor = 0, .beneath = .{ .hard = 0 } },
     /// What a collected region held, in stack order.
-    results: std.ArrayList(Value) = .empty,
+    results: heap.InlineList(Value, 4, .{ .int = 0 }) = .empty,
     /// The region's base: the floor as the quotation left it.
     base: usize = 0,
     /// How many originals come back: the floor's count before they do.
@@ -594,9 +594,9 @@ const PagedControl = struct {
             },
             .surface => {
                 const originals = &self.floor.originals;
-                const granted = work.take(originals.items.len);
+                const granted = work.take(originals.len());
                 for (0..granted) |_| {
-                    const index = self.restored - originals.items.len;
+                    const index = self.restored - originals.len();
                     const original = originals.pop().?;
                     try evaluator.pushOwned(original.value);
                     // Beneath the region, the originals end up at the base
@@ -604,7 +604,7 @@ const PagedControl = struct {
                     const position = if (self.placement == .below) self.base + index else evaluator.stack.items.len - 1;
                     if (original.shared) try evaluator.noteReturned(position);
                 }
-                if (originals.items.len != 0) return false;
+                if (originals.len() != 0) return false;
                 if (self.placement != .below) {
                     self.phase = .finished;
                     continue;
@@ -637,7 +637,7 @@ const PagedControl = struct {
     }
 
     pub fn retire(self: *PagedControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.results.items) |item| releases.releaseValue(item);
+        for (self.results.items()) |item| releases.releaseValue(item);
         self.results.deinit(allocator);
         self.floor.retire(releases, allocator);
     }
@@ -872,7 +872,7 @@ const CleaveState = struct {
                 self.phase = .push;
             },
             .push => {
-                const results = self.paged.borrow().results.items;
+                const results = self.paged.borrowMut().results.items();
                 const end = self.pushed + work_budget.take(results.len - self.pushed);
                 while (self.pushed != end) : (self.pushed += 1) try evaluator.pushOwned(results[self.pushed]);
                 if (self.pushed != results.len) return false;

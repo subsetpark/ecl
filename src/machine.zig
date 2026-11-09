@@ -1413,7 +1413,8 @@ pub const PagingFloor = struct {
     floor: usize,
     beneath: Beneath,
     /// Retained copies of the paged values, the one nearest the entry first.
-    originals: std.ArrayList(Original) = .empty,
+    /// A few live inline, so a small quotation pages without allocating.
+    originals: heap.InlineList(Original, 4, .{ .value = .{ .int = 0 }, .shared = false }) = .empty,
     /// Positions of returned originals in the substack, ascending.
     returned: std.ArrayList(u32) = .empty,
 
@@ -1447,7 +1448,7 @@ pub const PagingFloor = struct {
             _ = self.returned.pop();
     }
     pub fn paged(self: *const PagingFloor) usize {
-        return self.originals.items.len;
+        return self.originals.len();
     }
     /// Whether `position` is a returned original: the slot `dip` is about to
     /// take, which then stays an original through its next return.
@@ -1458,7 +1459,7 @@ pub const PagingFloor = struct {
         return true;
     }
     pub fn retire(self: *PagingFloor, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.originals.items) |original| releases.releaseValue(original.value);
+        for (self.originals.items()) |original| releases.releaseValue(original.value);
         self.originals.deinit(allocator);
         self.returned.deinit(allocator);
     }
