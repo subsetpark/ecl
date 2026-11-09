@@ -1643,11 +1643,13 @@ test "oom: standard-library and host: native port registered call composition" {
 
 test "oom: standard-library and host: native port registered byte output" {
     try requireSelectedOomTest(@src());
-    try checkAllPostInitAllocationFailuresParallel(std.heap.smp_allocator, NativePortProbe(
-        "dup portprobe.output port.endpoint 1 fd.read pop port.close port.close",
+    // The echo transport's pipe threads make the allocation count depend on
+    // scheduling, so sweep the concurrent shape like the other byte tests.
+    try checkConcurrentPostInitAllocationFailures(std.heap.smp_allocator, NativePortLifecycleProbe(
         "portprobe.factory [] port.open dup portprobe.echo [] port.begin " ++
             "dup portprobe.input port.endpoint [1] fd.write " ++
-            "dup portprobe.input port.endpoint port.finish dup port.await",
+            "dup portprobe.input port.endpoint port.finish dup port.await " ++
+            "dup portprobe.output port.endpoint 1 fd.read pop port.close port.close",
     ).run);
 }
 
