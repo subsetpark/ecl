@@ -171,10 +171,9 @@ the captured value inside it. A captured value is data in the new quotation
 whatever it is: a symbol is pushed, not run, so a quotation that must run a
 symbol it was handed writes `execute`.
 
-An operator's declared input and a unit constructor's values operand pass
-parameters across the boundary without capture. Pass those values directly
-rather than constructing a different quotation merely to move them across the
-boundary.
+An operator's declared input passes parameters across its boundary without
+capture. A unit constructor other than `@defm` and `@load` takes no values
+operand: build the values into its body with `cons` or `cat`.
 
 ### Nested and sibling lookup
 

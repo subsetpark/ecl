@@ -103,18 +103,16 @@
 (() cons) `wrap def
 
 ### def @each
-(list values (quotation: a ... -- b) -- results :
- "Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit, with the element
-  seeded to the unit stack. `values` is then seeded above the element.")
-(|list values quotation|
+(list (quotation: a -- b) -- results :
+ "Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit whose stack
+  starts with the element.")
+(|list quotation|
  quotation type `list match? not
  ({kind type msg "@each expected a list for its quotation" word @each} raise) when
- values type `list match? not
- ({kind type msg "@each expected a list for its values seed" word @each} raise) when
  list type `list match? not
  ({kind type msg "@each expected a list for its operand" word @each} raise) when
- list values quotation pair
- (|element seeds| element seeds first cons seeds 1 at @spawn)
+ list quotation
+ (|element quotation| element quotation (call) cons cons @spawn)
  cons each
  dup
  (|failure entry tasks|
@@ -238,10 +236,6 @@ def
 ### def zip
 (left right -- pairs : "Pair corresponding elements of two conforming lists.")
 ((pair) zip-with) `zip def
-
-### def @each!
-(list (a -- b) -- results : "Call @each with an empty seed list.")
-(|list quotation| list [] quotation @each) `@each! def
 
 ### def case
 # Validate the clause container before inspecting any clause.

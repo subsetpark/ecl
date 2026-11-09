@@ -42,8 +42,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "int", .primitive = intWord, .effect = "value -- int", .doc = "Return an int unchanged, a char's codepoint, or the value of a string in the integer-literal grammar. A string outside that grammar is `` `parse ``. A float is `` `type ``: choose `floor`, `round`, or `ceil` instead. Any other value is also `` `type ``." },
         .{ .name = "float", .primitive = floatWord, .effect = "value -- float", .doc = "Return a float unchanged, an int as a float, or the value of a string in the numeric-literal grammar. A string outside that grammar is `` `parse ``; any other value is `` `type ``." },
         .{ .name = "char", .primitive = charWord, .effect = "value -- chars", .doc = "Return a char unchanged, or the char with an int's codepoint. A string is returned unchanged, whatever its length, and a list of chars or codepoints becomes the string of those chars. An int outside the Unicode scalar range, or a list element outside it, is `` `domain ``; any other value is `` `type ``." },
-        .{ .name = "@attempt", .primitive = attempt, .effect = "values quotation -- result", .doc = "Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`." },
-        .{ .name = "@attempt!", .primitive = attemptSeedless, .effect = "quotation -- result", .doc = "`@attempt` with no values operand." },
+        .{ .name = "@attempt", .primitive = attempt, .effect = "quotation -- result", .doc = "Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`. To start the unit on values, build them into the quotation: `values (q) cat @attempt`." },
         .{ .name = "raise", .primitive = raise, .effect = "error --", .doc = "Raise an error from an error dict." },
         .{ .name = "args", .primitive = args, .effect = "-- arguments", .doc = "The process arguments following the script or source, as a list of strings." },
         .{ .name = "exit", .primitive = exit, .effect = "status --", .doc = "Root-only outside `@attempt` (`` `domain `` otherwise): cancel and quiesce all descendants, then terminate the process with the given status." },
@@ -735,14 +734,8 @@ const NumericParseDriver = struct {
     }
 };
 fn attempt(evaluator: *Fiber) MachineError!void {
-    var input = try evaluator.popUnitInput();
-    defer input.deinit(evaluator.releases);
-    try evaluator.attemptOwned(input.move());
-}
-fn attemptSeedless(evaluator: *Fiber) MachineError!void {
-    var input = try evaluator.popSeedlessUnitInput();
-    defer input.deinit(evaluator.releases);
-    try evaluator.attemptOwned(input.move());
+    var body = try evaluator.popQuotation();
+    try evaluator.attemptOwned(body.take().list);
 }
 fn raise(evaluator: *Fiber) MachineError!void {
     var raised = try evaluator.popValue();

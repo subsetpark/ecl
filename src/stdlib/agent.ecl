@@ -26,14 +26,14 @@
 
  ### defp reply
  (reply address -- : "Send a reply, ignoring a caller whose helper has already gone.")
- (swap pair (task.send) @attempt pop) `reply defp
+ (swap pair (task.send) cat @attempt pop) `reply defp
 
  ### defp apply-message
  (state message -- state :
   "Apply one message's quotation to the state as a unit, reply when the message carries a from
    address, and return the next state.")
  (|state message|
-  state state message `quot at @attempt message
+  state state message `quot at cat @attempt message
   dup `from dict.has?
   (`from at rollup settle rolldown reply)
   (pop dup result.ok? (nip `ok at) (pop) if)
@@ -50,16 +50,16 @@
  (state -- address :
   "Spawn a server whose stack holds the one value `state` and return its address. The server is
    owned by the spawning task scope, as any `@spawn` is.")
- (wrap (serve) @spawn task.address) `start def
+ ((serve) cons @spawn task.address) `start def
 
  ### defp exchange
  (address quotation -- reply :
   "Send a request carrying a fresh reply helper's address and return the helper's reply; a refused
    send cancels the helper and re-raises its error.")
  (|address quotation|
-  [] (task.receive) @spawn dup task.address
+  (task.receive) @spawn dup task.address
   {} `quot quotation put `from rolldown put
-  address swap pair (task.send) @attempt
+  address swap pair (task.send) cat @attempt
   dup result.ok? (pop task.await `ok at first) (swap task.cancel `err at raise) if) `exchange defp
 
  ### def call
@@ -90,7 +90,7 @@
    comes, and its reply is discarded.")
  (|address quotation milliseconds|
   milliseconds check-deadline pop
-  address quotation pair (exchange) @spawn
+  address quotation pair (exchange) cat @spawn
   dup milliseconds task.await-for swap task.cancel
   dup result.ok? (`ok at first) (`err at raise) if
   dup result.ok? (`ok at first) (`err at raise) if) `call-for def

@@ -18,7 +18,7 @@
  (context hash -- bytes : "An absent or damaged previous generation is only an optimization miss.")
  (|context hash|
   context `active at empty? ([])
-  context hash pair (pair (active-read) @attempt optional) cat if) `previous defp
+  context hash pair (pair (active-read) cat @attempt optional) cat if) `previous defp
 
  ### defp network
  (context requirement -- bytes : "Offline operation never starts a network request.")

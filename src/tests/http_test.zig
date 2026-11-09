@@ -503,7 +503,7 @@ test "http: transfer limits reject complete and chunked bodies without partial r
     defer runtime.deinit();
     const success = try std.fmt.allocPrint(allocator, "{{target \"http://127.0.0.1:{d}/size/5\"}} http.get `body at", .{server.port});
     defer allocator.free(success);
-    const failure = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}/size/6\"}} http.get) @attempt `err at `kind at", .{server.port});
+    const failure = try std.fmt.allocPrint(allocator, "({{target \"http://127.0.0.1:{d}/size/6\"}} http.get) @attempt `err at `kind at", .{server.port});
     defer allocator.free(failure);
     const chunked = try std.fmt.allocPrint(allocator, "{{target \"http://127.0.0.1:{d}/chunked\"}} http.get `body at", .{server.port});
     defer allocator.free(chunked);
@@ -523,12 +523,12 @@ test "http: preparation limits count UTF-8 bytes and repeated header occurrences
     defer runtime.deinit();
     // Invalid URLs at the byte limit reach transport and fail as io; a fourth
     // UTF-8 byte is rejected by the counting pass before an exchange starts.
-    try runHttp(&runtime, "[] ({target \"éa\"} http.get) @attempt `err at `kind at", "io");
-    try runHttp(&runtime, "[] ({target \"éé\"} http.get) @attempt `err at `kind at", "overflow");
-    try runHttp(&runtime, "[] ({target \"x\" body [1 2]} http.post) @attempt `err at `kind at", "io");
-    try runHttp(&runtime, "[] ({target \"x\" body [1 2 3]} http.post) @attempt `err at `kind at", "overflow");
-    try runHttp(&runtime, "[] ({target \"x\" headers {\"a\" (\"1\" \"2\")}} http.get) @attempt `err at `kind at", "io");
-    try runHttp(&runtime, "[] ({target \"x\" headers {\"a\" (\"1\" \"2\" \"3\")}} http.get) @attempt `err at `kind at", "overflow");
+    try runHttp(&runtime, "({target \"éa\"} http.get) @attempt `err at `kind at", "io");
+    try runHttp(&runtime, "({target \"éé\"} http.get) @attempt `err at `kind at", "overflow");
+    try runHttp(&runtime, "({target \"x\" body [1 2]} http.post) @attempt `err at `kind at", "io");
+    try runHttp(&runtime, "({target \"x\" body [1 2 3]} http.post) @attempt `err at `kind at", "overflow");
+    try runHttp(&runtime, "({target \"x\" headers {\"a\" (\"1\" \"2\")}} http.get) @attempt `err at `kind at", "io");
+    try runHttp(&runtime, "({target \"x\" headers {\"a\" (\"1\" \"2\" \"3\")}} http.get) @attempt `err at `kind at", "overflow");
 }
 
 test "http: redirect bodies share the cumulative transfer budget" {
@@ -543,7 +543,7 @@ test "http: redirect bodies share the cumulative transfer budget" {
         .http_limits = .{ .encoded_bytes = 15, .decoded_bytes = 15 },
     }), .cooperative, .evaluate);
     defer runtime.deinit();
-    const source = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}/redirect-body\"}} http.get) @attempt `err at `kind at", .{server.port});
+    const source = try std.fmt.allocPrint(allocator, "({{target \"http://127.0.0.1:{d}/redirect-body\"}} http.get) @attempt `err at `kind at", .{server.port});
     defer allocator.free(source);
     try runHttp(&runtime, source, "overflow");
 }
@@ -577,10 +577,10 @@ test "http: manual deadlines and task cancellation interrupt blocked response so
                 }), config, .evaluate);
                 defer runtime.deinit();
                 const template = if (cancel)
-                    "[] ({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @spawn `request set " ++
+                    "({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @spawn `request set " ++
                         "1 clock.sleep request dup task.cancel task.await `err at `kind at"
                 else
-                    "[] ({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt `err at `kind at";
+                    "({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt `err at `kind at";
                 const source = try std.fmt.allocPrint(allocator, template, .{ server.port, path });
                 defer allocator.free(source);
                 var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = if (cancel) "cancelled" else "timeout" };
@@ -624,7 +624,7 @@ test "http: compressed and repeated response header limits are enforced before n
     for (cases) |case| {
         var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{ .http_limits = case.limits }), .cooperative, .evaluate);
         defer runtime.deinit();
-        const source = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt dup `err dict.has? ( `err at `kind at ) (pop `ok) if", .{ server.port, case.path });
+        const source = try std.fmt.allocPrint(allocator, "({{target \"http://127.0.0.1:{d}{s}\"}} http.get) @attempt dup `err dict.has? ( `err at `kind at ) (pop `ok) if", .{ server.port, case.path });
         defer allocator.free(source);
         try runHttp(&runtime, source, case.expected);
     }
@@ -640,7 +640,7 @@ test "http: Session shutdown joins a request blocked in response headers" {
     defer inputs.deinit();
     var runtime = try session.Session.init(allocator, &.{}, inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    const source = try std.fmt.allocPrint(allocator, "[] ({{target \"http://127.0.0.1:{d}/stall-head\"}} http.get) @spawn pop", .{server.port});
+    const source = try std.fmt.allocPrint(allocator, "({{target \"http://127.0.0.1:{d}/stall-head\"}} http.get) @spawn pop", .{server.port});
     defer allocator.free(source);
     try runHttp(&runtime, source, "");
     var buffer: [64]u8 = undefined;
@@ -785,7 +785,7 @@ test "http: cancellation reaches resolution connection TLS and upload I/O tasks"
             .connection, .upload => "http://127.0.0.1/",
         };
         const body = if (stage == .upload) "method \"POST\" body [80 73 78 71]" else "";
-        const source = try std.fmt.allocPrint(allocator, "[] ({{target \"{s}\" {s}}} http.get) @spawn `request set " ++
+        const source = try std.fmt.allocPrint(allocator, "({{target \"{s}\" {s}}} http.get) @spawn `request set " ++
             "1 clock.sleep request dup task.cancel task.await `err at `kind at", .{ target, body });
         defer allocator.free(source);
         var runner: HttpRunner = .{ .runtime = &runtime, .source = source, .expected = "cancelled" };

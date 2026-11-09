@@ -258,7 +258,7 @@ test "paging: above and below restore what the quotation consumed" {
             .expected = "5 2 3 2",
         },
         .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
-        .{ .name = "a word's own substack is a hard floor", .source = "1 ([] (pop) @attempt) below result.ok?", .expected = "1 0" },
+        .{ .name = "a word's own substack is a hard floor", .source = "1 ((pop) @attempt) below result.ok?", .expected = "1 0" },
         .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
         .{ .name = "rotating beneath the region is bounded work", .source = "20000 (1) times (10000 (pop) times 5) below 20001 pack dup len swap last", .expected = "20001 5" },
         .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((7) 10000 dip-n) below 20001 pack dup len swap last", .expected = "20001 7" },
@@ -367,16 +367,16 @@ test "combinators: every application keeps its caller's right to define" {
         .{ .name = "import", .source = "[1] (`result (ok) import pop) for (1) result.ok", .expected = "{ok [1]}" },
         // A definition is an environment effect: it survives the failure of
         // the @attempt that made it, as IO does.
-        .{ .name = "attempt success", .source = "[] (1 `k set) @attempt pop k", .expected = "1" },
-        .{ .name = "attempt failure", .source = "[] (1 `k set missing) @attempt pop k", .expected = "1" },
+        .{ .name = "attempt success", .source = "(1 `k set) @attempt pop k", .expected = "1" },
+        .{ .name = "attempt failure", .source = "(1 `k set missing) @attempt pop k", .expected = "1" },
         // Redefinition inside a body reaches the next element.
         .{ .name = "redefinition reaches the next element", .source = "(1) `f def [1 2 3] (pop f (2) `f def) each", .expected = "[1 2 2]" },
     });
     try support.expectErrors(&.{
         // A task runs in its spawner's root without owning it.
-        .{ .name = "task", .source = "[] (1 `k set) @spawn task.await `err at raise", .kind = "domain", .word = "def" },
-        .{ .name = "task import", .source = "[] (`result (ok) import) @spawn task.await `err at raise", .kind = "domain", .word = "import" },
-        .{ .name = "task inside each", .source = "[1] (pop [] (1 `k set) @spawn task.await `err at raise) each", .kind = "domain", .word = "def" },
+        .{ .name = "task", .source = "(1 `k set) @spawn task.await `err at raise", .kind = "domain", .word = "def" },
+        .{ .name = "task import", .source = "(`result (ok) import) @spawn task.await `err at raise", .kind = "domain", .word = "import" },
+        .{ .name = "task inside each", .source = "[1] (pop (1 `k set) @spawn task.await `err at raise) each", .kind = "domain", .word = "def" },
     });
 }
 
@@ -442,13 +442,13 @@ test "inline times checkpointed guards and case prevalidate and select" {
         .{ .name = "case prevalidation", .source = "1 [1 (10) 2 20 (30)] case", .kind = "type", .word = "len" },
         .{
             .name = "cond prevalidation precedes effects",
-            .source = "[] ([(1 `k set 1) (10) 20] cond) @attempt pop k",
+            .source = "([(1 `k set 1) (10) 20] cond) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
         .{
             .name = "case prevalidation precedes actions",
-            .source = "[] (1 [1 (7 `k set) 2 20 (30)] case) @attempt pop k",
+            .source = "(1 [1 (7 `k set) 2 20 (30)] case) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
@@ -662,7 +662,7 @@ test "linrec: depth is a count under one frame and cancellation reaches guard re
     try std.testing.expectEqual(frames[0], frames[1]);
 
     try support.expectStack(
-        "[] (200 (dup 100 = dup (task.cancel-self) () if pop dup 0 =) " ++
+        "(200 (dup 100 = dup (task.cancel-self) () if pop dup 0 =) " ++
             "(pop) (1 -) () linrec) @spawn task.await `err at `kind at",
         "cancelled",
     );
@@ -749,7 +749,7 @@ test "cancellation retires continuation-installed work before failure unwind" {
     // The conflict quotation cancels its own task as its final form. The
     // padding leaves exactly one fuel charge for the merge continuation,
     // which installs its materialization driver before cancellation is polled.
-    try source.appendSlice(std.testing.allocator, "[] (");
+    try source.appendSlice(std.testing.allocator, "(");
     for (0..506) |_| try source.appendSlice(std.testing.allocator, "0 pop ");
     try source.appendSlice(
         std.testing.allocator,
@@ -908,12 +908,12 @@ test "locals: the reserved backend words behave and blame as before" {
     try support.expectStacks(&.{
         .{
             .name = "the owner is traced once",
-            .source = "(|x| x) `f def ([] (f 1) @attempt `err at `trace at) `g def g",
+            .source = "(|x| x) `f def ((f 1) @attempt `err at `trace at) `g def g",
             .expected = "(`f `g)",
         },
         .{
             .name = "an anonymous binding has no word",
-            .source = "[] ((|x| x) call) @attempt `err at `word dict.core.has?",
+            .source = "((|x| x) call) @attempt `err at `word dict.core.has?",
             .expected = "0",
         },
     });
@@ -1167,19 +1167,19 @@ fn expectFreshStack(source: []const u8, expected: []const u8) !void {
 // however the parent redefines its names afterwards.
 test "bindings: a running task sees definitions made after its spawn" {
     // The task resolves `f` when it reaches it, after the root redefined it.
-    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def task.await", "{ok [2]}");
+    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def (body) @spawn (2) `f def task.await", "{ok [2]}");
     // Through a caller: `f` reaches the replaced `g`.
-    try expectFreshStack("(1) `g def (g) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `g def task.await", "{ok [2]}");
+    try expectFreshStack("(1) `g def (g) `f def (20 clock.sleep f) `body def (body) @spawn (2) `g def task.await", "{ok [2]}");
     // Shadowing a core word after the spawn reaches the session's code too.
-    try expectFreshStack("(20 clock.sleep 1 2 +) `work def [] (work) @spawn (pop pop 42) `+ def task.await", "{ok [42]}");
+    try expectFreshStack("(20 clock.sleep 1 2 +) `work def (work) @spawn (pop pop 42) `+ def task.await", "{ok [42]}");
     // The last of several replacements is the one reached.
-    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def [] (body) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [4]}");
+    try expectFreshStack("(1) `f def (20 clock.sleep f) `body def (body) @spawn (2) `f def (3) `f def (4) `f def task.await", "{ok [4]}");
     // A task body naming an undefined word fails before running anything.
-    try expectFreshStack("[] (missing-word) @spawn task.await `err at `kind at", "undefined-word");
+    try expectFreshStack("(missing-word) @spawn task.await `err at `kind at", "undefined-word");
 }
 
 test "bindings: a task spawned after a definition observes it" {
-    try expectFreshStack("(1) `f def (2) `f def [] (f) @spawn task.await", "{ok [2]}");
+    try expectFreshStack("(1) `f def (2) `f def (f) @spawn task.await", "{ok [2]}");
     // The defining unit itself sees its definitions as it makes them.
     try expectFreshStack("(1) `f def f (2) `f def f", "1 2");
 }
@@ -1187,9 +1187,9 @@ test "bindings: a task spawned after a definition observes it" {
 test "task.cancel-self requests cancellation of the current task" {
     // Outside a task there is nothing to cancel, including in an `@attempt`
     // of the root unit, which shares its scope.
-    try expectFreshStack("[] (task.cancel-self) @attempt `err at `kind at", "domain");
+    try expectFreshStack("(task.cancel-self) @attempt `err at `kind at", "domain");
     // A request: the task runs on to its next safe point, where it observes it.
-    try expectFreshStack("[] (task.cancel-self 0 100000 (1 +) times) @spawn task.await `err at `kind at", "cancelled");
+    try expectFreshStack("(task.cancel-self 0 100000 (1 +) times) @spawn task.await `err at `kind at", "cancelled");
 }
 
 test "bindings: a unit's cached resolutions follow its own definitions" {
@@ -1204,7 +1204,7 @@ test "while restores a checkpoint deeper than one turn's budget" {
     // suspend under a driver; a condition that consumes the stack still
     // leaves it as it found it.
     try expectFreshStack(
-        "[] (100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await `ok at last",
+        "(100000 (7) times 0 (dup 3 < swap pop) (1 +) while stack len) @spawn task.await `ok at last",
         "100001",
     );
 }
@@ -1213,7 +1213,7 @@ test "while abandons a checkpoint deeper than one turn's budget" {
     // A failing condition abandons the loop with 100,001 operands saved; the
     // checkpoint goes to the release domain whole, and nothing leaks.
     try expectFreshStack(
-        "[] (100000 (7) times 0 (dup `x +) () while) @spawn task.await `err at `kind at",
+        "(100000 (7) times 0 (dup `x +) () while) @spawn task.await `err at `kind at",
         "type",
     );
 }

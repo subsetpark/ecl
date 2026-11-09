@@ -33,7 +33,7 @@
  (package required-package version -- parts :
   "Validate a reachable version or raise with requirement provenance.")
  (|package required version|
-  version wrap (pkg.version.validate) @attempt
+  version (pkg.version.validate) cons @attempt
   dup `ok dict.has?
   (`ok at first)
   package required version 3 pack

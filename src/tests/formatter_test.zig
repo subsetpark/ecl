@@ -556,8 +556,8 @@ test "formatter synthesizes and normalizes module navigation headers" {
     // comment rather than becoming a navigation header the file has no
     // definition for.
     try expectFormat(
-        "### module stats\n[] ((1) `x def) @attempt\n",
-        "### module stats\n[]\n(\n ### def x\n (1) `x def) @attempt\n",
+        "### module stats\n((1) `x def) @attempt\n",
+        "### module stats\n(\n ### def x\n (1) `x def) @attempt\n",
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);

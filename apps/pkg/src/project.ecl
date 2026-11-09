@@ -9,7 +9,7 @@
 
  ### def environment
  (name -- value : "Read an optional startup environment setting; empty means absent.")
- (wrap (getenv) @attempt dup result.ok?
+ ((getenv) cons @attempt dup result.ok?
   (`ok at first) (`err at missing-environment) if) `environment def
 
  ### def absolute

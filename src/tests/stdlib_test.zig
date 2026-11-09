@@ -118,24 +118,24 @@ test "stdlib: an imported standard-library builtin is that builtin under its imp
     try support.expectStacks(&.{
         .{
             .name = "a kernel failure names the kernel",
-            .source = "[] ([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
+            .source = "([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
             .expected = "dict.core.get (`dict.core.get)",
         },
         .{
             .name = "a session import binds the same way",
-            .source = "`dict.core [get] import [] ([1 2] 0 9 get) @attempt `err at dup `word at swap `trace at " ++
+            .source = "`dict.core [get] import ([1 2] 0 9 get) @attempt `err at dup `word at swap `trace at " ++
                 "{a 5} `a 0 get",
             .expected = "dict.core.get (`dict.core.get) 5",
         },
         .{
             .name = "too few values are the kernel's underflow",
-            .source = "[] ({a 1} dict.get) @attempt `err at dup `kind at swap `word at",
+            .source = "({a 1} dict.get) @attempt `err at dup `kind at swap `word at",
             .expected = "underflow dict.core.get",
         },
         .{
             .name = "a user module's effect is still a contract",
             .source = "[] ((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
-                "[] (checked.w) @attempt `err at dup `kind at swap `word at",
+                "(checked.w) @attempt `err at dup `kind at swap `word at",
             .expected = "contract checked.w",
         },
     });
@@ -245,7 +245,7 @@ test "stdlib: concurrent first calls of a body's unloaded standard-library word 
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "(wrap result.ok) `f def [1 2 3 4 5 6 7 8] [] (f) @each",
+            "(wrap result.ok) `f def [1 2 3 4 5 6 7 8] (f) @each",
             "({ok [1]} {ok [2]} {ok [3]} {ok [4]} " ++
                 "{ok [5]} {ok [6]} {ok [7]} {ok [8]})",
         );
@@ -377,8 +377,8 @@ test "stdlib: concurrent first references converge on one published module" {
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "([1] result.ok) ([2] `result `ok qualify execute) pair ([] swap @spawn) each (task.await) each " ++
-                "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each",
+            "([1] result.ok) ([2] `result `ok qualify execute) pair (@spawn) each (task.await) each " ++
+                "[[1] [2] [3] [4] [5] [6] [7] [8]] (result.ok) @each",
             "({ok ({ok [1]})} {ok ({ok [2]})}) " ++
                 "({ok [1]} {ok [2]} {ok [3]} {ok [4]} " ++
                 "{ok [5]} {ok [6]} {ok [7]} {ok [8]})",

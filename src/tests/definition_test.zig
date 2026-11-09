@@ -250,10 +250,10 @@ test "invocation effects: which reports public task word contracts" {
 test "invocation effects: task completion precedes caller continuation" {
     try support.expectStack(
         "task.pending pop " ++
-            "[] (7) @spawn dup task.await pop 0 task.await-for pop " ++
-            "[] (8) @spawn dup pair task.await-any pop pop " ++
-            "[] ((1) () while) @spawn dup task.cancel task.await pop " ++
-            "[] (( -- result ) ([] (9) @spawn task.await) `wait def) `nested @defm " ++
+            "(7) @spawn dup task.await pop 0 task.await-for pop " ++
+            "(8) @spawn dup pair task.await-any pop pop " ++
+            "((1) () while) @spawn dup task.cancel task.await pop " ++
+            "[] (( -- result ) ((9) @spawn task.await) `wait def) `nested @defm " ++
             "nested.wait pop 42",
         "42",
     );
@@ -626,7 +626,7 @@ test "definitions: def inside a word body writes the caller's scope" {
     try support.expectErrors(&.{
         .{
             .name = "inside a task",
-            .source = "( -- ) ((-- n) (1) `scoped def) `h def [] (h) @spawn task.await `err at raise",
+            .source = "( -- ) ((-- n) (1) `scoped def) `h def (h) @spawn task.await `err at raise",
             .kind = "domain",
             .word = "def",
         },
@@ -659,23 +659,25 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
     );
 }
 
-test "seedless unit constructors start on an empty stack" {
+test "unit constructors start on an empty stack or their element" {
     try support.expectStacks(&.{
-        .{ .name = "@attempt!", .source = "9 (stack len) @attempt! `ok at", .expected = "9 [0]" },
-        .{ .name = "@attempt! failure", .source = "(1 `x raise) @attempt! `err at `kind at", .expected = "type" },
-        .{ .name = "@spawn!", .source = "9 (stack len) @spawn! task.await `ok at", .expected = "9 [0]" },
-        .{ .name = "@each!", .source = "9 (1 2 3) (stack len nip 10 *) @each!", .expected = "9 [10 10 10]" },
+        .{ .name = "@attempt", .source = "9 (stack len) @attempt `ok at", .expected = "9 [0]" },
+        .{ .name = "@attempt failure", .source = "(1 `x raise) @attempt `err at `kind at", .expected = "type" },
+        .{ .name = "@spawn", .source = "9 (stack len) @spawn task.await `ok at", .expected = "9 [0]" },
+        .{ .name = "@each", .source = "9 (1 2 3) (stack len nip 10 *) @each", .expected = "9 [10 10 10]" },
+        .{ .name = "@give", .source = "9 [] (stack len) @give task.await `ok at", .expected = "9 [0]" },
+        .{ .name = "values built in", .source = "9 1 2 pair (+) cat @attempt `ok at", .expected = "9 [3]" },
         .{ .name = "@defm!", .source = "9 (stack len `depth set) `m @defm! m.depth", .expected = "9 0" },
     });
     try support.expectErrors(&.{
-        .{ .name = "@attempt! underflow", .source = "@attempt!", .kind = "underflow", .word = "@attempt!" },
-        .{ .name = "@attempt! body type", .source = "1 @attempt!", .kind = "type", .word = "@attempt!" },
-        .{ .name = "@spawn! underflow", .source = "@spawn!", .kind = "underflow", .word = "@spawn!" },
-        .{ .name = "@give! underflow", .source = "() @give!", .kind = "underflow", .word = "@give!" },
+        .{ .name = "@attempt underflow", .source = "@attempt", .kind = "underflow", .word = "@attempt" },
+        .{ .name = "@attempt body type", .source = "1 @attempt", .kind = "type", .word = "@attempt" },
+        .{ .name = "@spawn underflow", .source = "@spawn", .kind = "underflow", .word = "@spawn" },
+        .{ .name = "@give underflow", .source = "() @give", .kind = "underflow", .word = "@give" },
         .{ .name = "@defm! underflow", .source = "`m @defm!", .kind = "underflow", .word = "@defm!" },
         .{ .name = "@defm! name domain", .source = "() `core @defm!", .kind = "domain", .word = "@defm!" },
-        .{ .name = "@spawn! in construction", .source = "((1) @spawn! pop) `m @defm!", .kind = "domain", .word = "@spawn!" },
-        .{ .name = "@attempt! isolation", .source = "1 (pop) @attempt! `err at raise", .kind = "underflow", .word = "pop" },
+        .{ .name = "@spawn in construction", .source = "((1) @spawn pop) `m @defm!", .kind = "domain", .word = "@spawn" },
+        .{ .name = "@attempt isolation", .source = "1 (pop) @attempt `err at raise", .kind = "underflow", .word = "pop" },
     });
 }
 
@@ -924,7 +926,7 @@ test "binding: a module validates as one group when it is sealed" {
         },
         // Staged definitions cannot run before the module is sealed.
         .{ .name = "staged", .source = "[] ((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
-        .{ .name = "failed seal publishes nothing", .source = "[] ([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
+        .{ .name = "failed seal publishes nothing", .source = "([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
         // A quotation injected into a replacement body was written in the
         // session, so sealing validates its qualified name against the
         // registered module, never the group being sealed under that name.

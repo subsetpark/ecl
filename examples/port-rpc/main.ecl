@@ -1,5 +1,4 @@
 # The child scope owns the resource and exchange, including on failure.
-[]
 (
  portprobe.factory [] port.open `resource set
  resource portprobe.rpc [] port.begin `exchange set

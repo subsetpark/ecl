@@ -69,7 +69,7 @@
   "Honor the root lock and reuse a captured generation after the cache is unavailable.")
  (|work project|
   work manifest 0 pkg.install.selection lock pkg.resolution.write equal
-  work manifest `requires {} put 0 3 pack (pkg.install.selection) @attempt result.err? 1 equal
+  work manifest `requires {} put 0 3 pack (pkg.install.selection) cat @attempt result.err? 1 equal
   work manifest `requires {} put 1 pkg.install.selection pkg.resolution.read `packages at {} equal
   project `directory at "ecl.lock" fs.read-text lock pkg.resolution.write equal
   work manifest str lock pkg.resolution.write pkg.generation.finish
@@ -88,7 +88,7 @@
   project `directory at "ecl.modules" fs.read-text
   project `directory at "ecl.lock" fs.read-text
   work manifest `sources ["collision.ecl"] put str lock pkg.resolution.write
-  3 pack (pkg.generation.finish) @attempt result.err? 1 equal
+  3 pack (pkg.generation.finish) cat @attempt result.err? 1 equal
   work `stage at port.close
   project `directory at work `location at fs.exists? 0 equal
   project `directory at "ecl.lock" fs.read-text equal
@@ -118,7 +118,7 @@
   project `directory at work `location at next-lock
   project `path at (pkg.verify.publication) cons pkg.transaction.prepare
   project `directory at "ecl.lock" next-lock fs.publish-text
-  project wrap (pkg.install.verify) @attempt result.err? 1 equal
+  project (pkg.install.verify) cons @attempt result.err? 1 equal
   project `directory at "ecl.modules" fs.read-text previous-map equal
   project previous-map pkg.layout.from-reference pkg.verify.generation
   project `directory at previous-map pkg.layout.from-reference "/ecl.lock" cat fs.read-text
@@ -134,7 +134,7 @@
   "Verification checks old generations independently and never repairs changed bytes.")
  (|project location|
   project `directory at location "/packages/sample/README.md" cat "changed" fs.publish-text
-  project location pair (pkg.verify.generation) @attempt result.err? 1 equal
+  project location pair (pkg.verify.generation) cat @attempt result.err? 1 equal
   project `directory at location "/packages/sample/README.md" cat fs.read-text "changed" equal
   project pkg.install.verify) `check-damage defp
 
@@ -148,7 +148,7 @@
  ### defp run-project
  (project path -- : "Clean up both successful and failed test invocations.")
  (|project path|
-  project wrap (exercise) @attempt
+  project (exercise) cons @attempt
   project `directory at port.close `cwd path fs.remove-tree
   result.or-raise pop) `run-project defp
 

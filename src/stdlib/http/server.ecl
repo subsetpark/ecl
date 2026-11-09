@@ -518,7 +518,7 @@
 
  ### defp decode-head
  (bytes -- text : "Decode the head as UTF-8 text; undecodable bytes are a 400.")
- (wrap (chars) @attempt dup `ok dict.has? (`ok at first)
+ ((chars) cons @attempt dup `ok dict.has? (`ok at first)
   (pop 400 "malformed request head" framing-error) if) `decode-head defp
 
  ### defp read-body-step
@@ -576,7 +576,7 @@
  ### defp report
  (config error -- :
   "Hand a request failure to the configured `on-failure quotation; its own failure is discarded.")
- (wrap swap `on-failure at @attempt pop) `report defp
+ (swap `on-failure at cons @attempt pop) `report defp
 
  ### defp fail-request
  (connection config error -- : "Report a request failure to `on-failure and answer 500.")
@@ -590,7 +590,7 @@
  (connection config head? response -- :
   "Validate and encode a response in full, then write it, without its body when the request was
    HEAD; a rejected response is reported and answered 500.")
- (wrap (render-response) @attempt
+ ((render-response) cons @attempt
   dup `ok dict.has?
   (`ok at first swap (head-only) when nip net.write)
   (`err at nip fail-request)
@@ -612,7 +612,7 @@
  ### defp run-handler
  (connection config handler request -- :
   "Run the handler in a fresh unit and write its response; a HEAD request gets no body.")
- (dup `method at "HEAD" match? swap wrap rolldown @attempt
+ (dup `method at "HEAD" match? swap wrap rolldown cat @attempt
   dup `ok dict.has?
   (`ok at handler-success)
   (`err at nip fail-request)
@@ -644,7 +644,7 @@
    response.")
  (|connection config handler|
   connection config handler
-  connection config pair (read-request) @spawn
+  connection config pair (read-request) cat @spawn
   dup config `read-timeout-ms at task.await-for
   dispatch-read) `handle-connection defp
 
@@ -653,7 +653,7 @@
   "Serve one connection this unit owns: frame and answer one request, close the connection, and
    report any non-io failure through `on-failure.")
  (|connection config handler|
-  connection config handler 3 pack (handle-connection) @attempt
+  connection config handler 3 pack (handle-connection) cat @attempt
   connection net.close
   config swap
   dup `err dict.has?
@@ -667,7 +667,7 @@
  (|listener config handler tasks|
   listener config handler
   tasks
-  listener net.accept wrap config handler pair (serve-connection) @give
+  listener net.accept wrap config handler pair (serve-connection) cat @give
   append) `accept-one defp
 
  ### defp reap-one

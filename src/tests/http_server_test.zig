@@ -320,7 +320,7 @@ const Server = struct {
     fn start(runtime: *Runtime, port: u16, prelude: []const u8, config: []const u8, rows: []const u8, default_row: []const u8) !*Server {
         const program = try std.fmt.allocPrint(
             allocator,
-            "{s} [] (l {s} (dup `path at [{s}" ++
+            "{s} (l {s} (dup `path at [{s}" ++
                 "\"/close-listener\" (pop l net.close 204 http.response.new) " ++
                 "\"/stop\" (pop srv task.cancel 204 http.response.new) " ++
                 "{s}] case) http.server.@serve) @spawn `srv set " ++
@@ -513,7 +513,7 @@ test "http server: the read deadline answers 408 and closes" {
     try server.finish();
 }
 
-const gate_prelude = "[] (l2 net.accept) @spawn `gate set";
+const gate_prelude = "(l2 net.accept) @spawn `gate set";
 const gate_rows =
     "\"/slow\" (pop gate task.await pop {status 200 headers {} body \"slow\"}) " ++
     "\"/probe\" (pop gate 0 task.await-for `ok dict.has? (\"terminal\") (\"active\") if {status 200 headers {} body \"\"} `body rolldown put) ";
@@ -639,21 +639,21 @@ test "http server: configuration and listener arguments are validated before ser
     defer runtime.close();
     const port = try runtime.listen("l");
     try runtime.run(
-        "[] (5 {} (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l 5 (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l {bogus 1} (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l {max-in-flight 0} (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l {read-timeout-ms -1} (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l {max-in-flight \"8\"} (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l {on-failure 5} (1) http.server.@serve) @attempt `err at `kind at " ++
-            "[] (l {} 7 http.server.@serve) @attempt `err at `kind at",
+        "(5 {} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l 5 (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l {bogus 1} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l {max-in-flight 0} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l {read-timeout-ms -1} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l {max-in-flight \"8\"} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l {on-failure 5} (1) http.server.@serve) @attempt `err at `kind at " ++
+            "(l {} 7 http.server.@serve) @attempt `err at `kind at",
     );
     try runtime.expectDisplay("type type domain domain domain type type type");
     // A connection is a port too, but not a listener: the acceptor's accept
     // fails 'type and the serving fiber fails with it.
     const silent = try Peer.start(port, .connect_then_close);
     try expectSilentClose(silent.join());
-    try runtime.run("pop pop pop pop pop pop pop pop l net.accept `c set [] (c {} (1) http.server.@serve) @attempt `err at `kind at");
+    try runtime.run("pop pop pop pop pop pop pop pop l net.accept `c set (c {} (1) http.server.@serve) @attempt `err at `kind at");
     try runtime.expectDisplay("type");
 }
 
@@ -697,7 +697,7 @@ test "http server: HTTP client and server progress together with one worker" {
         try runtime.open(.{}, config);
         defer runtime.close();
         const port = try runtime.listen("l");
-        const program = try std.fmt.allocPrint(allocator, "[] (l {{max-in-flight 1}} (pop 200 \"same Session\" http.response.text) http.server.@serve) @spawn `srv set " ++
+        const program = try std.fmt.allocPrint(allocator, "(l {{max-in-flight 1}} (pop 200 \"same Session\" http.response.text) http.server.@serve) @spawn `srv set " ++
             "{{target \"http://127.0.0.1:{d}/hello\"}} http.get `body at " ++
             "srv dup task.cancel task.await pop l net.close", .{port});
         defer allocator.free(program);

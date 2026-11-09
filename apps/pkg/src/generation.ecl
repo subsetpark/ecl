@@ -14,7 +14,7 @@
 
  ### def active
  (project -- generation : "Capture the previous generation once; startup repair is never required.")
- (wrap (active-value) @attempt optional-active) `active def
+ ((active-value) cons @attempt optional-active) `active def
 
  ### def start
  (project location offline -- work : "Own a private candidate and its exact-download pins.")

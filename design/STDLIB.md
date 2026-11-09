@@ -73,23 +73,13 @@
 `( x y -- bool )` — Compare conforming values for greater-than-or-equal order.
 
 ### @attempt
-`( values quotation -- result )` — Initialize an isolated substack from the explicit values list, then run the quotation as a new unit. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`.
+`( quotation -- result )` — Run the quotation as a new unit on an empty, isolated stack. It will push a result object, containing either `ok <values>` with the successful stack values as a list, or `{err <error dict>}`. To start the unit on values, build them into the quotation: `values (q) cat @attempt`.
 
 #### Examples
 
 ```ecl
-[1 2] (3 +) @attempt
+(1 2 3 +) @attempt
 # => {ok [1 5]}
-```
-
-### @attempt!
-`( quotation -- result )` — `@attempt` with no values operand.
-
-#### Examples
-
-```ecl
-(40 2 +) @attempt!
-# => {ok [42]}
 ```
 
 ### @defm
@@ -101,7 +91,7 @@ The name is last, matching `def` and `set`: the bound name sits nearest the defi
 `( body module-name -- )` — `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too.
 
 ### @give
-`( ports values quotation -- task )` — Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The ports are seeded onto the resulting stack followed by `values`.
+`( ports quotation -- task )` — Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The child stack starts with the ports, in list order.
 
 Including a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.
 
@@ -111,12 +101,9 @@ Ownership doesn't determine what unit(s) a port is accessible from, but which un
 
 ```ecl
 {address "127.0.0.1" port 0} net.listen
-wrap [] (net.local-address `port at 0 >) @give task.await
+wrap (net.local-address `port at 0 >) @give task.await
 # => {ok [1]}
 ```
-
-### @give!
-`( ports quotation -- task )` — `@give` with no values operand: the child stack contains only the given ports.
 
 ### @load
 `( values path -- )` — Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
@@ -125,22 +112,12 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 `( path -- )` — `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`.
 
 ### @spawn
-`( values quotation -- task )` — Initialize a child stack from the explicit values list and run the quotation concurrently. Use `[]` for no initial values; the ambient stack never crosses the boundary. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
+`( quotation -- task )` — Run the quotation concurrently on an empty child stack; the ambient stack never crosses the boundary. To start the child on values, build them into the quotation: `values (q) cat @spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
 
 #### Examples
 
 ```ecl
-[] (40 2 +) @spawn task.await
-# => {ok [42]}
-```
-
-### @spawn!
-`( quotation -- task )` — `@spawn` with no seeded values.
-
-#### Examples
-
-```ecl
-(40 2 +) @spawn! task.await
+(40 2 +) @spawn task.await
 # => {ok [42]}
 ```
 
@@ -954,7 +931,14 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### @each
-`( list values (quotation: a ... -- b) -- results )` — Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit, with the element seeded to the unit stack. `values` is then seeded above the element.
+`( list (quotation: a -- b) -- results )` — Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit whose stack starts with the element.
+
+#### Examples
+
+```ecl
+[1 2 3] (10 *) @each
+# => [10 20 30]
+```
 
 ### append
 `( list value -- list )` — Push `value` to the end of `list`.
@@ -1016,16 +1000,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 
 ### zip
 `( left right -- pairs )` — Pair corresponding elements of two conforming lists.
-
-### @each!
-`( list (a -- b) -- results )` — Call @each with an empty seed list.
-
-#### Examples
-
-```ecl
-[1 2 3] (10 *) @each!
-# => [10 20 30]
-```
 
 ### case
 `( x clauses -- ... )` — Select and call the first action whose key matches the subject. The clause list should be shaped:
@@ -1104,7 +1078,7 @@ rng (5 rand.int) agent.call
 g (100 rand.int) agent.call g (100 rand.int) agent.call pair
 # => [35 0]
 [7 0] agent.start `g set
-[] (g (1 0 div) agent.call) @attempt `err at `kind at g (dup) agent.call pair
+(g (1 0 div) agent.call) @attempt `err at `kind at g (dup) agent.call pair
 # => (domain [7 0])
 ```
 
@@ -2385,8 +2359,8 @@ Request and reply is a composition over `send` and `receive`: spawn a helper tas
 Request and reply:
 
 ```ecl
-(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def
-[] (task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask
+(|a v| (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def
+(task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask
 # => 42
 ```
 
@@ -2426,7 +2400,7 @@ Request and reply:
 #### Examples
 
 ```ecl
-[] (task.receive 1 +) @spawn dup task.address 41 task.send task.await
+(task.receive 1 +) @spawn dup task.address 41 task.send task.await
 # => {ok [42]}
 ```
 

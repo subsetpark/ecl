@@ -139,7 +139,7 @@ test "loader: maps load native artifacts through concurrent public requests" {
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .{ .worker_pool = 4 }, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (40 sample.increment) @spawn [] (41 sample.increment) @spawn task.await `ok at pop task.await `ok at pop 9 sample.increment");
+    try expectOk(&runtime, "(40 sample.increment) @spawn (41 sample.increment) @spawn task.await `ok at pop task.await `ok at pop 9 sample.increment");
     try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
 }
 
@@ -277,10 +277,10 @@ test "scope: @attempt keeps its invoker's right to define and import" {
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // A failed @attempt restores the stack, not the environment.
-    try expectOk(&runtime, "[] (1 `k set missing) @attempt pop k");
+    try expectOk(&runtime, "(1 `k set missing) @attempt pop k");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try expectOk(&runtime, "[] (7 `x set) `m @defm");
-    try expectOk(&runtime, "[] (`m (x) import) @attempt pop x");
+    try expectOk(&runtime, "(`m (x) import) @attempt pop x");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
 }
 
@@ -357,7 +357,7 @@ test "module: provisional tasks keep rollback generations alive until quiescence
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ([] ([] ((1) () while) @spawn pop missing) `bad @defm) @attempt pop");
+    try expectOk(&runtime, "([] (((1) () while) @spawn pop missing) `bad @defm) @attempt pop");
 }
 
 test "module: hot reload commit failure and whole-body pinning" {
@@ -748,7 +748,7 @@ test "loader: ECL_PATH loads first candidate and retries import" {
         .ecl_path = search,
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (`attempted (answer) import answer) @attempt pop attempted.answer");
+    try expectOk(&runtime, "(`attempted (answer) import answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     // The import inside the @attempt bound `answer` in the session.
     try expectOk(&runtime, "answer");
@@ -1049,7 +1049,7 @@ test "loader: one quotation rechecks direct visibility in each scope" {
     var runtime = try session.Session.init(backing.allocator(), &.{}, inputs.inputs(.{}), .cooperative, .evaluate);
     defer runtime.deinit();
     try expectErrorContains(&runtime, "secret.answer", &.{"not visible"});
-    try expectOk(&runtime, "(secret.answer) dup alpha.run wrap (beta.run) @attempt `err at `kind at");
+    try expectOk(&runtime, "(secret.answer) dup alpha.run (beta.run) cons @attempt `err at `kind at");
     try std.testing.expectEqualStrings("undefined-word", intern.get(runtime.stackItems()[0].symbol.name));
     try expectErrorContains(&runtime, "secret.answer", &.{"not visible"});
 }
@@ -1121,10 +1121,10 @@ test "module source: unit constructors are refused during construction" {
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     const refusal = "is legal only outside module construction";
-    try expectErrorContains(&runtime, "[] ([] (1) @spawn pop (1) `x def) `m @defm", &.{ "kind domain", "word @spawn", refusal });
-    try expectErrorContains(&runtime, "[] ([] [] (1) @give pop (1) `x def) `m @defm", &.{ "kind domain", "word @give", refusal });
+    try expectErrorContains(&runtime, "[] ((1) @spawn pop (1) `x def) `m @defm", &.{ "kind domain", "word @spawn", refusal });
+    try expectErrorContains(&runtime, "[] ([] (1) @give pop (1) `x def) `m @defm", &.{ "kind domain", "word @give", refusal });
     // `@each` is a prelude definition over `@spawn`, so the trace names it.
-    try expectErrorContains(&runtime, "[] ([1] [] (1) @each pop (1) `x def) `m @defm", &.{ "kind domain", "@each", refusal });
+    try expectErrorContains(&runtime, "[] ([1] (1) @each pop (1) `x def) `m @defm", &.{ "kind domain", "@each", refusal });
     try expectErrorContains(&runtime, "m.x", &.{"kind undefined-word"});
     try expectOk(&runtime, "task.pending len");
     try std.testing.expectEqual(@as(i64, 0), runtime.stackItems()[0].int);
@@ -1141,17 +1141,17 @@ test "module source: construction refusal reaches helper words and nested attemp
     // construction body cannot reach a constructor through its own helper.
     try expectErrorContains(
         &runtime,
-        "[] (([] (1) @spawn) `start def start) `helper @defm",
+        "[] (((1) @spawn) `start def start) `helper @defm",
         &.{ "kind undefined-word", "word start" },
     );
     // An `@attempt` inside the body observes the refusal as data; construction
     // then completes without having started a task.
-    try expectOk(&runtime, "[] ([] ([] (1) @spawn) @attempt `err at `kind at `k set) `nested @defm nested.k task.pending len");
+    try expectOk(&runtime, "[] (((1) @spawn) @attempt `err at `kind at `k set) `nested @defm nested.k task.pending len");
     var stack = try runtime.stackDisplay();
     defer stack.deinit();
     try std.testing.expectEqualStrings("domain 0", stack.bytes());
     // Outside construction the constructor is unchanged.
-    try expectOk(&runtime, "pop pop [] (1) @spawn task.await");
+    try expectOk(&runtime, "pop pop (1) @spawn task.await");
     var after = try runtime.stackDisplay();
     defer after.deinit();
     try std.testing.expectEqualStrings("{ok [1]}", after.bytes());

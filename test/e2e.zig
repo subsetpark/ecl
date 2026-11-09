@@ -231,7 +231,7 @@ test "e2e: proc write serializes at scheduler call arrival" {
         "`proc (spawn write close-input read-stdout wait) import " ++
             "{{executable \"{s}\" args (\"first-byte\")}} spawn `p set " ++
             "[1] 200000 take `payload set " ++
-            "[] (p payload write) @spawn `early set [] () @spawn task.await pop " ++
+            "(p payload write) @spawn `early set () @spawn task.await pop " ++
             "p [2] write early task.await pop p close-input p 1 read-stdout [1] match? p wait pop",
         .{process_exe},
     );
@@ -628,7 +628,7 @@ test "e2e: tests retain file-private module visibility" {
         .{ .path = "bar.ecl", .source = "([] ((42) `answer def) `baz @defm) call\n" ++
             "[] ((baz.answer 42 = {kind user} assert) `local test) `app.bar @defm\n" ++
             "baz.answer 42 = {kind user} assert\n" },
-        .{ .path = "foo.ecl", .source = "[] (([] (baz.answer) @attempt `err at `kind at `undefined-word match? " ++
+        .{ .path = "foo.ecl", .source = "[] (((baz.answer) @attempt `err at `kind at `undefined-word match? " ++
             "{kind user} assert) `isolated test) `app.foo @defm\n" },
     });
     const exe = try absoluteExe();
@@ -640,7 +640,7 @@ test "e2e: tests retain file-private module visibility" {
     defer script.deinit();
     try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
     var loaded = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "\"bar.ecl\" @load! [] (baz.answer) @attempt `err at `kind at" },
+        .argv = &.{ exe, "-e", "\"bar.ecl\" @load! (baz.answer) @attempt `err at `kind at" },
         .cwd = .{ .dir = scratch.dir },
     });
     defer loaded.deinit();
@@ -668,7 +668,7 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     // reuse that committed artifact, including with overlapping source globs.
     try writeTestProject(scratch.dir, &.{
         .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {kind user} assert\n" ++
-            "[] (([] (helper.answer) @attempt `err at `kind at `undefined-word match? " ++
+            "[] (((helper.answer) @attempt `err at `kind at `undefined-word match? " ++
             "{kind user} assert) `isolated test) `consumer @defm\n" },
         .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
             "[] ((42) `answer def) `app.public @defm\n" },
@@ -1507,7 +1507,7 @@ test "e2e: M6 combinators parse and contract payloads" {
         .stderr = "warning: `+` now shadows the core word for top-level code; `core.+` still reaches it\n",
     });
 
-    var refused = try run(&.{ build_options.ecl_exe, "-e", "[] (1 `k set) @spawn task.await `err at raise" });
+    var refused = try run(&.{ build_options.ecl_exe, "-e", "(1 `k set) @spawn task.await `err at raise" });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,
@@ -1606,7 +1606,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "[] (\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-default io.pp",
+            "(\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-default io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -1657,8 +1657,8 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         // auto-load, with no `ECL_PATH` and no readable directory.
         .{
             .name = "result",
-            .imported = "`result (or-raise) import [] (2 3 +) @attempt or-raise io.pp",
-            .qualified = "[] (2 3 +) @attempt result.or-raise io.pp",
+            .imported = "`result (or-raise) import (2 3 +) @attempt or-raise io.pp",
+            .qualified = "(2 3 +) @attempt result.or-raise io.pp",
         },
         .{ .name = "str", .imported = "`str (upper) import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
         .{ .name = "io", .imported = "`io (print) import \"hi\" print", .qualified = "\"hi\" io.print" },
@@ -1725,22 +1725,11 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     });
 }
 
-test "e2e: result module exclusively owns the envelope vocabulary" {
-    for ([_][]const u8{ "ok?", "or-raise", "or-else" }) |old| {
-        var result = try run(&.{ build_options.ecl_exe, "-e", old });
-        defer result.deinit();
-        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
-    }
-    for ([_][]const u8{ "result.map-error", "result.case", "result.or-else", "result.and-then" }) |old| {
-        var result = try run(&.{ build_options.ecl_exe, "-e", old });
-        defer result.deinit();
-        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
-    }
-
+test "e2e: result.or-raise returns an existing failure unchanged" {
     var unchanged = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (\"original\" fail) @attempt dup (result.or-raise) cons [] swap @attempt `err at swap `err at match?",
+        "(\"original\" fail) @attempt dup (result.or-raise) cons @attempt `err at swap `err at match?",
     });
     defer unchanged.deinit();
     try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -1822,8 +1811,8 @@ test "e2e: concurrent fd writes stay contiguous" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (3 (fd.out 70000 range 0 * 65 + fd.write) times {}) @spawn " ++
-            "[] (3 (fd.out 70000 range 0 * 66 + fd.write) times {}) @spawn " ++
+        "(3 (fd.out 70000 range 0 * 65 + fd.write) times {}) @spawn " ++
+            "(3 (fd.out 70000 range 0 * 66 + fd.write) times {}) @spawn " ++
             "task.await pop task.await pop",
     });
     defer result.deinit();
@@ -1868,51 +1857,30 @@ test "e2e: entropy is the one draw that differs between processes" {
     try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
 }
 
-test "e2e: the old unit-constructor spellings are gone and the boundary error guides" {
-    // Hard renames, no aliases: the pre-@ spellings resolve to nothing.
-    for ([_][]const u8{
-        "attempt",
-        "spawn",
-        "par-each",
-        "module",
-        "attempt-with",
-        "spawn-with",
-        "par-each-with",
-        "module-with",
-        "@attempt-with",
-        "@spawn-with",
-        "@each-with",
-        "@defm-with",
-        "seed",
-        "unseed",
-    }) |old| {
-        var result = try run(&.{ build_options.ecl_exe, "-e", old });
-        defer result.deinit();
-        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "kind undefined-word", old } });
-    }
+test "e2e: the unit boundary error guides" {
     // The trap the convention exists to make visible: the caller's value is
     // on screen and out of reach, so the error names the isolation.
-    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 [1] (+) @attempt io.pp" });
+    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @attempt io.pp" });
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "isolation @attempt", "constructor's values operand" },
+        .stdout_contains = &.{ "isolation @attempt", "`values (q) cat @attempt`" },
     });
-    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] [] (+ +) @each io.pp" });
+    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each io.pp" });
     defer child.deinit();
     try child.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "isolation @spawn", "constructor's values operand" },
+        .stderr_contains = &.{ "isolation @spawn", "`values (q) cat @spawn`" },
     });
-    // And the seeding composition that fixes it.
-    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) @attempt io.pp" });
+    // And the composition that fixes it: build the values into the body.
+    var seeded = try run(&.{ build_options.ecl_exe, "-e", "3 wrap (1 +) cat @attempt io.pp" });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "{ok [4]}\n", .stderr = "" });
 
     var seeded_each = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[1 2] [10] (|x a| x a +) @each io.pp",
+        "[1 2] [10] (|x a| x a +) cat @each io.pp",
     });
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });

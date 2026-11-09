@@ -26,5 +26,5 @@
   "demo\nalpha -> charlie 1.0.0\nbravo -> charlie 1.0.0\ndemo -> alpha 1.0.0\ndemo -> bravo 1.0.0\n"
   equal
   lock "charlie.api" pkg.report.why "charlie.api: demo -> alpha 1.0.0 -> charlie 1.0.0\n" equal
-  lock "missing.api" pair (pkg.report.why) @attempt result.err? 1 equal) `canonical-reports test
+  lock "missing.api" pair (pkg.report.why) cat @attempt result.err? 1 equal) `canonical-reports test
 ) `pkg.test.report @defm

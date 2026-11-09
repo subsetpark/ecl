@@ -47,7 +47,7 @@
  (|values quotation word|
   word
   word chars " left the millisecond range" cat
-  values quotation @attempt
+  values quotation cat @attempt
   dup `ok dict.has?
   (`ok at first nip nip)
   (`err at dup `kind at `overflow match? (pop swap `overflow rollup fail) (nip nip raise) if)

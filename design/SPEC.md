@@ -1223,7 +1223,7 @@ Three quotation-application behaviors exist:
   word that restored it. Paging stops at the nearest isolated substack or
   unit beneath, whose underflow is unchanged.
 - **Isolated**: the quotation runs on a fresh substack per application,
-  seeded with its declared inputs, and its result count is checked
+  starting on its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
   `fold`, `fold1`, `scan`, `lex-cmp-with`, `update`, `stencil`, `unfold`,
   `infra`, `@attempt`, `@spawn`, `@each`, and `@defm`.
@@ -1265,14 +1265,8 @@ and value retirement remain bounded scheduler work.
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
 — one unit per application for `@each` — and `@load`, which runs a file's
-source the same way. The seeded constructors, `@attempt`, `@spawn`, `@give`,
-`@each`, `@defm`, and `@load`, take an explicit seed-values list and a body
-quotation, or for `@load` a path, as separate operands. An empty seed list is written `[]`, or the
-operand is omitted by the constructor's seedless twin, spelled with a trailing
-`!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the ambient stack
-across its unit boundary. `@each` also
-places the iterated element deepest in each child stack, beneath the shared
-seed values.
+source the same way. No constructor reads the ambient stack across its unit
+boundary; see Seeding a unit for what each one starts on.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -1305,38 +1299,46 @@ reserving the spelling from user definitions.
 
 #### Seeding a unit
 
-Every unit constructor receives its seed values and exact body separately:
+`@attempt`, `@spawn`, `@give`, and `@each` take only a body. A unit started by
+`@attempt` or `@spawn` begins on an empty stack, one started by `@give` on the
+ports it was given, and each `@each` child on its element. A caller that wants
+the unit to begin on values builds them into the body:
 
 ```ecl
-values (q) @attempt
-values (q) @spawn
-list values (q) @each          ( element deepest in each child )
+values (q) cat @attempt
+x (q) cons @spawn
+list (q) @each                 ( element alone on each child's stack )
+ports (q) @give                ( the given ports, in list order )
+```
+
+A value stored into a list at run time enters as data, so the built body
+pushes each value and then runs `q`; that is all a separate values operand
+would do.
+
+Module construction is the exception. `@defm` and `@load` receive seed values
+apart from the body:
+
+```ecl
 values (body) `name @defm
 values path @load
 ```
 
-Both `values` and the body must be lists. The new unit's operand stack is
-initialized from the values list in list order, and then the body runs. `[]` is
-the explicit no-seed operand, and each `!` twin (`(q) @attempt!`, ``(body)
-`name @defm!``, and so on) is exactly its constructor applied to `[]`. Seeds
-are inert stack values and contribute no code to the body: even when a seed is
-itself a reader-built quotation, none of its contents is part of the
-construction body's text. `@each` puts the iterated element deepest in each
-child stack, beneath the shared seeds.
-
-Keeping the two operands separate is what makes seeding compatible with module
-text: `@defm` knows exactly which list is the construction body.
-Generic quotation-building operations such as `cat` may still produce a body,
-but a runtime-built body has no reader lineage and therefore takes no module
-attribution; see Modules.
+`[]` is the explicit no-seed operand, and `@defm!` and `@load!` are exactly
+their constructor applied to `[]`. The new unit's operand stack is initialized
+from the values list in list order, and then the body runs. Seeds are inert
+stack values and contribute no code to the body: even when a seed is itself a
+reader-built quotation, none of its contents is part of the construction
+body's text. Keeping the two operands separate is what makes seeding
+compatible with module text: `@defm` knows exactly which list is the
+construction body, and a body built by `cat` or `cons` has no reader lineage
+and therefore takes no module attribution (see Modules). `@load`'s body is a
+file, which no list operation can extend.
 
 Underflow against the floor of a constructed unit is reported specially:
-the message names the isolation and the constructor's values operand, and the
-error dict carries `` `isolation `` naming the constructor. It does not prescribe
-`cons` or `cat`: those construct a different, reusable quotation rather
-than pass arguments through this boundary. It is the one underflow
-whose cause is invisible — the values the caller meant to pass are on
-screen and out of reach.
+the message names the isolation and says how to pass initial values, and the
+error dict carries `` `isolation `` naming the constructor. It is the one
+underflow whose cause is invisible — the values the caller meant to pass are
+on screen and out of reach.
 
 ## Bindings and scope
 

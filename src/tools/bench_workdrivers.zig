@@ -305,7 +305,7 @@ fn runLatency(
     const long_size: usize = if (quick) 200_000 else 5_000_000;
     const mixed = try std.fmt.allocPrint(
         std.heap.smp_allocator,
-        "[] ([1] {d} take sum) @spawn pop [] ([1] {d} take sum) @spawn [] (7) @spawn pair task.await-any pop",
+        "([1] {d} take sum) @spawn pop ([1] {d} take sum) @spawn (7) @spawn pair task.await-any pop",
         .{ long_size, long_size },
     );
     defer std.heap.smp_allocator.free(mixed);
@@ -317,7 +317,7 @@ fn runLatency(
         }, repetitions);
         try printCase(io, out, mode, workers, 0, .{
             .name = "cancellation-latency",
-            .setup = "[] ((1) () while) @spawn",
+            .setup = "((1) () while) @spawn",
             .workload = "dup task.cancel task.await",
         }, repetitions);
         try out.flush();

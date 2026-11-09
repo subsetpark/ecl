@@ -5285,7 +5285,7 @@ pub const Fiber = struct {
                 .attempt => .{
                     .constructor = "@attempt",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand",
+                        "build initial values into the quotation: `values (q) cat @attempt`",
                 },
                 .module => .{
                     .constructor = "@defm",
@@ -5307,7 +5307,7 @@ pub const Fiber = struct {
             .spawn => .{
                 .constructor = "@spawn",
                 .advice = "the child unit's stack is isolated from the caller's stack — " ++
-                    "pass initial values in the constructor's values operand",
+                    "build initial values into the quotation: `values (q) cat @spawn`",
             },
             .@"test" => .{
                 .constructor = "@test",
@@ -6005,8 +6005,10 @@ pub const Fiber = struct {
             .application_selection = if (select_initial) provenance_target else null,
         };
     }
-    pub fn attemptOwned(self: *Fiber, input: OwnedUnitInput) error{OutOfMemory}!void {
-        return self.beginAttemptOwned(input);
+    /// Opens `@attempt`'s boundary on an owned body. Consuming on success and
+    /// failure alike.
+    pub fn attemptOwned(self: *Fiber, body: *Header) error{OutOfMemory}!void {
+        return self.openAttempt(body);
     }
     /// Opens a construction boundary for `@defm`. The name has already been
     /// validated; the body evaluates against a fresh image, and completion
@@ -6318,26 +6320,6 @@ pub const Fiber = struct {
         self.pendingFailure().raised = raised;
         return error.Ecl;
     }
-    fn beginAttemptOwned(
-        self: *Fiber,
-        input: OwnedUnitInput,
-    ) error{OutOfMemory}!void {
-        var owned = input;
-        defer owned.deinit(self.releases);
-        // An unseeded `@attempt` opens its boundary in this step and allocates
-        // nothing extra; a seeded one materializes a user-sized seed list, so
-        // it becomes ordinary resumable scheduler work like every other
-        // user-sized traversal.
-        if (owned.seedHeader() == null) return self.openAttempt(owned.takeBody());
-        return self.startDriver(ConstructionDriver{
-            .state = .init(.{ .open = .{
-                .target = .init(.attempt),
-                .body = .init(owned.takeBody()),
-            } }),
-            .materializer = .init(.init(owned.takeSeeds().?)),
-            .word = self.active_word,
-        });
-    }
     /// Opens one `@attempt` boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure.
     fn openAttempt(self: *Fiber, body: *Header) error{OutOfMemory}!void {
@@ -6552,16 +6534,6 @@ pub const OwnedUnitInput = enum(u128) {
         return self.bodyHeader().?;
     }
 
-    pub fn initialStack(self: *const OwnedUnitInput, element: ?Value) InitialStack {
-        std.debug.assert(self.* != .consumed);
-        if (element) |item| {
-            const seeds = self.seedHeader() orelse return .{ .borrowed_element = item };
-            return .{ .borrowed_element_and_seeds = .{ .element = item, .seeds = seeds } };
-        }
-        const seeds = self.seedHeader() orelse return .empty;
-        return .{ .borrowed_seeds = seeds };
-    }
-
     pub fn move(self: *OwnedUnitInput) OwnedUnitInput {
         std.debug.assert(self.* != .consumed);
         const moved = self.*;
@@ -6595,15 +6567,8 @@ pub const OwnedUnitInput = enum(u128) {
 /// independent stack-owned reference to each before returning.
 pub const InitialStack = union(enum) {
     empty,
-    /// `@each`'s per-child element and nothing else.
-    borrowed_element: Value,
-    /// Explicit seed values, in list order.
+    /// Seed values in list order: `@give`'s moved ports.
     borrowed_seeds: *Header,
-    /// `@each` with shared seeds: the element deepest and the seeds above it.
-    borrowed_element_and_seeds: struct { element: Value, seeds: *Header },
-    /// `@give`'s moved ports deepest, then the explicit seed values. Both are
-    /// materialized in bounded slices rather than concatenated up front.
-    borrowed_pair: struct { deep: *Header, seeds: *Header },
 };
 
 /// Starts a fiber on code that resolves one form at a time: top-level source,
@@ -6613,45 +6578,19 @@ pub fn initialize(fiber: *Fiber, code: *Header, initial_stack: InitialStack) err
     std.debug.assert(fiber.frames.items.len == 0);
     std.debug.assert(fiber.terminal == .evaluating);
     std.debug.assert(fiber.current == null);
-    if (initial_stack == .borrowed_pair) {
-        const pair = initial_stack.borrowed_pair;
-        heap.incRef(pair.deep);
-        heap.incRef(pair.seeds);
-        try fiber.startDriver(ChildSeedDriver{
-            .materializer = .init(.initPair(pair.deep, pair.seeds)),
-        });
-        heap.incRef(code);
-        fiber.current = .{
-            .code = code,
-            .program = program,
-            .position = .{ .source = 0 },
-            .site = .root(fiber),
-            .traced_word = no_word,
-        };
-        return;
-    }
-    const element: ?Value, const seeds: ?*Header = switch (initial_stack) {
-        .empty => .{ null, null },
-        .borrowed_element => |item| .{ item, null },
-        .borrowed_seeds => |items| .{ null, items },
-        .borrowed_element_and_seeds => |both| .{ both.element, both.seeds },
-        .borrowed_pair => unreachable,
-    };
-    // One element is O(1) and goes on now, deepest. Explicit seeds are
-    // user-sized, so the Fiber is instead handed a driver that materializes them
-    // in bounded slices: the evaluator services a driver before the
-    // activation's code, so the body still starts on a fully seeded stack.
-    if (element) |item| {
-        try fiber.stack.append(fiber.allocator, item);
-        heap.retainValue(item);
-    }
-    if (seeds) |items| {
-        // The driver's field owns this reference on every exit: a failed
-        // `startDriver` disposes the pending driver's fields for us.
-        heap.incRef(items);
-        try fiber.startDriver(ChildSeedDriver{
-            .materializer = .init(.init(items)),
-        });
+    // Seeds go on through a driver that materializes them in bounded slices:
+    // the evaluator services a driver before the activation's code, so the
+    // body still starts on a fully seeded stack.
+    switch (initial_stack) {
+        .empty => {},
+        .borrowed_seeds => |items| {
+            // The driver's field owns this reference on every exit: a failed
+            // `startDriver` disposes the pending driver's fields for us.
+            heap.incRef(items);
+            try fiber.startDriver(ChildSeedDriver{
+                .materializer = .init(.init(items)),
+            });
+        },
     }
     heap.incRef(code);
     fiber.current = .{
@@ -8180,22 +8119,12 @@ fn advanceRegistration(
 /// state machine. Capacity for a granted slice is secured before its first
 /// append, so allocation failure adds none of that slice; an earlier prefix is
 /// ordinary stack ownership and retires with its boundary or Fiber.
-/// Materializes one or two seed lists onto a fresh child's stack in bounded
-/// slices. `deep`, when present, is materialized first and therefore ends up
-/// beneath `seeds`: `@give` uses it for the ports it moves, so no caller has
-/// to build a concatenated list eagerly to seed a child.
 const SeedMaterializer = struct {
-    deep: ?heap.Owned(*Header) = null,
     seeds: heap.Owned(*Header),
     next: usize = 0,
-    deep_done: bool = false,
 
     fn init(seeds: *Header) SeedMaterializer {
-        return .{ .seeds = .init(seeds), .deep_done = true };
-    }
-
-    fn initPair(deep: *Header, seeds: *Header) SeedMaterializer {
-        return .{ .deep = .init(deep), .seeds = .init(seeds) };
+        return .{ .seeds = .init(seeds) };
     }
 
     pub fn deinit(
@@ -8203,8 +8132,6 @@ const SeedMaterializer = struct {
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
     ) void {
-        if (self.deep) |*deep| deep.deinit(releases, allocator);
-        self.deep = null;
         self.seeds.deinit(releases, allocator);
         self.next = 0;
     }
@@ -8214,20 +8141,7 @@ const SeedMaterializer = struct {
         fiber: *Fiber,
         work: *poll_api.WorkBudget,
     ) error{OutOfMemory}!bool {
-        if (!self.deep_done) {
-            if (!try self.copy(fiber, self.deep.?.borrow(), work)) return false;
-            self.deep_done = true;
-            self.next = 0;
-        }
-        return self.copy(fiber, self.seeds.borrow(), work);
-    }
-
-    fn copy(
-        self: *SeedMaterializer,
-        fiber: *Fiber,
-        source: *Header,
-        work: *poll_api.WorkBudget,
-    ) error{OutOfMemory}!bool {
+        const source = self.seeds.borrow();
         const count: usize = @intCast(source.length());
         const end = self.next + work.take(count - self.next);
         try fiber.stack.ensureUnusedCapacity(fiber.allocator, end - self.next);
@@ -8241,20 +8155,14 @@ const SeedMaterializer = struct {
     }
 };
 
-/// What a `ConstructionDriver` opens once its body is final.
-const ConstructionTarget = union(enum) {
-    /// `@attempt`: a failure boundary in the invoker's scope.
-    attempt,
-    /// `@defm`: the candidate image, carrying its validated name and its
-    /// constructing site's provenance.
+/// What a `ConstructionDriver` opens once its body is final: `@defm`'s
+/// candidate image, carrying its validated name and its constructing site's
+/// provenance.
+const ConstructionTarget = struct {
     image: modules.OwnedImage,
 
     pub fn deinit(self: *ConstructionTarget) void {
-        switch (self.*) {
-            .attempt => {},
-            .image => |*owned| owned.deinit(),
-        }
-        self.* = .attempt;
+        self.image.deinit();
     }
 };
 
@@ -8341,12 +8249,7 @@ const ConstructionDriver = struct {
                 // alike; the seeds are not, so they stay owned here until the
                 // boundary they seed exists.
                 const body = open.body.take();
-                switch (open.target.borrowMut().*) {
-                    .attempt => {
-                        try evaluator.openAttempt(body);
-                    },
-                    .image => |*owned| try evaluator.openImageBoundary(owned, self.word, body),
-                }
+                try evaluator.openImageBoundary(&open.target.borrowMut().image, self.word, body);
                 open.target.deinit(evaluator.releases, evaluator.allocator);
                 self.state.borrowMut().* = .seed;
                 return .stepped;

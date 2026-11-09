@@ -1,5 +1,4 @@
 # The task scope owns the session, transaction, cursor, and exchanges.
-[]
 (
  portprobe.storage [] port.open `session set
  session portprobe.transaction [] port.call `transaction set

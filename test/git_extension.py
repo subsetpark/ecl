@@ -189,13 +189,13 @@ def main():
             repeated = ' '.join(fetch(request(), f'same-session-{number}.tgz') for number in range(3))
             assert invoke(repeated).strip() == ' '.join([json.dumps(commit)] * 3)
             concurrent = (
-                '[] (' + fetch(request(), 'concurrent-a.tgz') + ') @spawn `a set '
-                '[] (' + fetch(request(), 'concurrent-b.tgz') + ') @spawn `b set '
+                '(' + fetch(request(), 'concurrent-a.tgz') + ') @spawn `a set '
+                '(' + fetch(request(), 'concurrent-b.tgz') + ') @spawn `b set '
                 "a task.await `ok at first b task.await `ok at first"
             )
             assert invoke(concurrent).strip() == ' '.join([json.dumps(commit)] * 2)
             recovered = (
-                '[] (' + fetch(request(**{'ca-file': ''}), 'untrusted.tgz') +
+                '(' + fetch(request(**{'ca-file': ''}), 'untrusted.tgz') +
                 ") @attempt `err at `kind at " + fetch(request(), 'trusted.tgz')
             )
             assert invoke(recovered).strip() == "io " + json.dumps(commit)
@@ -206,7 +206,7 @@ def main():
             # handler wait and request timeout exceed the child's exit budget.
             with subprocess.Popen(
                 [binary, '--module-map', str(module_map), '-e',
-                 begin + "io.stdin pop x port.cancel [] (x port.result) @attempt "
+                 begin + "io.stdin pop x port.cancel (x port.result) @attempt "
                  "`err at `kind at x port.close p port.close"],
                 cwd=caller, env={**os.environ, 'ECL_WORKERS': '4'},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -95,7 +95,7 @@ test "conversion: chars rejects non-UTF-8 bytes with a reason and other kinds by
     try expectError(&runtime, "5 chars", &.{"kind type"});
     try expectError(&runtime, "{} chars", &.{"kind type"});
     // A failed conversion is transactional: the operand is still there.
-    try expectStack(&runtime, "1 [255] (chars) @attempt result.err? pop", "1");
+    try expectStack(&runtime, "1 (255 chars) @attempt result.err? pop", "1");
 }
 
 test "conversion: bytes encodes strings and passes byte lists through" {
@@ -261,7 +261,7 @@ test "conversion: a symbol the implementation builds means core's binding" {
     // executing it reaches core's `at` even though the session shadows `at`.
     try expectStack(
         &runtime,
-        "(pop pop 55) `at def [] ([] 5 core.at) @attempt `err 0 dict.get `word 0 dict.get (execute) cons `q set " ++
+        "(pop pop 55) `at def ([] 5 core.at) @attempt `err 0 dict.get `word 0 dict.get (execute) cons `q set " ++
             "[7 8] 1 q call",
         "8",
     );

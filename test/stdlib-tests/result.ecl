@@ -15,8 +15,8 @@
   [1] result.ok result.err? 0 equal
   {kind io} result.err result.ok? 0 equal
   {kind io} result.err result.err? 1 equal
-  [] (2 3 +) @attempt result.ok? 1 equal
-  [] (missing) @attempt result.err? 1 equal
+  (2 3 +) @attempt result.ok? 1 equal
+  (missing) @attempt result.err? 1 equal
   (7 result.ok) `type "expects a list" raises-containing
   (7 result.err) `type "expects an error dict" raises-containing
   ({kind 7} result.err) `type "expects an error dict" raises-containing)

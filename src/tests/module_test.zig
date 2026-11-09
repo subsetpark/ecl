@@ -194,8 +194,8 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     // Measured window: delays from one to two quanta cancel mid-interning;
     // three let the target finish.
     const source =
-        "wrap (execute) @spawn dup `target set " ++
-        "wrap (1536 () times task.cancel) @spawn task.await pop target task.await";
+        "(execute) cons @spawn dup `target set " ++
+        "(1536 () times task.cancel) cons @spawn task.await pop target task.await";
 
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
@@ -451,7 +451,7 @@ test "session: mutation settlement is independent of a busy sole worker" {
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
         defer runtime.deinit();
-        try expectOk(&runtime, "[] ((1) () while) @spawn");
+        try expectOk(&runtime, "((1) () while) @spawn");
         try expectChurnBounded(&runtime, &counting, 4096);
         try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup task.cancel task.await pop");
@@ -656,7 +656,7 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
     try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
-    try expectOk(&runtime, "[] (\"abc\" \"z\" str.index-of) @attempt `err at `kind at `domain match? " ++
+    try expectOk(&runtime, "(\"abc\" \"z\" str.index-of) @attempt `err at `kind at `domain match? " ++
         "{kind user msg \"str lost error\"} assert");
     // A dotted name under a stdlib prefix is an ordinary module.
     try expectOk(&runtime, "[] ((1) `one def) `dict.extra @defm dict.extra.one 1 = {kind user} assert");

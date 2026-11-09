@@ -75,5 +75,5 @@
   "Begin an operation, claim its result, and close the exchange. Use only when no additional
    streaming input or output is required. Close the exchange before returning or re-raising its
    error.")
- (begin dup wrap (result) @attempt swap close result.or-raise first) `call def
+ (begin dup (result) cons @attempt swap close result.or-raise first) `call def
 ) `port @defm

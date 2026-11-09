@@ -41,7 +41,7 @@
  (candidate -- bool :
   "Return 1 when a candidate satisfies the table convention and 0 for a convention mismatch.
    Cancellation, allocation failure, and other runtime errors still propagate.")
- (wrap (checked pop) @attempt dup result.ok? (pop 1) (convention-miss?) if) `valid? def
+ ((checked pop) cons @attempt dup result.ok? (pop 1) (convention-miss?) if) `valid? def
 
  ### def names
  (table -- names : "Return the column names in schema order.")

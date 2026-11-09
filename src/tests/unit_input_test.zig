@@ -1,8 +1,10 @@
 //! Public behavior of fixed-arity unit inputs and explicit unit seeding.
 //!
-//! Every unit constructor consumes a seed-values list followed by its exact
-//! body. Keeping the two operands apart is what lets `@defm` answer the one
-//! attribution question it must: did the reader write this exact body?
+//! `@attempt`, `@spawn`, `@give`, and `@each` take only their body: a caller
+//! that wants the unit to start on values builds them into it. `@defm` and
+//! `@load` still take a seed-values list apart from their body. Keeping the
+//! two operands apart is what lets `@defm` answer the one attribution
+//! question it must: did the reader write this exact body?
 //!
 //! Every test here goes through the ordinary `Session` interface. Nothing
 //! inspects interpreter representation.
@@ -58,37 +60,40 @@ fn expectErrorContains(
     while (runtime.stackItems().len != 0) try expectOk(runtime, "pop");
 }
 
-test "unit inputs: every constructor requires separate seed and body lists" {
+test "unit inputs: every constructor checks its operands" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectErrorContains(&runtime, "(1) @attempt", &.{"underflow"});
-    try expectErrorContains(&runtime, "[1] 3 @attempt", &.{"type"});
-    try expectErrorContains(&runtime, "3 (1) @attempt", &.{"type"});
+    try expectErrorContains(&runtime, "@attempt", &.{"underflow"});
+    try expectErrorContains(&runtime, "3 @attempt", &.{"type"});
+    try expectErrorContains(&runtime, "(1) `m @defm", &.{"underflow"});
     try expectErrorContains(&runtime, "3 (1) `m @defm", &.{"type"});
-    try expectErrorContains(&runtime, "[1] 3 @spawn", &.{"type"});
-    try expectErrorContains(&runtime, "[1] [] 3 @each", &.{"type"});
+    try expectErrorContains(&runtime, "3 @spawn", &.{"type"});
+    try expectErrorContains(&runtime, "[1] 3 @each", &.{"type"});
+    try expectErrorContains(&runtime, "[] 3 @give", &.{"type"});
 }
 
-test "unit inputs: seeds reach every unit constructor in list order" {
+test "unit inputs: initial values reach every unit constructor in list order" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectStack(&runtime, "[10 3] (-) @attempt", "{ok [7]}");
-    try expectStack(&runtime, "[10 3] (-) @spawn task.await", "{ok [7]}");
-    // The element stays deepest in each child stack, beneath the shared seeds.
-    try expectStack(&runtime, "[1 2] [10] (-) @each", "[-9 -8]");
+    try expectStack(&runtime, "(10 3 -) @attempt", "{ok [7]}");
+    try expectStack(&runtime, "(10 3 -) @spawn task.await", "{ok [7]}");
+    try expectStack(&runtime, "10 3 pair (-) cat @attempt", "{ok [7]}");
+    // The element is deepest in each child stack, beneath what the body pushes.
+    try expectStack(&runtime, "[1 2] (10 -) @each", "[-9 -8]");
+    // The given ports are the child's whole initial stack.
+    try expectStack(&runtime, "[] (stack) @give task.await", "{ok (())}");
     try expectStack(&runtime, "[4 5] (+ `sum set) `added @defm added.sum", "9");
-    // An empty seed list is the unseeded case spelled out.
-    try expectStack(&runtime, "[] (7) @attempt", "{ok [7]}");
-    try expectStack(&runtime, "[] () @attempt", "{ok ()}");
+    try expectStack(&runtime, "(7) @attempt", "{ok [7]}");
+    try expectStack(&runtime, "() @attempt", "{ok ()}");
 }
 
-test "unit inputs: isolation underflow names only the explicit values operand" {
+test "unit inputs: isolation underflow says how to pass initial values" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -96,13 +101,13 @@ test "unit inputs: isolation underflow names only the explicit values operand" {
 
     try expectStack(
         &runtime,
-        "9 [1] (+) @attempt nip `err at dup `data at `isolation at swap `msg at",
+        "9 (1 +) @attempt nip `err at dup `data at `isolation at swap `msg at",
         "@attempt \"+ needs 2 stack values, but found 1; the substack is isolated from " ++
-            "the caller's stack — pass initial values in the constructor's values operand\"",
+            "the caller's stack — build initial values into the quotation: `values (q) cat @attempt`\"",
     );
 }
 
-test "unit inputs: every constructor diagnoses its own values operand" {
+test "unit inputs: every constructor diagnoses its own boundary" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -113,14 +118,14 @@ test "unit inputs: every constructor diagnoses its own values operand" {
         "constructor's values operand",
         "trace (`+)",
     });
-    try expectErrorContains(&runtime, "[] (1 +) @spawn task.await `err at raise", &.{
+    try expectErrorContains(&runtime, "(1 +) @spawn task.await `err at raise", &.{
         "isolation @spawn",
-        "constructor's values operand\"",
+        "`values (q) cat @spawn`\"",
     });
     // `@each` is prelude code over `@spawn`, which owns each child's floor.
-    try expectErrorContains(&runtime, "[1] [] (+) @each", &.{
+    try expectErrorContains(&runtime, "[1] (+) @each", &.{
         "isolation @spawn",
-        "constructor's values operand",
+        "`values (q) cat @spawn`",
         "trace (`+)",
     });
 }
@@ -131,9 +136,9 @@ test "unit inputs: large seeds and bodies preserve order and postconditions" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // 512 seeds arrive in list order, so folding pairwise from the top still
-    // reaches the deepest one.
-    try expectStack(&runtime, "512 range (511 (+) times) @attempt `ok at", "[130816]");
+    // 512 values built into a body arrive in list order, so folding pairwise
+    // from the top still reaches the deepest one.
+    try expectStack(&runtime, "512 range (511 (+) times) cat @attempt `ok at", "[130816]");
     // Seeds the body consumes, in order, with the construction's own
     // postcondition still enforced on what it leaves behind.
     try expectStack(
@@ -141,15 +146,15 @@ test "unit inputs: large seeds and bodies preserve order and postconditions" {
         "[1 2] (+ `sum setp ( -- n ) (sum) `go def) `sized @defm sized.go",
         "3",
     );
-    // One seed list initializes a whole fan-out identically.
-    try expectStack(&runtime, "64 range [1] (+) @each len", "64");
-    // More seeds than one scheduler step materializes, so the list order has to
+    // One body initializes a whole fan-out identically.
+    try expectStack(&runtime, "64 range (1 +) @each len", "64");
+    // More values than one scheduler step copies, so the list order has to
     // survive the slice boundary: popping all but the deepest leaves the first
-    // element of the seed list.
-    try expectStack(&runtime, "300 range (299 (pop) times) @attempt `ok at", "[0]");
-    // And a child's element stays deepest beneath 300 seeds delivered across
-    // several of its own slices.
-    try expectStack(&runtime, "[7] 300 range (300 (pop) times) @each", "[7]");
+    // element of the list.
+    try expectStack(&runtime, "300 range (299 (pop) times) cat @attempt `ok at", "[0]");
+    // And a child's element stays deepest beneath the 300 values its body
+    // pushes.
+    try expectStack(&runtime, "[7] 300 range (300 (pop) times) cat @each", "[7]");
 }
 
 test "unit inputs: a construction body the reader wrote names its image" {

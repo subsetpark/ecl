@@ -23,13 +23,13 @@ rows csv.emit [text text text] csv.parse flip rows match? io.pp
 "" [] csv.parse flip csv.emit len io.pp
 
 # Malformed quoting is `parse; invalid rows are `type or `shape.
-[] ("\"unclosed" [] csv.parse) @attempt `err at `kind at io.pp
-[] ("a\"b" [] csv.parse) @attempt `err at `kind at io.pp
-[] (5 [] csv.parse) @attempt `err at `kind at io.pp
-[] ((5) wrap csv.emit) @attempt `err at `kind at io.pp
-[] (5 wrap csv.emit) @attempt `err at `kind at io.pp
-[] ([] wrap csv.emit) @attempt `err at `kind at io.pp
+("\"unclosed" [] csv.parse) @attempt `err at `kind at io.pp
+("a\"b" [] csv.parse) @attempt `err at `kind at io.pp
+(5 [] csv.parse) @attempt `err at `kind at io.pp
+((5) wrap csv.emit) @attempt `err at `kind at io.pp
+(5 wrap csv.emit) @attempt `err at `kind at io.pp
+([] wrap csv.emit) @attempt `err at `kind at io.pp
 
 # Ragged and blank records cannot fit a multi-column result.
-[] ("a,b\nc" [] csv.parse) @attempt `err at `kind at io.pp
-[] ("a,b\n\n" [] csv.parse) @attempt `err at `kind at io.pp
+("a,b\nc" [] csv.parse) @attempt `err at `kind at io.pp
+("a,b\n\n" [] csv.parse) @attempt `err at `kind at io.pp

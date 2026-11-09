@@ -13,33 +13,33 @@ const runtime_fixture = @import("runtime_fixture.zig");
 const seeds = 48;
 
 const programs = [_][]const u8{
-    "[] (1 2 +) @spawn task.await",
-    "[1 2 3 4 5 6 7 8] [] (dup *) @each",
-    "[] ([] (10) @spawn [] (20) @spawn pair (task.await) each) @spawn task.await",
+    "(1 2 +) @spawn task.await",
+    "[1 2 3 4 5 6 7 8] (dup *) @each",
+    "((10) @spawn (20) @spawn pair (task.await) each) @spawn task.await",
     // A wait chain: each task joins the one it spawned.
-    "[] ([] ([] (7) @spawn task.await) @spawn task.await) @spawn task.await",
+    "(((7) @spawn task.await) @spawn task.await) @spawn task.await",
     // A tree of spinners is cancelled and joined. Where cancellation lands is
     // schedule-dependent and visible in the error's trace, so only completion
     // is compared.
-    "[] ([1] 12 take ([] ((1) () while) @spawn pop) each (1) () while) @spawn " ++
+    "([1] 12 take (((1) () while) @spawn pop) each (1) () while) @spawn " ++
         "dup task.cancel task.await pop `done",
     // Failures inside tasks surface as values, whatever ran first.
-    "[1 2 3 4] [] ([] (0 /) @attempt pop) @each",
+    "[1 2 3 4] ((0 /) @attempt pop) @each",
     // Allocation-heavy tasks keep retirement busy between ready turns.
-    "[1] 16 take [] (pop [1] 64 take (pop [1 2 3]) each len) @each",
+    "[1] 16 take (pop [1] 64 take (pop [1 2 3]) each len) @each",
     // A finite task beats a spinner in await-any under every order.
-    "[] ((1) () while) @spawn `spin set [] (5) @spawn spin pair task.await-any " ++
+    "((1) () while) @spawn `spin set (5) @spawn spin pair task.await-any " ++
         "spin task.cancel spin task.await pop",
     // A composed request and reply: the helper's address travels as 'from.
-    "(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def " ++
-        "[] (task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask",
+    "(|a v| (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def " ++
+        "(task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask",
     // Three senders race into one mailbox; cross-sender order is unspecified.
-    "[] (3 (task.receive) times 3 pack sort) @spawn dup task.address `box set " ++
-        "[] (box 1 task.send) @spawn [] (box 2 task.send) @spawn [] (box 3 task.send) @spawn " ++
+    "(3 (task.receive) times 3 pack sort) @spawn dup task.address `box set " ++
+        "(box 1 task.send) @spawn (box 2 task.send) @spawn (box 3 task.send) @spawn " ++
         "pop pop pop task.await",
     // A send races a receiver that exits: queued-then-discarded or refused as
     // closed, so only completion is compared.
-    "[] (1) @spawn dup task.address 5 pair (task.send) @attempt pop task.await pop `done",
+    "(1) @spawn dup task.address 5 pair (task.send) cat @attempt pop task.await pop `done",
 };
 
 fn render(config: session.Config, source: []const u8) ![]u8 {

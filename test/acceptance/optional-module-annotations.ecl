@@ -70,10 +70,9 @@ answer spelled match? io.pp
  ### def two
  (-- n)
  (1 2) `two def) `liar @defm
-[] (liar.two) @attempt `err at `kind at io.pp
+(liar.two) @attempt `err at `kind at io.pp
 
 ### A malformed recognized annotation is still 'domain.
-[]
 (
  []
  (
@@ -90,12 +89,11 @@ at
 io.pp
 
 ### An undocumented word has no documentation to report.
-[] (`forms.bare doc) @attempt `err at `kind at io.pp
+(`forms.bare doc) @attempt `err at `kind at io.pp
 
 ### A list beneath the body that recognizes no marker is not consumed as an
 ### annotation. It stays on the construction stack, and a module body that
 ### leaves anything there is 'domain.
-[]
 (
  []
  (### def f

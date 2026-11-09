@@ -34,17 +34,8 @@
 #### Examples
 
 ```ecl
-[1 2] (3 +) @attempt
+(1 2 3 +) @attempt
 # => {ok [1 5]}
-```
-
-### @attempt!
-
-#### Examples
-
-```ecl
-(40 2 +) @attempt!
-# => {ok [42]}
 ```
 
 ### @give
@@ -53,17 +44,8 @@
 
 ```ecl
 {address "127.0.0.1" port 0} net.listen
-wrap [] (net.local-address `port at 0 >) @give task.await
+wrap (net.local-address `port at 0 >) @give task.await
 # => {ok [1]}
-```
-
-### @spawn!
-
-#### Examples
-
-```ecl
-(40 2 +) @spawn! task.await
-# => {ok [42]}
 ```
 
 ### @spawn
@@ -71,7 +53,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 #### Examples
 
 ```ecl
-[] (40 2 +) @spawn task.await
+(40 2 +) @spawn task.await
 # => {ok [42]}
 ```
 
@@ -496,12 +478,12 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 # => [1 2 3 4 5]
 ```
 
-### @each!
+### @each
 
 #### Examples
 
 ```ecl
-[1 2 3] (10 *) @each!
+[1 2 3] (10 *) @each
 # => [10 20 30]
 ```
 

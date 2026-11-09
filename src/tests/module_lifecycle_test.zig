@@ -27,7 +27,7 @@ test "concurrency: map artifact auto-loads converge through one loading lease" {
     defer runtime.deinit();
     try expectStack(
         &runtime,
-        "[1 2 3 4 5 6 7 8] [] (race.answer) @each",
+        "[1 2 3 4 5 6 7 8] (race.answer) @each",
         "[42 42 42 42 42 42 42 42]",
     );
 }
@@ -408,7 +408,7 @@ test "concurrency: applying an escaped quotation races reload" {
     // inside the envelope and the runtime keeps progressing; TSan and the
     // allocator are what should speak here.
     try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `racer @defm racer.q `held set");
-    try expectOk(&runtime, "[1] 24 take (pop [] ([] (held call) @attempt) @spawn) each " ++
+    try expectOk(&runtime, "[1] 24 take (pop ((held call) @attempt) @spawn) each " ++
         "[] ((2) `k def ((k)) `q def) `racer @defm " ++
         "(task.await) each pop");
 }
@@ -435,7 +435,7 @@ test "concurrency: escaped quotations keep running old code across a concurrent 
         );
         try expectStack(
             &runtime,
-            "[1] 64 take (pop [] ([] (gone call) @attempt) @spawn) each " ++
+            "[1] 64 take (pop ((gone call) @attempt) @spawn) each " ++
                 "[] ((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
             "",
         );
@@ -460,7 +460,7 @@ test "concurrency: a reload that drops a word leaves escaped quotations running 
         );
         try expectStack(
             &runtime,
-            "[1] 64 take (pop [] ([] (held call) @attempt) @spawn) each " ++
+            "[1] 64 take (pop ((held call) @attempt) @spawn) each " ++
                 "[] ((2) `k def) `reloaded @defm (task.await) each pop",
             "",
         );

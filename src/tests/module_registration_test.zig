@@ -330,9 +330,9 @@ test "module registration: reload history grows no faster than registrations" {
         // every session accumulates.
         const cycle = "[] ((1) `bump def) `reuse-left @defm " ++
             "[] ((1) `bump def) `reuse-right @defm " ++
-            "[] (reuse-left.bump) @spawn " ++
+            "(reuse-left.bump) @spawn " ++
             "[] ((1) `bump def) `reuse-left @defm " ++
-            "task.await pop [] (reuse-right.bump) @spawn task.await pop";
+            "task.await pop (reuse-right.bump) @spawn task.await pop";
         // Both batches are one fiber each and differ only in the cycle count,
         // so their fixed per-fiber costs cancel and the only variable is how
         // many define/reload cycles ran. Ten times the cycles may cost ten

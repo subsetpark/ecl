@@ -92,16 +92,11 @@ const cases = [_]Case{
     .{ .name = "bi", .source = "2 (1 +) (3 *) bi" },
     .{ .name = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
     .{ .name = "fail", .source = "\"bad\" fail" },
-    .{ .name = "result.ok?", .source = "[] (2 3 +) @attempt result.ok?" },
-    .{ .name = "result.or-raise", .source = "[] (2 3 +) @attempt result.or-raise" },
-    .{ .name = "result.or-default", .source = "[] (2 3 +) @attempt 9 result.or-default" },
+    .{ .name = "result.ok?", .source = "(2 3 +) @attempt result.ok?" },
+    .{ .name = "result.or-raise", .source = "(2 3 +) @attempt result.or-raise" },
+    .{ .name = "result.or-default", .source = "(2 3 +) @attempt 9 result.or-default" },
     .{ .name = "result.either", .source = "[7] result.ok (first) (pop 0) result.either" },
     .{ .name = "result.map-err", .source = "{kind io} result.err (pop {kind domain}) result.map-err" },
-    // The prelude no longer carries these: the envelope interpreters live in
-    // the module, and the old bare spellings resolve to nothing.
-    .{ .name = "bare or-raise", .source = "[] (2 3 +) @attempt or-raise" },
-    .{ .name = "bare ok?", .source = "[] (2 3 +) @attempt ok?" },
-    .{ .name = "gone result.case", .source = "[7] result.ok (first) (pop 0) result.case" },
     .{ .name = "set", .source = "3 `x set x" },
     .{ .name = "set quotation", .source = "(dup *) `q set q" },
     .{ .name = "which", .source = "3 `x set `x which" },
@@ -152,13 +147,12 @@ const cases = [_]Case{
     .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
     .{ .name = "rand.deal", .source = "[7 0] 3 10 rand.deal" },
     .{ .name = "rand.shuffle", .source = "[7 0] [10 20 30 40] rand.shuffle" },
-    // The unit-constructor convention: the guided boundary error and the
-    // seeding composition that replaced the `-with` family.
-    .{ .name = "isolated substack", .source = "3 [1] (+) @attempt" },
-    .{ .name = "isolated child", .source = "3 [1 2] [] (+ +) @each" },
-    .{ .name = "seeded attempt", .source = "[3] (1 +) @attempt" },
+    // The unit-constructor convention: the guided boundary error, values built
+    // into the body, and module seeding.
+    .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
+    .{ .name = "isolated child", .source = "3 [1 2] (+ +) @each" },
+    .{ .name = "values in the body", .source = "(3 1 +) @attempt" },
     .{ .name = "seeded module", .source = "[7] (`base set) `m @defm m.base" },
-    .{ .name = "old spelling", .source = "(1) attempt" },
     .{ .name = "row annotation", .source = "(a -- ...) (dup) `f def `f see" },
     .{ .name = "two rows in one portion", .source = "(a ... b ... -- c) (dup) `f def" },
 };
@@ -766,21 +760,21 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{kind user msg "bad" word raise trace (`raise `fail) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== result.ok? ===
-        \\source: [] (2 3 +) @attempt result.ok?
+        \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
         \\stdout:
         \\1
         \\stderr:
         \\<empty>
         \\=== result.or-raise ===
-        \\source: [] (2 3 +) @attempt result.or-raise
+        \\source: (2 3 +) @attempt result.or-raise
         \\exit: 0
         \\stdout:
         \\[5]
         \\stderr:
         \\<empty>
         \\=== result.or-default ===
-        \\source: [] (2 3 +) @attempt 9 result.or-default
+        \\source: (2 3 +) @attempt 9 result.or-default
         \\exit: 0
         \\stdout:
         \\[5]
@@ -802,27 +796,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\}
         \\stderr:
         \\<empty>
-        \\=== bare or-raise ===
-        \\source: [] (2 3 +) @attempt or-raise
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{kind undefined-word msg "undefined word `or-raise`" word or-raise trace (`or-raise) data {name or-raise scope session source "<command>" line 1 col 21}}
-        \\=== bare ok? ===
-        \\source: [] (2 3 +) @attempt ok?
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{kind undefined-word msg "undefined word `ok?`" word ok? trace (`ok?) data {name ok? scope session source "<command>" line 1 col 21}}
-        \\=== gone result.case ===
-        \\source: [7] result.ok (first) (pop 0) result.case
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{kind undefined-word msg "undefined word `result.case`" word result.case trace (`result.case) data {name result.case scope qualified source "<command>" line 1 col 31}}
         \\=== set ===
         \\source: 3 `x set x
         \\exit: 0
@@ -1123,13 +1096,13 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== isolated substack ===
-        \\source: 3 [1] (+) @attempt
+        \\source: 3 (1 +) @attempt
         \\exit: 0
         \\stdout:
         \\  {
         \\    err {
         \\      kind underflow
-        \\      msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — pass initial values in the constructor's values operand"
+        \\      msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — build initial values into the quotation: `values (q) cat @attempt`"
         \\      word +
         \\      trace (`+)
         \\      data {
@@ -1138,21 +1111,21 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\        isolation @attempt
         \\        source "<command>"
         \\        line 1
-        \\        col 8
+        \\        col 6
         \\      }
         \\    }
         \\3 }
         \\stderr:
         \\<empty>
         \\=== isolated child ===
-        \\source: 3 [1 2] [] (+ +) @each
+        \\source: 3 [1 2] (+ +) @each
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind underflow msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — pass initial values in the constructor's values operand" word + trace (`+) data {needed 2 available 1 isolation @spawn source "<command>" line 1 col 13}}
-        \\=== seeded attempt ===
-        \\source: [3] (1 +) @attempt
+        \\{kind underflow msg "+ needs 2 stack values, but found 1; the child unit's stack is isolated from the caller's stack — build initial values into the quotation: `values (q) cat @spawn`" word + trace (`+) data {needed 2 available 1 isolation @spawn source "<command>" line 1 col 10}}
+        \\=== values in the body ===
+        \\source: (3 1 +) @attempt
         \\exit: 0
         \\stdout:
         \\{ok [4]}
@@ -1165,13 +1138,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\7
         \\stderr:
         \\<empty>
-        \\=== old spelling ===
-        \\source: (1) attempt
-        \\exit: 1
-        \\stdout:
-        \\<empty>
-        \\stderr:
-        \\{kind undefined-word msg "undefined word `attempt`" word attempt trace (`attempt) data {name attempt scope session source "<command>" line 1 col 5}}
         \\=== row annotation ===
         \\source: (a -- ...) (dup) `f def `f see
         \\exit: 0

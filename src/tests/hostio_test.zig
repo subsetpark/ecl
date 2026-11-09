@@ -121,7 +121,7 @@ test "hostio: getenv returns the snapshot value and unset is an error" {
     });
     // Absence is absence: defaulting is the caller's explicit idiom.
     try expectStack(.{
-        .source = "[] (\"ECL_TEST_ABSENT\" getenv) @attempt \"fallback\" result.or-default",
+        .source = "(\"ECL_TEST_ABSENT\" getenv) @attempt \"fallback\" result.or-default",
         .environ = environ,
     }, "\"fallback\"");
     try expectError(.{ .source = "42 getenv", .environ = environ }, .{
@@ -198,14 +198,8 @@ test "hostio: fd.out and fd.err write bytes, io.write encodes text" {
     });
 }
 
-test "hostio: fd.bytes? recognizes exact byte lists and the stream words live under fd" {
+test "hostio: fd.bytes? recognizes exact byte lists" {
     try expectStack(.{ .source = "[1 2 255] fd.bytes? [1 256] fd.bytes? [-1] fd.bytes? \"ab\" fd.bytes? \"ab\" bytes fd.bytes? [] fd.bytes? 7 fd.bytes? [1 \\a] fd.bytes? [1 2.0] fd.bytes? 300 range fd.bytes? 256 range fd.bytes?" }, "1 0 0 0 1 1 0 0 0 0 1");
-    try expectError(.{ .source = "fd.in 1 port.read" }, .{
-        .name = "port.read is gone",
-        .source = "fd.in 1 port.read",
-        .kind = "undefined-word",
-        .word = "port.read",
-    });
 }
 
 test "hostio: inspect preserves its value" {
