@@ -803,7 +803,7 @@ test "binding: every word resolves against the definitions current when it runs"
             .expected = "2 3",
         },
         .{ .name = "typed list applied", .source = "[1 2] call [3 4] call", .expected = "1 2 3 4" },
-        .{ .name = "cleave over literals", .source = "1 2 (+) (*) bi2 1 2 (+) (*) (-) tri2", .expected = "3 2 3 2 -1" },
+        .{ .name = "cleave over literals", .source = "1 2 (+) (*) bi 1 2 (+) (*) (-) tri", .expected = "3 2 3 2 -1" },
         .{
             .name = "a resolved word sees a later redefinition",
             .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++

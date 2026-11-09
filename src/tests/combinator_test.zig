@@ -236,18 +236,24 @@ test "paging: above and below restore what the quotation consumed" {
         },
         .{ .name = "a returned original a later word requires is consumed", .source = "1 2 3 ((+) dip swap) below", .expected = "1 2 3 3 3" },
         .{ .name = "dip-n returns originals as originals", .source = "1 2 3 ((+) dip 5 (2 *) 2 dip-n) below", .expected = "1 2 3 6 5" },
-        .{ .name = "nested paging floors account for the same values", .source = "5 ((1 +) below) below 1 2 ((+) above) above", .expected = "5 5 6 3 1 2 1 2" },
+        .{ .name = "a nested restore is not a product", .source = "5 ((1 +) below) below 1 2 ((+) above) above 1 2 ((+) above) below", .expected = "5 6 3 1 2 1 2 3" },
         .{
-            .name = "checkpointed guards do not consume what a test paged",
+            .name = "guards do not consume what a test paged",
             .source = "5 ([(0 <) (pop 1) (pop 2)] cond) below 5 ((0 >) (1 -) while) below " ++
-                "1 2 3 ((dup 2 =) (pop 100) (1 -) (+) linrec) below",
-            .expected = "5 2 5 0 1 2 3 102",
+                "1 2 3 ((dup 2 =) (pop 100) (1 -) (+) linrec) below " ++
+                "5 ([(0 <) (1) (2)] cond) below 5 ((0 <) (1 -) while) below 5 ([(0 <) (1) (2)] cond) above",
+            .expected = "5 2 5 0 1 2 3 102 5 2 5 2 5",
         },
+        .{ .name = "a cleave inside a floor consumes what its quotations did", .source = "1 2 3 ([(+) (pop)] cleave) below 1 2 3 ([(pop) (7)] cleave) above", .expected = "1 2 3 5 1 2 7 3" },
+        .{ .name = "a test that leaves nothing reads beneath", .source = "0 5 [(pop) (1) (2)] cond 0 5 (pop) (1 -) while", .expected = "0 5 2 0 5" },
         .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
         .{ .name = "a word's own substack is a hard floor", .source = "1 ([] (pop) @attempt) below result.ok?", .expected = "1 0" },
         .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
         .{ .name = "rotating beneath the region is bounded work", .source = "20000 (1) times (10000 (pop) times 5) below 20001 pack dup len swap last", .expected = "20001 5" },
         .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((7) 10000 dip-n) below 20001 pack dup len swap last", .expected = "20001 7" },
+        .{ .name = "a guard's restore is bounded work", .source = "20000 (1) times (10000 (pop) times 0) (pop) while 20000 pack len 20000 (1) times [(10000 (pop) times 0) (pop) (pop)] cond 19999 pack len", .expected = "20000 19999" },
+        .{ .name = "a cleave's collect and drop are bounded work", .source = "20000 (1) times [(10000 (pop) times 7) ()] cleave 10001 pack dup len swap last", .expected = "10001 7" },
+        .{ .name = "linrec runs in constant space", .source = "100000 (dup 0 =) (pop) (1 -) () linrec 20000 (dup 0 =) (pop 0) (1 -) (1 +) linrec", .expected = "20000" },
     });
     try support.expectErrors(&.{
         .{ .name = "an isolated application beneath does not page", .source = "3 [1 2] ((+) each) below", .kind = "underflow", .word = "+" },
@@ -651,19 +657,26 @@ test "linrec: failures in every quotation roll back the enclosing unit" {
     }
 }
 
-test "linrec: empty post retains explicit depth frames and cancellation reaches guard restore" {
-    var depth_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&depth_heap);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer depth_runtime.deinit();
-    try expectStack(
-        &depth_runtime,
-        "10000 (dup 0 =) () (1 -) () linrec",
-        "0",
-    );
-    try std.testing.expect(depth_runtime.lastMaxFrames() >= 10_000);
+test "linrec: depth is a count under one frame and cancellation reaches guard restore" {
+    // Every level applies the same quotations, so twice the depth takes the
+    // same frames: the pending `post` applications are a count.
+    var frames: [2]usize = undefined;
+    for (&frames, [_][]const u8{ "10000", "20000" }) |*observed, depth| {
+        var depth_heap: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&depth_heap);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+        defer depth_runtime.deinit();
+        var source: [64]u8 = undefined;
+        try expectStack(
+            &depth_runtime,
+            try std.fmt.bufPrint(&source, "{s} (dup 0 =) () (1 -) (1 +) linrec", .{depth}),
+            depth,
+        );
+        observed.* = depth_runtime.lastMaxFrames();
+    }
+    try std.testing.expectEqual(frames[0], frames[1]);
 
     try support.expectStack(
         "[] (200 (dup 100 = dup (task.cancel-self) () if pop dup 0 =) " ++
@@ -681,10 +694,8 @@ test "nested in-place applications finish in one unwind" {
     try support.expectStacks(&.{
         .{ .name = "nested times", .source = "1 2 (1 (10 *) times) times", .expected = "100" },
         .{ .name = "nested dip", .source = "1 (2 (3 (4 5 +) dip) dip) dip", .expected = "9 3 2 1" },
-        .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "28" },
-        .{ .name = "bi2", .source = "3 4 (+) (*) bi2", .expected = "7 12" },
+        .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "7 12" },
         .{ .name = "tri", .source = "3 (1 +) (2 *) (3 -) tri", .expected = "4 6 0" },
-        .{ .name = "tri2", .source = "3 4 (+) (*) (-) tri2", .expected = "7 12 -1" },
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
         .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
     });
@@ -890,10 +901,10 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "a prelude binder blames the prelude word",
-            .source = "1 bi2",
+            .source = "1 both",
             .kind = "underflow",
-            .word = "bi2",
-            .message = "bi2 needs 4 stack values, but found 1",
+            .word = "both",
+            .message = "both needs 3 stack values, but found 1",
         },
         .{
             .name = "an anonymous binder blames the binding",

@@ -199,7 +199,7 @@
 
  ### defp colliding-names?
  (left right -- bool : "Return 1 when either package name owns the other.")
- ((pkg.name.owns?) (swap pkg.name.owns?) bi2 or) `colliding-names? defp
+ ((pkg.name.owns?) (swap pkg.name.owns?) bi or) `colliding-names? defp
 
  ### defp source-record
  (requirement package -- record : "Attach declaring-package provenance to a requirement.")

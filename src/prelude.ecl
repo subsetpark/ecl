@@ -18,10 +18,6 @@
   path returns `ds` unchanged.")
 (swap (at) fold) `at-path def
 
-### def bi2
-(x y p q -- ... : "Apply each of two quotations to the same pair of operands.")
-(|x y p q| x y p call x y q call) `bi2 def
-
 ### def both
 (x y q -- ... : "Apply one quotation to each of two operands.")
 (|x y q| x q call y q call) `both def
@@ -85,11 +81,6 @@
 ### def signum
 (number -- sign : "Return the int −1, 0, or 1 according to the sign of a number.")
 (dup 0 > swap 0 < -) `signum def
-
-### def tri2
-(x y p q r -- ... :
- "Apply each of three quotations to the same pair of operands in left-to-right order.")
-(|x y p q r| x y p call x y q call x y r call) `tri2 def
 
 ### def uncons
 (list -- first rest : "Split a nonempty list into its first element and remaining elements.")
@@ -156,10 +147,10 @@
 (wrap cat) `append def
 
 ### def bi
-(x p q -- ... :
- "Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath
-  `q`'s.")
-((over (call) dip) dip call) `bi def
+(... p q -- ... :
+ "Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s:
+  a two-quotation `cleave`.")
+(2 pack cleave) `bi def
 
 ### def chunk
 (list size -- pieces :
@@ -241,8 +232,9 @@ def
  fold 1 at) `to-digits def
 
 ### def tri
-(x p q r -- ... : "Apply three quotations to `x` in left-to-right order.")
-(((over (call) dip) dip over (call) dip) dip call) `tri def
+(... p q r -- ... :
+ "Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`.")
+(3 pack cleave) `tri def
 
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")

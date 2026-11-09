@@ -1400,23 +1400,29 @@ const EffectCheck = struct {
 /// quotation consumes exactly what its words required: the stack effect it
 /// presents as a black box. Underflow remains the hard floor's beneath.
 ///
-/// `dip` is transparent to that accounting. A value it takes aside straight
-/// from across the floor returns as the same original, recorded here by its
-/// position, until a later word requires it.
+/// Restoring is not producing. A value `dip` took aside straight from
+/// across the floor returns as the same original, recorded here by its
+/// position until a later word requires it, and so does a value an inner
+/// restore puts back that this floor holds as an original too: one it paged
+/// for the inner floor, or one `dip` had returned to it. A finalize sweeps
+/// the recorded values out before it restores its own copies, so a word
+/// that only looked at a value beneath the floor did not produce it.
 pub const PagingFloor = struct {
     /// This application's floor: the fiber's `stack_base` while it is the
     /// innermost paging floor.
     floor: usize,
-    /// The floor beneath when this application began. Paging through an
-    /// enclosing paging floor lowers both to the same depth, so the values
-    /// this one restored to the stack beneath that depth are ones the
-    /// enclosing floor paged too.
-    entry_beneath: usize,
     beneath: Beneath,
     /// Retained copies of the paged values, the one nearest the entry first.
-    originals: std.ArrayList(Value) = .empty,
-    /// Positions of originals `dip` returned to the substack, ascending.
+    originals: std.ArrayList(Original) = .empty,
+    /// Positions of returned originals in the substack, ascending.
     returned: std.ArrayList(u32) = .empty,
+
+    pub const Original = struct {
+        value: Value,
+        /// The floor beneath holds this value as an original as well, so a
+        /// restore puts it back as that floor's returned original.
+        shared: bool,
+    };
 
     pub const Beneath = union(enum) {
         hard: usize,
@@ -1452,7 +1458,7 @@ pub const PagingFloor = struct {
         return true;
     }
     pub fn retire(self: *PagingFloor, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        for (self.originals.items) |item| releases.releaseValue(item);
+        for (self.originals.items) |original| releases.releaseValue(original.value);
         self.originals.deinit(allocator);
         self.returned.deinit(allocator);
     }
@@ -1509,6 +1515,11 @@ pub const ApplicationStep = union(enum) {
         quotation: *Header,
         seeded: u32,
         provenance: ApplicationProvenance = .boundary,
+        /// How the quotation runs: as this frame's application ran, in place
+        /// on the caller's stack, or over a paging floor the context keeps in
+        /// place. A guard alternates its tests over a floor with its actions
+        /// in place under one frame.
+        launch: ApplyLaunch = .inherited,
     },
     /// The callback installed bounded work which will launch a nested inline
     /// application. Reinsert this exact application continuation beneath that
@@ -1516,6 +1527,7 @@ pub const ApplicationStep = union(enum) {
     suspend_inline: *const ApplicationSuspension,
 };
 pub const ApplicationSuspension = opaque {};
+pub const ApplyLaunch = union(enum) { inherited, in_place, paging: *PagingFloor };
 /// Opaque, non-dereferenced capability for one live application frame. The
 /// Fiber encodes a process-unique nonce with the frame index and validates
 /// both before use; ordinary callers can neither construct nor inspect it.
@@ -5092,10 +5104,28 @@ pub const Fiber = struct {
         deficit = needed;
         while (true) {
             const held = floor.floor - floor.beneathFloor();
+            // The floor beneath holds a value as an original too when it
+            // lies beneath that floor, which the next round pages it across,
+            // or when it is one of that floor's returned originals.
+            const outer: ?*PagingFloor = switch (floor.beneath) {
+                .hard => null,
+                .paging => |outer| outer,
+            };
+            var records: usize = if (outer) |enclosing| enclosing.returned.items.len else 0;
             for (1..deficit + 1) |offset| {
-                const item = self.stack.items[floor.floor - offset];
+                const position = floor.floor - offset;
+                const item = self.stack.items[position];
                 heap.retainValue(item);
-                floor.originals.appendAssumeCapacity(item);
+                var shared = false;
+                if (outer) |enclosing| {
+                    if (position < enclosing.floor) {
+                        shared = true;
+                    } else {
+                        while (records != 0 and enclosing.returned.items[records - 1] > position) records -= 1;
+                        shared = records != 0 and enclosing.returned.items[records - 1] == position;
+                    }
+                }
+                floor.originals.appendAssumeCapacity(.{ .value = item, .shared = shared });
             }
             floor.floor -= deficit;
             floor.dropReturnedFrom(innermost.floor);
@@ -5111,28 +5141,6 @@ pub const Fiber = struct {
         }
         self.setFloor(innermost.floor, innermost);
         return true;
-    }
-    /// Pushes the most recently paged value of the innermost paging floor
-    /// back where it came from and raises the floor over it, along with
-    /// every enclosing floor that paged the same value. A checkpoint that
-    /// restores the stack its test saw calls this once per value the test
-    /// paged, so a test's look beneath the floor is not a consumption.
-    pub fn unpageOne(self: *Fiber) void {
-        const innermost = self.paging.?;
-        std.debug.assert(innermost.floor == self.stack_base);
-        const position = innermost.floor;
-        std.debug.assert(self.stack.items.len == position);
-        self.stack.appendAssumeCapacity(innermost.originals.pop().?);
-        innermost.floor += 1;
-        var inner = innermost;
-        while (inner.beneath == .paging and position < inner.entry_beneath) {
-            const outer = inner.beneath.paging;
-            std.debug.assert(outer.floor == position);
-            self.releases.releaseValue(outer.originals.pop().?);
-            outer.floor += 1;
-            inner = outer;
-        }
-        self.setFloor(innermost.floor, innermost);
     }
     /// The floor an application or boundary sets or restores, and whether it
     /// is a paging one. `guard` follows.
@@ -5178,9 +5186,15 @@ pub const Fiber = struct {
     /// it as one and the same paging floor is still innermost.
     pub fn pushReturned(self: *Fiber, item: Value, original: bool) error{OutOfMemory}!void {
         try self.pushOwned(item);
-        if (!original) return;
+        if (original) try self.noteReturned(self.stack.items.len - 1);
+    }
+    /// Records the value at `position` as a returned original of the
+    /// innermost paging floor, when there is one: a value put back that the
+    /// floor holds as an original too, so the first operand check that
+    /// reaches it consumes it and a finalize sweeps it out. Positions are
+    /// recorded ascending, above every record the floor holds.
+    pub fn noteReturned(self: *Fiber, position: usize) error{OutOfMemory}!void {
         const floor = self.paging orelse return;
-        const position = self.stack.items.len - 1;
         std.debug.assert(position >= floor.watermark());
         try floor.returned.append(self.allocator, @intCast(position));
         self.guard = position + 1;
@@ -5956,7 +5970,6 @@ pub const Fiber = struct {
             .paging => |floor| {
                 std.debug.assert(floor.paged() == 0 and floor.returned.items.len == 0);
                 floor.floor = base.base();
-                floor.entry_beneath = self.stack_base;
                 floor.beneath = if (self.paging) |outer| .{ .paging = outer } else .{ .hard = self.stack_base };
                 self.setFloor(base.base(), floor);
             },
@@ -5974,12 +5987,13 @@ pub const Fiber = struct {
             .program = .borrowed,
             .position = .{ .source = 0 },
             // An isolated body runs in its caller's scope but is not a root,
-            // so nothing it calls may define there.
+            // so nothing it calls may define there. A paging body is still
+            // the invoking context, with a floor beneath it.
             .site = .resumed(
                 application.site.parent_scope,
                 application.site.home,
                 application.site.registration_provenance,
-                launch == .in_place and application.site.defining,
+                launch != .isolated and application.site.defining,
             ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
@@ -7907,6 +7921,11 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
             };
             if (next) |step| switch (step) {
                 .apply => |application| {
+                    const relaunch: Fiber.ApplicationLaunch = switch (application.launch) {
+                        .inherited => launch,
+                        .in_place => .in_place,
+                        .paging => |floor| .{ .paging = floor },
+                    };
                     try self.beginApplication(.{
                         .quotation = application.quotation,
                         .context = continuation.context,
@@ -7916,7 +7935,7 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         .seeded = application.seeded,
                         .provenance = application.provenance,
                         .plan = continuation.plan,
-                    }, launch, continuation.traced_word);
+                    }, relaunch, continuation.traced_word);
                     return true;
                 },
                 .suspend_inline => |suspension| {
@@ -7928,7 +7947,10 @@ fn resumeFrames(self: *Fiber) MachineError!bool {
                         );
                         return self.fail(.domain, "application suspension has no installed work");
                     };
-                    if (launch != .in_place or
+                    // A frame resumed over a paging floor suspends in place:
+                    // the floor beneath is active again, and the frame names
+                    // the launch of whatever it applies next.
+                    if (launch == .isolated or
                         @intFromPtr(suspension) != @intFromPtr(installed.context))
                     {
                         continuation.deinit_fn(
