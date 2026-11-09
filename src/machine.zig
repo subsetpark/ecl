@@ -5980,12 +5980,12 @@ pub const Fiber = struct {
             modules.anchorHandle(home, self.module_access),
         );
         var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-            self.archive.rescopeCursor(body.take(), self.environment.linker(image_cell.id)),
+            try self.archive.rescopeCursor(body.take(), self.environment.linker(image_cell.id)),
         );
         defer cursor.deinit(self.releases, self.allocator);
         try self.startDriver(ConstructionDriver{
             .state = .init(.{ .rescope = .{
-                .target = .init(.{ .image = candidate.move() }),
+                .image = .init(candidate.move()),
                 .cursor = .init(cursor.take()),
             } }),
             .word = word,
@@ -6394,43 +6394,21 @@ pub const Fiber = struct {
 /// cleanup, or backpressure), so its executor should let other work run.
 pub const RunStatus = enum { completed, exhausted, yielded, parked };
 
-/// What a constructed fiber's stack starts with. Every reference here is a
-/// borrow the caller keeps through initialization; the Fiber retains its own
-/// independent stack-owned reference to each before returning.
-pub const InitialStack = union(enum) {
-    empty,
-    /// `@give`'s moved ports, in list order: at most `max_given_ports`.
-    borrowed_ports: *Header,
-};
-
 /// A `@give` moves at most this many ports. Validation is resumable, but
 /// preparation and commit run inside `spawn` and cannot yield, so the count is
 /// capped rather than unbounded: that is what keeps the phases which must be
 /// atomic inside one scheduler step, what lets the transfer cursor hold its
-/// ports in fixed storage, and what lets a child's initial stack go on in
-/// constant work. Realistic calls move one port.
+/// ports in fixed storage, and what lets the commit put them on the child's
+/// stack in constant work. Realistic calls move one port.
 pub const max_given_ports: usize = 16;
 
 /// Starts a fiber on code that resolves one form at a time: top-level source,
 /// or a task's body.
-pub fn initialize(fiber: *Fiber, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
+pub fn initialize(fiber: *Fiber, code: *Header) void {
     const program: Program = .owned;
     std.debug.assert(fiber.frames.items.len == 0);
     std.debug.assert(fiber.terminal == .evaluating);
     std.debug.assert(fiber.current == null);
-    switch (initial_stack) {
-        .empty => {},
-        .borrowed_ports => |items| {
-            const count: usize = @intCast(items.length());
-            std.debug.assert(count <= max_given_ports);
-            try fiber.stack.ensureUnusedCapacity(fiber.allocator, count);
-            for (0..count) |index| {
-                const item = list.atUnchecked(.{ .list = items }, index);
-                fiber.stack.appendAssumeCapacity(item);
-                heap.retainValue(item);
-            }
-        },
-    }
     heap.incRef(code);
     fiber.current = .{
         .code = code,
@@ -6454,7 +6432,7 @@ pub fn initializeSource(
         try list.fromValuesGeneric(fiber.allocator, &.{}),
     );
     defer empty.deinit();
-    try initialize(fiber, empty.borrow().list, .empty);
+    initialize(fiber, empty.borrow().list);
     try fiber.startDriver(Fiber.SourceDriver{
         .text = .init(.{ .borrowed = .{ .source_name = source_name, .source = source } }),
         .completion = .init(.{ .session = null }),
@@ -6483,7 +6461,7 @@ pub fn armCancellationBeforeDispatch(fiber: *Fiber) void {
 }
 
 pub fn run(fiber: *Fiber, code: *Header) MachineError!void {
-    try initialize(fiber, code, .empty);
+    initialize(fiber, code);
     while (true) {
         const status = try runSlice(fiber);
         _ = fiber.releases.advance(kernel_poll_quantum);
@@ -7953,40 +7931,22 @@ fn advanceRegistration(
     };
 }
 
-/// What a `ConstructionDriver` opens once its body is final: `@defm`'s
-/// candidate image, carrying its validated name and its constructing site's
-/// provenance.
-const ConstructionTarget = struct {
-    image: modules.OwnedImage,
-
-    pub fn deinit(self: *ConstructionTarget) void {
-        self.image.deinit();
-    }
-};
-
 /// The user-sized half of opening a module construction: re-scoping its
 /// body.
 ///
 /// It is proportional to what the program wrote, so it may not run to
-/// completion inside one scheduler step. Everything the boundary will need is
-/// held here meanwhile — the candidate image, the source body, and the
-/// finished copy — so abandoning the fiber at any point releases all of it
-/// through field ownership and publishes nothing.
+/// completion inside one scheduler step. The candidate image and the source
+/// body are held here meanwhile, so abandoning the fiber at any point releases
+/// both through field ownership and publishes nothing.
 const ConstructionDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
     const State = union(enum) {
-        /// The re-scoping pass owns its source body and the target
-        /// that will receive the completed copy.
+        /// The re-scoping pass owns its source body, and the candidate image
+        /// waits for the copy it will run.
         rescope: struct {
-            target: heap.Owned(ConstructionTarget),
+            image: heap.Owned(modules.OwnedImage),
             cursor: heap.Owned(spans.SpanArchive.RescopeCursor),
-        },
-        /// The finished copy, or an unchanged input body, is owned until the
-        /// target boundary consumes it on both success and failure.
-        open: struct {
-            target: heap.Owned(ConstructionTarget),
-            body: heap.Owned(*Header),
         },
         /// The boundary exists; completion is polled in the next step.
         opened,
@@ -7999,11 +7959,7 @@ const ConstructionDriver = struct {
             switch (self.*) {
                 .rescope => |*rescope| {
                     rescope.cursor.deinit(releases, allocator);
-                    rescope.target.deinit(releases, allocator);
-                },
-                .open => |*open| {
-                    open.body.deinit(releases, allocator);
-                    open.target.deinit(releases, allocator);
+                    rescope.image.deinit(releases, allocator);
                 },
                 .opened => {},
             }
@@ -8020,28 +7976,17 @@ const ConstructionDriver = struct {
         try evaluator.pollKernel();
         switch (self.state.borrowMut().*) {
             .rescope => |*rescope| {
-                const progress = rescope.cursor.borrowMut().advance(evaluator.workBudget()) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidProvenance => @panic("archive refused its own completed re-scope publication"),
-                };
-                const stamped = switch (progress) {
+                const progress = try rescope.cursor.borrowMut().advance(evaluator.workBudget());
+                const copy = switch (progress) {
                     .pending => return .stepped,
                     .complete => |header| header,
                 };
                 rescope.cursor.deinit(evaluator.releases, evaluator.allocator);
-                const next = @FieldType(State, "open"){
-                    .target = .init(rescope.target.take()),
-                    .body = .init(stamped),
-                };
-                self.state.borrowMut().* = .{ .open = next };
-                return .stepped;
-            },
-            .open => |*open| {
-                // The body is consumed by the open, on success and on failure
-                // alike.
-                const body = open.body.take();
-                try evaluator.openImageBoundary(&open.target.borrowMut().image, self.word, body);
-                open.target.deinit(evaluator.releases, evaluator.allocator);
+                // The open consumes the copy on success and failure alike, and
+                // the image only once the boundary owns it; on failure the
+                // image stays here for the state's own release.
+                try evaluator.openImageBoundary(rescope.image.borrowMut(), self.word, copy);
+                rescope.image.deinit(evaluator.releases, evaluator.allocator);
                 self.state.borrowMut().* = .opened;
                 return .stepped;
             },

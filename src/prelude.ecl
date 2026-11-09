@@ -104,8 +104,8 @@
 
 ### def @each
 (list (quotation: a -- b) -- results :
- "Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit whose stack
-  starts with the element.")
+ "Concurrent `each`: apply `quotation` to each element of `list`, each application in a fresh
+  unit.")
 (|list quotation|
  quotation type `list match? not
  ({kind type msg "@each expected a list for its quotation" word @each} raise) when

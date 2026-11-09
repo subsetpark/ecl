@@ -354,7 +354,7 @@ test "concurrency: one-worker kernel safe points let another unit progress" {
     try std.testing.expectEqualStrings("1", actual.bytes());
 }
 
-test "concurrency: a large seeded construction cannot starve a peer task" {
+test "concurrency: a large built body and a large re-scope cannot starve a peer task" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
@@ -382,7 +382,7 @@ test "concurrency: a failing sibling cancels peers mid-construction" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
     defer runtime.deinit();
     // The leftmost child fails at once; its siblings are each part-way through
-    // materializing a large seed list. Cancellation has to reach them between slices, so a
+    // building and running a large body. Cancellation has to reach them between slices, so a
     // construction that only yielded at completion would hang this case rather
     // than fail it.
     const failure = switch (try runtime.runUnit(
@@ -434,7 +434,7 @@ test "concurrency: await-any ties and @each preserve program order" {
     actual.deinit();
 }
 
-test "concurrency: @each seeds children without resolving capture helpers" {
+test "concurrency: @each is unaffected by a session redefinition of a core word" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);

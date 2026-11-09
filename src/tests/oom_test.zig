@@ -1231,7 +1231,7 @@ test "oom: core: construction driver allocation failure transfers its cursor onc
     try std.testing.expect(allocation_count != 0);
 
     // Bootstrap outside the failure window, then exhaust every allocation in
-    // the smallest public operation that admits reader text and installs a
+    // the smallest public operation that re-scopes a body and installs a
     // ConstructionDriver. In particular, failure of the driver's own pending
     // allocation must destroy its re-scope cursor once, without leaving a
     // second local owner to destroy the same source header again.

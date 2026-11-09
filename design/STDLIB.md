@@ -925,7 +925,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ```
 
 ### @each
-`( list (quotation: a -- b) -- results )` — Concurrent `each`: for each element of `list`, apply `quotation` in a fresh unit whose stack starts with the element.
+`( list (quotation: a -- b) -- results )` — Concurrent `each`: apply `quotation` to each element of `list`, each application in a fresh unit.
 
 #### Examples
 
@@ -2125,7 +2125,7 @@ Each word has one role. Transformers return a result and run their quotation iso
 `( result -- values )` — Return a success list, or re-raise the stored error dict unchanged.
 
 ### recover
-`( result quotation -- result )` — For a failure, run the recovery quotation under `@attempt` on an isolated stack seeded with the stored error dict. Return a success unchanged.
+`( result quotation -- result )` — For a failure, run the recovery quotation under `@attempt` with the stored error dict as its only input. Return a success unchanged.
 
 ### all
 `( results -- result )` — Return the leftmost failure unchanged, or one success whose value is the list of success stacks in input order.

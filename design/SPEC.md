@@ -306,7 +306,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ##### Domains
 
-> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and port values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
+> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and port values match only themselves. Resolution context, source spans, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
 
 `NumericMagnitude`.
 
@@ -1299,9 +1299,8 @@ reserving the spelling from user definitions.
 #### A unit's initial stack
 
 A unit started by `@attempt`, `@spawn`, `@defm`, or `@load` begins on an empty
-stack; one started by `@give` begins on the ports it was given, in list order;
-and each `@each` child begins on its element. A caller that wants a unit to
-begin on values builds them into its body:
+stack, and one started by `@give` begins on the ports it was given, in list
+order. A caller that wants a unit to begin on values builds them into its body:
 
 ```ecl
 values (q) cat @attempt
@@ -1957,8 +1956,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   runs as a task under that generation's private home, spawned in the current
   scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
-  replaced-away test is a reified missing-test error. The runner's operand
-  stack never seeds the test, registry changes persist between invocations in
+  replaced-away test is a reified missing-test error. The test starts on an
+  empty stack, registry changes persist between invocations in
   the Session, and Session teardown destroys them. External effects are
   not transactional or rolled back.
 - **`ecl test` delegates framework policy to ECL.** The command requires a

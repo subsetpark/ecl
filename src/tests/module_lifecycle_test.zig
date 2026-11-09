@@ -1,4 +1,4 @@
-//! Module lifecycle: optional source annotations, construction seeds,
+//! Module lifecycle: optional source annotations,
 //! namespaced lookup, the `core` qualifier, `execute`, auto-loading, hot
 //! reload, including reload racing calls and the memory bound across
 //! construct/reload churn. Tests carrying

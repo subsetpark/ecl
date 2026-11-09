@@ -115,7 +115,8 @@ test {
     _ = @import("tests/fuzz_test.zig");
     _ = @import("tests/module_lifecycle_test.zig");
     _ = @import("tests/module_registration_test.zig");
-    _ = @import("tests/unit_input_test.zig");
+    _ = @import("tests/unit_boundary_test.zig");
+    _ = @import("tests/module_body_test.zig");
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
     _ = @import("tests/archive_test.zig");

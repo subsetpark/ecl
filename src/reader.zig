@@ -24,7 +24,7 @@ pub const LexicalContext = implementation.LexicalContext;
 /// it, rather than re-deriving the answer from a second scanner.
 pub const PendingSubmission = implementation.PendingSubmission;
 
-/// The module constructors whose operands end in a literal name.
+/// The module constructor, whose operands end in a literal name.
 pub fn isRegistrationWord(bytes: []const u8) bool {
     const std = @import("std");
     return std.mem.eql(u8, bytes, "@defm");

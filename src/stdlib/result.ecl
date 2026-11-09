@@ -100,8 +100,8 @@
 
  ### def recover
  (result quotation -- result :
-  "For a failure, run the recovery quotation under `@attempt` on an isolated stack seeded with the
-   stored error dict. Return a success unchanged.")
+  "For a failure, run the recovery quotation under `@attempt` with the stored error dict as its only
+   input. Return a success unchanged.")
  (swap checked swap over `err dict.has?
   (swap `err at swap cons @attempt)
   (pop)

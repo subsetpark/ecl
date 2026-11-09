@@ -724,7 +724,7 @@ pub const Session = enum(usize) {
         var transaction = try RootTransaction.begin(core);
         defer transaction.finish();
         const fiber = &transaction.fiber;
-        try machine.initialize(fiber, root.borrow().list, .empty);
+        machine.initialize(fiber, root.borrow().list);
         const started = switch (target) {
             .module => |name| fiber.loadModuleOnly(name),
             .source => |source| fiber.loadSourceOnly(source),

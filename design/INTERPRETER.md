@@ -136,12 +136,14 @@ to those systems.
 
 The same unit abstraction supports calculator input, script execution,
 applications launched by combinators, and spawned tasks. A constructed unit
-starts on an empty stack, or on `@give`'s port list, which the child
-materializes in bounded slices before its body runs. A body that needs values
-carries them: a stack value stored into a list enters as data, so
-`values (q) cat` builds the unit's whole input, and that copy is itself
-budgeted. `@defm` re-homes every word of the body it receives, however the
-body was built.
+starts on an empty stack. Only a port transfer can put values on a new unit's
+stack, and it does so atomically with the ownership move: the transfer
+reserves the child's stack while it prepares, and pushes the ports when it
+commits, so a child holds a port only once its scope owns it and an aborted
+transfer leaves the stack empty. A body that needs values carries them: a
+stack value stored into a list enters as data, so `values (q) cat` builds the
+unit's whole input, and that copy is itself budgeted. `@defm` re-homes every
+word of the body it receives, however the body was built.
 
 Task construction remains in the core vocabulary. The embedded `task` module
 exposes handle observation, waiting, and cancellation through the same scheduler

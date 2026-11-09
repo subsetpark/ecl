@@ -637,9 +637,8 @@ reserving the spelling from user definitions.
 #### A unit's initial stack
 
 A unit started by `@attempt`, `@spawn`, `@defm`, or `@load` begins on an empty
-stack; one started by `@give` begins on the ports it was given, in list order;
-and each `@each` child begins on its element. A caller that wants a unit to
-begin on values builds them into its body:
+stack, and one started by `@give` begins on the ports it was given, in list
+order. A caller that wants a unit to begin on values builds them into its body:
 
 ```ecl
 values (q) cat @attempt
@@ -1116,8 +1115,8 @@ that name.
   runs as a task under that generation's private home, spawned in the current
   scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
-  replaced-away test is a reified missing-test error. The runner's operand
-  stack never seeds the test, registry changes persist between invocations in
+  replaced-away test is a reified missing-test error. The test starts on an
+  empty stack, registry changes persist between invocations in
   the Session, and Session teardown destroys them. External effects are
   not transactional or rolled back.
 - **`ecl test` delegates framework policy to ECL.** The command requires a

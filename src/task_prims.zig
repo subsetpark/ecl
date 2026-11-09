@@ -51,8 +51,6 @@ pub const words = [_]env.BuiltinWord{
 fn spawnTask(
     evaluator: *Fiber,
     quotation: *value.ListHandle,
-    initial_stack: machine.InitialStack,
-    constructor: machine.FiberConstructor,
 ) MachineError!Value {
     return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
         .parent_fiber = evaluator,
@@ -61,8 +59,7 @@ fn spawnTask(
             .home = evaluator.currentHome(),
         } },
         .quotation = quotation,
-        .initial_stack = initial_stack,
-        .constructor = constructor,
+        .constructor = .spawn,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -86,7 +83,7 @@ fn spawn(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@spawn");
     var body = try evaluator.popQuotation();
     defer body.deinit();
-    const task = try spawnTask(evaluator, body.borrow().list, .empty, .spawn);
+    const task = try spawnTask(evaluator, body.borrow().list);
     try evaluator.pushOwned(task);
 }
 
@@ -116,6 +113,9 @@ pub const GiveCursor = struct {
     ports: [max_given_ports]?Value = @splat(null),
     prepared: [max_given_ports]?heap.PortTransfer = @splat(null),
     destination: ?*scheduler_api.TaskScope = null,
+    /// Room on the child's stack for every port, reserved by prepare and
+    /// filled by commit, so the child holds a port only once it owns it.
+    child_stack: ?machine.StackReservation = null,
     phase: Phase = .validating,
     index: usize = 0,
     ready: usize = 0,
@@ -191,12 +191,15 @@ pub const GiveCursor = struct {
         self.phase = .done;
     }
 
-    /// `SpawnRequest.transfer` hooks. Preparation leaves every origin membership in
+    /// `SpawnRequest.transfer` hooks. Preparation reserves the child's stack
+    /// before it touches a membership, and leaves every origin membership in
     /// place, so a refusal rolls back to exactly the state before the give.
     pub fn prepareScopeTransfer(
         self: *GiveCursor,
         destination: *scheduler_api.TaskScope,
+        child: *machine.Fiber,
     ) scheduler_api.ScopeTransferError!void {
+        self.child_stack = try child.reserveStack(self.count);
         self.destination = destination;
         self.ready = 0;
         self.run(.preparing);
@@ -204,6 +207,7 @@ pub const GiveCursor = struct {
             .none => {},
             .not_a_port => unreachable,
             .transfer => |err| {
+                self.child_stack = null;
                 self.run(.rolling_back);
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -215,9 +219,16 @@ pub const GiveCursor = struct {
 
     pub fn commitScopeTransfer(self: *GiveCursor) void {
         self.run(.committing);
+        var stack = self.child_stack.?;
+        self.child_stack = null;
+        for (self.ports[0..self.count]) |port| stack.pushBorrowed(port.?);
+        std.debug.assert(stack.complete());
     }
 
+    /// The reservation needs no undo: the spawn that failed discards the
+    /// child, and its stack is still empty.
     pub fn abortScopeTransfer(self: *GiveCursor) void {
+        self.child_stack = null;
         self.run(.rolling_back);
     }
 };
@@ -252,11 +263,6 @@ const GiveDriver = struct {
     }
 
     fn spawn(self: *GiveDriver, evaluator: *Fiber) MachineError!Value {
-        // The child starts on the given ports.
-        const stack: machine.InitialStack = if (self.cursor.count == 0)
-            .empty
-        else
-            .{ .borrowed_ports = self.moved.list };
         return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
             .parent_fiber = evaluator,
             .site = .{ .inherited = .{
@@ -264,7 +270,6 @@ const GiveDriver = struct {
                 .home = evaluator.currentHome(),
             } },
             .quotation = self.body.list,
-            .initial_stack = stack,
             .constructor = .spawn,
             .transfer = &self.cursor,
         }) catch |err| switch (err) {

@@ -1089,8 +1089,19 @@ test "net: a process port is givable too, and dies with the unit it was given to
     try std.testing.expectEqualStrings("io", std.mem.trim(u8, display.bytes(), " \n"));
 }
 
-test "net: @give with no ports is @spawn, and the given ports are the deepest stack values" {
+test "net: @give with no ports is @spawn" {
     try support.expectStack("[] (40 2 +) @give task.await `ok at first", "42");
+}
+
+test "net: a @give child starts on exactly the given ports, in list order" {
+    var runtime: Runtime = .{};
+    try runtime.open(.{}, .cooperative);
+    defer runtime.close();
+    try runtime.run(listen_ephemeral ++ " `a set " ++ listen_ephemeral ++ " `b set" ++
+        " a b pair (stack) @give task.await `ok at last a b pair match?");
+    var display = try runtime.session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1", std.mem.trim(u8, display.bytes(), " \n"));
 }
 
 test "net: @give bounds its port list before doing any per-port work" {

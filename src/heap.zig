@@ -1825,7 +1825,7 @@ pub const ReleaseDomain = struct {
     pub const WakeReason = enum { retirement_available, backpressure_relieved };
 
     /// The archive's O(1) notification that one code header it indexed is
-    /// being destroyed, so the directory slot holding that header's lineage can
+    /// being destroyed, so the directory slot holding that header's spans can
     /// be cleared and its identity recycled.
     ///
     /// It hangs off the release domain rather than off the header because both

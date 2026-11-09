@@ -195,8 +195,6 @@ const SpanArchiveState = struct {
     /// path out of a publication can consume identity capacity without
     /// installing something.
     const IdentityTransaction = struct {
-        const AliasPublication = enum { published, refused };
-
         state: *SpanArchiveState,
         held: ?heap.CodeIdentity,
 
@@ -204,11 +202,9 @@ const SpanArchiveState = struct {
             self: *IdentityTransaction,
             rewritten: *value.ListHandle,
             existing: IndexedSpan,
-        ) AliasPublication {
-            if (!self.state.aliasIndexed(self.held.?, rewritten, existing))
-                return .refused;
+        ) void {
+            self.state.aliasIndexed(self.held.?, rewritten, existing);
             self.held = null;
-            return .published;
         }
 
         fn publishSpan(
@@ -333,18 +329,20 @@ const SpanArchiveState = struct {
     /// was read from. The span entries are archive-owned and shared rather than
     /// copied; only the identity is new, which keeps the index's one-header-per
     /// -identity invariant intact.
+    /// `rewritten` is a header the re-scope cursor just built in this
+    /// archive's own namespace and has not published, and `identity` was just
+    /// claimed from this issuer, so the assignment cannot refuse.
     fn aliasIndexed(
         self: *SpanArchiveState,
         identity: heap.CodeIdentity,
         rewritten: *value.ListHandle,
         existing: IndexedSpan,
-    ) bool {
+    ) void {
         std.Io.Threaded.mutexLockUncancelable(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        if (heap.assignCodeIdentity(self.identity_issuer, rewritten, identity) != .assigned)
-            return false;
+        const assigned = heap.assignCodeIdentity(self.identity_issuer, rewritten, identity);
+        std.debug.assert(assigned == .assigned);
         self.index.set(identity, rewritten, existing);
-        return true;
     }
 
     /// Validation precedes identity reservation and every header/index write.
@@ -526,14 +524,12 @@ pub const SpanArchive = enum(usize) {
         self: *SpanArchive,
         existing: IndexedSpan,
         rewritten: *value.ListHandle,
-    ) error{OutOfMemory}!enum { pending, published, refused } {
+    ) error{OutOfMemory}!enum { pending, published } {
         const backing = self.privateState();
         var transaction = (try backing.beginIdentity(self.allocator())) orelse return .pending;
         defer transaction.deinit();
-        return switch (transaction.publishAlias(rewritten, existing)) {
-            .published => .published,
-            .refused => .refused,
-        };
+        transaction.publishAlias(rewritten, existing);
+        return .published;
     }
 
     /// The source spans recorded for `header`, when the reader wrote it or it
@@ -543,13 +539,17 @@ pub const SpanArchive = enum(usize) {
     }
 
     /// Re-scopes a module construction body into the image `linker` names.
-    /// Consuming: the cursor owns `body` from here on.
+    /// Consuming on success and failure alike: the cursor owns `body` from
+    /// here on, and a failure releases it.
     pub fn rescopeCursor(
         self: *const SpanArchive,
         body: *value.ListHandle,
         linker: env.SymbolLinker,
-    ) RescopeCursor {
-        return .{ .archive = self.*, .source = .init(body), .linker = linker };
+    ) error{OutOfMemory}!RescopeCursor {
+        var cursor: RescopeCursor = .{ .archive = self.*, .source = .init(body), .linker = linker };
+        errdefer cursor.deinit();
+        try cursor.pushCode(body);
+        return cursor;
     }
 
     pub const RescopeProgress = poll.Progress(*value.ListHandle);
@@ -622,7 +622,6 @@ pub const SpanArchive = enum(usize) {
         /// Links each symbol to its slot in the image the body is becoming.
         linker: env.SymbolLinker,
         frames: std.ArrayList(Frame) = .empty,
-        started: bool = false,
 
         /// Abandons an unfinished re-scope. Every element any frame wrote goes
         /// back through the release domain, and the sources are untouched.
@@ -638,12 +637,8 @@ pub const SpanArchive = enum(usize) {
         pub fn advance(
             self: *RescopeCursor,
             work: *poll.WorkBudget,
-        ) error{ OutOfMemory, InvalidProvenance }!RescopeProgress {
+        ) error{OutOfMemory}!RescopeProgress {
             const scratch = self.archive.allocator();
-            if (!self.started) {
-                try self.pushCode(self.source.borrow());
-                self.started = true;
-            }
             // Each step charges the budget for exactly the work it does, so a
             // budget of one unit performs one element — and an index slice gets
             // the whole remaining allowance rather than what is left after the
@@ -674,7 +669,7 @@ pub const SpanArchive = enum(usize) {
             self: *RescopeCursor,
             frame: *CodeFrame,
             work: *poll.WorkBudget,
-        ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
+        ) error{OutOfMemory}!?value.Value {
             const count: usize = @intCast(frame.source.length());
             if (frame.position != count) {
                 charge(work);
@@ -694,7 +689,6 @@ pub const SpanArchive = enum(usize) {
             if (frame.spans) |spans| switch (try self.archive.publishSpans(spans, rewritten)) {
                 .pending => return null,
                 .published => {},
-                .refused => return error.InvalidProvenance,
             };
             return .{ .list = rewritten };
         }
@@ -704,7 +698,7 @@ pub const SpanArchive = enum(usize) {
             self: *RescopeCursor,
             frame: *DictFrame,
             work: *poll.WorkBudget,
-        ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
+        ) error{OutOfMemory}!?value.Value {
             const scratch = self.archive.allocator();
             const entries: usize = @intCast(frame.source.length());
             switch (frame.stage) {
@@ -777,7 +771,7 @@ pub const SpanArchive = enum(usize) {
         fn rewrite(
             self: *RescopeCursor,
             item: value.Value,
-        ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
+        ) error{OutOfMemory}!?value.Value {
             shared: switch (item) {
                 // The one rewrite: a symbol occurrence inside the body names
                 // the image the body is becoming. A lowered locals
@@ -1499,7 +1493,7 @@ fn drive(fixture: *ArchiveFixture, cursor: *SpanArchive.RescopeCursor) !*value.L
 fn rescopeForTest(
     fixture: *ArchiveFixture,
     header: *value.ListHandle,
-) SpanArchive.RescopeCursor {
+) !SpanArchive.RescopeCursor {
     heap.incRef(header);
     return fixture.archive.rescopeCursor(header, fixture.linker());
 }
@@ -1611,7 +1605,7 @@ test "spans: a body the reader did not write re-scopes without spans" {
     var rebuilt = try fixture.rebuilt();
     defer rebuilt.deinit();
     try std.testing.expect(fixture.archive.projection(rebuilt.borrow().list) == null);
-    var cursor = rescopeForTest(&fixture, rebuilt.borrow().list);
+    var cursor = try rescopeForTest(&fixture, rebuilt.borrow().list);
     const copy = try drive(&fixture, &cursor);
     cursor.deinit();
     defer releases.releaseHeader(copy);
@@ -1627,7 +1621,7 @@ test "spans: re-scoping carries spans onto a copy that links every word" {
 
     const root = try fixture.absorbSource("(1 +) `go def");
     var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
-        rescopeForTest(&fixture, root),
+        try rescopeForTest(&fixture, root),
     );
     defer cursor.deinit(releases, fixture.archive.allocator());
     const copy = try drive(&fixture, cursor.borrowMut());
@@ -1676,7 +1670,7 @@ test "spans: every re-scope step is one budget unit, publication included" {
             "q (dup) r (dup)} `d def",
     );
     var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
-        rescopeForTest(&fixture, root),
+        try rescopeForTest(&fixture, root),
     );
     defer cursor.deinit(releases, fixture.archive.allocator());
 
@@ -1715,7 +1709,7 @@ test "spans: settled span storage tracks only live copies" {
         // a directory page per 256 rounds the way a history-proportional
         // directory would.
         for (0..64) |_| {
-            var cursor = rescopeForTest(&fixture, root);
+            var cursor = try rescopeForTest(&fixture, root);
             releases.releaseHeader(try drive(&fixture, &cursor));
             cursor.deinit();
             // Recycling happens at destruction, and destruction is deferred
@@ -1724,7 +1718,7 @@ test "spans: settled span storage tracks only live copies" {
         }
         const warmed = counting.total_requested_bytes;
         for (0..1024) |_| {
-            var cursor = rescopeForTest(&fixture, root);
+            var cursor = try rescopeForTest(&fixture, root);
             releases.releaseHeader(try drive(&fixture, &cursor));
             cursor.deinit();
             fixture.owner.cleanup().drain();
@@ -1773,7 +1767,7 @@ test "spans: an abandoned re-scope releases its partial copy" {
     // built nested headers, and a partly copied index, and every one of them
     // goes back. The test allocator reports a leak if any does not.
     for (1..24) |steps| {
-        var cursor = rescopeForTest(&fixture, root);
+        var cursor = try rescopeForTest(&fixture, root);
         for (0..steps) |_| {
             var work: poll.WorkBudget = .init(1);
             if (try cursor.advance(&work) == .complete) unreachable;
