@@ -341,14 +341,22 @@ fn dipN(evaluator: *Fiber) MachineError!void {
     // Checked before the buffers are sized by it; `require` would page early
     // and lose which values `popProtected` finds to be originals.
     if (count > evaluator.reachable()) return evaluator.failShort(count);
-    var control = heap.Owned(DipControl).init(.{
-        .quotation = .init(quotation.take().list),
-        .protected = .init(try .init(evaluator.releases, count)),
-        .originals = try .initEmpty(evaluator.allocator, count),
-        .count = count,
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
-    });
+    // Each allocation precedes taking the quotation, and a later failure
+    // retires the earlier ones: a struct literal would leak them.
+    var control = blk: {
+        var protected = heap.Owned(heap.OwnedValueBuffer).init(try .init(evaluator.releases, count));
+        errdefer protected.deinit(evaluator.releases, evaluator.allocator);
+        var originals: std.DynamicBitSetUnmanaged = try .initEmpty(evaluator.allocator, count);
+        errdefer originals.deinit(evaluator.allocator);
+        break :blk heap.Owned(DipControl).init(.{
+            .quotation = .init(quotation.take().list),
+            .protected = protected,
+            .originals = originals,
+            .count = count,
+            .site = evaluator.applicationSite(),
+            .word = evaluator.active_word,
+        });
+    };
     defer control.deinit(evaluator.releases, evaluator.allocator);
     switch (try control.borrowMut().advance(evaluator)) {
         .finished => unreachable,
