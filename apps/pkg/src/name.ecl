@@ -94,7 +94,7 @@
 
  ### defp related?
  (left right -- bool : "Return 1 when either package name owns the other as a prefix.")
- (|left right| left right (owns?) (swap owns?) bi2 or) `related? defp
+ (|left right| left right (owns?) (swap owns?) bi or) `related? defp
 
  ### def collides?
  (names -- bool : "Return 1 when any two package names have overlapping ownership prefixes.")

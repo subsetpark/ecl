@@ -120,16 +120,17 @@ managing it by hand.
 ### Reused inputs
 
 Use `bi` or `tri` when two or three independent quotations consume the same
-input:
+inputs; each takes what its words require, and the inputs are dropped after:
 
 ```ecl
 state ([root name] at-path) (`root at minimum-map) bi
 pair wrap
 ```
 
-Use `keep` when the original input must remain beneath one quotation's
-result. Use `both` for the same quotation over two inputs, and `bi2` for two
-quotations over the same pair of inputs.
+Use `above` when the inputs a quotation consumed must come back on top of
+its results, and `below` when the results belong on top of an unchanged
+stack. Use `both` for the same quotation over two inputs, and `cleave` for
+more than three quotations.
 
 ### Locals must change the flow
 

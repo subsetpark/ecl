@@ -27,7 +27,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "over", .primitive = over, .effect = "x y -- x y x", .doc = "Copy the value beneath the top of the stack onto the top." },
         .{ .name = "pop", .primitive = pop, .effect = "x --", .doc = "Discard the top stack value." },
         .{ .name = "nip", .primitive = nip, .effect = "x y -- y", .doc = "Discard the second value on the stack." },
-        .{ .name = "2dup", .primitive = twoDup, .effect = "x y -- x y x y", .doc = "Copy the top two stack values onto the top, preserving their order." },
+        .{ .name = "dup2", .primitive = dup2, .effect = "x y -- x y x y", .doc = "Copy the top two stack values onto the top, preserving their order." },
         .{ .name = "rollup", .primitive = rollup, .effect = "x y z -- z x y", .doc = "Rotate the top three stack values upward." },
         .{ .name = "rolldown", .primitive = rolldown, .effect = "x y z -- y z x", .doc = "Rotate the top three stack values downward." },
         .{ .name = "stack", .primitive = stack, .effect = null, .doc = "Copy the operand stack into a bottom-to-top list while leaving every original value in place." },
@@ -78,7 +78,7 @@ fn nip(evaluator: *Fiber) MachineError!void {
     try swap(evaluator);
     try pop(evaluator);
 }
-fn twoDup(evaluator: *Fiber) MachineError!void {
+fn dup2(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     var copies = try evaluator.reserveStack(2);
     const items = evaluator.stack.items;

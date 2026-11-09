@@ -27,7 +27,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "1 2 3 rollup 4 5 6 rolldown",
             .expected = "3 1 2 5 6 4",
         },
-        .{ .name = "two-value stack copy", .source = "1 2 2dup", .expected = "1 2 1 2" },
+        .{ .name = "two-value stack copy", .source = "1 2 dup2", .expected = "1 2 1 2" },
         .{
             .name = "migrated numeric words",
             .source = "7 3 mod -2 neg -2 abs 2 3 <> 2 2 <> 2 3 <= 3 2 <= " ++
@@ -91,20 +91,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{ .name = "results", .source = "[] (2 3 +) @attempt result.ok? [] (2 3 +) @attempt result.or-raise [] (missing) @attempt 9 result.or-default", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
-            .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
-                "2 3 (+) (*) bi2 2 3 (1 +) both 2 3 (+) (*) (-) tri2 " ++
+            .source = "1 2 nip 3 (1 +) above 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
+                "2 3 (1 +) both 2 3 (+) (*) bi 2 3 (+) (*) (-) tri " ++
                 "3 [(1 +) (2 *) (1 -)] cleave 3 [] cleave `w [(type) ()] cleave " ++
-                "2 3 [(+) (*) (-)] cleave2 2 3 [(+) (+ +)] cleave2 2 3 [] cleave2 `v `w [(pop type) ()] cleave2 " ++
-                "1 2 3 3 [(+ +) (* *)] cleave-n 3 1 [(1 +) (2 *)] cleave-n 0 [(7) (8)] cleave-n 1 2 2 [] cleave-n " ++
-                "`v `w 2 [(pop type) ()] cleave-n " ++
-                "2 3 (+) 2keep `w 4 (pop type) 2keep (type) dip",
-            .expected = "2 4 3 4 6 4 6 2 5 6 3 4 5 6 -1 4 6 2 symbol w 5 6 -1 10 symbol v w 6 6 4 6 7 8 symbol v w 5 2 3 symbol symbol 4",
+                "2 3 [(+) (pop)] cleave 2 3 [(pop) (+)] cleave 1 2 3 [(+ +) (* *)] cleave [(7) (8)] cleave " ++
+                "2 3 (+) above `w 4 (pop type) above (type) dip 1 2 3 (10 +) dip2",
+            .expected = "2 4 3 4 6 4 6 2 3 4 5 6 5 6 -1 4 6 2 3 symbol 5 5 6 6 7 8 5 2 3 symbol symbol 4 11 2 3",
         },
         .{
             .name = "cleaves keep a quoted symbol input quoted",
-            .source = "(`m) first [()] cleave wrap call (`m) first 1 [()] cleave-n wrap call " ++
-                "(`m) first `n [()] cleave2 pop wrap call",
-            .expected = "m m m",
+            .source = "(`m) first [()] cleave wrap call (`m) first [(type)] cleave",
+            .expected = "m symbol",
         },
         .{
             .name = "derived control and scalar",
@@ -200,8 +197,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "first",        "wrap",       "dip",          "over",
         "rollup",       "rolldown",   "mod",          "neg",
         "abs",          "<>",         "<=",           ">=",
-        "and",          "or",         "nip",          "keep",
-        "bi",           "tri",        "bi2",          "tri2",
+        "and",          "or",         "nip",          "dip2",
         "both",         "when",       "unless",       "case",
         "signum",       "clamp",      "last",         "pair",
         "pack",         "append",     "rest",         "reverse",
@@ -213,7 +209,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "rotate",       "windows",    "each-prior",   "fold1",
         "scan1",        "iterations", "while-values", "converges",
         "converge",     "chunk",      "from-digits",  "to-digits",
-        "collect",      "2dup",       "2keep",        "case-with",
+        "collect",      "dup2",       "case-with",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -294,13 +290,10 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         .{ .name = "case shape", .source = "1 [] case", .kind = "shape" },
         .{ .name = "case type", .source = "1 2 case", .kind = "type" },
         .{ .name = "cleave type", .source = "1 2 cleave", .kind = "type" },
+        .{ .name = "bi type", .source = "1 (1 +) 2 bi", .kind = "type" },
+        .{ .name = "bi underflow", .source = "(1 +) bi", .kind = "underflow" },
+        .{ .name = "tri type", .source = "1 () 2 () tri", .kind = "type" },
         .{ .name = "cleave validates before running", .source = "1 [(missing) 2] cleave", .kind = "type" },
-        .{ .name = "cleave2 type", .source = "1 2 3 cleave2", .kind = "type" },
-        .{ .name = "cleave2 validates before running", .source = "1 2 [(missing) 2] cleave2", .kind = "type" },
-        .{ .name = "cleave-n arity type", .source = "1 2 1.0 [] cleave-n", .kind = "type" },
-        .{ .name = "cleave-n negative arity", .source = "1 2 -1 [] cleave-n", .kind = "domain" },
-        .{ .name = "cleave-n type", .source = "1 2 2 3 cleave-n", .kind = "type" },
-        .{ .name = "cleave-n validates before running", .source = "1 2 2 [(missing) 2] cleave-n", .kind = "type" },
         .{ .name = "at-path propagates lookup failure", .source = "{a [1]} [a 4] at-path", .kind = "domain", .word = "at" },
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },

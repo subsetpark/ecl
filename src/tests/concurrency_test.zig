@@ -487,7 +487,7 @@ test "concurrency: @each is a reflective prelude definition and task-join is abs
         .err => |failure| runtime.release(failure),
         .ok, .incomplete => return error.ExpectedLanguageError,
     }
-    const indirect = try runtime.runUnit("concurrency.ecl", "1 (task-join) keep");
+    const indirect = try runtime.runUnit("concurrency.ecl", "1 (task-join) above");
     switch (indirect) {
         .err => |failure| runtime.release(failure),
         .ok, .incomplete => return error.ExpectedLanguageError,

@@ -1,9 +1,3 @@
-### def 2keep
-(x y (... -- ...) -- ... x y :
- "Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top
-  of the quotation's results.")
-(|x y q| x y q call x y) `2keep def
-
 ### def all?
 (list (a -- bool) -- bool :
  "Return 1 when the predicate returns 1 for every element; otherwise return 0.")
@@ -23,10 +17,6 @@
  "Repeatedly index nested lists and dicts by each key or index in the path, left to right; an empty
   path returns `ds` unchanged.")
 (swap (at) fold) `at-path def
-
-### def bi2
-(x y p q -- ... : "Apply each of two quotations to the same pair of operands.")
-(|x y p q| x y p call x y q call) `bi2 def
 
 ### def both
 (x y q -- ... : "Apply one quotation to each of two operands.")
@@ -61,10 +51,11 @@
   nonnegative int.")
 (over swap each where at) `filter def
 
-### def keep
-(x (... -- ...) -- ... x :
- "Apply a quotation to a value, then restore the value on top of the quotation's results.")
-(over (call) dip) `keep def
+### def dip2
+(x y (... -- ...) -- ... x y :
+ "Run a quotation beneath the top two stack values, then push them back in their original order
+  after its results: `2 dip-n`.")
+(2 dip-n) `dip2 def
 
 ### def last
 (list -- value : "Return the final element of a nonempty list.")
@@ -90,11 +81,6 @@
 ### def signum
 (number -- sign : "Return the int −1, 0, or 1 according to the sign of a number.")
 (dup 0 > swap 0 < -) `signum def
-
-### def tri2
-(x y p q r -- ... :
- "Apply each of three quotations to the same pair of operands in left-to-right order.")
-(|x y p q r| x y p call x y q call x y r call) `tri2 def
 
 ### def uncons
 (list -- first rest : "Split a nonempty list into its first element and remaining elements.")
@@ -159,12 +145,6 @@
 ### def append
 (list value -- list : "Push `value` to the end of `list`.")
 (wrap cat) `append def
-
-### def bi
-(x p q -- ... :
- "Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath
-  `q`'s.")
-((keep) dip call) `bi def
 
 ### def chunk
 (list size -- pieces :
@@ -244,10 +224,6 @@ def
   st 0 at r mod 0 < st r
   (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) call)
  fold 1 at) `to-digits def
-
-### def tri
-(x p q r -- ... : "Apply three quotations to `x` in left-to-right order.")
-(((keep) dip keep) dip call) `tri def
 
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")

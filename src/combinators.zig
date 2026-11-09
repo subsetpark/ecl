@@ -22,14 +22,17 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "call", .primitive = call, .effect = "quotation -- ...", .doc = "Run a quotation on the current stack. A data list pushes its elements." },
         .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``." },
-        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized." },
-        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level." },
-        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results." },
-        .{ .name = "cleave", .primitive = cleave, .effect = "x quotations -- ...", .doc = "Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing." },
-        .{ .name = "cleave2", .primitive = cleave2, .effect = "x y quotations -- ...", .doc = "Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs." },
-        .{ .name = "cleave-n", .primitive = cleaveN, .effect = "... n quotations -- ...", .doc = "N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs." },
+        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. IO and other non-stack effects from the condition survive; definitions are not legal in it. Tail-call optimized." },
+        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. IO and other non-stack effects from the predicate survive restoration; definitions are not legal in it. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count." },
+        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results. Inside `above` or `below`, a protected value taken from beneath their floor returns as the original it was, so protecting a value is not consuming it." },
+        .{ .name = "dip-n", .primitive = dipN, .effect = "... (q: ... -- ...) n -- ...", .doc = "Run a quotation beneath the top `n` stack values: `q` runs with them removed, then they are pushed back in their original order after its results. `n` must be a nonnegative int, or the word fails with `` `type `` or `` `domain `` before anything is removed. `0 dip-n` is `call`, and `1 dip-n` is `dip`." },
+        .{ .name = "above", .primitive = above, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed above its results, in their original order. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) above` is `3 1 2`, and `1 (dup) above` is `1 1 1`. A `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual. `(q) above` leaves the quotation's results beneath the restored values; `below` leaves them on top." },
+        .{ .name = "below", .primitive = below, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual." },
+        .{ .name = "bi", .primitive = bi, .effect = "... p q -- ...", .doc = "Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s: a two-quotation `cleave`, with the same consumption rule." },
+        .{ .name = "tri", .primitive = tri, .effect = "... p q r -- ...", .doc = "Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`, with the same consumption rule." },
+        .{ .name = "cleave", .primitive = cleave, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations`, in order, to the stack as it was when the list was consumed. Each quotation consumes exactly what its words require, and its results are held aside, so every quotation starts from the same inputs and sees the stack beneath them rather than earlier results. Afterwards the inputs any quotation consumed are dropped and all the results are pushed in order. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list leaves the stack unchanged." },
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized." },
-        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Every test runs against the operand stack checkpoint taken after the clause list is consumed. Tests may inspect that stack destructively; only their top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded. The first true test selects its action; otherwise the final else runs, in either case from the original checkpoint. Stack rollback does not roll back environment or IO effects performed by tests." },
+        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back IO or other non-stack effects performed by tests; definitions are not legal in a test." },
         .{ .name = "each", .primitive = each, .effect = "collection (a -- b) -- collection", .doc = "For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``." },
         .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (a b -- c) -- list", .doc = "Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `cons` compositions." },
         .{ .name = "for", .primitive = forWord, .effect = "collection (a --) --", .doc = "Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing." },
@@ -78,140 +81,110 @@ fn whileWord(evaluator: *Fiber) MachineError!void {
     state.* = .{
         .condition = .init(condition.take().list),
         .body = .init(body.take().list),
-        .checkpoint = .init(.{}),
+        .paged = .init(.init(.discarded)),
         .site = evaluator.applicationSite(),
         .word = evaluator.active_word,
         .provenance_target = provenance_target,
         .phase = .condition,
     };
-    var owned = heap.Owned(*WhileState).init(state);
-    state.checkpoint.borrowMut().beginCapture();
-    if (!(state.checkpoint.borrowMut().advance(evaluator) catch |err| {
-        owned.deinit(evaluator.releases, evaluator.allocator);
-        return err;
-    })) return evaluator.startDriver(WhileStartDriver{ .state = owned });
-    try evaluator.beginInlineApplication(owned.take().application(state.condition.borrow()));
+    try evaluator.beginPagingApplication(
+        state.application(state.condition.borrow()),
+        &state.paged.borrowMut().floor,
+    );
 }
 
-/// The operand stack a `while` condition starts from, retained, so the
-/// condition's own stack result can be discarded. One buffer serves the whole
-/// loop while it is deep enough; capture and restore advance as far as the
-/// turn's budget allows. The buffer is a heap list, so abandoning it retires
-/// one root through the release domain rather than walking the saved stack.
-const WhileCheckpoint = struct {
-    values: ?heap.ListBuilder(.generic_spine) = null,
-    depth: usize = 0,
-    index: usize = 0,
-    phase: enum { idle, release, capture, discard, restore } = .idle,
+fn selectedProvenance(target: ?*const machine.ApplicationProvenanceTarget) machine.ApplicationProvenance {
+    return if (target) |selected| .{ .selected_target = selected } else .boundary;
+}
 
-    fn beginCapture(self: *WhileCheckpoint) void {
-        self.phase = .release;
-        self.index = 0;
-    }
-    fn beginRestore(self: *WhileCheckpoint) void {
-        self.phase = .discard;
-        self.index = 0;
-    }
-    /// Advances the capture or restore in hand; true once it is finished.
-    fn advance(self: *WhileCheckpoint, evaluator: *Fiber) error{OutOfMemory}!bool {
-        const work = evaluator.workBudget();
-        while (work.spend()) switch (self.phase) {
-            .release => {
-                const depth = evaluator.available();
-                if (self.values) |*buffer| {
-                    if (buffer.capacity() < depth) {
-                        buffer.retirePartial(evaluator.releases);
-                        self.values = null;
-                    } else if (buffer.len() != 0) {
-                        const last = buffer.len() - 1;
-                        const item = buffer.items()[last];
-                        buffer.setLen(last);
-                        evaluator.releases.releaseValue(item);
-                        continue;
-                    }
-                }
-                if (self.values == null)
-                    self.values = try heap.ListBuilder(.generic_spine).init(evaluator.allocator, 0, depth);
-                self.depth = depth;
-                self.phase = .capture;
-            },
-            .capture => if (self.index != self.depth) {
-                const item = evaluator.visibleOperandBorrowed(self.index);
-                heap.retainValue(item);
-                self.values.?.items()[self.index] = item;
-                self.values.?.setLen(self.index + 1);
-                self.index += 1;
-            } else {
-                self.phase = .idle;
-                return true;
-            },
-            .discard => if (evaluator.available() != 0) evaluator.discard(1) else {
-                _ = try evaluator.reserveStack(self.depth);
-                self.phase = .restore;
-            },
-            .restore => if (self.index != self.depth) {
-                try evaluator.pushBorrowed(self.values.?.items()[self.index]);
-                self.index += 1;
-            } else {
-                self.phase = .idle;
-                return true;
-            },
-            .idle => unreachable,
-        };
-        return false;
-    }
-    pub fn retire(self: *WhileCheckpoint, releases: *heap.ReleaseDomain, _: std.mem.Allocator) void {
-        if (self.values) |*buffer| buffer.retirePartial(releases);
-        self.values = null;
-    }
-};
+/// The boolean a test left on top of its region. A test that left nothing
+/// took its result from beneath, like any operand its words required: the
+/// value is paged now, so the restore gives it back.
+fn popTestResult(evaluator: *Fiber, paged: *PagedControl) MachineError!bool {
+    var result = if (evaluator.stack.items.len != paged.base) try evaluator.popValue() else taken: {
+        try paged.floor.originals.ensureUnusedCapacity(evaluator.allocator, 1);
+        var taken = try evaluator.popProtected();
+        heap.retainValue(taken.item.borrow());
+        paged.floor.originals.appendAssumeCapacity(.{ .value = taken.item.borrow(), .shared = taken.original });
+        paged.base -= 1;
+        break :taken taken.item;
+    };
+    defer result.deinit();
+    return boolValue(evaluator, &result);
+}
 
-/// One `while` loop's application state, alive for the whole loop. Each
-/// condition or body that finishes resumes it: a condition's result is popped
-/// and the checkpoint restored, a body's stack becomes the next checkpoint,
-/// and the next quotation is applied. Capture and restore run where they are
-/// needed; only work the turn's budget cannot cover stands up a driver, under
+/// Runs the work a guard's frame has in hand, or suspends the frame under a
+/// driver that finishes it and resumes the frame at `pending`.
+fn finishWork(
+    comptime State: type,
+    state: *State,
+    evaluator: *Fiber,
+    pending: @FieldType(State, "phase"),
+) MachineError!?ApplicationStep {
+    if (try state.work(evaluator)) return state.resumeAfter(pending);
+    state.phase = pending;
+    try evaluator.startDriver(SuspendedWork(State){ .state = state });
+    return evaluator.suspendInlineApplication();
+}
+
+/// Finishes work for a suspended frame, whose application state the frame
+/// owns; the frame resumes once this completes.
+fn SuspendedWork(comptime State: type) type {
+    return struct {
+        state: *State,
+
+        pub fn advance(evaluator: *Fiber, self: *@This()) MachineError!machine.WorkProgress {
+            evaluator.active_word = self.state.word;
+            try evaluator.pollKernel();
+            return if (try self.state.work(evaluator)) .completed else .stepped;
+        }
+        pub const ownership: heap.DriverOwnership = .fields;
+    };
+}
+
+/// One `while` loop's application state, alive for the whole loop under one
+/// frame. The condition runs over a paging floor, so it takes from the stack
+/// only what its words require; its result is read, its region dropped, and
+/// what it paged restored, all as bounded work. The body then runs in place.
+/// Only restore work the turn's budget cannot cover stands up a driver, under
 /// which the loop suspends until it is done.
 const WhileState = struct {
     condition: heap.Owned(*Header),
     body: heap.Owned(*Header),
-    checkpoint: heap.Owned(WhileCheckpoint),
+    paged: heap.Owned(PagedControl),
     site: machine.ApplicationSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
-    /// The quotation that last finished, or the work a suspension completes.
-    phase: enum { condition, body, captured, restored_true, restored_false },
+    /// The quotation that last finished, or the restore a suspension completes.
+    phase: enum { condition, body, restored_true, restored_false },
 
     fn application(self: *WhileState, quotation: *Header) Application {
         return machine.typedApplication(self, quotation, self.site, 0);
     }
     fn conditionStep(self: *WhileState) ApplicationStep {
         self.phase = .condition;
-        return .{ .apply = .{ .quotation = self.condition.borrow(), .seeded = 0 } };
+        const paged = self.paged.borrowMut();
+        paged.reset();
+        return .{ .apply = .{
+            .quotation = self.condition.borrow(),
+            .seeded = 0,
+            .launch = .{ .paging = &paged.floor },
+        } };
     }
     fn bodyStep(self: *WhileState) ApplicationStep {
         self.phase = .body;
         return .{ .apply = .{
             .quotation = self.body.borrow(),
             .seeded = 0,
-            .provenance = if (self.provenance_target) |target| .{ .selected_target = target } else .boundary,
+            .provenance = selectedProvenance(self.provenance_target),
+            .launch = .in_place,
         } };
     }
-    /// Runs the checkpoint work in hand, or suspends under a driver that
-    /// finishes it and resumes the loop in `pending`.
-    fn finishWork(
-        self: *WhileState,
-        evaluator: *Fiber,
-        pending: @FieldType(WhileState, "phase"),
-    ) MachineError!?ApplicationStep {
-        if (try self.checkpoint.borrowMut().advance(evaluator)) return self.resumeAfter(pending);
-        self.phase = pending;
-        try evaluator.startDriver(WhileWorkDriver{ .state = self });
-        return evaluator.suspendInlineApplication();
+    fn work(self: *WhileState, evaluator: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(evaluator);
     }
     fn resumeAfter(self: *WhileState, finished: @FieldType(WhileState, "phase")) ?ApplicationStep {
         return switch (finished) {
-            .captured => self.conditionStep(),
             .restored_true => self.bodyStep(),
             .restored_false => null,
             .condition, .body => unreachable,
@@ -221,56 +194,21 @@ const WhileState = struct {
     pub fn resumeApplication(
         evaluator: *Fiber,
         self: *WhileState,
-        _: StackWindow,
+        window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         switch (self.phase) {
             .condition => {
-                var predicate = try evaluator.popValue();
-                defer predicate.deinit();
-                const selected = try boolValue(evaluator, &predicate);
-                self.checkpoint.borrowMut().beginRestore();
-                return self.finishWork(evaluator, if (selected) .restored_true else .restored_false);
+                const paged = self.paged.borrowMut();
+                paged.base = window.base();
+                const selected = try popTestResult(evaluator, paged);
+                return finishWork(WhileState, self, evaluator, if (selected) .restored_true else .restored_false);
             },
-            .body => {
-                self.checkpoint.borrowMut().beginCapture();
-                return self.finishWork(evaluator, .captured);
-            },
-            .captured, .restored_true, .restored_false => |finished| return self.resumeAfter(finished),
+            .body => return self.conditionStep(),
+            .restored_true, .restored_false => |finished| return self.resumeAfter(finished),
         }
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-/// Finishes a loop's first capture when the turn ran out, then applies the
-/// condition.
-const WhileStartDriver = struct {
-    state: heap.Owned(*WhileState),
-
-    pub fn advance(evaluator: *Fiber, self: *WhileStartDriver) MachineError!machine.WorkProgress {
-        const state = self.state.borrow();
-        evaluator.active_word = state.word;
-        try evaluator.pollKernel();
-        if (!try state.checkpoint.borrowMut().advance(evaluator)) return .stepped;
-        _ = self.state.take();
-        evaluator.retireDriver(self);
-        try evaluator.beginInlineApplication(state.application(state.condition.borrow()));
-        return .detached;
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-/// Finishes checkpoint work for a suspended loop, whose application frame
-/// owns the state; the loop resumes once this completes.
-const WhileWorkDriver = struct {
-    state: *WhileState,
-
-    pub fn advance(evaluator: *Fiber, self: *WhileWorkDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.state.word;
-        try evaluator.pollKernel();
-        return if (try self.state.checkpoint.borrowMut().advance(evaluator)) .completed else .stepped;
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -327,11 +265,10 @@ fn times(evaluator: *Fiber) MachineError!void {
 /// The protected value rides in a continuation rather than in a capture
 /// quotation composed onto `q`.
 fn dip(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
-    var protected = try evaluator.popValue();
-    defer protected.deinit();
+    var protected = try evaluator.popProtected();
+    defer protected.item.deinit();
     try startDip(evaluator, &quotation, &protected);
 }
 
@@ -340,22 +277,22 @@ fn dip(evaluator: *Fiber) MachineError!void {
 /// of `(x quotation...)` would have pushed it. The `cons call` and `cons dip`
 /// phrases in `idioms.zig` reach this.
 pub fn dipBelowHead(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     var head = try evaluator.popValue();
     defer head.deinit();
-    var protected = try evaluator.popValue();
-    defer protected.deinit();
+    var protected = try evaluator.popProtected();
+    defer protected.item.deinit();
     try evaluator.pushOwned(head.take());
     try startDip(evaluator, &quotation, &protected);
 }
 
-fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *heap.OwnedValue) MachineError!void {
+fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *Fiber.Protected) MachineError!void {
     const state = try evaluator.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .protected = .init(protected.take()),
+        .protected = .init(protected.item.take()),
+        .original = protected.original,
         .site = evaluator.applicationSite(),
         .word = evaluator.active_word,
     };
@@ -365,6 +302,8 @@ fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *heap.Own
 const DipState = struct {
     quotation: heap.Owned(*Header),
     protected: heap.Owned(Value),
+    /// Whether the value came across a paging floor, so it returns as one.
+    original: bool,
     site: machine.ApplicationSite,
     word: intern.TraceWord,
 
@@ -383,153 +322,126 @@ const DipState = struct {
     ) MachineError!?ApplicationStep {
         evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
-        try evaluator.pushOwned(self.protected.take());
+        try evaluator.pushReturned(self.protected.take(), self.original);
         return null;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn cleave(evaluator: *Fiber) MachineError!void {
-    return cleaveFixed(evaluator, 1);
-}
-fn cleave2(evaluator: *Fiber) MachineError!void {
-    return cleaveFixed(evaluator, 2);
-}
-fn cleaveFixed(evaluator: *Fiber, arity: usize) MachineError!void {
-    try evaluator.require(arity + 1);
-    var quotations = try evaluator.popValue();
-    defer quotations.deinit();
-    if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
-    try startCleave(evaluator, &quotations, arity);
-}
-fn cleaveN(evaluator: *Fiber) MachineError!void {
+fn dipN(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
-    var quotations = try evaluator.popValue();
-    defer quotations.deinit();
-    var arity = try evaluator.popValue();
-    defer arity.deinit();
-    if (arity.borrow() != .int) return evaluator.typeError("an int arity");
-    if (arity.borrow().int < 0) return evaluator.fail(.domain, "cleave-n arity must be nonnegative");
-    if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
-    try startCleave(evaluator, &quotations, @intCast(arity.borrow().int));
-}
-
-/// Runs a cleave's setup where the word is invoked when the turn's budget
-/// covers it, so a small cleave launches its first quotation without
-/// installing a driver.
-fn startCleave(evaluator: *Fiber, quotations: *heap.OwnedValue, arity: usize) MachineError!void {
-    var control = heap.Owned(CleaveControl).init(.{
-        .quotations = .init(quotations.take()),
-        .arity = arity,
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
-    });
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    if (count_value.borrow() != .int) return evaluator.typeError("an int count");
+    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "dip-n count must be nonnegative");
+    const count: usize = @intCast(count_value.borrow().int);
+    // Checked before the buffers are sized by it; `require` would page early
+    // and lose which values `popProtected` finds to be originals.
+    if (count > evaluator.reachable()) return evaluator.failShort(count);
+    // Each allocation precedes taking the quotation, and a later failure
+    // retires the earlier ones: a struct literal would leak them.
+    var control = blk: {
+        var protected = heap.Owned(heap.OwnedValueBuffer).init(try .init(evaluator.releases, count));
+        errdefer protected.deinit(evaluator.releases, evaluator.allocator);
+        var originals: std.DynamicBitSetUnmanaged = try .initEmpty(evaluator.allocator, count);
+        errdefer originals.deinit(evaluator.allocator);
+        break :blk heap.Owned(DipControl).init(.{
+            .quotation = .init(quotation.take().list),
+            .protected = protected,
+            .originals = originals,
+            .count = count,
+            .site = evaluator.applicationSite(),
+            .word = evaluator.active_word,
+        });
+    };
     defer control.deinit(evaluator.releases, evaluator.allocator);
     switch (try control.borrowMut().advance(evaluator)) {
-        .finished => {},
-        .launch => |quotation| try launchCleave(evaluator, &control, quotation),
-        .pending => try evaluator.startDriver(CleaveDriver{ .control = .init(control.take()) }),
+        .finished => unreachable,
+        .launch => try launchDipN(evaluator, &control),
+        .pending => try evaluator.startDriver(DipDriver{ .control = .init(control.take()) }),
     }
 }
 
-fn launchCleave(evaluator: *Fiber, control: *heap.Owned(CleaveControl), quotation: *Header) MachineError!void {
-    const state = try evaluator.allocator.create(CleaveState);
+fn launchDipN(evaluator: *Fiber, control: *heap.Owned(DipControl)) MachineError!void {
+    const state = try evaluator.allocator.create(DipNState);
     state.* = .{ .control = .init(control.take()) };
-    try evaluator.beginInlineApplication(state.application(quotation));
+    try evaluator.beginInlineApplication(state.application());
 }
 
-/// A cleave validates every quotation, moves its `arity` inputs off the stack
-/// into a retained buffer, and then, before each quotation, pushes fresh
-/// copies of them. Each phase is user-sized and advances only as far as the
-/// turn's budget allows; the inputs are retained values, so a symbol input
-/// stays a value rather than becoming code.
-const CleaveControl = struct {
-    quotations: heap.Owned(Value),
-    inputs: heap.Owned(heap.OwnedValueBuffer) = .none,
-    arity: usize,
+/// `dip-n` takes its `count` protected values off the stack one at a time,
+/// each as `dip` would, runs the quotation, and returns them in their
+/// original order. Both phases are user-sized and advance only as far as the
+/// turn's budget allows. The values are retained, so a symbol stays a value
+/// rather than becoming code.
+const DipControl = struct {
+    quotation: heap.Owned(*Header),
+    /// The protected values, the top of the stack first.
+    protected: heap.Owned(heap.OwnedValueBuffer),
+    /// Which of them are originals of a paging floor, by `protected` index.
+    originals: std.DynamicBitSetUnmanaged,
+    count: usize,
     site: machine.ApplicationSite,
     word: intern.TraceWord,
-    /// The quotation the current restore seeds.
-    next: usize = 0,
     index: usize = 0,
-    phase: enum { validate, capture, drop, restore } = .validate,
+    phase: enum { take, run, restore } = .take,
 
-    const Progress = union(enum) {
-        pending,
-        launch: *Header,
-        finished,
-    };
+    const Progress = union(enum) { pending, launch, finished };
 
-    fn advance(self: *CleaveControl, evaluator: *Fiber) MachineError!Progress {
+    fn advance(self: *DipControl, evaluator: *Fiber) MachineError!Progress {
         const work = evaluator.workBudget();
-        const quotations = self.quotations.borrow();
-        const count: usize = @intCast(quotations.list.length());
         while (true) switch (self.phase) {
-            .validate => {
-                const end = self.index + work.take(count - self.index);
+            .take => {
+                const end = self.index + work.take(self.count - self.index);
                 while (self.index != end) : (self.index += 1) {
-                    if (list.atUnchecked(quotations, self.index) != .list)
-                        return evaluator.typeError("a list of quotations");
+                    var taken = try evaluator.popProtected();
+                    self.protected.borrowMut().appendOwned(taken.item.take());
+                    if (taken.original) self.originals.set(self.index);
                 }
-                if (self.index != count) return .pending;
-                try evaluator.require(self.arity);
-                self.inputs = .init(try .init(evaluator.releases, self.arity));
-                self.index = 0;
-                self.phase = .capture;
+                if (self.index != self.count) return .pending;
+                self.phase = .run;
+                return .launch;
             },
-            .capture => {
-                const base = evaluator.available() - self.arity;
-                const inputs = self.inputs.borrowMut();
-                const end = self.index + work.take(self.arity - self.index);
-                while (self.index != end) : (self.index += 1)
-                    inputs.appendBorrowed(evaluator.visibleOperandBorrowed(base + self.index));
-                if (self.index != self.arity) return .pending;
-                self.index = 0;
-                self.phase = .drop;
-            },
-            .drop => {
-                const granted = work.take(self.arity - self.index);
-                evaluator.discard(granted);
-                self.index += granted;
-                if (self.index != self.arity) return .pending;
-                self.index = 0;
+            .run => {
+                self.index = self.count;
                 self.phase = .restore;
             },
             .restore => {
-                if (self.next == count) return .finished;
-                const inputs = self.inputs.borrow().values();
-                const end = self.index + work.take(self.arity - self.index);
-                while (self.index != end) : (self.index += 1)
-                    try evaluator.pushBorrowed(inputs[self.index]);
-                if (self.index != self.arity) return .pending;
-                self.index = 0;
-                const quotation = list.atUnchecked(quotations, self.next).list;
-                self.next += 1;
-                return .{ .launch = quotation };
+                const end = self.index - work.take(self.index);
+                while (self.index != end) {
+                    self.index -= 1;
+                    const item = self.protected.borrow().values()[self.index];
+                    heap.retainValue(item);
+                    try evaluator.pushReturned(item, self.originals.isSet(self.index));
+                }
+                if (self.index != 0) return .pending;
+                return .finished;
             },
         };
     }
 
-    pub fn retire(self: *CleaveControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        self.inputs.deinit(releases, allocator);
-        self.quotations.deinit(releases, allocator);
+    pub fn retire(self: *DipControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.originals.deinit(allocator);
+        self.protected.deinit(releases, allocator);
+        self.quotation.deinit(releases, allocator);
     }
 };
 
-const CleaveDriver = struct {
-    control: heap.Owned(CleaveControl),
+const DipDriver = struct {
+    control: heap.Owned(DipControl),
 
-    pub fn advance(evaluator: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Fiber, self: *DipDriver) MachineError!machine.WorkProgress {
         evaluator.active_word = self.control.borrow().word;
         try evaluator.pollKernel();
         const progress = try self.control.borrowMut().advance(evaluator);
         if (progress == .pending) return .stepped;
-        var control = heap.Owned(CleaveControl).init(self.control.take());
+        var control = heap.Owned(DipControl).init(self.control.take());
         defer control.deinit(evaluator.releases, evaluator.allocator);
         evaluator.retireDriver(self);
         switch (progress) {
-            .launch => |quotation| try launchCleave(evaluator, &control, quotation),
+            .launch => try launchDipN(evaluator, &control),
             .finished, .pending => {},
         }
         return .detached;
@@ -537,18 +449,20 @@ const CleaveDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-/// Each finished quotation seeds the next from the same continuation; only a
-/// restore the turn cannot finish hands the control back to a driver.
-const CleaveState = struct {
-    control: heap.Owned(CleaveControl),
+/// The finished quotation returns the protected values from the same
+/// continuation; only a restore the turn cannot finish hands the control
+/// back to a driver.
+const DipNState = struct {
+    control: heap.Owned(DipControl),
 
-    fn application(self: *CleaveState, quotation: *Header) Application {
-        return machine.typedApplication(self, quotation, self.control.borrow().site, 0);
+    fn application(self: *DipNState) Application {
+        const control = self.control.borrow();
+        return machine.typedApplication(self, control.quotation.borrow(), control.site, 0);
     }
 
     pub fn resumeApplication(
         evaluator: *Fiber,
-        self: *CleaveState,
+        self: *DipNState,
         _: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
@@ -556,9 +470,9 @@ const CleaveState = struct {
         evaluator.chargeContinuationStep();
         switch (try self.control.borrowMut().advance(evaluator)) {
             .finished => return null,
-            .launch => |quotation| return .{ .apply = .{ .quotation = quotation, .seeded = 0 } },
+            .launch => unreachable,
             .pending => {
-                try evaluator.startDriver(CleaveDriver{ .control = .init(self.control.take()) });
+                try evaluator.startDriver(DipDriver{ .control = .init(self.control.take()) });
                 return null;
             },
         }
@@ -567,436 +481,674 @@ const CleaveState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const GuardTarget = union(enum) {
-    predicate: *Header,
-    action: *Header,
-    done,
+fn above(evaluator: *Fiber) MachineError!void {
+    return startPaged(evaluator, .above);
+}
+fn below(evaluator: *Fiber) MachineError!void {
+    return startPaged(evaluator, .below);
+}
+fn startPaged(evaluator: *Fiber, placement: Placement) MachineError!void {
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    const state = try evaluator.allocator.create(PagedState);
+    state.* = .{
+        .quotation = .init(quotation.take().list),
+        .paged = .init(.init(placement)),
+        .site = evaluator.applicationSite(),
+        .word = evaluator.active_word,
+    };
+    try evaluator.beginPagingApplication(state.application(), &state.paged.borrowMut().floor);
+}
+
+/// What becomes of the region a paged quotation leaves.
+const Placement = enum {
+    /// The restored originals go on top of the region.
+    above,
+    /// The restored originals go beneath the region.
+    below,
+    /// The region is dropped: a test's result was read from it, and the
+    /// test's only lasting effect on the stack is none.
+    discarded,
+    /// The region moves into the control's `results`, in stack order, for
+    /// a cleave to put back once every quotation has run.
+    collected,
 };
 
-const GuardCheckpoint = struct {
-    values: heap.OwnedValueBuffer,
-    depth: usize,
-    index: usize = 0,
-    phase: enum { capture, ready, discard, reserve, restore } = .capture,
+/// A quotation run over a paging floor, and the bounded phases that put the
+/// stack back together once it returns: originals a `dip` returned are swept
+/// to the top of the region and dropped, the region is placed, and the paged
+/// originals come back in their original order. Each phase is user-sized and
+/// advances only as far as the turn's budget allows, and no phase takes a
+/// live value off the stack except to release it or to collect it.
+///
+/// A restored original the floor beneath holds too goes back as that
+/// floor's returned original, so restoring is never producing: a word that
+/// only looked at a value beneath the floor did not produce it.
+const PagedControl = struct {
+    placement: Placement,
+    floor: machine.PagingFloor = .{ .floor = 0, .beneath = .{ .hard = 0 } },
+    /// What a collected region held, in stack order.
+    results: heap.InlineList(Value, 4, .{ .int = 0 }) = .empty,
+    /// The region's base: the floor as the quotation left it.
+    base: usize = 0,
+    /// How many originals come back: the floor's count before they do.
+    restored: usize = 0,
+    sweep: machine.StackSweep = .from(0),
+    /// The reversal that orders a collected region, or the three that rotate
+    /// the restored originals beneath the region.
+    spans: [3]machine.StackReversal = @splat(.none),
+    reversed: usize = 0,
+    phase: Phase = .begin,
 
-    fn init(evaluator: *Fiber) error{OutOfMemory}!heap.Owned(GuardCheckpoint) {
-        const depth = evaluator.available();
-        return .init(.{
-            .values = try .init(evaluator.releases, depth),
-            .depth = depth,
-        });
+    const Phase = enum { begin, sweep, drop, clear, reverse, gather, surface, rotate, finished };
+
+    fn init(placement: Placement) PagedControl {
+        return .{ .placement = placement };
     }
-    fn take(self: *GuardCheckpoint) GuardCheckpoint {
-        return .{
-            .values = self.values.take(),
-            .depth = self.depth,
-            .index = self.index,
-            .phase = self.phase,
-        };
+    /// Readies the floor for another quotation once a restore has finished.
+    fn reset(self: *PagedControl) void {
+        std.debug.assert(self.floor.paged() == 0 and self.floor.returned.items.len == 0);
+        self.phase = .begin;
+        self.reversed = 0;
     }
-    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Fiber) bool {
-        std.debug.assert(self.phase == .capture and evaluator.available() == self.depth);
-        const end = self.index + evaluator.workBudget().take(self.depth - self.index);
-        while (self.index != end) : (self.index += 1)
-            self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
-        if (self.index != self.depth) return false;
-        self.phase = .ready;
-        return true;
-    }
-    fn beginRestore(self: *GuardCheckpoint) void {
-        std.debug.assert(self.phase == .ready);
-        self.phase = .discard;
-        self.index = 0;
-    }
-    fn advanceRestore(
-        self: *GuardCheckpoint,
-        evaluator: *Fiber,
-    ) error{OutOfMemory}!bool {
+
+    fn advance(self: *PagedControl, evaluator: *Fiber) MachineError!bool {
         const work = evaluator.workBudget();
-        while (work.spend()) switch (self.phase) {
-            .discard => if (evaluator.available() != 0) {
-                evaluator.discard(1);
-            } else {
-                self.phase = .reserve;
+        while (true) switch (self.phase) {
+            .begin => {
+                self.restored = self.floor.paged();
+                const returned = self.floor.returned.items;
+                if (self.placement == .discarded) {
+                    self.phase = .clear;
+                } else if (returned.len == 0) {
+                    self.placeRegion(evaluator);
+                } else {
+                    // The region lies above the floor beneath, whose returned
+                    // originals all sit below it, so only this floor's records
+                    // name slots in it.
+                    self.sweep = .from(returned[0]);
+                    self.phase = .sweep;
+                }
             },
-            .reserve => {
-                _ = try evaluator.reserveStack(self.depth);
-                self.phase = .restore;
+            .sweep => {
+                if (!evaluator.sweepStack(&self.sweep, self.floor.returned.items, work)) return false;
+                self.phase = .drop;
             },
-            .restore => if (self.index != self.depth) {
-                try evaluator.pushBorrowed(self.values.values()[self.index]);
-                self.index += 1;
-            } else {
-                self.phase = .ready;
-                return true;
+            .drop => {
+                const returned = &self.floor.returned;
+                const granted = work.take(returned.items.len);
+                evaluator.discard(granted);
+                returned.shrinkRetainingCapacity(returned.items.len - granted);
+                if (returned.items.len != 0) return false;
+                self.placeRegion(evaluator);
             },
-            .capture, .ready => unreachable,
+            .clear => {
+                const granted = work.take(evaluator.stack.items.len - self.base);
+                evaluator.discard(granted);
+                if (evaluator.stack.items.len != self.base) return false;
+                self.floor.returned.clearRetainingCapacity();
+                self.phase = .surface;
+            },
+            .reverse => {
+                if (!evaluator.reverseStack(&self.spans[0], work)) return false;
+                try self.results.ensureUnusedCapacity(evaluator.allocator, evaluator.stack.items.len - self.base);
+                self.phase = .gather;
+            },
+            .gather => {
+                const granted = work.take(evaluator.stack.items.len - self.base);
+                for (0..granted) |_| {
+                    var item = try evaluator.popValue();
+                    self.results.appendAssumeCapacity(item.take());
+                }
+                if (evaluator.stack.items.len != self.base) return false;
+                self.phase = .surface;
+            },
+            .surface => {
+                const originals = &self.floor.originals;
+                const granted = work.take(originals.len());
+                for (0..granted) |_| {
+                    const index = self.restored - originals.len();
+                    const original = originals.pop().?;
+                    try evaluator.pushOwned(original.value);
+                    // Beneath the region, the originals end up at the base
+                    // once rotated; the records name those slots now.
+                    const position = if (self.placement == .below) self.base + index else evaluator.stack.items.len - 1;
+                    if (original.shared) try evaluator.noteReturned(position);
+                }
+                if (originals.len() != 0) return false;
+                if (self.placement != .below) {
+                    self.phase = .finished;
+                    continue;
+                }
+                const top = evaluator.stack.items.len;
+                const split = top - self.restored;
+                self.spans = .{ .of(self.base, split), .of(split, top), .of(self.base, top) };
+                self.phase = .rotate;
+            },
+            .rotate => {
+                while (self.reversed != self.spans.len) : (self.reversed += 1) {
+                    if (!evaluator.reverseStack(&self.spans[self.reversed], work)) return false;
+                }
+                self.phase = .finished;
+            },
+            .finished => return true,
         };
-        return false;
     }
-    pub fn retire(self: *GuardCheckpoint, _: *heap.ReleaseDomain) void {
-        self.values.deinit();
+
+    /// The region holds only results now; what happens to it is the placement.
+    fn placeRegion(self: *PagedControl, evaluator: *const Fiber) void {
+        switch (self.placement) {
+            .above, .below => self.phase = .surface,
+            .collected => {
+                self.spans[0] = .of(self.base, evaluator.stack.items.len);
+                self.phase = .reverse;
+            },
+            .discarded => unreachable,
+        }
+    }
+
+    pub fn retire(self: *PagedControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        for (self.results.items()) |item| releases.releaseValue(item);
+        self.results.deinit(allocator);
+        self.floor.retire(releases, allocator);
     }
 };
 
-const GuardControl = struct {
-    checkpoint: heap.Owned(GuardCheckpoint),
-    selector: union(enum) {
-        cond: struct {
-            clauses: heap.Owned(Value),
-            pair_index: usize = 0,
-        },
-    },
+const PagedState = struct {
+    quotation: heap.Owned(*Header),
+    paged: heap.Owned(PagedControl),
     site: machine.ApplicationSite,
     word: intern.TraceWord,
-    provenance_target: ?*const machine.ApplicationProvenanceTarget,
+    phase: enum { run, restored } = .run,
 
-    fn selectedTarget(self: *GuardControl, selected: bool) GuardTarget {
-        return switch (self.selector) {
-            .cond => |*state| if (selected)
-                .{ .action = list.atUnchecked(state.clauses.borrow(), state.pair_index + 1).list }
-            else next: {
-                state.pair_index += 2;
-                const count: usize = @intCast(state.clauses.borrow().list.length());
-                if (state.pair_index + 1 >= count)
-                    break :next .{ .action = list.atUnchecked(state.clauses.borrow(), count - 1).list };
-                break :next .{ .predicate = list.atUnchecked(state.clauses.borrow(), state.pair_index).list };
+    fn application(self: *PagedState) Application {
+        return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
+    }
+    fn work(self: *PagedState, evaluator: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(evaluator);
+    }
+    fn resumeAfter(_: *PagedState, _: @FieldType(PagedState, "phase")) ?ApplicationStep {
+        return null;
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Fiber,
+        self: *PagedState,
+        window: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        evaluator.active_word = self.word;
+        evaluator.chargeContinuationStep();
+        switch (self.phase) {
+            .run => {
+                self.paged.borrowMut().base = window.base();
+                return finishWork(PagedState, self, evaluator, .restored);
             },
+            .restored => return null,
+        }
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn cleave(evaluator: *Fiber) MachineError!void {
+    var quotations = try evaluator.popValue();
+    defer quotations.deinit();
+    if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
+    return startCleave(evaluator, .{ .list = .init(quotations.take()) }, .validate);
+}
+fn bi(evaluator: *Fiber) MachineError!void {
+    return cleaveFixed(evaluator, 2);
+}
+fn tri(evaluator: *Fiber) MachineError!void {
+    return cleaveFixed(evaluator, 3);
+}
+/// `bi` and `tri` take their quotations straight off the stack, already
+/// validated, so no list is built and no validation phase runs.
+fn cleaveFixed(evaluator: *Fiber, count: usize) MachineError!void {
+    try evaluator.require(count);
+    var fixed: CleaveQuotations.Fixed = .{};
+    errdefer fixed.retire(evaluator.releases);
+    for (0..count) |offset| {
+        const item = evaluator.visibleOperandBorrowed(evaluator.available() - count + offset);
+        if (item != .list) return evaluator.typeError("quotations");
+        heap.incRef(item.list);
+        fixed.items[offset] = item.list;
+        fixed.count += 1;
+    }
+    evaluator.discard(count);
+    return startCleave(evaluator, .{ .fixed = fixed }, .run);
+}
+fn startCleave(
+    evaluator: *Fiber,
+    quotations: CleaveQuotations,
+    phase: @FieldType(CleaveState, "phase"),
+) MachineError!void {
+    var owned_quotations = heap.Owned(CleaveQuotations).init(quotations);
+    const state = evaluator.allocator.create(CleaveState) catch |err| {
+        owned_quotations.deinit(evaluator.releases, evaluator.allocator);
+        return err;
+    };
+    state.* = .{
+        .quotations = .init(owned_quotations.take()),
+        .paged = .init(.init(.collected)),
+        .site = evaluator.applicationSite(),
+        .word = evaluator.active_word,
+        .phase = phase,
+    };
+    var owned = heap.Owned(*CleaveState).init(state);
+    // Validation runs where the word is invoked when the turn's budget
+    // covers it, so a small cleave launches without installing a driver.
+    if (phase == .validate and !(state.work(evaluator) catch |err| {
+        owned.deinit(evaluator.releases, evaluator.allocator);
+        return err;
+    })) return evaluator.startDriver(CleaveDriver{ .state = owned });
+    try launchCleave(evaluator, &owned);
+}
+
+fn launchCleave(evaluator: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!void {
+    const state = owned.borrow();
+    if (state.phase == .done) return owned.deinit(evaluator.releases, evaluator.allocator);
+    state.running = true;
+    try evaluator.beginPagingApplication(
+        owned.take().application(state.quotation()),
+        &state.paged.borrowMut().floor,
+    );
+}
+
+/// Finishes a cleave's validation when the turn ran out, then launches it.
+const CleaveDriver = struct {
+    state: heap.Owned(*CleaveState),
+
+    pub fn advance(evaluator: *Fiber, self: *CleaveDriver) MachineError!machine.WorkProgress {
+        evaluator.active_word = self.state.borrow().word;
+        try evaluator.pollKernel();
+        if (!try self.state.borrow().work(evaluator)) return .stepped;
+        var owned = heap.Owned(*CleaveState).init(self.state.take());
+        evaluator.retireDriver(self);
+        try launchCleave(evaluator, &owned);
+        return .detached;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// The quotations a cleave applies: a list the program built, or the two or
+/// three `bi` and `tri` took off the stack.
+const CleaveQuotations = union(enum) {
+    list: heap.Owned(Value),
+    fixed: Fixed,
+
+    const Fixed = struct {
+        items: [3]?*Header = @splat(null),
+        count: usize = 0,
+
+        fn retire(self: *Fixed, releases: *heap.ReleaseDomain) void {
+            for (self.items[0..self.count]) |quotation| releases.releaseHeader(quotation.?);
+            self.count = 0;
+        }
+    };
+
+    fn count(self: *const CleaveQuotations) usize {
+        return switch (self.*) {
+            .list => |quotations| @intCast(quotations.borrow().list.length()),
+            .fixed => |fixed| fixed.count,
         };
     }
-    pub fn retire(
-        self: *GuardControl,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.checkpoint.deinit(releases, allocator);
-        switch (self.selector) {
-            .cond => |*state| state.clauses.deinit(releases, allocator),
+    fn at(self: *const CleaveQuotations, index: usize) *Header {
+        return switch (self.*) {
+            .list => |quotations| list.atUnchecked(quotations.borrow(), index).list,
+            .fixed => |fixed| fixed.items[index].?,
+        };
+    }
+    fn isQuotation(self: *const CleaveQuotations, index: usize) bool {
+        return switch (self.*) {
+            .list => |quotations| list.atUnchecked(quotations.borrow(), index) == .list,
+            .fixed => true,
+        };
+    }
+
+    pub fn retire(self: *CleaveQuotations, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .list => |*quotations| quotations.deinit(releases, allocator),
+            .fixed => |*fixed| fixed.retire(releases),
         }
     }
 };
 
-fn beginGuardTarget(
-    evaluator: *Fiber,
-    control: *heap.Owned(GuardControl),
-    target: GuardTarget,
-) MachineError!void {
-    switch (target) {
-        .predicate => |quotation| {
-            const state = try evaluator.allocator.create(GuardPredicateState);
-            state.* = .{ .control = .init(control.take()) };
-            try evaluator.beginInlineApplication(state.application(quotation));
-        },
-        .action => |quotation| {
-            const state = try evaluator.allocator.create(GuardActionState);
-            state.* = .{ .control = .init(control.take()) };
-            try evaluator.beginInlineApplication(state.application(quotation));
-        },
-        .done => unreachable,
+/// A cleave validates every quotation and then runs each over a paging
+/// floor above the inputs, so each consumes exactly what its words require.
+/// A quotation's results move into the control's buffer and its paged
+/// inputs come back, so the next quotation starts from the same inputs; the
+/// inputs any quotation consumed are dropped at the end and the results put
+/// back in order. Each phase is user-sized and advances only as far as the
+/// turn's budget allows, and the inputs are retained values, so a symbol
+/// input stays a value rather than becoming code.
+const CleaveState = struct {
+    quotations: heap.Owned(CleaveQuotations),
+    paged: heap.Owned(PagedControl),
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    /// The most inputs any quotation consumed: consumption is a prefix from
+    /// the top, so the sets nest.
+    consumed: usize = 0,
+    /// The quotation running or next to run.
+    next: usize = 0,
+    index: usize = 0,
+    pushed: usize = 0,
+    /// A quotation was launched and has not yet returned. A resume with none
+    /// outstanding is a suspended restore, drop, or push finishing.
+    running: bool = false,
+    phase: enum { validate, run, restored, drop, push, done } = .validate,
+
+    fn count(self: *const CleaveState) usize {
+        return self.quotations.borrow().count();
     }
-}
-
-const GuardSnapshotDriver = struct {
-    control: heap.Owned(GuardControl),
-    target: GuardTarget,
-
-    pub fn advance(evaluator: *Fiber, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.control.borrow().word;
-        try evaluator.pollKernel();
-        if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(evaluator)) return .stepped;
-        var control = heap.Owned(GuardControl).init(self.control.take());
-        defer control.deinit(evaluator.releases, evaluator.allocator);
-        const target = self.target;
-        evaluator.retireDriver(self);
-        try beginGuardTarget(evaluator, &control, target);
-        return .detached;
+    fn quotation(self: *const CleaveState) *Header {
+        return self.quotations.borrow().at(self.next);
     }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-const GuardRestoreDriver = struct {
-    control: heap.Owned(GuardControl),
-    target: GuardTarget,
-
-    pub fn advance(evaluator: *Fiber, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.control.borrow().word;
-        try evaluator.pollKernel();
-        if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(evaluator)) return .stepped;
-        var control = heap.Owned(GuardControl).init(self.control.take());
-        defer control.deinit(evaluator.releases, evaluator.allocator);
-        const target = self.target;
-        evaluator.retireDriver(self);
-        if (target != .done) try beginGuardTarget(evaluator, &control, target);
-        return .detached;
+    fn application(self: *CleaveState, code: *Header) Application {
+        return machine.typedApplication(self, code, self.site, 0);
     }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
-const GuardPredicateState = struct {
-    control: heap.Owned(GuardControl),
-
-    fn application(self: *GuardPredicateState, quotation: *Header) Application {
-        const control = self.control.borrow();
-        return machine.typedApplication(self, quotation, control.site, 0);
+    /// Advances the work in hand; true once the next quotation may launch
+    /// or the cleave is done.
+    fn work(self: *CleaveState, evaluator: *Fiber) MachineError!bool {
+        const work_budget = evaluator.workBudget();
+        while (true) switch (self.phase) {
+            .validate => {
+                const quotations = self.quotations.borrow();
+                const total = self.count();
+                const end = self.index + work_budget.take(total - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    if (!quotations.isQuotation(self.index))
+                        return evaluator.typeError("a list of quotations");
+                }
+                if (self.index != total) return false;
+                self.phase = if (total == 0) .done else .run;
+                return true;
+            },
+            .restored => {
+                const paged = self.paged.borrowMut();
+                if (!try paged.advance(evaluator)) return false;
+                self.consumed = @max(self.consumed, paged.restored);
+                self.next += 1;
+                if (self.next != self.count()) {
+                    self.phase = .run;
+                    return true;
+                }
+                self.index = 0;
+                self.phase = .drop;
+            },
+            .drop => {
+                const granted = work_budget.take(self.consumed - self.index);
+                evaluator.discard(granted);
+                self.index += granted;
+                if (self.index != self.consumed) return false;
+                self.phase = .push;
+            },
+            .push => {
+                const results = self.paged.borrowMut().results.items();
+                const end = self.pushed + work_budget.take(results.len - self.pushed);
+                while (self.pushed != end) : (self.pushed += 1) try evaluator.pushOwned(results[self.pushed]);
+                if (self.pushed != results.len) return false;
+                self.paged.borrowMut().results.clearRetainingCapacity();
+                self.phase = .done;
+                return true;
+            },
+            .run, .done => unreachable,
+        };
     }
+    fn resumeAfter(self: *CleaveState, _: @FieldType(CleaveState, "phase")) ?ApplicationStep {
+        if (self.phase == .done) return null;
+        std.debug.assert(self.phase == .run);
+        self.running = true;
+        const paged = self.paged.borrowMut();
+        paged.reset();
+        return .{ .apply = .{
+            .quotation = self.quotation(),
+            .seeded = 0,
+            .launch = .{ .paging = &paged.floor },
+        } };
+    }
+
     pub fn resumeApplication(
         evaluator: *Fiber,
-        self: *GuardPredicateState,
-        _: StackWindow,
+        self: *CleaveState,
+        window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.control.borrow().word;
-        var predicate = try evaluator.popValue();
-        defer predicate.deinit();
-        const target = self.control.borrowMut().selectedTarget(try boolValue(evaluator, &predicate));
-        self.control.borrowMut().checkpoint.borrowMut().beginRestore();
-        try evaluator.startDriver(GuardRestoreDriver{
-            .control = .init(self.control.take()),
-            .target = target,
-        });
-        return null;
+        evaluator.active_word = self.word;
+        evaluator.chargeContinuationStep();
+        if (self.running) {
+            self.running = false;
+            self.paged.borrowMut().base = window.base();
+            self.phase = .restored;
+            // `work` leaves its own progress in `phase`; `finishWork` would
+            // reset it, so a suspension keeps it here.
+            if (try self.work(evaluator)) return self.resumeAfter(self.phase);
+            try evaluator.startDriver(SuspendedWork(CleaveState){ .state = self });
+            return evaluator.suspendInlineApplication();
+        }
+        // A suspended restore, drop, or push finished under its driver.
+        return self.resumeAfter(self.phase);
     }
+
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const GuardActionState = struct {
-    control: heap.Owned(GuardControl),
+/// One `cond`'s application state, alive for the whole word under one frame.
+/// Each test runs over a paging floor, its result is read, its region
+/// dropped, and what it paged restored; the selected action then runs in
+/// place.
+const CondState = struct {
+    clauses: heap.Owned(Value),
+    paged: heap.Owned(PagedControl),
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    provenance_target: ?*const machine.ApplicationProvenanceTarget,
+    pair_index: usize = 0,
+    selected: bool = false,
+    phase: enum { predicate, action, restored } = .predicate,
 
-    fn application(self: *GuardActionState, quotation: *Header) Application {
-        const control = self.control.borrow();
-        var launched = machine.typedApplication(self, quotation, control.site, 0);
-        launched.provenance = if (control.provenance_target) |target|
-            .{ .selected_target = target }
-        else
-            .boundary;
+    fn count(self: *const CondState) usize {
+        return @intCast(self.clauses.borrow().list.length());
+    }
+    fn clause(self: *const CondState, index: usize) *Header {
+        return list.atUnchecked(self.clauses.borrow(), index).list;
+    }
+    fn application(self: *CondState, code: *Header) Application {
+        var launched = machine.typedApplication(self, code, self.site, 0);
+        if (self.phase == .action) launched.provenance = selectedProvenance(self.provenance_target);
         return launched;
     }
+    fn work(self: *CondState, evaluator: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(evaluator);
+    }
+    /// The action a true test selected, the else when the tests ran out, or
+    /// the next test.
+    fn resumeAfter(self: *CondState, _: @FieldType(CondState, "phase")) ?ApplicationStep {
+        if (self.selected) return self.actionStep(self.pair_index + 1);
+        self.pair_index += 2;
+        if (self.pair_index + 1 >= self.count()) return self.actionStep(self.count() - 1);
+        self.phase = .predicate;
+        const paged = self.paged.borrowMut();
+        paged.reset();
+        return .{ .apply = .{
+            .quotation = self.clause(self.pair_index),
+            .seeded = 0,
+            .launch = .{ .paging = &paged.floor },
+        } };
+    }
+    fn actionStep(self: *CondState, index: usize) ApplicationStep {
+        self.phase = .action;
+        return .{ .apply = .{
+            .quotation = self.clause(index),
+            .seeded = 0,
+            .provenance = selectedProvenance(self.provenance_target),
+            .launch = .in_place,
+        } };
+    }
+
     pub fn resumeApplication(
         evaluator: *Fiber,
-        self: *GuardActionState,
-        _: StackWindow,
+        self: *CondState,
+        window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        // A `cond` action is the clause's whole result.
-        evaluator.active_word = self.control.borrow().word;
-        return null;
+        evaluator.active_word = self.word;
+        evaluator.chargeContinuationStep();
+        switch (self.phase) {
+            .predicate => {
+                const paged = self.paged.borrowMut();
+                paged.base = window.base();
+                self.selected = try popTestResult(evaluator, paged);
+                return finishWork(CondState, self, evaluator, .restored);
+            },
+            // A `cond` action is the clause's whole result.
+            .action => return null,
+            .restored => return self.resumeAfter(.restored),
+        }
     }
+
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const LinrecQuotations = struct {
+fn cond(evaluator: *Fiber) MachineError!void {
+    var clauses = try evaluator.popValue();
+    defer clauses.deinit();
+    if (clauses.borrow() != .list) {
+        return evaluator.typeError("a clause list");
+    }
+    const count: usize = @intCast(clauses.borrow().list.length());
+    if (count == 0 or count % 2 == 0) {
+        return evaluator.fail(.shape, "cond requires a nonempty odd clause list ending in else");
+    }
+    try evaluator.startDriver(CondDriver{
+        .clauses = .init(clauses.take()),
+        .site = evaluator.applicationSite(),
+        .word = evaluator.active_word,
+        .provenance_target = try evaluator.applicationProvenanceTarget(),
+    });
+}
+
+/// Validates every clause as bounded work, then runs the first test, or the
+/// lone else.
+const CondDriver = struct {
+    clauses: heap.Owned(Value),
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    provenance_target: ?*const machine.ApplicationProvenanceTarget,
+    index: usize = 0,
+
+    pub fn advance(evaluator: *Fiber, self: *CondDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const clauses = self.clauses.borrow();
+        const count: usize = @intCast(clauses.list.length());
+        const end = self.index + evaluator.workBudget().take(count - self.index);
+        while (self.index != end) : (self.index += 1) {
+            if (list.atUnchecked(clauses, self.index) != .list)
+                return evaluator.typeError("quotation clauses and else");
+        }
+        if (self.index != count) return .stepped;
+        const state = try evaluator.allocator.create(CondState);
+        state.* = .{
+            .clauses = .init(self.clauses.take()),
+            .paged = .init(.init(.discarded)),
+            .site = self.site,
+            .word = self.word,
+            .provenance_target = self.provenance_target,
+            .phase = if (count == 1) .action else .predicate,
+        };
+        evaluator.retireDriver(self);
+        const first = state.clause(0);
+        if (count == 1) {
+            try evaluator.beginInlineApplication(state.application(first));
+        } else {
+            try evaluator.beginPagingApplication(state.application(first), &state.paged.borrowMut().floor);
+        }
+        return .detached;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// One `linrec`'s application state, alive for the whole recursion under one
+/// frame. Every level applies the same four quotations, so the recursion is
+/// a sequence `pre … pre base post … post` and the levels pending `post` are
+/// a count. Each predicate runs over a paging floor, its result is read, its
+/// region dropped, and what it paged restored; the branches run in place.
+const LinrecState = struct {
     predicate: heap.Owned(*Header),
     base: heap.Owned(*Header),
     pre: heap.Owned(*Header),
     post: heap.Owned(*Header),
-
-    fn retained(self: *const LinrecQuotations) LinrecQuotations {
-        const predicate = self.predicate.borrow();
-        const base = self.base.borrow();
-        const pre = self.pre.borrow();
-        const post = self.post.borrow();
-        heap.incRef(predicate);
-        heap.incRef(base);
-        heap.incRef(pre);
-        heap.incRef(post);
-        return .{
-            .predicate = .init(predicate),
-            .base = .init(base),
-            .pre = .init(pre),
-            .post = .init(post),
-        };
-    }
-
-    pub fn retire(
-        self: *LinrecQuotations,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.predicate.deinit(releases, allocator);
-        self.base.deinit(releases, allocator);
-        self.pre.deinit(releases, allocator);
-        self.post.deinit(releases, allocator);
-    }
-};
-
-const LinrecLevel = struct {
-    quotations: heap.Owned(LinrecQuotations),
-    checkpoint: ?heap.Owned(GuardCheckpoint),
+    paged: heap.Owned(PagedControl),
     site: machine.ApplicationSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
+    /// Descents whose `post` has yet to run.
+    depth: usize = 0,
+    selected: bool = false,
+    phase: enum { predicate, base, pre, post, restored } = .predicate,
 
-    fn application(
-        self: *const LinrecLevel,
-        state: *LinrecApplicationState,
-        quotation: *Header,
-    ) Application {
-        var launched = machine.typedApplication(state, quotation, self.site, 0);
-        launched.provenance = if (self.provenance_target) |target|
-            .{ .selected_target = target }
-        else
-            .boundary;
-        return launched;
+    fn application(self: *LinrecState) Application {
+        return machine.typedApplication(self, self.predicate.borrow(), self.site, 0);
     }
-
-    fn child(self: *const LinrecLevel, checkpoint: GuardCheckpoint) LinrecLevel {
-        return .{
-            .quotations = .init(self.quotations.borrow().retained()),
-            .checkpoint = .init(checkpoint),
-            .site = self.site,
-            .word = self.word,
-            .provenance_target = self.provenance_target,
-        };
+    fn work(self: *LinrecState, evaluator: *Fiber) MachineError!bool {
+        return self.paged.borrowMut().advance(evaluator);
     }
-
-    fn releaseCheckpoint(
-        self: *LinrecLevel,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        if (self.checkpoint) |*checkpoint| checkpoint.deinit(releases, allocator);
-        self.checkpoint = null;
+    fn resumeAfter(self: *LinrecState, _: @FieldType(LinrecState, "phase")) ?ApplicationStep {
+        return if (self.selected) self.branchStep(.base) else self.branchStep(.pre);
     }
-
-    pub fn retire(
-        self: *LinrecLevel,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.releaseCheckpoint(releases, allocator);
-        self.quotations.deinit(releases, allocator);
+    fn predicateStep(self: *LinrecState) ApplicationStep {
+        self.phase = .predicate;
+        const paged = self.paged.borrowMut();
+        paged.reset();
+        return .{ .apply = .{
+            .quotation = self.predicate.borrow(),
+            .seeded = 0,
+            .launch = .{ .paging = &paged.floor },
+        } };
     }
-};
-
-const LinrecBranch = enum { base, recurse };
-
-const LinrecSnapshotDriver = struct {
-    level: heap.Owned(LinrecLevel),
-
-    pub fn advance(evaluator: *Fiber, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.level.borrow().word;
-        try evaluator.pollKernel();
-        const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
-        if (!checkpoint.advanceCapture(evaluator)) return .stepped;
-        var level = heap.Owned(LinrecLevel).init(self.level.take());
-        defer level.deinit(evaluator.releases, evaluator.allocator);
-        evaluator.retireDriver(self);
-        const state = try evaluator.allocator.create(LinrecPredicateState);
-        state.* = .{ .level = .init(level.take()) };
-        try evaluator.beginInlineApplication(state.application());
-        return .detached;
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-const LinrecRestoreDriver = struct {
-    level: heap.Owned(LinrecLevel),
-    branch: LinrecBranch,
-
-    pub fn advance(evaluator: *Fiber, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
-        evaluator.active_word = self.level.borrow().word;
-        try evaluator.pollKernel();
-        const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
-        if (!try checkpoint.advanceRestore(evaluator)) return .stepped;
-        var level = heap.Owned(LinrecLevel).init(self.level.take());
-        defer level.deinit(evaluator.releases, evaluator.allocator);
-        const branch = self.branch;
-        evaluator.retireDriver(self);
-        level.borrowMut().releaseCheckpoint(evaluator.releases, evaluator.allocator);
-        const state = try evaluator.allocator.create(LinrecApplicationState);
-        state.* = .{
-            .level = .init(level.take()),
-            .phase = if (branch == .base) .base else .pre,
-        };
-        try evaluator.beginInlineApplication(state.application());
-        return .detached;
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-const LinrecPredicateState = struct {
-    level: heap.Owned(LinrecLevel),
-
-    fn application(self: *LinrecPredicateState) Application {
-        const level = self.level.borrow();
-        return machine.typedApplication(
-            self,
-            level.quotations.borrow().predicate.borrow(),
-            level.site,
-            0,
-        );
+    fn branchStep(self: *LinrecState, branch: @FieldType(LinrecState, "phase")) ApplicationStep {
+        self.phase = branch;
+        return .{ .apply = .{
+            .quotation = switch (branch) {
+                .base => self.base.borrow(),
+                .pre => self.pre.borrow(),
+                .post => self.post.borrow(),
+                .predicate, .restored => unreachable,
+            },
+            .seeded = 0,
+            .provenance = selectedProvenance(self.provenance_target),
+            .launch = .in_place,
+        } };
     }
 
     pub fn resumeApplication(
         evaluator: *Fiber,
-        self: *LinrecPredicateState,
-        _: StackWindow,
+        self: *LinrecState,
+        window: StackWindow,
         _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.level.borrow().word;
-        var predicate = try evaluator.popValue();
-        defer predicate.deinit();
-        const branch: LinrecBranch = if (try boolValue(evaluator, &predicate)) .base else .recurse;
-        self.level.borrowMut().checkpoint.?.borrowMut().beginRestore();
-        try evaluator.startDriver(LinrecRestoreDriver{
-            .level = .init(self.level.take()),
-            .branch = branch,
-        });
-        return null;
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
-
-const LinrecPhase = enum { base, pre, after_child, post };
-
-const LinrecApplicationState = struct {
-    level: heap.Owned(LinrecLevel),
-    phase: LinrecPhase,
-
-    fn quotation(self: *const LinrecApplicationState) *Header {
-        const quotations = self.level.borrow().quotations.borrow();
-        return switch (self.phase) {
-            .base => quotations.base.borrow(),
-            .pre => quotations.pre.borrow(),
-            .post => quotations.post.borrow(),
-            .after_child => unreachable,
-        };
-    }
-
-    fn application(self: *LinrecApplicationState) Application {
-        return self.level.borrow().application(self, self.quotation());
-    }
-
-    pub fn resumeApplication(
-        evaluator: *Fiber,
-        self: *LinrecApplicationState,
-        _: StackWindow,
-        _: *machine.ApplicationContractSite,
-    ) MachineError!?ApplicationStep {
-        evaluator.active_word = self.level.borrow().word;
+        evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
         switch (self.phase) {
-            .base, .post => return null,
-            .pre => {
-                var checkpoint = try GuardCheckpoint.init(evaluator);
-                const child = self.level.borrow().child(checkpoint.take());
-                self.phase = .after_child;
-                try evaluator.startDriver(LinrecSnapshotDriver{ .level = .init(child) });
-                return evaluator.suspendInlineApplication();
+            .predicate => {
+                const paged = self.paged.borrowMut();
+                paged.base = window.base();
+                self.selected = try popTestResult(evaluator, paged);
+                return finishWork(LinrecState, self, evaluator, .restored);
             },
-            .after_child => {
-                self.phase = .post;
-                return .{ .apply = .{
-                    .quotation = self.quotation(),
-                    .seeded = 0,
-                    .provenance = if (self.level.borrow().provenance_target) |target|
-                        .{ .selected_target = target }
-                    else
-                        .boundary,
-                } };
+            .restored => return self.resumeAfter(.restored),
+            .pre => {
+                self.depth += 1;
+                return self.predicateStep();
+            },
+            .base, .post => {
+                if (self.depth == 0) return null;
+                self.depth -= 1;
+                return self.branchStep(.post);
             },
         }
     }
@@ -1020,78 +1172,19 @@ fn linrec(evaluator: *Fiber) MachineError!void {
         return evaluator.typeError("four quotations/lists");
     }
     const provenance_target = try evaluator.applicationProvenanceTarget();
-    var checkpoint = try GuardCheckpoint.init(evaluator);
-    try evaluator.startDriver(LinrecSnapshotDriver{ .level = .init(.{
-        .quotations = .init(.{
-            .predicate = .init(predicate.take().list),
-            .base = .init(base.take().list),
-            .pre = .init(pre.take().list),
-            .post = .init(post.take().list),
-        }),
-        .checkpoint = .init(checkpoint.take()),
+    const state = try evaluator.allocator.create(LinrecState);
+    state.* = .{
+        .predicate = .init(predicate.take().list),
+        .base = .init(base.take().list),
+        .pre = .init(pre.take().list),
+        .post = .init(post.take().list),
+        .paged = .init(.init(.discarded)),
         .site = evaluator.applicationSite(),
         .word = evaluator.active_word,
         .provenance_target = provenance_target,
-    }) });
+    };
+    try evaluator.beginPagingApplication(state.application(), &state.paged.borrowMut().floor);
 }
-
-fn cond(evaluator: *Fiber) MachineError!void {
-    var clauses = try evaluator.popValue();
-    defer clauses.deinit();
-    if (clauses.borrow() != .list) {
-        return evaluator.typeError("a clause list");
-    }
-    const count: usize = @intCast(clauses.borrow().list.length());
-    if (count == 0 or count % 2 == 0) {
-        return evaluator.fail(.shape, "cond requires a nonempty odd clause list ending in else");
-    }
-    try evaluator.startDriver(CondDriver{
-        .clauses = .init(clauses.take()),
-        .site = evaluator.applicationSite(),
-        .word = evaluator.active_word,
-        .provenance_target = try evaluator.applicationProvenanceTarget(),
-    });
-}
-
-const CondDriver = struct {
-    clauses: heap.Owned(Value),
-    site: machine.ApplicationSite,
-    word: intern.TraceWord,
-    provenance_target: ?*const machine.ApplicationProvenanceTarget,
-    index: usize = 0,
-
-    pub fn advance(evaluator: *Fiber, self: *CondDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const clauses = self.clauses.borrow();
-        const count: usize = @intCast(clauses.list.length());
-        const end = self.index + evaluator.workBudget().take(count - self.index);
-        while (self.index != end) : (self.index += 1) {
-            if (list.atUnchecked(clauses, self.index) != .list)
-                return evaluator.typeError("quotation clauses and else");
-        }
-        if (self.index != count) return .stepped;
-        var checkpoint = try GuardCheckpoint.init(evaluator);
-        const first: GuardTarget = if (count == 1)
-            .{ .action = list.atUnchecked(clauses, 0).list }
-        else
-            .{ .predicate = list.atUnchecked(clauses, 0).list };
-        const control = GuardControl{
-            .checkpoint = .init(checkpoint.take()),
-            .selector = .{ .cond = .{ .clauses = .init(self.clauses.take()) } },
-            .site = self.site,
-            .word = self.word,
-            .provenance_target = self.provenance_target,
-        };
-        evaluator.retireDriver(self);
-        try evaluator.startDriver(GuardSnapshotDriver{
-            .control = .init(control),
-            .target = first,
-        });
-        return .detached;
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
 const IterationKind = enum { each, zip_with, for_word, fold, scan, lex_cmp, infra };
 const IterationState = struct {

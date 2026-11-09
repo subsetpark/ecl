@@ -977,8 +977,9 @@ and then takes the same invocation path.
 A non-tail call saves the current evaluation in a frame. A tail call replaces
 the current `(code, ip, site)` state, securing the callee's owner first. Combinators mark their documented tail
 positions in the same continuation machinery, so tail recursion and iteration
-consume constant frame space. Constructs such as general `linrec` that need
-post-recursion work retain one explicit continuation per descent.
+consume constant frame space. `linrec` applies the same quotations at every
+level, so its pending post-recursion work is a count under one frame rather
+than a retained continuation per descent.
 
 Proper tail behavior is therefore a guarantee of the language machine,
 independent of host-compiler optimization.
@@ -994,6 +995,32 @@ that stack protocol.
 The window is a nominal value derived from a real stack depth. A callback
 cannot pair an arbitrary base with a count, and a nested application that
 suspends carries the exact continuation it must resume.
+
+A paging application is the third floor kind beside the caller's stack and
+the isolated substack. Its substack starts empty, and an operand check that
+comes up short pages the missing values across the floor: the frame retains
+a copy of each and the floor lowers to include it, so a quotation's
+consumption is the sum of what its words required, which is the stack effect
+it presents from outside. Every operand check compares against one guard
+depth. That depth is the floor unless a paged original has been returned to
+the substack; those are recorded by position and consumed by the first check
+that reaches them, so protecting a value is not consuming it. Restoring is
+not producing: a copy records whether the floor beneath holds the same value
+as an original, because it paged it for this floor or it was already one of
+its returned originals, and a restore puts such a value back as the floor
+beneath's returned original. One bounded finalize serves every paging word.
+It sweeps the returned originals out of the region, places the region (kept
+beneath or above the restored originals, dropped for a guard's test,
+collected for a cleave), and pushes the originals back in order, in place on
+the stack. The guards therefore keep no checkpoint: a test takes what it
+requires and the finalize gives it back. Paging floors nest by chaining
+through the floor beneath, and the hard floor beneath them all is where
+underflow still happens. Every site that saves or restores the stack base
+also saves which paging floor is innermost, so a boundary or isolated
+application inside one blocks paging while it is open and restores it when
+it closes. A frame alternates its applications between a paging floor its
+context keeps in place and the caller's stack by naming the launch of each,
+so a guard runs its tests and actions under one frame.
 
 ### Failure is a bounded machine transition
 

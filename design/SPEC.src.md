@@ -157,7 +157,7 @@ The token kinds are the six delimiters `( ) [ ] { }`, string literals, and
 characters. An atom is classified whole-token, in this order:
 
 1. **Number** — the entire token parses as a number, else it is not one
-   (`2dup` and `1+` are words; `-3` is a number; `-` is a word).
+   (`2x` and `1+` are words; `-3` is a number; `-` is a word).
    - int64: optional `+`/`-` sign, then decimal digits with optional `_`
      separators strictly between digits (1_000_000), or `0x` followed by
      hex digits. `_` is not permitted in hex literals. A literal outside
@@ -453,9 +453,9 @@ dynamic behavior described above.
 
 Tail calls are guaranteed: through word calls, `if`, and every combinator's
 documented tail position, iteration and tail recursion run in constant space
-and never exhaust a host call stack. General `linrec` retains one explicit
-recursion level per nonterminal descent, even when `post` is empty, so its live
-storage is proportional to recursion depth rather than constant.
+and never exhaust a host call stack. General `linrec` runs in constant space
+too: every level applies the same quotations, so the descents whose `post` is
+pending are a count rather than retained continuations.
 
 ### Errors
 
@@ -542,14 +542,25 @@ failing (see Concurrency).
 Three quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
-  are `call`, `dip`, `keep`, `bi`, `tri`, `cleave`, `bi2`, `tri2`, `cleave2`,
-  `cleave-n`, `both`, `if`, `when`, `unless`, `case`, and `times`.
-- **Checkpointed inline guards**: `cond`, `while`, and `linrec` test quotations run
-  inline against a retained operand-stack checkpoint. A test
-  may consume, rearrange, or add values; its top value must be a 0/1 boolean,
-  and its complete operand result is discarded before control continues from
-  the checkpoint. Environment writes, IO, and other non-stack effects are
-  inline and therefore survive.
+  are `call`, `dip`, `dip2`, `dip-n`, `both`, `if`, `when`, `unless`,
+  `case`, and `times`, and the action quotations of `cond`, `while`, and
+  `linrec`.
+- **Paging**: the quotation runs on a substack that starts empty and takes
+  operands from beneath as its words need them, so what it consumed is
+  exactly what its words required. `above` and `below` then restore those
+  values, in their original order, above or below the quotation's results.
+  `cleave`, `bi`, and `tri` run each quotation this way from the same
+  inputs, hold its results aside, and finally drop the inputs any quotation
+  consumed. The test quotations of `cond`, `while`, and `linrec` run this
+  way too: a test may consume, rearrange, or add values; its top value must
+  be a 0/1 boolean, and its complete result is discarded and what it took
+  restored before control continues. IO and other non-stack effects
+  survive. A paged quotation may not define, as an isolated one may not:
+  definitions belong to a body applied in place. Restoring is not producing: a value a `dip`
+  protected, a test looked at, or an inner `above` or `below` restored is
+  the original it was to every enclosing paging floor, not a result of the
+  word that restored it. Paging stops at the nearest isolated substack or
+  unit beneath, whose underflow is unchanged.
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
@@ -573,10 +584,10 @@ predicate true  -> base
 predicate false -> pre; linrec; post
 ```
 
-At every descent, `predicate` uses the checkpointed inline-guard protocol
-above. The predicate runs destructively in the invoking scope, its top result
-must be exactly 0 or 1, and the complete operand checkpoint is restored before
-either branch begins. On 1, `base` runs from that restored state. On 0, `pre`
+At every descent, `predicate` runs over a paging floor as the application
+contexts above describe. The predicate runs destructively in the invoking
+scope, its top result must be exactly 0 or 1, and its complete result is
+discarded and what it took restored before either branch begins. On 1, `base` runs from that restored state. On 0, `pre`
 runs from it, the recursive descent begins from `pre`'s resulting stack, and
 `post` runs after that descent returns. Consequently the four applications
 share ambient stack state intentionally; none has an isolated quotation
@@ -584,13 +595,10 @@ contract. Fewer than four operands is `` `underflow ``, a non-quotation paramete
 is `` `type ``, and a missing or non-boolean predicate result follows the ordinary
 guard `` `underflow ``/`` `type `` behavior.
 
-Each nonterminal descent leaves one explicit `post` continuation in the frame
-machine. General `linrec` therefore uses live continuation storage
-proportional to recursion depth; it does not recurse on the host stack and it
-does not promise constant space when `post` is empty. Predicate snapshot and
-restore, recursive setup, cancellation, failure unwind, and value retirement
-remain bounded scheduler work. Existing `while` and `unfold` are the
-constant-continuation choices for iterative and tail-recursive shapes.
+Every descent applies the same four quotations, so the descents whose `post`
+is pending are a count and `linrec` runs in constant space; it does not
+recurse on the host stack. Predicate restore, cancellation, failure unwind,
+and value retirement remain bounded scheduler work.
 
 #### The `@` spelling convention
 
@@ -842,7 +850,7 @@ minimum:
 ```ecl
 (result on-ok on-err -- ...) (body) `case def
 (... n -- list) (body) `pack def
-(x (... -- ...) -- ... x) (body) `keep def
+(x (... -- ...) -- ... x) (body) `peek def
 ```
 
 A row in the before portion declares that the word consumes at least its

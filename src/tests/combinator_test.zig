@@ -222,6 +222,78 @@ test "combinators: contracts and conformability are structural errors" {
     });
 }
 
+test "paging: above and below restore what the quotation consumed" {
+    try support.expectStacks(&.{
+        .{ .name = "above restores consumed inputs above the results", .source = "1 2 (+) above 1 (dup) above", .expected = "3 1 2 1 1 1" },
+        .{ .name = "below restores them beneath", .source = "1 2 (+) below 1 2 (swap) below", .expected = "1 2 3 1 2 2 1" },
+        .{ .name = "every result survives", .source = "1 2 (+ 10 20) below 1 2 (+ 10 20) above", .expected = "1 2 3 10 20 3 10 20 1 2" },
+        .{ .name = "a quotation that consumes nothing", .source = "(7) above 1 (8) below", .expected = "7 1 8" },
+        .{ .name = "consumption is what the words required", .source = "1 2 (over pop) below 1 2 3 (2 (pop) times) above", .expected = "1 2 1 2 1 2 3" },
+        .{
+            .name = "dip protects without consuming",
+            .source = "1 2 3 ((+) dip) below 1 2 3 ((+) dip) above 0 1 2 3 (((+) dip) dip) below 1 2 3 ((+) dip pop) below",
+            .expected = "1 2 3 3 3 1 2 3 0 1 2 3 1 1 2 3 3",
+        },
+        .{ .name = "a returned original a later word requires is consumed", .source = "1 2 3 ((+) dip swap) below", .expected = "1 2 3 3 3" },
+        .{ .name = "dip-n returns originals as originals", .source = "1 2 3 ((+) dip 5 (2 *) 2 dip-n) below", .expected = "1 2 3 6 5" },
+        .{ .name = "a nested restore is not a product", .source = "5 ((1 +) below) below 1 2 ((+) above) above 1 2 ((+) above) below", .expected = "5 6 3 1 2 1 2 3" },
+        .{
+            .name = "guards do not consume what a test paged",
+            .source = "5 ([(0 <) (pop 1) (pop 2)] cond) below 5 ((0 >) (1 -) while) below " ++
+                "1 2 3 ((dup 2 =) (pop 100) (1 -) (+) linrec) below " ++
+                "5 ([(0 <) (1) (2)] cond) below 5 ((0 <) (1 -) while) below 5 ([(0 <) (1) (2)] cond) above",
+            .expected = "5 2 5 0 1 2 3 102 5 2 5 2 5",
+        },
+        .{ .name = "a cleave inside a floor consumes what its quotations did", .source = "1 2 3 ([(+) (pop)] cleave) below 1 2 3 ([(pop) (7)] cleave) above", .expected = "1 2 3 5 1 2 7 3" },
+        .{ .name = "a test that leaves nothing reads beneath", .source = "0 5 [(pop) (1) (2)] cond 0 5 (pop) (1 -) while", .expected = "0 5 2 0 5" },
+        .{
+            .name = "a declared-effect module word counts inputs beneath the floor",
+            .source = "[] ((a -- b) (1 +) `inc def (a b -- c) (+) `add def (a -- bool) (0 <) `below0 def) `m @defm " ++
+                "5 (m.inc) below 1 2 (m.add) below 1 2 (m.add) above 1 2 3 ((m.inc) dip) below",
+            .expected = "5 6 1 2 3 3 1 2 1 2 3 3",
+        },
+        .{
+            .name = "a cond test that is a declared-effect module word reads beneath the floor",
+            .source = "[] ((a -- bool) (0 <) `below0 def) `m @defm 5 [(m.below0) (1) (2)] cond 3 ([(m.below0) (1) (2)] cond) below",
+            .expected = "5 2 3 2",
+        },
+        .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
+        .{ .name = "a word's own substack is a hard floor", .source = "1 ([] (pop) @attempt) below result.ok?", .expected = "1 0" },
+        .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
+        .{ .name = "rotating beneath the region is bounded work", .source = "20000 (1) times (10000 (pop) times 5) below 20001 pack dup len swap last", .expected = "20001 5" },
+        .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((7) 10000 dip-n) below 20001 pack dup len swap last", .expected = "20001 7" },
+        .{ .name = "a guard's restore is bounded work", .source = "20000 (1) times (10000 (pop) times 0) (pop) while 20000 pack len 20000 (1) times [(10000 (pop) times 0) (pop) (pop)] cond 19999 pack len", .expected = "20000 19999" },
+        .{ .name = "originals and results outgrow their inline slots", .source = "1 2 3 4 5 6 [(+ + + + +) (1 2 3 4 5 6)] cleave 1 2 3 4 5 6 (+ + + + +) above", .expected = "21 1 2 3 4 5 6 21 1 2 3 4 5 6" },
+        .{ .name = "a cleave resumes after a suspended restore", .source = "70000 (1) times [(70000 (pop) times) (7)] cleave", .expected = "7" },
+        .{ .name = "a cleave resumes after a suspended drop and push", .source = "70000 (1) times [(70000 (pop) times 8)] cleave", .expected = "8" },
+        .{ .name = "a cleave's collect and drop are bounded work", .source = "20000 (1) times [(10000 (pop) times 7) ()] cleave 10001 pack dup len swap last", .expected = "10001 7" },
+        .{ .name = "linrec runs in constant space", .source = "100000 (dup 0 =) (pop) (1 -) () linrec 20000 (dup 0 =) (pop 0) (1 -) (1 +) linrec", .expected = "20000" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "an isolated application beneath does not page", .source = "3 [1 2] ((+) each) below", .kind = "underflow", .word = "+" },
+        .{ .name = "the stack bottom does not page", .source = "(pop) below", .kind = "underflow", .word = "pop" },
+        .{ .name = "above non-quotation", .source = "1 above", .kind = "type", .word = "above" },
+        .{ .name = "below non-quotation", .source = "1 below", .kind = "type", .word = "below" },
+    });
+}
+
+test "combinators: dip-n protects a counted prefix" {
+    try support.expectStacks(&.{
+        .{ .name = "counted dips", .source = "1 2 3 (10 +) 2 dip-n 1 2 3 (1 +) 0 dip-n 1 2 3 (7) 3 dip-n", .expected = "11 2 3 1 2 4 7 1 2 3" },
+        .{ .name = "beneath a paging floor", .source = "1 2 3 ((10 *) 2 dip-n) below 0 1 2 3 ((+) 2 dip-n) below", .expected = "1 2 3 10 0 1 2 3 1" },
+        .{ .name = "a symbol stays a value", .source = "0 `m 1 (2 +) 2 dip-n", .expected = "2 m 1" },
+        .{ .name = "a large count is bounded work", .source = "20000 (1) times (2) 20000 dip-n 20001 pack len", .expected = "20001" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "dip-n count beyond the stack underflows before allocating", .source = "() 9000000000 dip-n", .kind = "underflow", .word = "dip-n" },
+        .{ .name = "dip-n count beyond a short stack beneath a floor", .source = "1 (() 3 dip-n) below", .kind = "underflow", .word = "dip-n" },
+        .{ .name = "dip-n non-int count", .source = "(+) `x dip-n", .kind = "type", .word = "dip-n" },
+        .{ .name = "dip-n negative count", .source = "(+) -1 dip-n", .kind = "domain", .word = "dip-n" },
+        .{ .name = "dip-n non-quotation", .source = "1 2 dip-n", .kind = "type", .word = "dip-n" },
+        .{ .name = "dip-n short stack", .source = "1 2 (+) 3 dip-n", .kind = "underflow", .word = "dip-n" },
+    });
+}
+
 test "combinators: dip fold1 and lex-cmp-with run any quotation" {
     // Quotations no recognizer takes: nested lists, a user word, and a
     // comparator that reads past its first difference only when told to.
@@ -360,11 +432,6 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .expected = "222",
         },
         .{
-            .name = "cond stack rollback preserves environment effects",
-            .source = "[(1 `guard-effect set 0) () (guard-effect)] cond",
-            .expected = "1",
-        },
-        .{
             .name = "while restores each test checkpoint",
             .source = "0 (1 + dup 3 <) (10 +) while",
             .expected = "10",
@@ -388,11 +455,6 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .name = "while checkpoint follows a shrinking stack",
             .source = "1 2 3 4 (dup 1 >) (pop) while",
             .expected = "1",
-        },
-        .{
-            .name = "while stack rollback preserves environment effects",
-            .source = "0 (1 `while-guard-effect set 0) () while while-guard-effect",
-            .expected = "0 1",
         },
         .{ .name = "case", .source = "3 [1 (10) 3 (30) (90)] case", .expected = "30" },
         .{ .name = "case else", .source = "2 [1 (10) 3 (30) (90)] case", .expected = "2 90" },
@@ -423,6 +485,18 @@ test "inline times checkpointed guards and case prevalidate and select" {
     });
 }
 
+test "paged quotations may not define" {
+    // A test, like an isolated body, is not the caller's own run: `set` is
+    // a definition, and the stack rollback would not roll it back.
+    try support.expectErrors(&.{
+        .{ .name = "cond test", .source = "[(1 `guard-effect set 0) () (guard-effect)] cond", .kind = "domain", .word = "def" },
+        .{ .name = "while condition", .source = "0 (1 `while-guard-effect set 0) () while", .kind = "domain", .word = "def" },
+        .{ .name = "linrec predicate", .source = "0 (7 `linrec-effect set 1) (pop) () () linrec", .kind = "domain", .word = "def" },
+        .{ .name = "above", .source = "((1) `paged-effect def) above", .kind = "domain", .word = "def" },
+        .{ .name = "cleave", .source = "[((1) `paged-effect def)] cleave", .kind = "domain", .word = "def" },
+    });
+}
+
 test "linrec: terminal selection recursive descent and guard restoration are inline" {
     try support.expectStacks(&.{
         .{
@@ -444,11 +518,6 @@ test "linrec: terminal selection recursive descent and guard restoration are inl
             .name = "predicate values below the boolean are discarded",
             .source = "8 (111 1) (1 +) (missing-pre) (missing-post) linrec",
             .expected = "9",
-        },
-        .{
-            .name = "predicate environment effects survive restoration",
-            .source = "0 (7 `linrec-effect set 1) (pop linrec-effect) () () linrec",
-            .expected = "7",
         },
     });
     try support.expectErrors(&.{
@@ -479,8 +548,7 @@ test "linrec: predicate IO effects survive checkpoint restoration" {
     defer runtime.deinit();
     try expectStack(
         &runtime,
-        "0 (\"guard\" io.print 7 `linrec-io-effect set 1) " ++
-            "(pop linrec-io-effect) (missing-pre) (missing-post) linrec",
+        "0 (\"guard\" io.print 1) (pop 7) (missing-pre) (missing-post) linrec",
         "7",
     );
     try std.testing.expectEqualStrings("guard\n", output.written());
@@ -601,19 +669,26 @@ test "linrec: failures in every quotation roll back the enclosing unit" {
     }
 }
 
-test "linrec: empty post retains explicit depth frames and cancellation reaches guard restore" {
-    var depth_heap: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&depth_heap);
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer depth_runtime.deinit();
-    try expectStack(
-        &depth_runtime,
-        "10000 (dup 0 =) () (1 -) () linrec",
-        "0",
-    );
-    try std.testing.expect(depth_runtime.lastMaxFrames() >= 10_000);
+test "linrec: depth is a count under one frame and cancellation reaches guard restore" {
+    // Every level applies the same quotations, so twice the depth takes the
+    // same frames: the pending `post` applications are a count.
+    var frames: [2]usize = undefined;
+    for (&frames, [_][]const u8{ "10000", "20000" }) |*observed, depth| {
+        var depth_heap: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&depth_heap);
+        var runtime_inputs = try runtime_fixture.Fixture.init();
+        defer runtime_inputs.deinit();
+        var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+        defer depth_runtime.deinit();
+        var source: [64]u8 = undefined;
+        try expectStack(
+            &depth_runtime,
+            try std.fmt.bufPrint(&source, "{s} (dup 0 =) () (1 -) (1 +) linrec", .{depth}),
+            depth,
+        );
+        observed.* = depth_runtime.lastMaxFrames();
+    }
+    try std.testing.expectEqual(frames[0], frames[1]);
 
     try support.expectStack(
         "[] (200 (dup 100 = dup (task.cancel-self) () if pop dup 0 =) " ++
@@ -631,10 +706,8 @@ test "nested in-place applications finish in one unwind" {
     try support.expectStacks(&.{
         .{ .name = "nested times", .source = "1 2 (1 (10 *) times) times", .expected = "100" },
         .{ .name = "nested dip", .source = "1 (2 (3 (4 5 +) dip) dip) dip", .expected = "9 3 2 1" },
-        .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "28" },
-        .{ .name = "bi2", .source = "3 4 (+) (*) bi2", .expected = "7 12" },
+        .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "7 12" },
         .{ .name = "tri", .source = "3 (1 +) (2 *) (3 -) tri", .expected = "4 6 0" },
-        .{ .name = "tri2", .source = "3 4 (+) (*) (-) tri2", .expected = "7 12 -1" },
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
         .{ .name = "locals body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
     });
@@ -840,10 +913,10 @@ test "locals: the reserved backend words behave and blame as before" {
         },
         .{
             .name = "a prelude binder blames the prelude word",
-            .source = "1 bi2",
+            .source = "1 both",
             .kind = "underflow",
-            .word = "bi2",
-            .message = "bi2 needs 4 stack values, but found 1",
+            .word = "both",
+            .message = "both needs 3 stack values, but found 1",
         },
         .{
             .name = "an anonymous binder blames the binding",

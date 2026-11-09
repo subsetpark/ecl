@@ -2747,6 +2747,59 @@ pub fn destroyDriver(
     }
 }
 
+/// A list with `inline_capacity` slots of its own, so the common small case
+/// allocates nothing; a list that outgrows them moves to the heap once and
+/// stays there until it is deinitialized. The filler keeps the unused slots
+/// defined. Ownership of the items is the holder's: this is storage only.
+pub fn InlineList(comptime T: type, comptime inline_capacity: usize, comptime filler: T) type {
+    return struct {
+        const Self = @This();
+
+        near: [inline_capacity]T = @splat(filler),
+        near_len: usize = 0,
+        far: ?std.ArrayList(T) = null,
+
+        pub const empty: Self = .{};
+
+        pub fn items(self: *Self) []T {
+            if (self.far) |*far| return far.items;
+            return self.near[0..self.near_len];
+        }
+        pub fn len(self: *const Self) usize {
+            if (self.far) |far| return far.items.len;
+            return self.near_len;
+        }
+        pub fn ensureUnusedCapacity(self: *Self, allocator: std.mem.Allocator, extra: usize) error{OutOfMemory}!void {
+            if (self.far) |*far| return far.ensureUnusedCapacity(allocator, extra);
+            if (self.near_len + extra <= inline_capacity) return;
+            var far: std.ArrayList(T) = .empty;
+            try far.ensureTotalCapacity(allocator, self.near_len + extra);
+            far.appendSliceAssumeCapacity(self.near[0..self.near_len]);
+            self.near_len = 0;
+            self.far = far;
+        }
+        pub fn appendAssumeCapacity(self: *Self, item: T) void {
+            if (self.far) |*far| return far.appendAssumeCapacity(item);
+            std.debug.assert(self.near_len < inline_capacity);
+            self.near[self.near_len] = item;
+            self.near_len += 1;
+        }
+        pub fn pop(self: *Self) ?T {
+            if (self.far) |*far| return far.pop();
+            if (self.near_len == 0) return null;
+            self.near_len -= 1;
+            return self.near[self.near_len];
+        }
+        pub fn clearRetainingCapacity(self: *Self) void {
+            if (self.far) |*far| far.clearRetainingCapacity() else self.near_len = 0;
+        }
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            if (self.far) |*far| far.deinit(allocator);
+            self.* = .empty;
+        }
+    };
+}
+
 /// Exact-capacity, non-relocating ownership for a partially initialized value
 /// sequence. Abandonment retires one heap root; it never loops over the
 /// initialized prefix on the caller's stack.
