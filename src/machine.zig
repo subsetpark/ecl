@@ -7853,6 +7853,9 @@ fn prepareEffectCheck(
         self.active_word = word;
         return self.fail(.domain, "module word has no effect declaration");
     };
+    // Inputs beneath a paging floor count: the word pages them in as
+    // originals, like any operand check across the floor.
+    if (self.available() < declared.inputs) _ = try self.coverAcross(declared.inputs);
     const available: u32 = @intCast(self.available());
     if (available < declared.inputs) {
         self.active_word = word;

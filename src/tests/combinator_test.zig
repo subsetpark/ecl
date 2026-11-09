@@ -246,6 +246,17 @@ test "paging: above and below restore what the quotation consumed" {
         },
         .{ .name = "a cleave inside a floor consumes what its quotations did", .source = "1 2 3 ([(+) (pop)] cleave) below 1 2 3 ([(pop) (7)] cleave) above", .expected = "1 2 3 5 1 2 7 3" },
         .{ .name = "a test that leaves nothing reads beneath", .source = "0 5 [(pop) (1) (2)] cond 0 5 (pop) (1 -) while", .expected = "0 5 2 0 5" },
+        .{
+            .name = "a declared-effect module word counts inputs beneath the floor",
+            .source = "[] ((a -- b) (1 +) `inc def (a b -- c) (+) `add def (a -- bool) (0 <) `below0 def) `m @defm " ++
+                "5 (m.inc) below 1 2 (m.add) below 1 2 (m.add) above 1 2 3 ((m.inc) dip) below",
+            .expected = "5 6 1 2 3 3 1 2 1 2 3 3",
+        },
+        .{
+            .name = "a cond test that is a declared-effect module word reads beneath the floor",
+            .source = "[] ((a -- bool) (0 <) `below0 def) `m @defm 5 [(m.below0) (1) (2)] cond 3 ([(m.below0) (1) (2)] cond) below",
+            .expected = "5 2 3 2",
+        },
         .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
         .{ .name = "a word's own substack is a hard floor", .source = "1 ([] (pop) @attempt) below result.ok?", .expected = "1 0" },
         .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
