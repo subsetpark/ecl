@@ -1646,8 +1646,8 @@ pub const ApplicationSite = struct {
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     registration_provenance: modules.RegistrationProvenance,
-    /// The launching activation's `defining`. An isolated launch clears it
-    /// for the body regardless; an inline one passes it through.
+    /// The launching activation's `defining`. Only an in-place launch passes
+    /// it through; an isolated or paging one clears it for the body.
     defining: bool,
 };
 pub const IsolatedApplication = struct {
