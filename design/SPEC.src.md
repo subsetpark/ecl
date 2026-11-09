@@ -554,9 +554,8 @@ Three quotation-application behaviors exist:
   consumed. The test quotations of `cond`, `while`, and `linrec` run this
   way too: a test may consume, rearrange, or add values; its top value must
   be a 0/1 boolean, and its complete result is discarded and what it took
-  restored before control continues. IO and other non-stack effects
-  survive. A paged quotation may not define, as an isolated one may not:
-  definitions belong to a body applied in place. Restoring is not producing: a value a `dip`
+  restored before control continues. Definitions, IO, and other non-stack
+  effects survive. Restoring is not producing: a value a `dip`
   protected, a test looked at, or an inner `above` or `below` restored is
   the original it was to every enclosing paging floor, not a result of the
   word that restored it. Paging stops at the nearest isolated substack or
@@ -776,15 +775,14 @@ representations but expose the same binding model.
   definition or a module registration during a Session: a shadowed core word
   stays reachable as `core.name`, and a new Session starts with no top-level
   definitions.
-- Definitions happen only at root level. `def`, `defp`, `set`, `setp`,
-  `import`, and `importp` write the current root, which is the session
-  for top-level code, the image for a module's construction body, and the
-  module's own image inside a module word. A word body without a module home
-  writes the root of the activation that called it. Inside a combinator
-  application (`each`, `zip-with`, `for`, `fold`, `scan`, `update`, `stencil`,
-  `unfold`, `infra`, and the words built on them), inside `@attempt`, and
-  inside a task, every one of these is `` `domain ``. Values local to a body
-  belong on the stack or in locals.
+- `def`, `defp`, `set`, `setp`, `import`, and `importp` write the current
+  root, which is the session for top-level code, the image for a module's
+  construction body, and the module's own image inside a module word. A word
+  body without a module home writes the root of the activation that called
+  it. Every quotation a unit runs, under any combinator or `@attempt`, may
+  define; a definition is an environment effect, and like IO it survives the
+  failure of the `@attempt` that made it. A task runs in its spawner's root
+  without owning it, so inside a task every one of these is `` `domain ``.
 - `defp`/`setp`/`importp` are the private forms, legal only inside a module
   body (see Modules); at top level they are errors.
 - Because `set`/`setp` are sugar, their failures are raised by the words

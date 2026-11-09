@@ -352,61 +352,31 @@ test "combinators: finite iterations keep their words' bindings and still check 
     });
 }
 
-test "combinators: definitions inside an application are refused" {
-    // Applications run at their caller's level but are not roots, so nothing
-    // they do can add a name for later code to resolve.
+test "combinators: every application keeps its caller's right to define" {
+    // Whether a word may define does not depend on which combinator reached
+    // it: each body below defines into the session, and later code sees it.
+    try support.expectStacks(&.{
+        .{ .name = "each", .source = "[1 2 3] (dup `k set) each pop k", .expected = "3" },
+        .{ .name = "zip-with", .source = "[1] [2] (pop dup `k set) zip-with pop k", .expected = "1" },
+        .{ .name = "for", .source = "[1 2 3] (`k set) for k", .expected = "3" },
+        .{ .name = "fold", .source = "[1] 0 (+ dup `k set) fold pop k", .expected = "1" },
+        .{ .name = "scan", .source = "[1] 0 (+ dup `k set) scan pop k", .expected = "1" },
+        .{ .name = "infra", .source = "[1] (dup `k set) infra pop k", .expected = "1" },
+        .{ .name = "stencil", .source = "[1] 1 (dup `k set) stencil pop k", .expected = "[1]" },
+        .{ .name = "unfold", .source = "0 (7 `k set pop 0) () unfold k", .expected = "0 () 7" },
+        .{ .name = "import", .source = "[1] (`result (ok) import pop) for (1) result.ok", .expected = "{ok [1]}" },
+        // A definition is an environment effect: it survives the failure of
+        // the @attempt that made it, as IO does.
+        .{ .name = "attempt success", .source = "[] (1 `k set) @attempt pop k", .expected = "1" },
+        .{ .name = "attempt failure", .source = "[] (1 `k set missing) @attempt pop k", .expected = "1" },
+        // Redefinition inside a body reaches the next element.
+        .{ .name = "redefinition reaches the next element", .source = "(1) `f def [1 2 3] (pop f (2) `f def) each", .expected = "[1 2 2]" },
+    });
     try support.expectErrors(&.{
-        .{
-            .name = "each scope",
-            .source = "[1 2 3] (dup `k set) each",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "zip-with scope",
-            .source = "[1] [2] (pop dup `k set) zip-with",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "for scope",
-            .source = "[1] (dup `k set pop) for",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "fold scope",
-            .source = "[1] 0 (+ dup `k set) fold",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "scan scope",
-            .source = "[1] 0 (+ dup `k set) scan",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "infra scope",
-            .source = "[1] (dup `k set) infra",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "stencil scope",
-            .source = "[1] 1 (dup `k set) stencil",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{
-            .name = "unfold scope",
-            .source = "0 (dup `k set pop 0) () unfold",
-            .kind = "domain",
-            .word = "def",
-        },
-        .{ .name = "attempt", .source = "[] (1 `k set) @attempt `err at raise", .kind = "domain", .word = "def" },
+        // A task runs in its spawner's root without owning it.
         .{ .name = "task", .source = "[] (1 `k set) @spawn task.await `err at raise", .kind = "domain", .word = "def" },
-        .{ .name = "import", .source = "[1] (`result (ok) import) each", .kind = "domain", .word = "import" },
+        .{ .name = "task import", .source = "[] (`result (ok) import) @spawn task.await `err at raise", .kind = "domain", .word = "import" },
+        .{ .name = "task inside each", .source = "[1] (pop [] (1 `k set) @spawn task.await `err at raise) each", .kind = "domain", .word = "def" },
     });
 }
 
@@ -485,15 +455,16 @@ test "inline times checkpointed guards and case prevalidate and select" {
     });
 }
 
-test "paged quotations may not define" {
-    // A test, like an isolated body, is not the caller's own run: `set` is
-    // a definition, and the stack rollback would not roll it back.
-    try support.expectErrors(&.{
-        .{ .name = "cond test", .source = "[(1 `guard-effect set 0) () (guard-effect)] cond", .kind = "domain", .word = "def" },
-        .{ .name = "while condition", .source = "0 (1 `while-guard-effect set 0) () while", .kind = "domain", .word = "def" },
-        .{ .name = "linrec predicate", .source = "0 (7 `linrec-effect set 1) (pop) () () linrec", .kind = "domain", .word = "def" },
-        .{ .name = "above", .source = "((1) `paged-effect def) above", .kind = "domain", .word = "def" },
-        .{ .name = "cleave", .source = "[((1) `paged-effect def)] cleave", .kind = "domain", .word = "def" },
+test "paged quotations keep their caller's right to define" {
+    // Paging restores the stack, not the environment: a definition made by a
+    // paged body, kept or discarded, survives.
+    try support.expectStacks(&.{
+        .{ .name = "cond test", .source = "[(1 `guard-effect set 0) () (guard-effect)] cond", .expected = "1" },
+        .{ .name = "while condition", .source = "0 (1 `while-guard-effect set 0) () while while-guard-effect", .expected = "0 1" },
+        .{ .name = "linrec predicate", .source = "0 (7 `linrec-effect set 1) (pop linrec-effect) () () linrec", .expected = "7" },
+        .{ .name = "above", .source = "((1) `paged-above def) above paged-above", .expected = "1" },
+        .{ .name = "cleave", .source = "[((1) `paged-cleave def)] cleave paged-cleave", .expected = "1" },
+        .{ .name = "bi binds one body to two names", .source = "(7) (`bi-left def) (`bi-right def) bi bi-left bi-right", .expected = "7 7" },
     });
 }
 

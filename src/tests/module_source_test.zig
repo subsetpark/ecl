@@ -269,16 +269,19 @@ test "binding: set installs and replaces values while let is absent" {
     try expectErrorContains(&runtime, "3 `bad def", &.{ "kind type", "use set for values" });
 }
 
-test "scope: @attempt refuses definitions and imports" {
+test "scope: @attempt keeps its invoker's right to define and import" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(backing.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "[] (1 `k set) @attempt `err at raise", &.{ "kind domain", "word def" });
+    // A failed @attempt restores the stack, not the environment.
+    try expectOk(&runtime, "[] (1 `k set missing) @attempt pop k");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try expectOk(&runtime, "[] (7 `x set) `m @defm");
-    try expectErrorContains(&runtime, "[] (`m (x) import) @attempt `err at raise", &.{ "kind domain", "word import" });
+    try expectOk(&runtime, "[] (`m (x) import) @attempt pop x");
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
@@ -747,9 +750,11 @@ test "loader: ECL_PATH loads first candidate and retries import" {
     defer runtime.deinit();
     try expectOk(&runtime, "[] (`attempted (answer) import answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
-    try expectErrorContains(&runtime, "answer", &.{"kind undefined-word"});
+    // The import inside the @attempt bound `answer` in the session.
+    try expectOk(&runtime, "answer");
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[1].int);
     try expectOk(&runtime, "`stats (answer) import answer");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
 
     var runtime_inputs38 = try runtime_fixture.Fixture.init();
     defer runtime_inputs38.deinit();

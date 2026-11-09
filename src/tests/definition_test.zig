@@ -574,15 +574,9 @@ test "definitions: top-level setp fails through defp's module-root check" {
             .word = "defp",
             .message = "defp/setp are legal only in a module root",
         },
-        .{
-            // An application is not a root even inside a module body, so
-            // nothing defines there, privately or otherwise.
-            .name = "setp inside an application",
-            .source = "[] ([1] (pop 1 `x setp) each) `m @defm",
-            .kind = "domain",
-            .word = "defp",
-        },
     });
+    // An application inside a module body writes the module root.
+    try support.expectStack("[] ([1] (1 `x setp pop) for (-- n) (x) `y def) `m @defm m.y", "1");
 }
 
 test "definitions: data-combinator applications resolve their words across elements" {
@@ -623,12 +617,16 @@ test "definitions: def inside a word body writes the caller's scope" {
         .{ .name = "private stays private", .source = "[] (8 `h setp) `m @defm m.h", .kind = "undefined-word", .word = "m.h" },
     });
 
-    // The same word called inside an application is refused: an
-    // application is not a root, so there is nowhere for the name to land.
+    // The same word called inside an application lands in the same root.
+    try support.expectStack(
+        "( -- ) ((-- n) (1) `scoped def) `h def [1] (pop h) for scoped",
+        "1",
+    );
+    // Inside a task it is refused: a task does not own its spawner's root.
     try support.expectErrors(&.{
         .{
-            .name = "inside an application",
-            .source = "( -- ) ((-- n) (1) `scoped def) `h def [1] (pop h) each",
+            .name = "inside a task",
+            .source = "( -- ) ((-- n) (1) `scoped def) `h def [] (h) @spawn task.await `err at raise",
             .kind = "domain",
             .word = "def",
         },

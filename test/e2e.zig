@@ -1507,11 +1507,11 @@ test "e2e: M6 combinators parse and contract payloads" {
         .stderr = "warning: `+` now shadows the core word for top-level code; `core.+` still reaches it\n",
     });
 
-    var refused = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup `k set) each" });
+    var refused = try run(&.{ build_options.ecl_exe, "-e", "[] (1 `k set) @spawn task.await `err at raise" });
     defer refused.deinit();
     try refused.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "kind domain", "definitions are legal only at root level" },
+        .stderr_contains = &.{ "kind domain", "definitions are not legal inside a task" },
     });
 }
 
