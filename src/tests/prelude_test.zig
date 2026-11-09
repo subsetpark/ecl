@@ -27,7 +27,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "1 2 3 rollup 4 5 6 rolldown",
             .expected = "3 1 2 5 6 4",
         },
-        .{ .name = "two-value stack copy", .source = "1 2 2dup", .expected = "1 2 1 2" },
+        .{ .name = "two-value stack copy", .source = "1 2 dup2", .expected = "1 2 1 2" },
         .{
             .name = "migrated numeric words",
             .source = "7 3 mod -2 neg -2 abs 2 3 <> 2 2 <> 2 3 <= 3 2 <= " ++
@@ -209,7 +209,7 @@ test "all embedded vocabulary entries expose nonempty documentation" {
         "rotate",       "windows",    "each-prior",   "fold1",
         "scan1",        "iterations", "while-values", "converges",
         "converge",     "chunk",      "from-digits",  "to-digits",
-        "collect",      "2dup",       "case-with",
+        "collect",      "dup2",       "case-with",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

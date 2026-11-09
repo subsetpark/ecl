@@ -54,9 +54,6 @@
 ### /
 `( x y -- z )` — Float division under IEEE rules: a nonzero number over zero is an infinity signed by both operands, and `0 0 /` is `` `domain `` (NaN).
 
-### 2dup
-`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
-
 ### <
 `( x y -- bool )` — Ascending comparison, producing 0/1 masks.
 
@@ -369,6 +366,9 @@ Ex:
 
 ### dup
 `( x -- x x )` — Duplicate the top stack value.
+
+### dup2
+`( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
 
 ### each
 `( collection (a -- b) -- collection )` — For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``.

@@ -12,7 +12,7 @@
 
  ### defp snapshot
  (project path -- snapshot : "Observe absence or the exact bytes of a text file.")
- (2dup fs.exists? (fs.read-text wrap) (pop pop []) if) `snapshot defp
+ (dup2 fs.exists? (fs.read-text wrap) (pop pop []) if) `snapshot defp
 
  ### defp snapshot?
  (value -- bool : "Recognize an absent or present text snapshot.")

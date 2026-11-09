@@ -89,7 +89,7 @@
 
 ### def rank-of
 (name ranks -- rank : "Return a name's rank, or zero for a word without a definition.")
-(swap 2dup dict.has? (at) (pop pop 0) if) `rank-of def
+(swap dup2 dict.has? (at) (pop pop 0) if) `rank-of def
 
 ### def rank-order
 (names ranks -- indices : "Return the permutation ordering names by rank, then by codepoint.")

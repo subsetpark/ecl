@@ -55,7 +55,7 @@
 
  ### defp fdiv
  (dividend divisor -- quotient : "Divide by a positive divisor, rounding toward negative infinity.")
- (2dup mod 0 < (div 1 -) (div) if) `fdiv defp
+ (dup2 mod 0 < (div 1 -) (div) if) `fdiv defp
 
  ### defp fmod
  (dividend divisor -- remainder : "Return the nonnegative remainder by a positive divisor.")

@@ -157,7 +157,7 @@ The token kinds are the six delimiters `( ) [ ] { }`, string literals, and
 characters. An atom is classified whole-token, in this order:
 
 1. **Number** — the entire token parses as a number, else it is not one
-   (`2dup` and `1+` are words; `-3` is a number; `-` is a word).
+   (`2x` and `1+` are words; `-3` is a number; `-` is a word).
    - int64: optional `+`/`-` sign, then decimal digits with optional `_`
      separators strictly between digits (1_000_000), or `0x` followed by
      hex digits. `_` is not permitted in hex literals. A literal outside

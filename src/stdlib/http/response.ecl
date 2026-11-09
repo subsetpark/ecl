@@ -150,7 +150,7 @@
   dup str.str? (wrap) () if
   swap checked-name
   (|response value name|
-   response checked `headers at name 2dup dict.has? (at dup str.str? (wrap) when) (pop pop ())
+   response checked `headers at name dup2 dict.has? (at dup str.str? (wrap) when) (pop pop ())
    if value cat
    response `headers at name rolldown put
    response `headers rolldown put)

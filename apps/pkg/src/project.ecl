@@ -23,7 +23,7 @@
  ### defp parent
  (path directory -- project : "Release one discovery handle before inspecting its parent.")
  (port.close dup path.dirname
-  2dup match? not
+  dup2 match? not
   `io error.new "cannot find ecl.pkg in this directory or its parents" error.with-message assert
   nip find-at) `parent defp
 
