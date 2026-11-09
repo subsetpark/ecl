@@ -203,6 +203,9 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### below
 `( ... (q: ... -- ...) -- ... )` — Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual.
 
+### bi
+`( ... p q -- ... )` — Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s: a two-quotation `cleave`, with the same consumption rule.
+
 ### bnot
 `( x -- y )` — Invert every bit. `bnot bnot` is identity; `0 bnot` is `-1`.
 
@@ -287,7 +290,7 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ```
 
 ### cond
-`( clauses -- ... )` — The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back environment or IO effects performed by tests.
+`( clauses -- ... )` — The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back IO or other non-stack effects performed by tests; definitions are not legal in a test.
 
 #### Examples
 
@@ -578,7 +581,7 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 `( left right (left-element right-element -- order) -- order )` — Compare two lists lexicographically with a comparator that returns −1, 0, or 1. The comparator runs only through the first differing pair; when the shared prefix is equal, the lists are ordered by length.
 
 ### linrec
-`( predicate base pre post -- ... )` — Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count.
+`( predicate base pre post -- ... )` — Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. IO and other non-stack effects from the predicate survive restoration; definitions are not legal in it. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count.
 
 ### log
 `( x -- y )` — Natural logarithm; float transcendental. Edges follow the Numbers rules: `0 log` is `-inf`, `-1 log` is `` `domain `` (NaN).
@@ -856,6 +859,9 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ### times
 `( n quotation -- ... )` — Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized.
 
+### tri
+`( ... p q r -- ... )` — Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`, with the same consumption rule.
+
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `int`, `float`, `char`, `symbol`, `list`, `dict`, `task`, `port`, or `address`.
 
@@ -909,7 +915,7 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 `( name -- )` — Print where a name resolves (module home, shadowing), its kind (`def`, `primitive`, or `native`), visibility, and declared effect when one was supplied. Constants report `def` with no effect, like every other unannotated ecl definition.
 
 ### while
-`( cond body -- ... )` — At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. Environment and IO effects from the condition survive. Tail-call optimized.
+`( cond body -- ... )` — At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. IO and other non-stack effects from the condition survive; definitions are not legal in it. Tail-call optimized.
 
 ### while-values
 `( value (predicate: state -- bool) (step: state -- state) -- list )` — Return `value` and successive states through the first state for which the predicate is false.
@@ -952,9 +958,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 
 ### append
 `( list value -- list )` — Push `value` to the end of `list`.
-
-### bi
-`( ... p q -- ... )` — Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s: a two-quotation `cleave`.
 
 ### chunk
 `( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
@@ -1007,9 +1010,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 -7 [10 10] to-digits
 # => [9 3]
 ```
-
-### tri
-`( ... p q r -- ... )` — Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`.
 
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial elements and last element.

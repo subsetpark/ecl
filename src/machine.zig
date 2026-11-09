@@ -5986,14 +5986,14 @@ pub const Fiber = struct {
             .code = application.quotation,
             .program = .borrowed,
             .position = .{ .source = 0 },
-            // An isolated body runs in its caller's scope but is not a root,
-            // so nothing it calls may define there. A paging body is still
-            // the invoking context, with a floor beneath it.
+            // An isolated or paging body runs in its caller's scope but is
+            // not a root, so nothing it calls may define there; only a body
+            // applied in place on the caller's stack keeps that right.
             .site = .resumed(
                 application.site.parent_scope,
                 application.site.home,
                 application.site.registration_provenance,
-                launch != .isolated and application.site.defining,
+                launch == .in_place and application.site.defining,
             ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,

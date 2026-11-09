@@ -22,15 +22,17 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
         .{ .name = "call", .primitive = call, .effect = "quotation -- ...", .doc = "Run a quotation on the current stack. A data list pushes its elements." },
         .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``." },
-        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. Environment and IO effects from the condition survive. Tail-call optimized." },
-        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count." },
+        .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, run `cond` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `body` in place and loop. On 0, exit. IO and other non-stack effects from the condition survive; definitions are not legal in it. Tail-call optimized." },
+        .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` over a paging floor: it takes from the stack only what its words require. Its top result must be a 0/1 boolean; its complete stack result is discarded and what it took is restored. On 1, run `base`. On 0, run `pre`, recurse from `pre`'s resulting stack, then run `post`. IO and other non-stack effects from the predicate survive restoration; definitions are not legal in it. All four quotations run in the invoking application context and communicate through ambient stack state. The recursion runs in constant space: every level applies the same quotations, so the descents whose `post` is pending are a count." },
         .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results. Inside `above` or `below`, a protected value taken from beneath their floor returns as the original it was, so protecting a value is not consuming it." },
         .{ .name = "dip-n", .primitive = dipN, .effect = "... (q: ... -- ...) n -- ...", .doc = "Run a quotation beneath the top `n` stack values: `q` runs with them removed, then they are pushed back in their original order after its results. `n` must be a nonnegative int, or the word fails with `` `type `` or `` `domain `` before anything is removed. `0 dip-n` is `call`, and `1 dip-n` is `dip`." },
         .{ .name = "above", .primitive = above, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed above its results, in their original order. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) above` is `3 1 2`, and `1 (dup) above` is `1 1 1`. A `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual. `(q) above` leaves the quotation's results beneath the restored values; `below` leaves them on top." },
         .{ .name = "below", .primitive = below, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual." },
+        .{ .name = "bi", .primitive = bi, .effect = "... p q -- ...", .doc = "Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s: a two-quotation `cleave`, with the same consumption rule." },
+        .{ .name = "tri", .primitive = tri, .effect = "... p q r -- ...", .doc = "Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`, with the same consumption rule." },
         .{ .name = "cleave", .primitive = cleave, .effect = "... quotations -- ...", .doc = "Apply each quotation in `quotations`, in order, to the stack as it was when the list was consumed. Each quotation consumes exactly what its words require, and its results are held aside, so every quotation starts from the same inputs and sees the stack beneath them rather than earlier results. Afterwards the inputs any quotation consumed are dropped and all the results are pushed in order. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list leaves the stack unchanged." },
         .{ .name = "times", .primitive = times, .effect = "n quotation -- ...", .doc = "Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized." },
-        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back environment or IO effects performed by tests." },
+        .{ .name = "cond", .primitive = cond, .effect = "clauses -- ...", .doc = "The clause list is flat, nonempty, and odd: `[test action … else]`, all quotations. The whole list is validated before the first test runs (empty or even lists are `` `shape ``; a non-list or non-quotation member is `` `type ``). Each test runs over a paging floor against the stack as it was when the clause list was consumed: it takes from the stack only what its words require. Only its top result is interpreted, and it must be a 0/1 boolean. The complete test result is then discarded and what the test took is restored. The first true test selects its action; otherwise the final else runs, in either case from the original stack. Stack rollback does not roll back IO or other non-stack effects performed by tests; definitions are not legal in a test." },
         .{ .name = "each", .primitive = each, .effect = "collection (a -- b) -- collection", .doc = "For a list, apply one level down the leading axis, exactly one result per element; the result specializes when rectangular. For a dictionary, apply to its values in insertion order while preserving its keys. Depth composes by nesting: `((q) each) each`. There is no collect-all map whose output length follows dynamic stack behavior: filtering is the mask idiom (or `filter`), and flat-map is `each raze`. Derived verbs come free from homoiconicity: ``((1 +) each) `inc-all def``." },
         .{ .name = "zip-with", .primitive = zipWith, .effect = "left right (a b -- c) -- list", .doc = "Zip two lists with broadcast conformability (an atom on either side extends). Each-left/each-right are `cons` compositions." },
         .{ .name = "for", .primitive = forWord, .effect = "collection (a --) --", .doc = "Apply to list elements or dictionary values in insertion order, left-to-right, collecting nothing." },
@@ -682,17 +684,51 @@ fn cleave(evaluator: *Fiber) MachineError!void {
     var quotations = try evaluator.popValue();
     defer quotations.deinit();
     if (quotations.borrow() != .list) return evaluator.typeError("a list of quotations");
-    const state = try evaluator.allocator.create(CleaveState);
+    return startCleave(evaluator, .{ .list = .init(quotations.take()) }, .validate);
+}
+fn bi(evaluator: *Fiber) MachineError!void {
+    return cleaveFixed(evaluator, 2);
+}
+fn tri(evaluator: *Fiber) MachineError!void {
+    return cleaveFixed(evaluator, 3);
+}
+/// `bi` and `tri` take their quotations straight off the stack, already
+/// validated, so no list is built and no validation phase runs.
+fn cleaveFixed(evaluator: *Fiber, count: usize) MachineError!void {
+    try evaluator.require(count);
+    var fixed: CleaveQuotations.Fixed = .{};
+    errdefer fixed.retire(evaluator.releases);
+    for (0..count) |offset| {
+        const item = evaluator.visibleOperandBorrowed(evaluator.available() - count + offset);
+        if (item != .list) return evaluator.typeError("quotations");
+        heap.incRef(item.list);
+        fixed.items[offset] = item.list;
+        fixed.count += 1;
+    }
+    evaluator.discard(count);
+    return startCleave(evaluator, .{ .fixed = fixed }, .run);
+}
+fn startCleave(
+    evaluator: *Fiber,
+    quotations: CleaveQuotations,
+    phase: @FieldType(CleaveState, "phase"),
+) MachineError!void {
+    var owned_quotations = heap.Owned(CleaveQuotations).init(quotations);
+    const state = evaluator.allocator.create(CleaveState) catch |err| {
+        owned_quotations.deinit(evaluator.releases, evaluator.allocator);
+        return err;
+    };
     state.* = .{
-        .quotations = .init(quotations.take()),
+        .quotations = .init(owned_quotations.take()),
         .paged = .init(.init(.collected)),
         .site = evaluator.applicationSite(),
         .word = evaluator.active_word,
+        .phase = phase,
     };
     var owned = heap.Owned(*CleaveState).init(state);
     // Validation runs where the word is invoked when the turn's budget
     // covers it, so a small cleave launches without installing a driver.
-    if (!(state.work(evaluator) catch |err| {
+    if (phase == .validate and !(state.work(evaluator) catch |err| {
         owned.deinit(evaluator.releases, evaluator.allocator);
         return err;
     })) return evaluator.startDriver(CleaveDriver{ .state = owned });
@@ -724,6 +760,49 @@ const CleaveDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
+/// The quotations a cleave applies: a list the program built, or the two or
+/// three `bi` and `tri` took off the stack.
+const CleaveQuotations = union(enum) {
+    list: heap.Owned(Value),
+    fixed: Fixed,
+
+    const Fixed = struct {
+        items: [3]?*Header = @splat(null),
+        count: usize = 0,
+
+        fn retire(self: *Fixed, releases: *heap.ReleaseDomain) void {
+            for (self.items[0..self.count]) |quotation| releases.releaseHeader(quotation.?);
+            self.count = 0;
+        }
+    };
+
+    fn count(self: *const CleaveQuotations) usize {
+        return switch (self.*) {
+            .list => |quotations| @intCast(quotations.borrow().list.length()),
+            .fixed => |fixed| fixed.count,
+        };
+    }
+    fn at(self: *const CleaveQuotations, index: usize) *Header {
+        return switch (self.*) {
+            .list => |quotations| list.atUnchecked(quotations.borrow(), index).list,
+            .fixed => |fixed| fixed.items[index].?,
+        };
+    }
+    fn isQuotation(self: *const CleaveQuotations, index: usize) bool {
+        return switch (self.*) {
+            .list => |quotations| list.atUnchecked(quotations.borrow(), index) == .list,
+            .fixed => true,
+        };
+    }
+
+    pub fn retire(self: *CleaveQuotations, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .list => |*quotations| quotations.deinit(releases, allocator),
+            .fixed => |*fixed| fixed.retire(releases),
+        }
+    }
+};
+
 /// A cleave validates every quotation and then runs each over a paging
 /// floor above the inputs, so each consumes exactly what its words require.
 /// A quotation's results move into the control's buffer and its paged
@@ -733,7 +812,7 @@ const CleaveDriver = struct {
 /// turn's budget allows, and the inputs are retained values, so a symbol
 /// input stays a value rather than becoming code.
 const CleaveState = struct {
-    quotations: heap.Owned(Value),
+    quotations: heap.Owned(CleaveQuotations),
     paged: heap.Owned(PagedControl),
     site: machine.ApplicationSite,
     word: intern.TraceWord,
@@ -747,10 +826,10 @@ const CleaveState = struct {
     phase: enum { validate, run, restored, drop, push, done } = .validate,
 
     fn count(self: *const CleaveState) usize {
-        return @intCast(self.quotations.borrow().list.length());
+        return self.quotations.borrow().count();
     }
     fn quotation(self: *const CleaveState) *Header {
-        return list.atUnchecked(self.quotations.borrow(), self.next).list;
+        return self.quotations.borrow().at(self.next);
     }
     fn application(self: *CleaveState, code: *Header) Application {
         return machine.typedApplication(self, code, self.site, 0);
@@ -766,7 +845,7 @@ const CleaveState = struct {
                 const total = self.count();
                 const end = self.index + work_budget.take(total - self.index);
                 while (self.index != end) : (self.index += 1) {
-                    if (list.atUnchecked(quotations, self.index) != .list)
+                    if (!quotations.isQuotation(self.index))
                         return evaluator.typeError("a list of quotations");
                 }
                 if (self.index != total) return false;

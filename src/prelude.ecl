@@ -146,12 +146,6 @@
 (list value -- list : "Push `value` to the end of `list`.")
 (wrap cat) `append def
 
-### def bi
-(... p q -- ... :
- "Apply two quotations to the same inputs, first `p`, then `q`, leaving `p`'s results beneath `q`'s:
-  a two-quotation `cleave`.")
-(2 pack cleave) `bi def
-
 ### def chunk
 (list size -- pieces :
  "Split a list into consecutive pieces of a positive size; the last piece is shorter when the size
@@ -230,11 +224,6 @@ def
   st 0 at r mod 0 < st r
   (|n st r| st 0 at r div n - st 0 at r mod n r * + wrap st 1 at cat pair) call)
  fold 1 at) `to-digits def
-
-### def tri
-(... p q r -- ... :
- "Apply three quotations to the same inputs in left-to-right order: a three-quotation `cleave`.")
-(3 pack cleave) `tri def
 
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")

@@ -1216,8 +1216,9 @@ Three quotation-application behaviors exist:
   consumed. The test quotations of `cond`, `while`, and `linrec` run this
   way too: a test may consume, rearrange, or add values; its top value must
   be a 0/1 boolean, and its complete result is discarded and what it took
-  restored before control continues. Environment writes, IO, and other
-  non-stack effects survive. Restoring is not producing: a value a `dip`
+  restored before control continues. IO and other non-stack effects
+  survive. A paged quotation may not define, as an isolated one may not:
+  definitions belong to a body applied in place. Restoring is not producing: a value a `dip`
   protected, a test looked at, or an inner `above` or `below` restored is
   the original it was to every enclosing paging floor, not a result of the
   word that restored it. Paging stops at the nearest isolated substack or

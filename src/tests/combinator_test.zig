@@ -416,11 +416,6 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .expected = "222",
         },
         .{
-            .name = "cond stack rollback preserves environment effects",
-            .source = "[(1 `guard-effect set 0) () (guard-effect)] cond",
-            .expected = "1",
-        },
-        .{
             .name = "while restores each test checkpoint",
             .source = "0 (1 + dup 3 <) (10 +) while",
             .expected = "10",
@@ -444,11 +439,6 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .name = "while checkpoint follows a shrinking stack",
             .source = "1 2 3 4 (dup 1 >) (pop) while",
             .expected = "1",
-        },
-        .{
-            .name = "while stack rollback preserves environment effects",
-            .source = "0 (1 `while-guard-effect set 0) () while while-guard-effect",
-            .expected = "0 1",
         },
         .{ .name = "case", .source = "3 [1 (10) 3 (30) (90)] case", .expected = "30" },
         .{ .name = "case else", .source = "2 [1 (10) 3 (30) (90)] case", .expected = "2 90" },
@@ -479,6 +469,18 @@ test "inline times checkpointed guards and case prevalidate and select" {
     });
 }
 
+test "paged quotations may not define" {
+    // A test, like an isolated body, is not the caller's own run: `set` is
+    // a definition, and the stack rollback would not roll it back.
+    try support.expectErrors(&.{
+        .{ .name = "cond test", .source = "[(1 `guard-effect set 0) () (guard-effect)] cond", .kind = "domain", .word = "def" },
+        .{ .name = "while condition", .source = "0 (1 `while-guard-effect set 0) () while", .kind = "domain", .word = "def" },
+        .{ .name = "linrec predicate", .source = "0 (7 `linrec-effect set 1) (pop) () () linrec", .kind = "domain", .word = "def" },
+        .{ .name = "above", .source = "((1) `paged-effect def) above", .kind = "domain", .word = "def" },
+        .{ .name = "cleave", .source = "[((1) `paged-effect def)] cleave", .kind = "domain", .word = "def" },
+    });
+}
+
 test "linrec: terminal selection recursive descent and guard restoration are inline" {
     try support.expectStacks(&.{
         .{
@@ -500,11 +502,6 @@ test "linrec: terminal selection recursive descent and guard restoration are inl
             .name = "predicate values below the boolean are discarded",
             .source = "8 (111 1) (1 +) (missing-pre) (missing-post) linrec",
             .expected = "9",
-        },
-        .{
-            .name = "predicate environment effects survive restoration",
-            .source = "0 (7 `linrec-effect set 1) (pop linrec-effect) () () linrec",
-            .expected = "7",
         },
     });
     try support.expectErrors(&.{
@@ -535,8 +532,7 @@ test "linrec: predicate IO effects survive checkpoint restoration" {
     defer runtime.deinit();
     try expectStack(
         &runtime,
-        "0 (\"guard\" io.print 7 `linrec-io-effect set 1) " ++
-            "(pop linrec-io-effect) (missing-pre) (missing-post) linrec",
+        "0 (\"guard\" io.print 1) (pop 7) (missing-pre) (missing-post) linrec",
         "7",
     );
     try std.testing.expectEqualStrings("guard\n", output.written());
