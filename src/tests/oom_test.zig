@@ -547,10 +547,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "(5 6 +) @attempt pop " ++
             "(7 8 +) @spawn task.await pop " ++
             "(1 2) @attempt pop " ++
-            // This admitted reader body reaches ConstructionDriver allocation
+            // This re-scoped body reaches ConstructionDriver allocation
             // after the re-scope cursor owns its source. Exhausting that exact
             // allocation proves cleanup remains with only one movable owner.
-            "(9 10 + `x set) `oom-admitted @defm oom-admitted.x pop",
+            "(9 10 + `x set) `oom-rescoped @defm oom-rescoped.x pop",
     );
     try runOk(
         &runtime,
@@ -1208,9 +1208,9 @@ test "oom: core: full-session surfaces propagate every allocation failure" {
     );
 }
 
-const admitted_construction_source = "() `oom-driver @defm";
+const rescoped_construction_source = "() `oom-driver @defm";
 
-fn admittedConstructionAllocationCount() !usize {
+fn rescopedConstructionAllocationCount() !usize {
     var failing = FailingAllocator.init(std.testing.allocator, .{});
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
@@ -1220,14 +1220,14 @@ fn admittedConstructionAllocationCount() !usize {
     const before = failing.alloc_index;
     try std.testing.expectEqual(
         .ok,
-        try runtime.runUnit("oom-driver-count.ecl", admitted_construction_source),
+        try runtime.runUnit("oom-driver-count.ecl", rescoped_construction_source),
     );
     return failing.alloc_index - before;
 }
 
-test "oom: core: admitted construction driver allocation failure transfers its cursor once" {
+test "oom: core: construction driver allocation failure transfers its cursor once" {
     try requireSelectedOomTest(@src());
-    const allocation_count = try admittedConstructionAllocationCount();
+    const allocation_count = try rescopedConstructionAllocationCount();
     try std.testing.expect(allocation_count != 0);
 
     // Bootstrap outside the failure window, then exhaust every allocation in
@@ -1243,7 +1243,7 @@ test "oom: core: admitted construction driver allocation failure transfers its c
         defer runtime.deinit();
 
         failing.fail_index = failing.alloc_index + offset;
-        const result = runtime.runUnit("oom-driver-failure.ecl", admitted_construction_source);
+        const result = runtime.runUnit("oom-driver-failure.ecl", rescoped_construction_source);
         try std.testing.expect(failing.has_induced_failure);
         try std.testing.expectError(error.OutOfMemory, result);
     }

@@ -56,7 +56,7 @@ The main components are these:
 | Component | Responsibility | Primary implementation |
 | --- | --- | --- |
 | Session | Lifetime root, persistent operand stack, host services, and unit transaction | `session.zig` |
-| Reader and source archive | Turn source into executable values while retaining optional diagnostic lineage | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
+| Reader and source archive | Turn source into executable values while retaining optional diagnostic spans | `lexer.zig`, `reader_*.zig`, `locals.zig`, `spans.zig` |
 | Value heap | Values, specialized list storage, dictionaries, ownership, and reclamation | `value.zig`, `heap.zig`, `list.zig`, `dict.zig`, `intern.zig` |
 | Names and modules | Resolution at dispatch, validated and immutable definitions, scopes, module images, and generations | `env.zig`, `binder.zig`, `modules.zig` |
 | Frame machine | Dispatch quotations, represent continuations, enforce application boundaries, and construct errors | `machine.zig` |
@@ -140,9 +140,8 @@ starts on an empty stack, or on `@give`'s port list, which the child
 materializes in bounded slices before its body runs. A body that needs values
 carries them: a stack value stored into a list enters as data, so
 `values (q) cat` builds the unit's whole input, and that copy is itself
-budgeted. `@defm` therefore receives exactly the body it attributes, and its
-single question — did the reader write this body? — has one operand to ask
-of.
+budgeted. `@defm` re-homes every word of the body it receives, however the
+body was built.
 
 Task construction remains in the core vocabulary. The embedded `task` module
 exposes handle observation, waiting, and cancellation through the same scheduler
@@ -411,8 +410,10 @@ reader-built list headers. The archive retains:
 
 - source buffers and source names;
 - element and container spans;
-- source slices used by reflection; and
-- reader lineage used when module construction re-scopes source code.
+- source slices used by reflection.
+
+A module body's re-scoped copy inherits its source's spans, so an error raised
+in the module points at the text that was read.
 
 The distinction is load-bearing. Value equality and hashing ignore provenance.
 Runtime-built or copy-on-write-rebuilt quotations naturally have no source

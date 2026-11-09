@@ -1292,7 +1292,7 @@ const Eval = struct {
 /// before it ran; completion seals and publishes that image.
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
-    /// Exact construction body admitted by `@defm`. A declaration
+    /// The construction body `@defm` runs, after re-scoping. A declaration
     /// is module-level only while this is the current activation; quotations
     /// called by the body may inherit its home but not its declaration site.
     root_code: *Header,
@@ -5966,46 +5966,30 @@ pub const Fiber = struct {
         var candidate = try registry.createImage(name, provenance);
         errdefer candidate.deinit();
         if (doc) |document| candidate.document(document);
-        // Attribution asks one question, of the exact designated body. The
-        // archive consumes that body into either an unchanged owner or an
-        // opaque exact-root admission awaiting a target scope.
-        //
-        // Re-scoping is user-sized, so it is ordinary resumable scheduler
-        // work: the driver holds the candidate image and the source body until
-        // the copy is finished and the boundary can open. A body with nothing
-        // to re-scope opens it in this step and copies nothing at all.
-        const prepared = try self.archive.prepareConstructionBody(&body);
-        switch (prepared) {
-            .unchanged => |prepared_body| {
-                var runnable = prepared_body;
-                defer runnable.deinit(self.releases, self.allocator);
-                return self.openImageBoundary(&candidate, word, runnable.take());
-            },
-            .admitted => |admitted| {
-                var admission: ?*spans.SpanArchive.AdmittedConstructionBody = admitted;
-                defer if (admission) |remaining| remaining.deinit();
-                // Only admitted reader text needs a stable image ScopeId. An
-                // unchanged runtime body keeps its existing word scopes, so it
-                // never creates an attribution-only directory cell.
-                const home = candidate.executionHome(self.module_access);
-                const image_cell = try self.environment.scopeCell(
-                    home.scope(self.module_access),
-                    modules.anchorHandle(home, self.module_access),
-                );
-                var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
-                    admission.?.begin(self.environment.linker(image_cell.id)),
-                );
-                admission = null;
-                defer cursor.deinit(self.releases, self.allocator);
-                try self.startDriver(ConstructionDriver{
-                    .state = .init(.{ .rescope = .{
-                        .target = .init(.{ .image = candidate.move() }),
-                        .cursor = .init(cursor.take()),
-                    } }),
-                    .word = word,
-                });
-            },
-        }
+        // Every word in the body names the image. A specialized leaf holds no
+        // symbol and no container, so it opens the boundary unchanged in this
+        // step; any other body is re-scoped, which is user-sized and therefore
+        // ordinary resumable scheduler work: the driver holds the candidate
+        // image and the source body until the copy is finished and the
+        // boundary can open.
+        if (body.borrow().kind() != .generic_spine)
+            return self.openImageBoundary(&candidate, word, body.take());
+        const home = candidate.executionHome(self.module_access);
+        const image_cell = try self.environment.scopeCell(
+            home.scope(self.module_access),
+            modules.anchorHandle(home, self.module_access),
+        );
+        var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
+            self.archive.rescopeCursor(body.take(), self.environment.linker(image_cell.id)),
+        );
+        defer cursor.deinit(self.releases, self.allocator);
+        try self.startDriver(ConstructionDriver{
+            .state = .init(.{ .rescope = .{
+                .target = .init(.{ .image = candidate.move() }),
+                .cursor = .init(cursor.take()),
+            } }),
+            .word = word,
+        });
     }
     /// Opens one construction boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure, and the image is
@@ -7980,8 +7964,8 @@ const ConstructionTarget = struct {
     }
 };
 
-/// The user-sized half of opening a module construction: re-scoping a
-/// witnessed construction body.
+/// The user-sized half of opening a module construction: re-scoping its
+/// body.
 ///
 /// It is proportional to what the program wrote, so it may not run to
 /// completion inside one scheduler step. Everything the boundary will need is
@@ -7992,7 +7976,7 @@ const ConstructionDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
     const State = union(enum) {
-        /// The re-scoping pass owns its exact admitted source and the target
+        /// The re-scoping pass owns its source body and the target
         /// that will receive the completed copy.
         rescope: struct {
             target: heap.Owned(ConstructionTarget),

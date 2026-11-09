@@ -2,8 +2,7 @@
 //!
 //! A constructed unit starts on an empty stack, `@give`'s ports, or `@each`'s
 //! element, and a caller that wants values builds them into the body. `@defm`
-//! answers the one attribution question it must of exactly the body it was
-//! handed: did the reader write it?
+//! re-homes every word of the body it is handed, however it was built.
 //!
 //! Every test here goes through the ordinary `Session` interface. Nothing
 //! inspects interpreter representation.
@@ -149,7 +148,7 @@ test "unit inputs: large bodies preserve order and postconditions" {
     try expectStack(&runtime, "[7] 300 range (300 (pop) times) cat @each", "[7]");
 }
 
-test "unit inputs: a construction body the reader wrote names its image" {
+test "unit inputs: a construction body names its image" {
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
@@ -174,29 +173,25 @@ test "unit inputs: a construction body the reader wrote names its image" {
     try expectStack(&runtime, "raw-body `again @defm again.go", "8");
 }
 
-test "unit inputs: a runtime-built body acquires no attribution" {
+test "unit inputs: a runtime-built body is module text too" {
     var runtime_inputs7 = try runtime_fixture.Fixture.init();
     defer runtime_inputs7.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs7.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    // cat and raze both produce runtime-built values, and a reader witness
-    // carried by a nested fragment grants no admission through one.
-    try expectStack(&runtime, "7 `k set ((k) `geta) (def) cat `catted @defm catted.geta", "7");
-    try expectStack(&runtime, "7 `k set [((k) `getc) (def)] raze `razed @defm razed.getc", "7");
-    // A body composed with `cat` is runtime-built too, so the module's own
-    // words take no attribution and `scale` is not found.
-    try expectErrorContains(
-        &runtime,
-        "5 `k set [(k *)] (`scale def ( -- n ) (4 scale) `go def) cat `flat @defm flat.go",
-        &.{ "undefined-word", "scale" },
-    );
+    // cat and raze both produce runtime-built values, and every word in the
+    // body they build names the module: a caller's `k` is not reached.
+    try expectErrorContains(&runtime, "7 `k set ((k) `geta) (def) cat `catted @defm catted.geta", &.{ "undefined-word", "scope module" });
+    try expectErrorContains(&runtime, "7 `k set [((k) `getc) (def)] raze `razed @defm razed.getc", &.{ "undefined-word", "scope module" });
+    // A module whose runtime-built body defines what it uses works as a
+    // literal one does.
+    try expectStack(&runtime, "((7) `k def) (( -- n ) (k) `geta def) cat `built @defm built.geta", "7");
+    try expectStack(&runtime, "[(k *)] (`scale def (5) `k def ( -- n ) (4 scale) `go def) cat `flat @defm flat.go", "20");
 
-    // Rejected roots must also avoid the stable image ScopeId used only to
-    // label rewritten occurrences. Define, execute, and replace runtime-built
-    // bodies in one Fiber so the measurement excludes per-source archive
-    // retention. A Session keeps every published image, so memory grows with
-    // the registrations made; it must grow no faster than they do.
+    // Define, execute, and replace runtime-built bodies in one Fiber so the
+    // measurement excludes per-source archive retention. A Session keeps
+    // every published image, so memory grows with the registrations made; it
+    // must grow no faster than they do.
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = test_heap.stack_trace_frames }) = .init;
     {
         var runtime_inputs8 = try runtime_fixture.Fixture.init();

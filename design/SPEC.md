@@ -527,7 +527,7 @@ identifier, or implementation pointer from one.
 A **diagnostic display** is human-facing text without a read-back guarantee.
 An operation may produce display text for every value, but any print/read
 guarantee applies only to the formally defined readable subset. Reader
-provenance, resolution metadata, and reader lineage need not be reproduced by
+provenance, resolution metadata, and source spans need not be reproduced by
 that round trip.
 
 Printing never exposes storage specialization. A non-string list uses `[...]`
@@ -724,14 +724,13 @@ rather than where it is later called. A symbol the implementation builds for
 itself (an error-dict key, a trace entry) carries no link and means core's
 binding wherever it runs.
 
-A reader-produced aggregate may separately retain **reader lineage**, which
-records that the aggregate and its reader-built descendants came from a
-particular source construction. Reader lineage supports attribution and the
-module-body re-scoping rule; it is not an AST, a captured environment, or a
-quotation-wide resolution root. Runtime aggregate reconstruction does not
-acquire reader lineage. Resolution context, reader lineage, and provenance are
-semantic metadata on stored occurrences and aggregates, but none is part of
-value identity.
+A reader-produced aggregate may separately retain **source spans**, which
+record where the aggregate and its reader-built descendants were read. Spans
+support diagnostics and reflection; they are not an AST, a captured
+environment, or a quotation-wide resolution root. Runtime aggregate
+reconstruction does not acquire spans. Resolution context, spans, and
+provenance are semantic metadata on stored occurrences and aggregates, but
+none is part of value identity.
 
 ECL therefore has syntactic closure without value capture: reader-authored
 identifiers retain their lookup scopes, while quotation values capture no
@@ -2036,26 +2035,17 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   private still resolves, because the literal was written inside the module;
   a module word may accept `(bump)` from its caller and that `bump` resolves in
   the caller, because the caller wrote it; and both hold when the stdlib passes
-  the caller's quotation as ordinary data.
-- **Only a reader-authored body becomes module text.** The constructor accepts
-  any list in the body operand position.
-  A body carrying lineage from either the reader or construction's own
-  scope-only copy of reader text is copied, and every word in its reader-built
-  subtree receives the new image's scope, including words nested in quotation,
-  list, and dict literals. The copy retains its lineage, so a construction
-  nested inside it can scope its own body to its own image.
-
-  Generic runtime list operations do not create lineage. A body produced by
-  `cat`, `cons`, `append`, `raze`, slicing, reversal, or a
-  similar operation keeps the scopes already carried by its parts, and a stack
-  value that such an operation stores enters as data: a symbol becomes a quoted
-  occurrence, so the body pushes it rather than running it (see Lexical
-  structure). Module
-  construction accepts it without traversing or re-scoping it. Reader-authored
-  fragments do not make their runtime-built container reader-authored. For
-  example, ``7 `k set ((k) `geta) (def) cat `m @defm`` builds the module body
-  at runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
-  the session's `k` and returns `7`.
+  the caller's quotation as ordinary data. A module body is the one place a
+  word changes scope: `@defm` re-homes it.
+- **Every word in a module body is module text.** `@defm` copies its body
+  and gives every word in it the new image's scope, including words nested in
+  quotation, list, and dict values, however the body was built. A body
+  produced by `cat`, `cons`, or any other list operation is re-homed exactly
+  as a literal is; a stack value such an operation stored entered as data, so
+  a symbol among them is a quoted occurrence and the body pushes it (see
+  Lexical structure). For example, ``7 `k set ((k) `geta) (def) cat `m @defm``
+  builds the body at runtime, and `k` inside it is a module word: `m.geta`
+  fails with `` `undefined-word `` because the module defines no `k`.
 - **A module holds no state.** A registration publishes an image and nothing
   else: there is no per-registration operand stack, no transaction against
   one, and no operation that reads or writes a module's storage. A construction
