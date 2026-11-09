@@ -211,7 +211,7 @@ test "clock: wall time is inherited by spawned tasks and loaded modules" {
     defer fixture.close();
     const runtime = try fixture.open(.{ .clock = .{ .monotonic = .manual, .wall = .{ .fixed = 42 } } });
     try expectDisplay(runtime, "(clock.unix) @spawn task.await", "{ok ({unix 42})}");
-    try expectDisplay(runtime, "[] ((clock.unix) `read def) `wall @defm wall.read", "{unix 42}");
+    try expectDisplay(runtime, "((clock.unix) `read def) `wall @defm wall.read", "{unix 42}");
 }
 
 test "clock: a fixed wall clock returns the configured timestamp on every read" {

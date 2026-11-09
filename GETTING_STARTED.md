@@ -285,10 +285,10 @@ body defines, and _module registrations_, the names they are published under.
 Modules are ECL's core primitive for encapsulation, distribution, and
 application structure. There's no special syntax for module construction;
 module image bodies are quotations, and @defm (as its name suggests) is a unit
-constructor that consumes a seed and a quotation:
+constructor that consumes a quotation and a name:
 
 ```
-ecl> [] ( 10 `scale setp
+ecl> ( 10 `scale setp
 ..        (scale *) `scale-up def
 ..        (scale /) `scale-down def ) `scaling @defm
 ecl> 5 scaling.scale-up

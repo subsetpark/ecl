@@ -4,7 +4,6 @@
 (: "Errors are ordinary dictionaries with a required symbol at `` `kind `` and optional, typed
     diagnostic fields. Construction and inspection do not raise unless an operation's own input
     violates its contract; control effects remain core words.")
-[]
 (
  ### defp text?
  (value -- bool : "Return 1 when a value is a string without loading the str module.")

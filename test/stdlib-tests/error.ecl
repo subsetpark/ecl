@@ -1,5 +1,4 @@
 ### module stdlib.test.error
-[]
 (
  `stdlib.test.support
  (equal raises-containing documented)

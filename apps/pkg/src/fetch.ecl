@@ -2,7 +2,6 @@
 # Network source policy, expressed only in the maintained application.
 # The native `git` module exists only in the installed layout, so its words
 # are looked up where they run rather than bound when this module is built.
-[]
 (
  ### def hash
  (bytes -- hash : "Compute the portable archive hash.")

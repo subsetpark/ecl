@@ -1,5 +1,4 @@
 ### module pkg.test.git-commands
-[]
 (
  ### defp equal
  (actual expected -- : "Compare package behavior through public interfaces.")
@@ -52,7 +51,7 @@
   ["pkg" "sync" "--offline"] invoke `term at `code at 1 equal
   seed-archive ["update" "--offline"] command
   args 2 at check-commit 42 runnable
-  `cwd "src/conflict.ecl" "[] ((999) `answer def) `pkg.command @defm" fs.publish-text
+  `cwd "src/conflict.ecl" "((999) `answer def) `pkg.command @defm" fs.publish-text
   `cwd "ecl.modules" "broken map" fs.publish-text
   ["sync" "--offline"] command
   ["verify"] command

@@ -1,6 +1,5 @@
 ### module pkg.cache
 # A disposable shared download cache. Project generations never depend on it.
-[]
 (
  ### def filename
  (hash -- filename : "Name one exact archive in the flat download cache.")

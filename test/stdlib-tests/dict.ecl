@@ -1,5 +1,4 @@
 ### module stdlib.test.dict
-[]
 (
  `stdlib.test.support
  (equal raises-containing raises-word documented)

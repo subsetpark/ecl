@@ -5,6 +5,6 @@
 #### Examples
 
 ```ecl
-"[] () `example @defm" parse source.declarations
+"() `example @defm" parse source.declarations
 # => (example)
 ```

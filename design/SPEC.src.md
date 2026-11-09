@@ -604,7 +604,7 @@ and value retirement remain bounded scheduler work.
 A leading `@` marks those words that apply their quotation **in a fresh unit**
 — one unit per application for `@each` — and `@load`, which runs a file's
 source the same way. No constructor reads the ambient stack across its unit
-boundary; see Seeding a unit for what each one starts on.
+boundary; see A unit's initial stack.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -635,48 +635,27 @@ no module and it is `` `domain ``. The stars are ordinary word characters with
 no reader meaning, and the convention applies to shipped vocabulary without
 reserving the spelling from user definitions.
 
-#### Seeding a unit
+#### A unit's initial stack
 
-`@attempt`, `@spawn`, `@give`, and `@each` take only a body. A unit started by
-`@attempt` or `@spawn` begins on an empty stack, one started by `@give` on the
-ports it was given, and each `@each` child on its element. A caller that wants
-the unit to begin on values builds them into the body:
+A unit started by `@attempt`, `@spawn`, `@defm`, or `@load` begins on an empty
+stack; one started by `@give` begins on the ports it was given, in list order;
+and each `@each` child begins on its element. A caller that wants a unit to
+begin on values builds them into its body:
 
 ```ecl
 values (q) cat @attempt
 x (q) cons @spawn
-list (q) @each                 ( element alone on each child's stack )
-ports (q) @give                ( the given ports, in list order )
 ```
 
 A value stored into a list at run time enters as data, so the built body
-pushes each value and then runs `q`; that is all a separate values operand
-would do.
-
-Module construction is the exception. `@defm` and `@load` receive seed values
-apart from the body:
-
-```ecl
-values (body) `name @defm
-values path @load
-```
-
-`[]` is the explicit no-seed operand, and `@defm!` and `@load!` are exactly
-their constructor applied to `[]`. The new unit's operand stack is initialized
-from the values list in list order, and then the body runs. Seeds are inert
-stack values and contribute no code to the body: even when a seed is itself a
-reader-built quotation, none of its contents is part of the construction
-body's text. Keeping the two operands separate is what makes seeding
-compatible with module text: `@defm` knows exactly which list is the
-construction body, and a body built by `cat` or `cons` has no reader lineage
-and therefore takes no module attribution (see Modules). `@load`'s body is a
-file, which no list operation can extend.
+pushes each value and then runs `q`. A module or loaded file is a
+self-contained unit of source: its body takes nothing from the caller.
 
 Underflow against the floor of a constructed unit is reported specially:
-the message names the isolation and says how to pass initial values, and the
-error dict carries `` `isolation `` naming the constructor. It is the one
-underflow whose cause is invisible — the values the caller meant to pass are
-on screen and out of reach.
+the message names the isolation and, for a body that runs plain code, how to
+build initial values into it; the error dict carries `` `isolation `` naming
+the constructor. It is the one underflow whose cause is invisible — the values
+the caller meant to pass are on screen and out of reach.
 
 ## Bindings and scope
 
@@ -1053,11 +1032,8 @@ that name.
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
-- ``values (body) `name @defm`` initializes the construction. The values form the
-  body unit's initial stack, in list order; the body may consume, reorder, or
-  extend them. The separate operands let attribution below name the body
-  exactly. The body runs stack-isolated: it never sees or disturbs the
-  caller's stack.
+- ``(body) `name @defm`` runs the body as a unit on an empty stack. It runs
+  stack-isolated: it never sees or disturbs the caller's stack.
 - **A module documents itself with a documentation-only annotation.** A
   module declares no stack effect, so the value beneath the operands is its
   annotation exactly when it is `(: "text")`: a colon and one string. Any
@@ -1205,22 +1181,11 @@ that name.
   root and resolves in core. Re-registering a module publishes a new image
   under the module name, so a qualified word reached afterwards runs the new
   code, in code defined earlier too. Words written in the old image go on
-  resolving there. Seed values passed to unit constructors are not part
-  of the construction body. Runtime-built captures retain their existing
-  word scopes.
-- `@defm` is parameterized by the seed operand — ``values (body) `name @defm`` —
-  and nothing else crosses the boundary. There is no ambient environment
-  between a module's own definitions and core.
-  A quotation parameter carries the scope it was written in, so it preserves
-  its references on injection into a module. Given:
-
-  ```ecl
-  10 `k set
-  [(k *)] (
-           `scale def
-           ( -- n ) (4 scale) `go def) `m @defm
-  m.go                                          -- 40
-  ```
+  resolving there. Runtime-built captures retain their existing word
+  scopes.
+- `@defm` takes a body and a name — ``(body) `name @defm`` — and nothing
+  crosses the boundary. There is no ambient environment between a module's
+  own definitions and core.
 
 - **A word resolves in the scope its text was written in.** The word itself
   carries the scope, so it
@@ -1232,7 +1197,7 @@ that name.
   the caller, because the caller wrote it; and both hold when the stdlib passes
   the caller's quotation as ordinary data.
 - **Only a reader-authored body becomes module text.** The constructor accepts
-  any list in the body operand position; the values operand never participates.
+  any list in the body operand position.
   A body carrying lineage from either the reader or construction's own
   scope-only copy of reader text is copied, and every word in its reader-built
   subtree receives the new image's scope, including words nested in quotation,
@@ -1247,12 +1212,9 @@ that name.
   structure). Module
   construction accepts it without traversing or re-scoping it. Reader-authored
   fragments do not make their runtime-built container reader-authored. For
-  example, ``7 `k set [] ((k) `geta) (def) cat `m @defm`` builds the module body
+  example, ``7 `k set ((k) `geta) (def) cat `m @defm`` builds the module body
   at runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
   the session's `k` and returns `7`.
-
-  Seed values only initialize the construction stack. They are never traversed
-  or re-scoped, and they cannot affect whether the body is module text.
 - **A module holds no state.** A registration publishes an image and nothing
   else: there is no per-registration operand stack, no transaction against
   one, and no operation that reads or writes a module's storage. A construction

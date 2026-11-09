@@ -465,7 +465,7 @@ fn runQualifiedCallSite(
             defer std.heap.smp_allocator.free(workload);
             try printCase(io, out, mode, workers, size, .{
                 .name = "qualified-call-site",
-                .setup = "[] ((1) `one def) `callsite-bench @defm",
+                .setup = "((1) `one def) `callsite-bench @defm",
                 .workload = workload,
             }, repetitions);
             try out.flush();
@@ -492,7 +492,7 @@ fn runModuleLocalCallSite(
             defer std.heap.smp_allocator.free(workload);
             try printCase(io, out, mode, workers, size, .{
                 .name = "module-local-call-site",
-                .setup = "[] ((1) `leaf def (leaf) `outer def) `local-callsite-bench @defm",
+                .setup = "((1) `leaf def (leaf) `outer def) `local-callsite-bench @defm",
                 .workload = workload,
             }, repetitions);
             try out.flush();
@@ -505,7 +505,7 @@ fn runModuleLocalCallSite(
             defer std.heap.smp_allocator.free(core_workload);
             try printCase(io, out, mode, workers, size, .{
                 .name = "module-local-core-fallback",
-                .setup = "[] ((1 1 +) `outer def) `local-core-bench @defm",
+                .setup = "((1 1 +) `outer def) `local-core-bench @defm",
                 .workload = core_workload,
             }, repetitions);
             try out.flush();

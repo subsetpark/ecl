@@ -103,7 +103,7 @@ const cases = [_]Case{
     .{ .name = "see", .source = "3 `x set `x see" },
     .{ .name = "see set", .source = "`set see" },
     .{ .name = "setp", .source = "1 `x setp" },
-    .{ .name = "qualify execute", .source = "[] ((41) `f def) `core.utils @defm `core.utils `f qualify execute" },
+    .{ .name = "qualify execute", .source = "((41) `f def) `core.utils @defm `core.utils `f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "`qualify doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
@@ -147,12 +147,11 @@ const cases = [_]Case{
     .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
     .{ .name = "rand.deal", .source = "[7 0] 3 10 rand.deal" },
     .{ .name = "rand.shuffle", .source = "[7 0] [10 20 30 40] rand.shuffle" },
-    // The unit-constructor convention: the guided boundary error, values built
-    // into the body, and module seeding.
+    // The unit-constructor convention: the guided boundary error and values
+    // built into the body.
     .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
     .{ .name = "isolated child", .source = "3 [1 2] (+ +) @each" },
     .{ .name = "values in the body", .source = "(3 1 +) @attempt" },
-    .{ .name = "seeded module", .source = "[7] (`base set) `m @defm m.base" },
     .{ .name = "row annotation", .source = "(a -- ...) (dup) `f def `f see" },
     .{ .name = "two rows in one portion", .source = "(a ... b ... -- c) (dup) `f def" },
 };
@@ -841,7 +840,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{kind domain msg "defp/setp are legal only in a module root" word defp trace (`defp `setp) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== qualify execute ===
-        \\source: [] ((41) `f def) `core.utils @defm `core.utils `f qualify execute
+        \\source: ((41) `f def) `core.utils @defm `core.utils `f qualify execute
         \\exit: 0
         \\stdout:
         \\41
@@ -1129,13 +1128,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\{ok [4]}
-        \\stderr:
-        \\<empty>
-        \\=== seeded module ===
-        \\source: [7] (`base set) `m @defm m.base
-        \\exit: 0
-        \\stdout:
-        \\7
         \\stderr:
         \\<empty>
         \\=== row annotation ===

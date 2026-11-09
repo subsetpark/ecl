@@ -1,5 +1,4 @@
 ### module pkg.test.resolution
-[]
 (
  ### defp equal
  (actual expected -- : "Compare observable resolution data.")

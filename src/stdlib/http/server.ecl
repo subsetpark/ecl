@@ -95,7 +95,6 @@
     every connection those children own. The listener itself is untouched: `@serve` never calls
     `net.close` on the listener it was given, which stays the caller's to close explicitly or
     through its own scope and may be served again.")
-[]
 (
  ### defp crlf
  # String literals have no `\r` escape, so the line terminator is spelled out.

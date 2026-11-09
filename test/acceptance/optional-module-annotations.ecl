@@ -1,7 +1,6 @@
 ### All four annotation forms are legal in a module root.
 
 ### module forms
-[]
 (
  ### def bare
  (1 +) `bare def
@@ -65,7 +64,6 @@ answer spelled match? io.pp
 ### A declared effect that the body violates is still 'contract.
 
 ### module liar
-[]
 (
  ### def two
  (-- n)
@@ -74,7 +72,6 @@ answer spelled match? io.pp
 
 ### A malformed recognized annotation is still 'domain.
 (
- []
  (
   ### def bad
   (:)
@@ -95,7 +92,6 @@ io.pp
 ### annotation. It stays on the construction stack, and a module body that
 ### leaves anything there is 'domain.
 (
- []
  (### def f
   (a b)
 

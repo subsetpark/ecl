@@ -1,6 +1,5 @@
 ### module pkg.transaction
 # Application-owned recovery of the separate portable-lock and module-map writes.
-[]
 (
  ### defp require
  (condition -- : "Reject a conflicting or malformed publication transaction.")

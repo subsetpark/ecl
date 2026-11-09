@@ -83,12 +83,9 @@
 ```
 
 ### @defm
-`( values body module-name -- )` — The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.
+`( body module-name -- )` — The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on an empty stack and a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.
 
-The name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``values (body) `name @defm``. See Modules.
-
-### @defm!
-`( body module-name -- )` — `@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too.
+The name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``(body) `name @defm``. See Modules.
 
 ### @give
 `( ports quotation -- task )` — Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The child stack starts with the ports, in list order.
@@ -106,10 +103,7 @@ wrap (net.local-address `port at 0 >) @give task.await
 ```
 
 ### @load
-`( values path -- )` — Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
-
-### @load!
-`( path -- )` — `@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`.
+`( path -- )` — Read a source file and run it as one stack-isolated unit on an empty stack. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive.
 
 ### @spawn
 `( quotation -- task )` — Run the quotation concurrently on an empty child stack; the ambient stack never crosses the boundary. To start the child on values, build them into the quotation: `values (q) cat @spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency).
@@ -2159,7 +2153,7 @@ Inert inspection of ECL source: what a source declares, found by the reader's di
 #### Examples
 
 ```ecl
-"[] () `example @defm" parse source.declarations
+"() `example @defm" parse source.declarations
 # => (example)
 ```
 

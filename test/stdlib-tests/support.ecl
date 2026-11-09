@@ -1,5 +1,4 @@
 ### module stdlib.test.support
-[]
 (
  ### defp assert-true
  (condition -- : "Fail a userland stdlib assertion when condition is false.")

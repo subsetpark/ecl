@@ -1,6 +1,5 @@
 ### module pkg.solver
 # Resolve reachable package manifests with minimal version selection.
-[]
 (
  ### defp node-member?
  (nodes node -- bool : "Return 1 when an exact [name version] node occurs in a list.")

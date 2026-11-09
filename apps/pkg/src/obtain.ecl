@@ -1,6 +1,5 @@
 ### module pkg.obtain
 # Every selected download is pinned in the private generation before reuse.
-[]
 (
  ### defp optional
  (result -- bytes :

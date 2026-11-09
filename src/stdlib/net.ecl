@@ -31,7 +31,6 @@
     admitted writers and queued bytes drain, while the input direction remains readable. Framing,
     TLS, encoding, and protocol limits belong to libraries. Deadlines compose tasks with
     `task.await-for`, cancellation, and joining.")
-[]
 (
  ### def listen
  (config -- listener :

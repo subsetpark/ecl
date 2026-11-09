@@ -222,12 +222,7 @@ pub const GiveCursor = struct {
     }
 };
 
-/// A `@give` moves at most this many ports. Validation is resumable, but
-/// preparation and commit run inside `spawn` and cannot yield, so the count is
-/// capped rather than unbounded: that is what keeps the phases which must be
-/// atomic inside one scheduler step, and what lets the cursor hold its ports
-/// in fixed storage. Realistic calls move one port.
-pub const max_given_ports: usize = 16;
+const max_given_ports = machine.max_given_ports;
 
 /// Validates the port list in bounded slices and then performs the spawn that
 /// moves them, so an oversized list cannot occupy a scheduler step.
@@ -257,12 +252,11 @@ const GiveDriver = struct {
     }
 
     fn spawn(self: *GiveDriver, evaluator: *Fiber) MachineError!Value {
-        // The child starts on the given ports, seeded in bounded slices by the
-        // child's seed driver.
+        // The child starts on the given ports.
         const stack: machine.InitialStack = if (self.cursor.count == 0)
             .empty
         else
-            .{ .borrowed_seeds = self.moved.list };
+            .{ .borrowed_ports = self.moved.list };
         return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
             .parent_fiber = evaluator,
             .site = .{ .inherited = .{

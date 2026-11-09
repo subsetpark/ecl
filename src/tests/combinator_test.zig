@@ -248,13 +248,13 @@ test "paging: above and below restore what the quotation consumed" {
         .{ .name = "a test that leaves nothing reads beneath", .source = "0 5 [(pop) (1) (2)] cond 0 5 (pop) (1 -) while", .expected = "0 5 2 0 5" },
         .{
             .name = "a declared-effect module word counts inputs beneath the floor",
-            .source = "[] ((a -- b) (1 +) `inc def (a b -- c) (+) `add def (a -- bool) (0 <) `below0 def) `m @defm " ++
+            .source = "((a -- b) (1 +) `inc def (a b -- c) (+) `add def (a -- bool) (0 <) `below0 def) `m @defm " ++
                 "5 (m.inc) below 1 2 (m.add) below 1 2 (m.add) above 1 2 3 ((m.inc) dip) below",
             .expected = "5 6 1 2 3 3 1 2 1 2 3 3",
         },
         .{
             .name = "a cond test that is a declared-effect module word reads beneath the floor",
-            .source = "[] ((a -- bool) (0 <) `below0 def) `m @defm 5 [(m.below0) (1) (2)] cond 3 ([(m.below0) (1) (2)] cond) below",
+            .source = "((a -- bool) (0 <) `below0 def) `m @defm 5 [(m.below0) (1) (2)] cond 3 ([(m.below0) (1) (2)] cond) below",
             .expected = "5 2 3 2",
         },
         .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
@@ -529,7 +529,7 @@ test "linrec: quotations keep source scope module home and within authority" {
     try support.expectStacks(&.{
         .{
             .name = "all four escaped quotations stay source sealed",
-            .source = "[] ((dup 0 =) `terminal? defp (pop 10) `base-op defp " ++
+            .source = "((dup 0 =) `terminal? defp (pop 10) `base-op defp " ++
                 "(dup 1 -) `pre-op defp (+) `post-op defp " ++
                 "((terminal?)) `predicate def ((base-op)) `base def " ++
                 "((pre-op)) `pre def ((post-op)) `post def) `linrec-quotes @defm " ++
@@ -541,9 +541,9 @@ test "linrec: quotations keep source scope module home and within authority" {
         },
         .{
             .name = "cross-module quotations remain inside one caller effect boundary",
-            .source = "[] (((dup 0 =)) `predicate def ((pop 10)) `base def " ++
+            .source = "(((dup 0 =)) `predicate def ((pop 10)) `base def " ++
                 "((dup 1 -)) `pre def ((+)) `post def) `linrec-source @defm " ++
-                "[] ((n -- result) (linrec-source.predicate linrec-source.base " ++
+                "((n -- result) (linrec-source.predicate linrec-source.base " ++
                 "linrec-source.pre linrec-source.post linrec) `run def) " ++
                 "`linrec-runner @defm 2 linrec-runner.run",
             .expected = "13",
@@ -560,7 +560,7 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     defer runtime.deinit();
     switch (try runtime.runUnit(
         "linrec-source.ecl",
-        "[] (((dup 0 =)) `predicate def (()) `base def ((1 -)) `pre def " ++
+        "(((dup 0 =)) `predicate def (()) `base def ((1 -)) `pre def " ++
             "((dup)) `post def) `linrec-source @defm",
     )) {
         .ok => {},
@@ -572,7 +572,7 @@ test "linrec: cross-module descent preserves the enclosing effect boundary and t
     }
     switch (try runtime.runUnit(
         "linrec-runner.ecl",
-        "[] ((n -- result) (linrec-source.predicate linrec-source.base " ++
+        "((n -- result) (linrec-source.predicate linrec-source.base " ++
             "linrec-source.pre linrec-source.post linrec) `run def) " ++
             "`linrec-runner @defm",
     )) {
@@ -1054,7 +1054,7 @@ test "idioms: a foreign stamp keeps recognition off" {
     // Recognizing it substituted the core builtin and returned 6.
     try expectStack(
         &runtime,
-        "[] ((pop pop 42) `+ def ((+)) `q def) `m @defm [1 2 3] 0 m.q fold",
+        "((pop pop 42) `+ def ((+)) `q def) `m @defm [1 2 3] 0 m.q fold",
         "42",
     );
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
@@ -1080,8 +1080,8 @@ test "idioms: a foreign stamp keeps recognition off" {
     defer across.deinit();
     try expectStack(
         &across,
-        "[] (((+)) `q def) `a @defm " ++
-            "[] ((pop pop 42) `+ def (|l q| l 0 q fold) `run def) `b @defm " ++
+        "(((+)) `q def) `a @defm " ++
+            "((pop pop 42) `+ def (|l q| l 0 q fold) `run def) `b @defm " ++
             "[1 2 3] a.q b.run",
         "6",
     );
@@ -1127,7 +1127,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
-        "[1 2] (dup 1 = ([] ((a -- b) (pop 42) `f def) `m @defm) () if `m.f execute) each",
+        "[1 2] (dup 1 = (((a -- b) (pop 42) `f def) `m @defm) () if `m.f execute) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());

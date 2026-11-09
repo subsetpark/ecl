@@ -135,18 +135,14 @@ evaluator restores the values it owns and leaves effects owned by other systems
 to those systems.
 
 The same unit abstraction supports calculator input, script execution,
-applications launched by combinators, and spawned tasks. Constructors make the
-starting stack explicit: empty, a given port list, or explicit seeds.
-User-sized seeding is itself bounded work rather than hidden inside
-construction.
-
-Only `@defm` and `@load` take seeds. A seed operand is structurally needed only
-where the constructor must know its exact body: `@defm` attributes a
-reader-written body to its image, which a body built by `cat` would lose, and
-`@load`'s body is a file. `@attempt`, `@spawn`, `@give`, and `@each` run their
-body as plain code, and a stack value stored into a list enters as data, so
-`values (q) cat` already is seeding for them; they take the body alone and a
-caller pays that copy, itself budgeted, only when it passes values.
+applications launched by combinators, and spawned tasks. A constructed unit
+starts on an empty stack, or on `@give`'s port list, which the child
+materializes in bounded slices before its body runs. A body that needs values
+carries them: a stack value stored into a list enters as data, so
+`values (q) cat` builds the unit's whole input, and that copy is itself
+budgeted. `@defm` therefore receives exactly the body it attributes, and its
+single question — did the reader write this body? — has one operand to ask
+of.
 
 Task construction remains in the core vocabulary. The embedded `task` module
 exposes handle observation, waiting, and cancellation through the same scheduler

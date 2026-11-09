@@ -1,5 +1,4 @@
 ### module m
-[]
 (
  ### setp s
  40 `s setp

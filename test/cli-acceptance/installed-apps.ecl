@@ -1,6 +1,5 @@
 ### module cli.test.installed-apps
 # Exercise installation-only dispatch through a relocated executable.
-[]
 (
  `cli.test.support
  (expect expect-contains expect-absent absolute install invocation succeeds write) import
@@ -32,14 +31,14 @@
   descriptor json.emit "installed-apps/distribution" app "application.json" pair path.join write
   "{format 1 local \"app\" scopes {\"app\" {root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}"
   "installed-apps/distribution" app "ecl.modules" pair path.join write
-  "[] ((42) `answer def) `appfixture @defm"
+  "((42) `answer def) `appfixture @defm"
   "installed-apps/distribution" app "library.ecl" pair path.join write
   "appfixture.answer str io.prin args str io.prin `cwd \"sentinel\" fs.read-text io.prin"
   "installed-apps/distribution" entry
   `cwd "installed-apps/caller" fs.mkdirs
   "caller directory" "installed-apps/caller/sentinel" write
   "broken project map" "installed-apps/caller/ecl.modules" write
-  "[] ((999) `answer def) `appfixture @defm" "installed-apps/caller/appfixture.ecl" write
+  "((999) `answer def) `appfixture @defm" "installed-apps/caller/appfixture.ecl" write
   dup ["fixture" "one" "two"] in-caller "application dispatch" succeeds
   "42(\"one\" \"two\")caller directory" "application output" expect
   # An explicit caller map also cannot replace the application's own map.

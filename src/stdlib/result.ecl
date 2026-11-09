@@ -20,7 +20,6 @@
     or, on failure, the fallback value as given.
 
     `raise`, `fail`, and `assert` operate on errors directly and remain core words.")
-[]
 (
  ### defp checked
  (result -- result : "Validate and return a result.")

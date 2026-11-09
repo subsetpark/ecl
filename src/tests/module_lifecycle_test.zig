@@ -51,7 +51,7 @@ const ConcurrentMapFixture = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/race.ecl",
-            .data = "[] ((pop 42) `answer def) `race @defm\n",
+            .data = "((pop 42) `answer def) `race @defm\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
@@ -117,7 +117,7 @@ test "definitions: module def and defp accept all four annotation forms" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{ .output = &output.writer }), .default, .evaluate);
     defer runtime.deinit();
     // All four forms register, publicly and privately, and each word runs.
-    try expectOk(&runtime, "[] (" ++
+    try expectOk(&runtime, "(" ++
         "(1 +) `bare def " ++
         "( n -- n ) (2 *) `effected def " ++
         "( : \"Subtract three.\" ) (3 -) `documented def " ++
@@ -147,14 +147,14 @@ test "definitions: module def and defp accept all four annotation forms" {
     // no inferred check, so a word leaving two values crosses unimpeded.
     try expectErrorContains(
         &runtime,
-        "[] (( -- n ) (1 2) `two def) `liar @defm liar.two",
+        "(( -- n ) (1 2) `two def) `liar @defm liar.two",
         &.{ "kind contract", "word liar.two", "declared (0 -- 1)" },
     );
-    try expectStack(&runtime, "[] ((1 2) `two def) `quiet @defm quiet.two", "1 2");
+    try expectStack(&runtime, "((1 2) `two def) `quiet @defm quiet.two", "1 2");
     // Malformed recognized annotations remain 'domain in a module root.
     try expectErrorContains(
         &runtime,
-        "[] (( : ) (3) `bad def) `broken @defm",
+        "(( : ) (3) `bad def) `broken @defm",
         &.{ "kind domain", "malformed definition annotation" },
     );
 }
@@ -183,7 +183,7 @@ test "definitions: set and setp publish exact captures without synthesized metad
     try expectErrorContains(&runtime, "`answer doc", &.{ "kind domain", "documentation" });
     // `setp` carries the same simplification into a module root, where the
     // published constant needs no effect declaration to register.
-    try expectOk(&runtime, "[] (7 `x set 8 `h setp (h) `peek def) `m @defm");
+    try expectOk(&runtime, "(7 `x set 8 `h setp (h) `peek def) `m @defm");
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
     try expectOk(&runtime, "`m.x see");
@@ -199,7 +199,7 @@ test "modules: *module* reports the running module's name" {
     // Two modules built from the same body report their own names.
     try expectStack(
         &runtime,
-        "[] ((*module*) `name def) `left @defm [] ((*module*) `name def) `right @defm " ++
+        "((*module*) `name def) `left @defm ((*module*) `name def) `right @defm " ++
             "left.name right.name",
         "left right",
     );
@@ -214,11 +214,11 @@ test "modules: *module* reports the running module's name" {
     });
     // A construction body already knows the name it is being built under:
     // `*module*` answers, and the value it leaves is what the body refuses.
-    try expectErrorContains(&runtime, "[] (*module*) `building @defm", &.{
+    try expectErrorContains(&runtime, "(*module*) `building @defm", &.{
         "kind domain",
         "left 1 value",
     });
-    try expectOk(&runtime, "[] ((*module*) `name set) `escaped @defm");
+    try expectOk(&runtime, "((*module*) `name set) `escaped @defm");
     try expectErrorContains(&runtime, "escaped.name call", &.{
         "kind domain",
         "registered module",
@@ -232,31 +232,10 @@ test "modules: a qualified call reaches the reloaded module" {
     defer runtime.deinit();
     // `via` resolves `m.x` each time it runs, so a reload reaches it as it
     // reaches an explicit lookup.
-    try expectOk(&runtime, "[] ((1) `x def) `m @defm (m.x) `via def");
+    try expectOk(&runtime, "((1) `x def) `m @defm (m.x) `via def");
     try expectStack(&runtime, "via", "1");
-    try expectStack(&runtime, "[] ((2) `x def) `m @defm via m.x", "2 2");
-    try expectStack(&runtime, "[] ((3) `x def) `m @defm via `m.x execute", "3 3");
-}
-
-test "modules: explicit seeds initialize the @defm construction stack in order" {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
-    defer runtime.deinit();
-    // The explicit seed list initializes the isolated body in list order, so the body observes
-    // the list's first element deepest. Consuming them proves the order without
-    // needing to read the durable stack back.
-    try expectStack(
-        &runtime,
-        "[10 3] (div `quotient set) `divide @defm divide.quotient",
-        "3",
-    );
-    // Whatever the body leaves behind is refused: a module keeps no state,
-    // and nothing it leaves ever reaches the caller.
-    try expectErrorContains(&runtime, "[1 2 3] (+ swap 9) `residue @defm", &.{ "kind domain", "left 3 values" });
-    try expectErrorContains(&runtime, "[4 5] () `untouched @defm", &.{ "kind domain", "left 2 values" });
-    // The seeded values are gone from the caller's stack in every case.
-    try expectStack(&runtime, "[6 7] (+ `sum set) `consumed @defm consumed.sum", "13");
+    try expectStack(&runtime, "((2) `x def) `m @defm via m.x", "2 2");
+    try expectStack(&runtime, "((3) `x def) `m @defm via `m.x execute", "3 3");
 }
 
 test "modules: dotted names qualify dynamically and split executable words at the final dot" {
@@ -264,8 +243,8 @@ test "modules: dotted names qualify dynamically and split executable words at th
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((1) `utils def) `base @defm");
-    try expectOk(&runtime, "[] ((41) `f def (42) `g def) `base.utils @defm");
+    try expectOk(&runtime, "((1) `utils def) `base @defm");
+    try expectOk(&runtime, "((41) `f def (42) `g def) `base.utils @defm");
     try expectStack(&runtime, "base.utils base.utils.f", "1 41");
     try expectStack(&runtime, "`base.utils `f qualify dup type swap execute", "symbol 41");
     try expectStack(&runtime, "`base.utils 1 (`f) (`g) if qualify execute", "41");
@@ -273,9 +252,9 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "utils.g", "42");
     try expectOk(&runtime, "`base.utils (g) import");
     try expectStack(&runtime, "g", "42");
-    try expectOk(&runtime, "[] ((43) `f def) `base.utils @defm");
+    try expectOk(&runtime, "((43) `f def) `base.utils @defm");
     try expectStack(&runtime, "base.utils.f `base.utils `f qualify execute", "43 43");
-    try expectOk(&runtime, "[] ((44) `f def) `base.utils @defm");
+    try expectOk(&runtime, "((44) `f def) `base.utils @defm");
     try expectStack(&runtime, "base.utils.f", "44");
 }
 
@@ -290,20 +269,20 @@ test "modules: core qualifier reaches shadowed core words and is never a registr
     try expectStack(&runtime, "`core `dup qualify 4 swap execute", "4 4");
     // A module whose own export shadows a core word reaches the original
     // through the qualifier, which is the case the standard library needs.
-    try expectOk(&runtime, "[] ((pop `shadowed) `where def ([0 1 1] core.where) `indices def) `shadow.host @defm");
+    try expectOk(&runtime, "((pop `shadowed) `where def ([0 1 1] core.where) `indices def) `shadow.host @defm");
     try expectStack(&runtime, "shadow.host.indices", "[1 2]");
     try expectStack(&runtime, "7 shadow.host.where", "shadowed");
     try expectErrorContains(&runtime, "core.no-such-binding", &.{ "kind undefined-word", "scope core" });
     // Core is a scope, not a registration: nothing may publish under its name
     // as a module or an alias, and it is not a module to
     // alias or import from.
-    try expectErrorContains(&runtime, "[] () `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
+    try expectErrorContains(&runtime, "() `core @defm", &.{ "kind domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "`core `shadow.host alias", &.{ "kind domain", "reserved for the core qualifier" });
     try expectErrorContains(&runtime, "`short `core alias", &.{ "kind undefined-word", "undefined module `core`" });
     try expectErrorContains(&runtime, "`core (dup) import", &.{ "kind undefined-word", "scope qualified" });
     // The reservation is the whole name, not a segment: a dotted name under it
     // registers, resolves, and qualifies like any other module.
-    try expectOk(&runtime, "[] ((1) `f def) `core.utils @defm");
+    try expectOk(&runtime, "((1) `f def) `core.utils @defm");
     try expectStack(&runtime, "core.utils.f `core.utils `f qualify execute", "1 1");
     try expectStack(&runtime, "1 core.dup", "1 1");
 }
@@ -313,9 +292,9 @@ test "modules: execute preserves ordinary dispatch home contracts and errors" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((3) `secret defp (secret 4 +) `f def) `private.home @defm");
+    try expectOk(&runtime, "((3) `secret defp (secret 4 +) `f def) `private.home @defm");
     try expectStack(&runtime, "`private.home `f qualify execute", "7");
-    try expectOk(&runtime, "[] ((5) `five def (1 +) `inc def) `other.home @defm");
+    try expectOk(&runtime, "((5) `five def (1 +) `inc def) `other.home @defm");
     try expectStack(
         &runtime,
         "`other.home `five qualify execute `other.home `inc qualify execute",
@@ -335,11 +314,11 @@ test "modules: removed identity builtin has no reservation and names validate by
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    for ([_][]const u8{ "[] () `.bad @defm", "[] () `bad. @defm", "[] () `bad..path @defm" }) |source|
+    for ([_][]const u8{ "() `.bad @defm", "() `bad. @defm", "() `bad..path @defm" }) |source|
         try expectErrorContains(&runtime, source, &.{"kind parse"});
-    try expectErrorContains(&runtime, "[] () 1 @defm", &.{"kind type"});
+    try expectErrorContains(&runtime, "() 1 @defm", &.{"kind type"});
     try expectErrorContains(&runtime, "`x 1 import", &.{"kind type"});
-    try expectErrorContains(&runtime, "[] ((1) `bad.name def) `core.utils @defm", &.{"kind domain"});
+    try expectErrorContains(&runtime, "((1) `bad.name def) `core.utils @defm", &.{"kind domain"});
     try expectErrorContains(&runtime, "1 `f qualify", &.{"kind type"});
     try expectErrorContains(&runtime, "`core.utils 1 qualify", &.{"kind type"});
     try expectErrorContains(&runtime, "`core..utils `f qualify", &.{"kind parse"});
@@ -348,7 +327,7 @@ test "modules: removed identity builtin has no reservation and names validate by
     try expectErrorContains(&runtime, "1 execute", &.{"kind type"});
 }
 
-const churn_cycle = "[] ((\"a module string\" [1 2 3] {k v}) `peek def) `churn @defm " ++
+const churn_cycle = "((\"a module string\" [1 2 3] {k v}) `peek def) `churn @defm " ++
     "`churn.peek execute pop pop pop";
 
 test "concurrency: repeated construct reload cycles grow no faster than registrations" {
@@ -407,9 +386,9 @@ test "concurrency: applying an escaped quotation races reload" {
     // at eight workers. The assertions are deliberately weak: failures stay
     // inside the envelope and the runtime keeps progressing; TSan and the
     // allocator are what should speak here.
-    try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `racer @defm racer.q `held set");
+    try expectOk(&runtime, "((1) `k def ((k)) `q def) `racer @defm racer.q `held set");
     try expectOk(&runtime, "[1] 24 take (pop ((held call) @attempt) @spawn) each " ++
-        "[] ((2) `k def ((k)) `q def) `racer @defm " ++
+        "((2) `k def ((k)) `q def) `racer @defm " ++
         "(task.await) each pop");
 }
 
@@ -431,12 +410,12 @@ test "concurrency: escaped quotations keep running old code across a concurrent 
         // reload published or retired leaks.
         try expectOk(
             &runtime,
-            "[] ((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
+            "((1) `k def ((k)) `q def) `goner @defm goner.q `gone set",
         );
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((gone call) @attempt) @spawn) each " ++
-                "[] ((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
+                "((2) `k def ((k)) `q def) `goner @defm (task.await) each pop",
             "",
         );
     }
@@ -456,12 +435,12 @@ test "concurrency: a reload that drops a word leaves escaped quotations running 
         // still resolve there.
         try expectOk(
             &runtime,
-            "[] ((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
+            "((1) `k def ((k)) `q def) `reloaded @defm reloaded.q `held set",
         );
         try expectStack(
             &runtime,
             "[1] 64 take (pop ((held call) @attempt) @spawn) each " ++
-                "[] ((2) `k def) `reloaded @defm (task.await) each pop",
+                "((2) `k def) `reloaded @defm (task.await) each pop",
             "",
         );
         // The replacement is what callers now reach; the escaped quotation went

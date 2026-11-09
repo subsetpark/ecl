@@ -1,6 +1,5 @@
 ### module cli.test.module-maps
 # Validate maps through the public CLI, without constructing a project Session.
-[]
 (
  `cli.test.support
  (expect expect-contains install invocation succeeds fails write exists?) import
@@ -51,7 +50,7 @@
   `cwd "module-maps/maps/src" fs.mkdirs
   complete "module-maps/maps/complete" write
   # A source with observable side effects is inspected, never executed.
-  "`cwd \"executed\" \"bad\" fs.create-text [] () `localmod @defm"
+  "`cwd \"executed\" \"bad\" fs.create-text () `localmod @defm"
   "module-maps/maps/src/entry.ecl" write
   "{format 1 map \"complete\"}" "module-maps/maps/reference" write
   dup ["maps/complete"] check "complete map" succeeds "" "complete map stdout" expect
@@ -80,7 +79,7 @@
   dup "maps/unpublished" " " 16777217 str.repeat document "oversized document" fails
   "bounded module map input" "oversized document" expect-contains
   # Validation discovers new sources with the same rules as startup.
-  "[] () `localmod @defm" "module-maps/maps/src/duplicate.ecl" write
+  "() `localmod @defm" "module-maps/maps/src/duplicate.ecl" write
   dup ["maps/complete"] check "duplicate module" invalid
   # The diagnostic names the module and both declaring files.
   dup ["module `localmod`" "`src/duplicate.ecl`" "`src/entry.ecl`" "scope `local`"] swap

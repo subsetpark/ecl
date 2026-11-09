@@ -130,7 +130,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "[] (100 `increment set) `sample @defm",
+        .data = "(100 `increment set) `sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -164,7 +164,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer source_root.cleanup();
     try source_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "[] (100 `increment set) `sample @defm",
+        .data = "(100 `increment set) `sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,

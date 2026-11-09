@@ -1,5 +1,4 @@
 ### module pkg.test.version
-[]
 (
  `pkg.test.support
  (equal raises raises-containing documented)

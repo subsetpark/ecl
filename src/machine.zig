@@ -4472,12 +4472,9 @@ pub const Fiber = struct {
         push,
         call: ?*const map_state.SourceScope,
         session: ?*const map_state.SourceScope,
-        /// `@load`: the source runs as a stack-isolated unit. When `seeded`,
-        /// its seed list waits on top of the caller's stack until activation
-        /// pops it, so reading the file carries no seed ownership.
+        /// `@load`: the source runs as a stack-isolated unit on an empty stack.
         load: struct {
             source: ?*const map_state.SourceScope = null,
-            seeded: bool,
             word: intern.TraceWord,
         },
         /// Registration only: the source runs, then the loading lease and
@@ -4545,9 +4542,6 @@ pub const Fiber = struct {
             locating: map_state.SourcePathCursor,
             ingesting: spans.SpanArchive.SourceIngestCursor,
             activating: *Header,
-            /// `@load` has opened its boundary and copies its seeds above it
-            /// before the file's first form runs.
-            seeding: SeedMaterializer,
             storage,
         };
 
@@ -4630,22 +4624,12 @@ pub const Fiber = struct {
                     switch (self.completion.borrowMut().*) {
                         .push => try evaluator.pushBorrowed(.{ .list = root_header }),
                         .load => |load| {
-                            // The seed list the primitive left on top is the
-                            // only operand this unit takes from its caller.
-                            const seeds: ?Value = if (load.seeded) evaluator.takeStackOwned().? else null;
                             const provenance: modules.RegistrationProvenance = if (load.source) |context|
                                 .{ .source = context }
                             else
                                 .ordinary;
                             heap.incRef(root_header);
-                            evaluator.openLoad(root_header, load.word, provenance) catch |err| {
-                                if (seeds) |item| evaluator.releases.releaseValue(item);
-                                return err;
-                            };
-                            if (seeds) |item| {
-                                self.state = .{ .seeding = .init(item.list) };
-                                return .stepped;
-                            }
+                            try evaluator.openLoad(root_header, load.word, provenance);
                         },
                         .call, .session => |source| {
                             heap.incRef(root_header);
@@ -4695,13 +4679,6 @@ pub const Fiber = struct {
                     }
                     return .completed;
                 },
-                .seeding => |*materializer| {
-                    if (!try materializer.advance(evaluator, work)) return .stepped;
-                    // An empty file has no later dispatch safe point. Settle
-                    // the final seed-copy charge before completion.
-                    try evaluator.pollCancellableCompletion();
-                    return .completed;
-                },
                 .storage => unreachable,
             };
             return .stepped;
@@ -4721,11 +4698,6 @@ pub const Fiber = struct {
                     self.state = .storage;
                     break :result false;
                 },
-                .seeding => |*materializer| result: {
-                    materializer.deinit(releases, storage_allocator);
-                    self.state = .storage;
-                    break :result false;
-                },
                 .ingesting => |*ingestion| result: {
                     if (!ingestion.advanceRetirement()) break :result false;
                     self.state = .storage;
@@ -4741,18 +4713,9 @@ pub const Fiber = struct {
         }
         pub const ownership: heap.DriverOwnership = .bounded_retirement;
     };
-    /// `path @load!`: the file runs as a stack-isolated unit on an empty stack.
-    pub fn loadFileSeedlessOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
+    /// `path @load`: the file runs as a stack-isolated unit on an empty stack.
+    pub fn loadFileOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
         return self.fileTransferOwned(path, path_value, .{ .source = .{ .load = .{
-            .seeded = false,
-            .word = self.active_word,
-        } } });
-    }
-    /// `values path @load`: as `@load!`, seeded from the list the primitive
-    /// left on top of the caller's stack.
-    pub fn loadFileSeededOwned(self: *Fiber, path: []u8, path_value: Value) MachineError!void {
-        return self.fileTransferOwned(path, path_value, .{ .source = .{ .load = .{
-            .seeded = true,
             .word = self.active_word,
         } } });
     }
@@ -5222,8 +5185,8 @@ pub const Fiber = struct {
     fn failUnderflowOf(self: *Fiber, subject: []const u8, count: usize) MachineError {
         // Underflow against the floor of a unit constructor's substack is the
         // one underflow whose cause is invisible: the values the caller meant
-        // to pass are right there and unreachable. Name the isolation and the
-        // seeding remedy rather than reporting a bare shortfall.
+        // to pass are right there and unreachable. Name the isolation and how
+        // to pass values, rather than reporting a bare shortfall.
         const isolation = self.isolationGuidance(self.hardFloor());
         const failure = if (isolation) |guidance| self.failFmt(
             .underflow,
@@ -5289,13 +5252,11 @@ pub const Fiber = struct {
                 },
                 .module => .{
                     .constructor = "@defm",
-                    .advice = "the substack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values (body) `name @defm`",
+                    .advice = "a module body starts on an empty stack and cannot read the caller's",
                 },
                 .load => .{
                     .constructor = "@load",
-                    .advice = "the loaded file's stack is isolated from the caller's stack — " ++
-                        "pass initial values in the constructor's values operand: `values path @load`",
+                    .advice = "a loaded file starts on an empty stack and cannot read the caller's",
                 },
             };
         }
@@ -5363,29 +5324,6 @@ pub const Fiber = struct {
                 return item == .list;
             }
         }.accepts);
-    }
-    /// Pops the two inputs every unit constructor takes: a seed-values list
-    /// followed by the construction body. The fixed arity keeps the exact body
-    /// separate without a wrapper value. The returned owner takes both stack
-    /// references directly; an empty seed list is released here and represented
-    /// internally by null so an unseeded construction needs no materializer.
-    pub fn popUnitInput(self: *Fiber) MachineError!OwnedUnitInput {
-        try self.require(2);
-        var body = try self.popQuotation();
-        errdefer body.deinit();
-        var seeds = try self.popList();
-        defer seeds.deinit();
-        const seed_header = if (seeds.borrow().list.length() == 0)
-            null
-        else
-            seeds.take().list;
-        return OwnedUnitInput.init(seed_header, body.take().list);
-    }
-    /// The `!` constructors take no values operand: the input is exactly the
-    /// empty-seed representation `[] body` would decode to.
-    pub fn popSeedlessUnitInput(self: *Fiber) MachineError!OwnedUnitInput {
-        var body = try self.popQuotation();
-        return OwnedUnitInput.init(null, body.take().list);
     }
     pub fn popString(self: *Fiber) MachineError!heap.OwnedValue {
         return self.popChecked("a string", struct {
@@ -6017,11 +5955,11 @@ pub const Fiber = struct {
     pub fn moduleOwned(
         self: *Fiber,
         name: intern.ModuleName,
-        input: OwnedUnitInput,
+        body_header: *Header,
         doc: ?*env.DocumentationString,
     ) MachineError!void {
-        var owned = input;
-        defer owned.deinit(self.releases);
+        var body = heap.Owned(*Header).init(body_header);
+        defer body.deinit(self.releases, self.allocator);
         const registry = self.inherited.registry;
         const word = self.active_word;
         const provenance = self.current.?.site.registration_provenance;
@@ -6030,32 +5968,18 @@ pub const Fiber = struct {
         if (doc) |document| candidate.document(document);
         // Attribution asks one question, of the exact designated body. The
         // archive consumes that body into either an unchanged owner or an
-        // opaque exact-root admission awaiting a target scope. Seeds are a
-        // separate value and are never reached either way.
+        // opaque exact-root admission awaiting a target scope.
         //
-        // Both re-scoping and seeding are user-sized, so they are ordinary
-        // resumable scheduler work: the driver holds the candidate image, the
-        // seeds, and the source body until the copy is finished and the
-        // boundary can open. Only a body with neither to do still opens it in
-        // this step, and that case copies nothing at all.
-        var body = heap.Owned(*Header).init(owned.takeBody());
-        defer body.deinit(self.releases, self.allocator);
+        // Re-scoping is user-sized, so it is ordinary resumable scheduler
+        // work: the driver holds the candidate image and the source body until
+        // the copy is finished and the boundary can open. A body with nothing
+        // to re-scope opens it in this step and copies nothing at all.
         const prepared = try self.archive.prepareConstructionBody(&body);
         switch (prepared) {
             .unchanged => |prepared_body| {
                 var runnable = prepared_body;
                 defer runnable.deinit(self.releases, self.allocator);
-                if (owned.seedHeader() == null) {
-                    return self.openImageBoundary(&candidate, word, runnable.take());
-                }
-                try self.startDriver(ConstructionDriver{
-                    .state = .init(.{ .open = .{
-                        .target = .init(.{ .image = candidate.move() }),
-                        .body = .init(runnable.take()),
-                    } }),
-                    .materializer = .init(.init(owned.takeSeeds().?)),
-                    .word = word,
-                });
+                return self.openImageBoundary(&candidate, word, runnable.take());
             },
             .admitted => |admitted| {
                 var admission: ?*spans.SpanArchive.AdmittedConstructionBody = admitted;
@@ -6078,10 +6002,6 @@ pub const Fiber = struct {
                         .target = .init(.{ .image = candidate.move() }),
                         .cursor = .init(cursor.take()),
                     } }),
-                    .materializer = if (owned.takeSeeds()) |seeds|
-                        .init(.init(seeds))
-                    else
-                        null,
                     .word = word,
                 });
             },
@@ -6386,9 +6306,7 @@ pub const Fiber = struct {
     /// body, a state application, and `@attempt` — differ in what they record
     /// and what runs inside them, never in how the boundary is opened. The
     /// caller keeps the frame-count check, because what it has to release on
-    /// refusal differs; past that point failure releases the body here. A
-    /// seed values are never handed in: they belong to the driver that
-    /// materializes them after the boundary is open.
+    /// refusal differs; past that point failure releases the body here.
     fn openBoundary(
         self: *Fiber,
         mode: BoundaryMode,
@@ -6492,84 +6410,22 @@ pub const Fiber = struct {
 /// cleanup, or backpressure), so its executor should let other work run.
 pub const RunStatus = enum { completed, exhausted, yielded, parked };
 
-/// The decoded input every unit constructor takes. It remains the one nominal
-/// owner through validation, child borrowing, fan-out transfer, and boundary
-/// handoff. Empty seeds use the null representation; otherwise it owns both
-/// list references. Moving it empties the source, and `deinit` is the sole
-/// destructor for an input that has not split into later boundary states.
-pub const OwnedUnitInput = enum(u128) {
-    consumed = 0,
-    _,
-
-    const pointer_mask: u128 = std.math.maxInt(u64);
-
-    comptime {
-        if (@bitSizeOf(usize) > 64)
-            @compileError("OwnedUnitInput requires pointers no wider than 64 bits");
-    }
-
-    fn init(seeds: ?*Header, body: *Header) OwnedUnitInput {
-        const body_bits: u128 = @intFromPtr(body);
-        const seed_bits: u128 = if (seeds) |items| @intFromPtr(items) else 0;
-        std.debug.assert(body_bits != 0 and body_bits <= pointer_mask);
-        std.debug.assert(seed_bits <= pointer_mask);
-        return @fromBackingInt(@intCast(body_bits | (seed_bits << 64)));
-    }
-
-    fn bodyHeader(self: OwnedUnitInput) ?*Header {
-        const bits = @backingInt(self) & pointer_mask;
-        return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
-    }
-
-    fn seedHeader(self: OwnedUnitInput) ?*Header {
-        const bits = @backingInt(self) >> 64;
-        return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
-    }
-
-    /// The body, borrowed: the input stays alive until the scheduler has
-    /// retained it and the initial operands into the new Fiber, so a child
-    /// launch never invents a second teardown protocol.
-    pub fn quotation(self: *const OwnedUnitInput) *Header {
-        std.debug.assert(self.* != .consumed);
-        return self.bodyHeader().?;
-    }
-
-    pub fn move(self: *OwnedUnitInput) OwnedUnitInput {
-        std.debug.assert(self.* != .consumed);
-        const moved = self.*;
-        self.* = .consumed;
-        return moved;
-    }
-
-    fn takeBody(self: *OwnedUnitInput) *Header {
-        const body = self.bodyHeader().?;
-        const seed_bits = @backingInt(self.*) & ~pointer_mask;
-        self.* = if (seed_bits == 0) .consumed else @fromBackingInt(@intCast(seed_bits));
-        return body;
-    }
-
-    fn takeSeeds(self: *OwnedUnitInput) ?*Header {
-        const seeds = self.seedHeader();
-        const body_bits = @backingInt(self.*) & pointer_mask;
-        self.* = if (body_bits == 0) .consumed else @fromBackingInt(@intCast(body_bits));
-        return seeds;
-    }
-
-    pub fn deinit(self: *OwnedUnitInput, releases: *heap.ReleaseDomain) void {
-        if (self.seedHeader()) |items| releases.releaseHeader(items);
-        if (self.bodyHeader()) |body| releases.releaseHeader(body);
-        self.* = .consumed;
-    }
-};
-
 /// What a constructed fiber's stack starts with. Every reference here is a
 /// borrow the caller keeps through initialization; the Fiber retains its own
 /// independent stack-owned reference to each before returning.
 pub const InitialStack = union(enum) {
     empty,
-    /// Seed values in list order: `@give`'s moved ports.
-    borrowed_seeds: *Header,
+    /// `@give`'s moved ports, in list order: at most `max_given_ports`.
+    borrowed_ports: *Header,
 };
+
+/// A `@give` moves at most this many ports. Validation is resumable, but
+/// preparation and commit run inside `spawn` and cannot yield, so the count is
+/// capped rather than unbounded: that is what keeps the phases which must be
+/// atomic inside one scheduler step, what lets the transfer cursor hold its
+/// ports in fixed storage, and what lets a child's initial stack go on in
+/// constant work. Realistic calls move one port.
+pub const max_given_ports: usize = 16;
 
 /// Starts a fiber on code that resolves one form at a time: top-level source,
 /// or a task's body.
@@ -6578,18 +6434,17 @@ pub fn initialize(fiber: *Fiber, code: *Header, initial_stack: InitialStack) err
     std.debug.assert(fiber.frames.items.len == 0);
     std.debug.assert(fiber.terminal == .evaluating);
     std.debug.assert(fiber.current == null);
-    // Seeds go on through a driver that materializes them in bounded slices:
-    // the evaluator services a driver before the activation's code, so the
-    // body still starts on a fully seeded stack.
     switch (initial_stack) {
         .empty => {},
-        .borrowed_seeds => |items| {
-            // The driver's field owns this reference on every exit: a failed
-            // `startDriver` disposes the pending driver's fields for us.
-            heap.incRef(items);
-            try fiber.startDriver(ChildSeedDriver{
-                .materializer = .init(.init(items)),
-            });
+        .borrowed_ports => |items| {
+            const count: usize = @intCast(items.length());
+            std.debug.assert(count <= max_given_ports);
+            try fiber.stack.ensureUnusedCapacity(fiber.allocator, count);
+            for (0..count) |index| {
+                const item = list.atUnchecked(.{ .list = items }, index);
+                fiber.stack.appendAssumeCapacity(item);
+                heap.retainValue(item);
+            }
         },
     }
     heap.incRef(code);
@@ -8114,47 +7969,6 @@ fn advanceRegistration(
     };
 }
 
-/// The one bounded owner/progress state for explicit seed materialization. Both an
-/// in-machine construction boundary and a fresh child Fiber embed this exact
-/// state machine. Capacity for a granted slice is secured before its first
-/// append, so allocation failure adds none of that slice; an earlier prefix is
-/// ordinary stack ownership and retires with its boundary or Fiber.
-const SeedMaterializer = struct {
-    seeds: heap.Owned(*Header),
-    next: usize = 0,
-
-    fn init(seeds: *Header) SeedMaterializer {
-        return .{ .seeds = .init(seeds) };
-    }
-
-    pub fn deinit(
-        self: *SeedMaterializer,
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.seeds.deinit(releases, allocator);
-        self.next = 0;
-    }
-
-    fn advance(
-        self: *SeedMaterializer,
-        fiber: *Fiber,
-        work: *poll_api.WorkBudget,
-    ) error{OutOfMemory}!bool {
-        const source = self.seeds.borrow();
-        const count: usize = @intCast(source.length());
-        const end = self.next + work.take(count - self.next);
-        try fiber.stack.ensureUnusedCapacity(fiber.allocator, end - self.next);
-        for (self.next..end) |index| {
-            const item = list.atUnchecked(.{ .list = source }, index);
-            fiber.stack.appendAssumeCapacity(item);
-            heap.retainValue(item);
-        }
-        self.next = end;
-        return self.next == count;
-    }
-};
-
 /// What a `ConstructionDriver` opens once its body is final: `@defm`'s
 /// candidate image, carrying its validated name and its constructing site's
 /// provenance.
@@ -8166,18 +7980,14 @@ const ConstructionTarget = struct {
     }
 };
 
-/// The user-sized half of opening a fiber: re-scoping a witnessed construction
-/// body, and materializing explicit seed values onto the construction stack.
+/// The user-sized half of opening a module construction: re-scoping a
+/// witnessed construction body.
 ///
-/// Both are proportional to what the program wrote, so neither may run to
+/// It is proportional to what the program wrote, so it may not run to
 /// completion inside one scheduler step. Everything the boundary will need is
-/// held here meanwhile — the candidate image, the source body, the finished
-/// copy, and the seeds — so abandoning the fiber at any point releases all of it
+/// held here meanwhile — the candidate image, the source body, and the
+/// finished copy — so abandoning the fiber at any point releases all of it
 /// through field ownership and publishes nothing.
-///
-/// The driver stays installed across the open phase on purpose: the evaluator
-/// services a work driver before the activation's own code, so the body cannot
-/// begin until the last seed is on the stack.
 const ConstructionDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
@@ -8194,9 +8004,8 @@ const ConstructionDriver = struct {
             target: heap.Owned(ConstructionTarget),
             body: heap.Owned(*Header),
         },
-        /// The boundary exists and only the independently optional seeds may
-        /// remain to be materialized.
-        seed,
+        /// The boundary exists; completion is polled in the next step.
+        opened,
 
         pub fn deinit(
             self: *State,
@@ -8212,14 +8021,13 @@ const ConstructionDriver = struct {
                     open.body.deinit(releases, allocator);
                     open.target.deinit(releases, allocator);
                 },
-                .seed => {},
+                .opened => {},
             }
             self.* = undefined;
         }
     };
 
     state: heap.Owned(State),
-    materializer: ?heap.Owned(SeedMaterializer),
     /// The word that opened the construction, captured because the boundary is
     /// opened in a later step than the one that dispatched it.
     word: intern.TraceWord,
@@ -8246,51 +8054,18 @@ const ConstructionDriver = struct {
             },
             .open => |*open| {
                 // The body is consumed by the open, on success and on failure
-                // alike; the seeds are not, so they stay owned here until the
-                // boundary they seed exists.
+                // alike.
                 const body = open.body.take();
                 try evaluator.openImageBoundary(&open.target.borrowMut().image, self.word, body);
                 open.target.deinit(evaluator.releases, evaluator.allocator);
-                self.state.borrowMut().* = .seed;
+                self.state.borrowMut().* = .opened;
                 return .stepped;
             },
-            .seed => {
-                // A construction that only had a body to re-scope reaches this
-                // phase with nothing to seed, which is the whole of its work.
-                if (self.materializer) |*materializer| {
-                    if (!try materializer.borrowMut().advance(
-                        evaluator,
-                        evaluator.workBudget(),
-                    )) return .stepped;
-                }
+            .opened => {
                 try evaluator.pollCancellableCompletion();
                 return .completed;
             },
         }
-    }
-};
-
-/// The child half of the same rule: a fresh Fiber's own first slices put its
-/// input's seeds on its stack, so a spawn never copies a user-sized seed list
-/// inside the step that created it — and `@each` cannot multiply that copy by
-/// the number of children it starts per turn.
-const ChildSeedDriver = struct {
-    pub const address_stable_driver = {};
-    pub const ownership: heap.DriverOwnership = .fields;
-    materializer: heap.Owned(SeedMaterializer),
-
-    pub fn advance(evaluator: *Fiber, self: *ChildSeedDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        if (try self.materializer.borrowMut().advance(
-            evaluator,
-            evaluator.workBudget(),
-        )) {
-            // An empty body has no later dispatch safe point. Settle the
-            // final seed-copy charge before completion can retire this driver.
-            try evaluator.pollCancellableCompletion();
-            return .completed;
-        }
-        return .stepped;
     }
 };
 

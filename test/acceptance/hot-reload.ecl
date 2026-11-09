@@ -1,5 +1,4 @@
 ### module math
-[]
 (
  ### def inc
  (n -- n)
@@ -9,7 +8,6 @@
 10 math.inc io.pp 20 inc io.pp 30 m.inc io.pp
 
 ### module math
-[]
 (
  ### def inc
  (n -- n)

@@ -60,80 +60,61 @@ fn expectParseEquivalent(source: []const u8) !void {
 test "formatter keeps a module annotation with its registration" {
     // The annotation claims the registration's header and stands on its own
     // line above the operands; the operands after it claim no second header.
-    const seeded = "(: \"Doc.\") [] ((1) `x def) `stats @defm\n";
+    const annotated = "(: \"Doc.\") ((1) `x def) `stats @defm\n";
     try expectFormat(
-        seeded,
-        "### module stats\n(: \"Doc.\")\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n",
+        annotated,
+        "### module stats\n(: \"Doc.\")\n(\n ### def x\n (1) `x def) `stats @defm\n",
     );
-    try expectParseEquivalent(seeded);
+    try expectParseEquivalent(annotated);
     try expectFormat(
-        "(: \"Doc.\") (() `x def) `stats @defm!\n",
-        "### module stats\n(: \"Doc.\")\n(\n ### def x\n () `x def) `stats @defm!\n",
+        "(: \"Doc.\") (() `x def) `stats @defm\n",
+        "### module stats\n(: \"Doc.\")\n(\n ### def x\n () `x def) `stats @defm\n",
     );
     // An implementation comment beneath the header stays there.
-    const commented = "### module stats\n# Note.\n(: \"Doc.\")\n[]\n() `stats @defm\n";
+    const commented = "### module stats\n# Note.\n(: \"Doc.\")\n() `stats @defm\n";
     try expectFormat(commented, commented);
 }
 
 test "formatter leaves a non-documentation list before a module registration as data" {
     // `@defm` reads only `(: "text")` as documentation, so a stack-effect
     // annotation with a docstring is caller data whose string must survive.
-    try expectParseEquivalent("(x -- y : \"a\\n  b\") [] () `m @defm\n");
+    try expectParseEquivalent("(x -- y : \"a\\n  b\") () `m @defm\n");
 }
 
-test "formatter measures a module seed against its opening line" {
-    const source = "[] ((1) `x def) `stats @defm\n";
+test "formatter measures a module registration against its opening line" {
+    const source = "((1) `x def) `stats @defm\n";
     try expectFormat(
         source,
-        "### module stats\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n",
+        "### module stats\n(\n ### def x\n (1) `x def) `stats @defm\n",
     );
     try expectParseEquivalent(source);
 
     try expectFormat(
-        "[]\n() `empty @defm\n",
-        "### module empty\n[]\n() `empty @defm\n",
+        "() `empty @defm\n",
+        "### module empty\n() `empty @defm\n",
     );
-    try expectFormat(
-        "[] # seed details\n() `commented @defm\n",
-        "### module commented\n[] # seed details\n() `commented @defm\n",
-    );
-
-    const wide_seed = &@as([98]u8, @splat('a'));
-    const wide_source = try std.fmt.allocPrint(
-        allocator,
-        "[{s}] () `wide @defm\n",
-        .{wide_seed},
-    );
-    defer allocator.free(wide_source);
-    const wide_expected = try std.fmt.allocPrint(
-        allocator,
-        "### module wide\n[{s}]\n() `wide @defm\n",
-        .{wide_seed},
-    );
-    defer allocator.free(wide_expected);
-    try expectFormat(wide_source, wide_expected);
 
     const wide_body = &@as([89]u8, @splat('b'));
     const wide_body_source = try std.fmt.allocPrint(
         allocator,
-        "[] ({s}) `m @defm\n",
+        "({s}) `m @defm\n",
         .{wide_body},
     );
     defer allocator.free(wide_body_source);
     const wide_body_expected = try std.fmt.allocPrint(
         allocator,
-        "### module m\n[]\n({s}) `m @defm\n",
+        "### module m\n({s}) `m @defm\n",
         .{wide_body},
     );
     defer allocator.free(wide_body_expected);
     try expectFormat(wide_body_source, wide_body_expected);
 
     const long_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const long_source = try std.fmt.allocPrint(allocator, "[] ((1) `x def) `{s} @defm\n", .{long_name});
+    const long_source = try std.fmt.allocPrint(allocator, "((1) `x def) `{s} @defm\n", .{long_name});
     defer allocator.free(long_source);
     const long_expected = try std.fmt.allocPrint(
         allocator,
-        "### module {s}\n[] (\n    ### def x\n    (1) `x def)\n   `{s}\n   @defm\n",
+        "### module {s}\n(\n ### def x\n (1) `x def)\n`{s} @defm\n",
         .{ long_name, long_name },
     );
     defer allocator.free(long_expected);
@@ -267,14 +248,14 @@ test "formatter owns canonical definition section comments" {
     try expectParseEquivalent(source);
 
     const nested =
-        "[]\n(\n" ++
+        "(\n" ++
         "(-- n)\n(1)\n`visible def\n" ++
         "# note\n# def stale\n# hidden details\n" ++
         "(-- n)\n(2)\n`hidden defp\n" ++
         ") `m @defm\n";
     try expectFormat(
         nested,
-        "### module m\n[]\n" ++
+        "### module m\n" ++
             "(\n" ++
             " ### def visible\n" ++
             " (-- n)\n (1)\n `visible def\n # note\n\n" ++
@@ -285,13 +266,13 @@ test "formatter owns canonical definition section comments" {
     try expectParseEquivalent(nested);
 
     const nested_synthesized =
-        "[]\n(\n" ++
+        "(\n" ++
         "# attached inside the module\n" ++
         "(-- n)\n(3)\n`generated def\n" ++
         ") `m @defm\n";
     try expectFormat(
         nested_synthesized,
-        "### module m\n[]\n" ++
+        "### module m\n" ++
             "(\n" ++
             " ### def generated\n" ++
             " # attached inside the module\n" ++
@@ -498,7 +479,7 @@ fn formatterAllocationProbe(failing_backing: std.mem.Allocator) !void {
     const failing = fixed.allocator();
     const output = try formatter.format(
         failing,
-        "[] ((value -- value : \"Documentation that exercises normalized prose.\") " ++
+        "((value -- value : \"Documentation that exercises normalized prose.\") " ++
             "(dup) `x def) `m @defm",
     );
     failing.free(output);
@@ -525,22 +506,18 @@ test "formatter handles the reader's maximum nesting without host recursion" {
 test "formatter synthesizes and normalizes module navigation headers" {
     // A registration earns a header on the same terms a definition does, and
     // the body keeps the definition headers it already earns inside.
-    const registration = "[] ((1) `x def) `stats @defm\n";
-    const headed = "### module stats\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n";
+    const registration = "((1) `x def) `stats @defm\n";
+    const headed = "### module stats\n(\n ### def x\n (1) `x def) `stats @defm\n";
     try expectFormat(registration, headed);
     // A stale header is rewritten from the registration itself, never trusted.
     try expectFormat("### module wrong\n" ++ registration, headed);
-    // The seeded phrase is one form, so its values list carries the header and
-    // an attached comment stays below it exactly as it does for a definition.
-    const seeded = "# a seeded counter\n[[0]] ((1 +) `tick def) `counter @defm\n";
-    try expectFormat(
-        seeded,
-        "### module counter\n# a seeded counter\n[[0]] (\n       ### def tick\n" ++
-            "       (1 +) `tick def) `counter @defm\n",
-    );
-    // `cat` is ordinary composition rather than constructor metadata. Its
-    // former seeded spelling therefore earns no module navigation header and
-    // formats as the independent forms the program actually evaluates.
+    // An attached comment stays below the header exactly as it does for a
+    // definition.
+    const commented = "# a counter\n((1 +) `tick def) `counter @defm\n";
+    try expectFormat(commented, "### module counter\n# a counter\n(\n ### def tick\n (1 +) `tick def) `counter @defm\n");
+    // A body built with `cat` is ordinary composition rather than a
+    // registration, so it earns no module navigation header and formats as
+    // the independent forms the program actually evaluates.
     const composed = "[1] ((1) `x def) cat `legacy @defm\n";
     try expectFormat(
         composed,
@@ -548,8 +525,8 @@ test "formatter synthesizes and normalizes module navigation headers" {
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(
-        "[] ((1) `x def) chosen-name @defm\n",
-        "[]\n(\n ### def x\n (1) `x def) chosen-name @defm\n",
+        "((1) `x def) chosen-name @defm\n",
+        "(\n ### def x\n (1) `x def) chosen-name @defm\n",
     );
     // A header is synthesized and rewritten only where a registration is
     // recognized, so above any other expression the text stays an ordinary
@@ -560,20 +537,20 @@ test "formatter synthesizes and normalizes module navigation headers" {
         "### module stats\n(\n ### def x\n (1) `x def) @attempt\n",
     );
     try expectParseEquivalent(registration);
-    try expectParseEquivalent(seeded);
+    try expectParseEquivalent(commented);
     try expectParseEquivalent(composed);
 }
 
 test "formatter: synthesizes and normalizes test navigation headers" {
-    const source = "[] ((1) `works test) `suite @defm\n";
+    const source = "((1) `works test) `suite @defm\n";
     const expected =
-        "### module suite\n[] (\n" ++
-        "    ### test works\n" ++
-        "    (1) `works test) `suite @defm\n";
+        "### module suite\n(\n" ++
+        " ### test works\n" ++
+        " (1) `works test) `suite @defm\n";
     try expectFormat(source, expected);
     try expectFormat(
-        "### module stale\n[]\n(\n ### test stale\n (1) `works test) `suite @defm\n",
-        "### module suite\n[]\n(\n ### test works\n (1) `works test) `suite @defm\n",
+        "### module stale\n(\n ### test stale\n (1) `works test) `suite @defm\n",
+        "### module suite\n(\n ### test works\n (1) `works test) `suite @defm\n",
     );
     try expectFormat(
         "# test stale\n(1) `works test\n",
@@ -587,8 +564,8 @@ test "formatter: synthesizes and normalizes test navigation headers" {
         "### test stale\n\n### def value\n(1) `value def\n",
     );
     try expectFormat(
-        "[] (# test stale\n (1) `value def) `ordinary @defm\n",
-        "### module ordinary\n[] (\n    ### def value\n    # test stale\n    (1) `value def) `ordinary @defm\n",
+        "(# test stale\n (1) `value def) `ordinary @defm\n",
+        "### module ordinary\n(\n ### def value\n # test stale\n (1) `value def) `ordinary @defm\n",
     );
 }
 

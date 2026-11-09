@@ -75,27 +75,27 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",        "swap",        "pop",          "over",           "rollup",         "rolldown",
-        "cons",       "match?",      "type",         "parse",          "chars",          "bytes",
-        "symbol",     "intern",      "int",          "float",          "char",           "@attempt",
-        "raise",      "args",        "exit",         "dip",            "call",           "if",
-        "while",      "times",       "cond",         "each",           "zip-with",       "for",
-        "fold",       "scan",        "stencil",      "unfold",         "infra",          "def",
-        "set",        "defp",        "setp",         "test",           "tests",          "@test",
-        "effect",     "exports",     "doc",          "which",          "see",            "@defm",
-        "import",     "alias",       "words",        "@load",          "@load!",         "@spawn",
-        "task.await", "task.cancel", "task.pending", "task.await-any", "task.await-for", "@each",
-        "+",          "-",           "*",            "/",              "div",            "mod",
-        "pow",        "atan2",       "min",          "max",            "=",              "<>",
-        "<",          ">",           "<=",           ">=",             "and",            "or",
-        "neg",        "abs",         "sqrt",         "floor",          "ceil",           "round",
-        "exp",        "log",         "sin",          "cos",            "not",            "at",
-        "where",      "first-where", "in?",          "raze",           "cat",            "take",
-        "drop",       "reverse",     "first",        "rest",           "range",          "shape",
-        "len",        "flip",        "reshape",      "cmp",            "grade",          "distinct",
-        "group",      "put",         "update",       "del",            "split",          "join",
-        "str",        "band",        "bor",          "bxor",           "bsl",            "bsr",
-        "bnot",       "stack",       "cut",          "+%",             "-%",             "*%",
+        "dup",         "swap",         "pop",            "over",           "rollup",   "rolldown",
+        "cons",        "match?",       "type",           "parse",          "chars",    "bytes",
+        "symbol",      "intern",       "int",            "float",          "char",     "@attempt",
+        "raise",       "args",         "exit",           "dip",            "call",     "if",
+        "while",       "times",        "cond",           "each",           "zip-with", "for",
+        "fold",        "scan",         "stencil",        "unfold",         "infra",    "def",
+        "set",         "defp",         "setp",           "test",           "tests",    "@test",
+        "effect",      "exports",      "doc",            "which",          "see",      "@defm",
+        "import",      "alias",        "words",          "@load",          "@spawn",   "task.await",
+        "task.cancel", "task.pending", "task.await-any", "task.await-for", "@each",    "+",
+        "-",           "*",            "/",              "div",            "mod",      "pow",
+        "atan2",       "min",          "max",            "=",              "<>",       "<",
+        ">",           "<=",           ">=",             "and",            "or",       "neg",
+        "abs",         "sqrt",         "floor",          "ceil",           "round",    "exp",
+        "log",         "sin",          "cos",            "not",            "at",       "where",
+        "first-where", "in?",          "raze",           "cat",            "take",     "drop",
+        "reverse",     "first",        "rest",           "range",          "shape",    "len",
+        "flip",        "reshape",      "cmp",            "grade",          "distinct", "group",
+        "put",         "update",       "del",            "split",          "join",     "str",
+        "band",        "bor",          "bxor",           "bsl",            "bsr",      "bnot",
+        "stack",       "cut",          "+%",             "-%",             "*%",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -170,7 +170,7 @@ test "a before-row row makes named inputs a minimum and leaves the result depth 
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     // `... n` consumes n values beneath its count; any depth may remain.
-    try expectOk(&runtime, "[] ((... n -- list) (pack) `gather def " ++
+    try expectOk(&runtime, "((... n -- list) (pack) `gather def " ++
         "(a ... b -- c) (pop pop pop) `squeeze def) `rows @defm " ++
         "1 2 3 2 rows.gather [2 3] match? swap 1 match? and " ++
         "4 5 6 7 rows.squeeze 4 match? and");
@@ -187,7 +187,7 @@ test "an after-row row makes named outputs a minimum the boundary still checks" 
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((a -- ... b) (dup dup) `spread def " ++
+    try expectOk(&runtime, "((a -- ... b) (dup dup) `spread def " ++
         "(a -- b ... c) () `same def " ++
         "(a -- ... b) (pop) `vanish def) `tails @defm " ++
         "1 tails.spread 3 pack [1 1 1] match?");
@@ -203,14 +203,14 @@ test "a nested effect is one slot of a module word's checked arity" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (((a -- b) x -- y) (pop) `keep-first def) `slots @defm " ++
+    try expectOk(&runtime, "(((a -- b) x -- y) (pop) `keep-first def) `slots @defm " ++
         "(1) 2 slots.keep-first (1) match?");
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("1", display.bytes());
     try expectErrorContains(
         &runtime,
-        "[] (((a -- b) x -- y) (pop pop) `drop-both def) `lying @defm (1) 2 lying.drop-both",
+        "(((a -- b) x -- y) (pop pop) `drop-both def) `lying @defm (1) 2 lying.drop-both",
         "declared (2 -- 1)",
     );
 }
@@ -219,7 +219,7 @@ test "exports lists a module's public words and stdlib the embedded modules" {
     try support.expectStack(
         "`archive exports " ++
             "`core exports (`effect match?) any? " ++
-            "[] ((1) `shown def (2) `hidden defp) `m @defm `m exports " ++
+            "((1) `shown def (2) `hidden defp) `m @defm `m exports " ++
             "stdlib (`dict match?) any?",
         "(`next-member `open-tgz `read-member `sha256 `unpack-tgz) 1 (`shown) 1",
     );
@@ -253,7 +253,7 @@ test "invocation effects: task completion precedes caller continuation" {
             "(7) @spawn dup task.await pop 0 task.await-for pop " ++
             "(8) @spawn dup pair task.await-any pop pop " ++
             "((1) () while) @spawn dup task.cancel task.await pop " ++
-            "[] (( -- result ) ((9) @spawn task.await) `wait def) `nested @defm " ++
+            "(( -- result ) ((9) @spawn task.await) `wait def) `nested @defm " ++
             "nested.wait pop 42",
         "42",
     );
@@ -271,7 +271,7 @@ test "module annotations retain contracts documentation qualification and shadow
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (" ++
+    try expectOk(&runtime, "(" ++
         "(-- n : \"Public module word.\") (1) `public def " ++
         "(-- n : \"Private module word.\") (2) `private defp " ++
         "(-- text : \"Expose private documentation.\") (`private doc) `private-doc def" ++
@@ -287,9 +287,9 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "`m.private doc", "kind undefined-word");
     // A documentation-only module word is one of the four legal forms, and
     // its documentation is what reflection reports.
-    try expectOk(&runtime, "[] ((: \"Documentation only.\") (1) `f def) `docs @defm " ++
+    try expectOk(&runtime, "((: \"Documentation only.\") (1) `f def) `docs @defm " ++
         "`docs.f doc \"Documentation only.\" match? pop");
-    try expectErrorContains(&runtime, "[] ((a -- b c : \"An intentionally false contract.\") (dup +) `f def) `lies @defm 1 lies.f", "kind contract");
+    try expectErrorContains(&runtime, "((a -- b c : \"An intentionally false contract.\") (dup +) `f def) `lies @defm 1 lies.f", "kind contract");
 }
 
 test "multiline documentation is normalized and see prints annotation and canonical body" {
@@ -379,7 +379,7 @@ test "nested and quoted markers remain body data" {
     try support.expectStack(
         "((-- :) `-- `:) `inert def inert " ++
             "(-- :) `markers set markers " ++
-            "[] ((-- :) `private-markers setp " ++
+            "((-- :) `private-markers setp " ++
             "(-- value : \"Return private marker data.\") (private-markers) `get def) `m @defm m.get",
         "(-- :) -- : (-- :) (-- :)",
     );
@@ -394,14 +394,14 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "local separator", .source = "1 (|--| --)", .kind = "parse" },
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
         // @defm validates its name before the body runs.
-        .{ .name = "@defm", .source = "[] () `-- @defm", .kind = "domain", .word = "@defm" },
-        .{ .name = "alias", .source = "[] () `m @defm `-- `m alias", .kind = "domain", .word = "alias" },
+        .{ .name = "@defm", .source = "() `-- @defm", .kind = "domain", .word = "@defm" },
+        .{ .name = "alias", .source = "() `m @defm `-- `m alias", .kind = "domain", .word = "alias" },
         // The exact name `core` is the core qualifier, so neither publication
         // surface may claim it; `core.utils` remains an ordinary module name.
-        .{ .name = "@defm core", .source = "[] () `core @defm", .kind = "domain", .word = "@defm" },
-        .{ .name = "alias core", .source = "[] () `m @defm `core `m alias", .kind = "domain", .word = "alias" },
-        .{ .name = "public export", .source = "[] ((-- x) (1) `-- def) `m @defm", .kind = "domain", .word = "def" },
-        .{ .name = "private value", .source = "[] (1 `: setp) `m @defm", .kind = "domain", .word = "defp" },
+        .{ .name = "@defm core", .source = "() `core @defm", .kind = "domain", .word = "@defm" },
+        .{ .name = "alias core", .source = "() `m @defm `core `m alias", .kind = "domain", .word = "alias" },
+        .{ .name = "public export", .source = "((-- x) (1) `-- def) `m @defm", .kind = "domain", .word = "def" },
+        .{ .name = "private value", .source = "(1 `: setp) `m @defm", .kind = "domain", .word = "defp" },
         .{ .name = "unset is not a word", .source = "`x unset", .kind = "undefined-word", .word = "unset" },
         .{ .name = "undef is not a word", .source = "`x undef", .kind = "undefined-word", .word = "undef" },
         .{ .name = "undefm is not a word", .source = "`m undefm", .kind = "undefined-word", .word = "undefm" },
@@ -576,7 +576,7 @@ test "definitions: top-level setp fails through defp's module-root check" {
         },
     });
     // An application inside a module body writes the module root.
-    try support.expectStack("[] ([1] (1 `x setp pop) for (-- n) (x) `y def) `m @defm m.y", "1");
+    try support.expectStack("([1] (1 `x setp pop) for (-- n) (x) `y def) `m @defm m.y", "1");
 }
 
 test "definitions: data-combinator applications resolve their words across elements" {
@@ -612,9 +612,9 @@ test "definitions: def inside a word body writes the caller's scope" {
     // how the core words set and setp publish module constants, including
     // the privacy distinction. Module bodies resolve against the module's
     // own chain, so only core words (not session helpers) can be used here.
-    try support.expectStack("[] (7 `x set 8 `h setp (-- n) (h) `peek def) `m @defm m.x m.peek", "7 8");
+    try support.expectStack("(7 `x set 8 `h setp (-- n) (h) `peek def) `m @defm m.x m.peek", "7 8");
     try support.expectErrors(&.{
-        .{ .name = "private stays private", .source = "[] (8 `h setp) `m @defm m.h", .kind = "undefined-word", .word = "m.h" },
+        .{ .name = "private stays private", .source = "(8 `h setp) `m @defm m.h", .kind = "undefined-word", .word = "m.h" },
     });
 
     // The same word called inside an application lands in the same root.
@@ -667,16 +667,16 @@ test "unit constructors start on an empty stack or their element" {
         .{ .name = "@each", .source = "9 (1 2 3) (stack len nip 10 *) @each", .expected = "9 [10 10 10]" },
         .{ .name = "@give", .source = "9 [] (stack len) @give task.await `ok at", .expected = "9 [0]" },
         .{ .name = "values built in", .source = "9 1 2 pair (+) cat @attempt `ok at", .expected = "9 [3]" },
-        .{ .name = "@defm!", .source = "9 (stack len `depth set) `m @defm! m.depth", .expected = "9 0" },
+        .{ .name = "@defm", .source = "9 (stack len `depth set) `m @defm m.depth", .expected = "9 0" },
     });
     try support.expectErrors(&.{
         .{ .name = "@attempt underflow", .source = "@attempt", .kind = "underflow", .word = "@attempt" },
         .{ .name = "@attempt body type", .source = "1 @attempt", .kind = "type", .word = "@attempt" },
         .{ .name = "@spawn underflow", .source = "@spawn", .kind = "underflow", .word = "@spawn" },
         .{ .name = "@give underflow", .source = "() @give", .kind = "underflow", .word = "@give" },
-        .{ .name = "@defm! underflow", .source = "`m @defm!", .kind = "underflow", .word = "@defm!" },
-        .{ .name = "@defm! name domain", .source = "() `core @defm!", .kind = "domain", .word = "@defm!" },
-        .{ .name = "@spawn in construction", .source = "((1) @spawn pop) `m @defm!", .kind = "domain", .word = "@spawn" },
+        .{ .name = "@defm underflow", .source = "`m @defm", .kind = "underflow", .word = "@defm" },
+        .{ .name = "@defm name domain", .source = "() `core @defm", .kind = "domain", .word = "@defm" },
+        .{ .name = "@spawn in construction", .source = "((1) @spawn pop) `m @defm", .kind = "domain", .word = "@spawn" },
         .{ .name = "@attempt isolation", .source = "1 (pop) @attempt `err at raise", .kind = "underflow", .word = "pop" },
     });
 }
@@ -694,7 +694,7 @@ test "quotes: one quoted occurrence that pushes its symbol" {
         .{ .name = "extracted occurrence", .source = "(`a) first wrap call 1 2 (`swap) first execute", .expected = "a 2 1" },
         // A quote in a locals body is the symbol, not the local.
         .{ .name = "locals", .source = "5 (|x| `x x) call", .expected = "x 5" },
-        .{ .name = "module body", .source = "[] ((|a| `a) `w def) `quoting @defm 5 quoting.w", .expected = "a" },
+        .{ .name = "module body", .source = "((|a| `a) `w def) `quoting @defm 5 quoting.w", .expected = "a" },
         // A quoted operation pushes its symbol; no idiom takes it as the word,
         // and the collected symbols are data in the result.
         .{ .name = "no idiom", .source = "[1 2] (pop `+) each", .expected = "(`+ `+)" },
@@ -773,7 +773,7 @@ test "binding: every word resolves against the definitions current when it runs"
         .{ .name = "plain", .source = "(1) `foo def (foo) `bar def (2) `foo def bar foo", .expected = "2 2" },
         .{
             .name = "qualified",
-            .source = "[] ((1) `x def) `a @defm (a.x) `old def [] ((2) `x def) `a @defm old a.x",
+            .source = "((1) `x def) `a @defm (a.x) `old def ((2) `x def) `a @defm old a.x",
             .expected = "2 2",
         },
         // A nested quotation is data until it is applied, and then resolves
@@ -786,7 +786,7 @@ test "binding: every word resolves against the definitions current when it runs"
         // and every later one.
         .{
             .name = "iteration sees a redefinition",
-            .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
+            .source = "((1) `x def) `m @defm (dup 1 = (((2) `x def) `m @defm) () if pop m.x) `q set " ++
                 "[1 2] q each",
             .expected = "[2 2]",
         },
@@ -806,7 +806,7 @@ test "binding: every word resolves against the definitions current when it runs"
         .{ .name = "cleave over literals", .source = "1 2 (+) (*) bi 1 2 (+) (*) (-) tri", .expected = "3 2 3 2 -1" },
         .{
             .name = "a resolved word sees a later redefinition",
-            .source = "[] ((1) `x def) `m @defm (dup 1 = ([] ((2) `x def) `m @defm) () if pop m.x) `q set " ++
+            .source = "((1) `x def) `m @defm (dup 1 = (((2) `x def) `m @defm) () if pop m.x) `q set " ++
                 "0 q call [1 2] q each",
             .expected = "1 [2 2]",
         },
@@ -849,14 +849,14 @@ test "binding: words resolve in the root they were written in" {
         // A caller's quotation keeps its own meaning inside a module wrapper.
         .{
             .name = "wrapper",
-            .source = "[] ((|q| q call) `apply def) `w @defm (5) `five def (five) w.apply",
+            .source = "((|q| q call) `apply def) `w @defm (5) `five def (five) w.apply",
             .expected = "5",
         },
         // Equal quotations from different roots bind differently, and reuse
         // never conflates them.
         .{
             .name = "equal data",
-            .source = "[] ((7) `k defp ((k)) `q def) `m @defm (1) `k def " ++
+            .source = "((7) `k defp ((k)) `q def) `m @defm (1) `k def " ++
                 "m.q (k) match? [1 2] (pop m.q call (k) call +) each",
             .expected = "1 [8 8]",
         },
@@ -864,7 +864,7 @@ test "binding: words resolve in the root they were written in" {
         // equality and printing ignore that root.
         .{
             .name = "explicit lookup",
-            .source = "[] (( -- n ) (7) `k defp (`k) `sym def) `m @defm (1) `k def " ++
+            .source = "(( -- n ) (7) `k defp (`k) `sym def) `m @defm (1) `k def " ++
                 "m.sym execute k m.sym effect `k effect m.sym `k match? m.sym",
             .expected = "7 1 (-- n) () 1 k",
         },
@@ -875,12 +875,12 @@ test "binding: imports are name aliases followed at every binding" {
     try support.expectStacks(&.{
         .{
             .name = "alias",
-            .source = "[] ((1) `x def) `a @defm `a (x) import (x) `via def [] ((2) `x def) `a @defm via x",
+            .source = "((1) `x def) `a @defm `a (x) import (x) `via def ((2) `x def) `a @defm via x",
             .expected = "2 2",
         },
         .{
             .name = "re-export",
-            .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm b.x [] ((2) `x def) `a @defm b.x",
+            .source = "((1) `x def) `a @defm (`a (x) import) `b @defm b.x ((2) `x def) `a @defm b.x",
             .expected = "1 2",
         },
         // Chain length is not evidence of a cycle.
@@ -889,7 +889,7 @@ test "binding: imports are name aliases followed at every binding" {
     try support.expectErrors(&.{
         .{
             .name = "alias cycle",
-            .source = "[] ((1) `x def) `a @defm [] (`a (x) import) `b @defm [] (`b (x) import) `a @defm b.x",
+            .source = "((1) `x def) `a @defm (`a (x) import) `b @defm (`b (x) import) `a @defm b.x",
             .kind = "domain",
             .message_contains = "never reach a definition",
         },
@@ -900,42 +900,27 @@ test "binding: a module validates as one group when it is sealed" {
     try support.expectStacks(&.{
         .{
             .name = "forward and mutual",
-            .source = "[] (( n -- b ) (dup 0 = (pop 1) (1 - odd?) if) `even? def " ++
+            .source = "(( n -- b ) (dup 0 = (pop 1) (1 - odd?) if) `even? def " ++
                 "( n -- b ) (dup 0 = (pop 0) (1 - even?) if) `odd? def) `parity @defm 4 parity.even? 3 parity.even?",
             .expected = "1 0",
         },
         .{
             .name = "self-qualified",
-            .source = "[] (( -- n ) (self-named.base 1 +) `next def ( -- n ) (41) `base def) `self-named @defm self-named.next",
+            .source = "(( -- n ) (self-named.base 1 +) `next def ( -- n ) (41) `base def) `self-named @defm self-named.next",
             .expected = "42",
-        },
-        // Once registered, the replacement is what a qualified word reaches.
-        .{
-            .name = "injected qualified word",
-            .source = "[] ((1) `x def) `m @defm [(m.x)] ((2) `x def `y def) `m @defm m.y m.x",
-            .expected = "2 2",
         },
     });
     try support.expectErrors(&.{
-        .{ .name = "duplicate definition", .source = "[] ((1) `x def (2) `x def) `twice @defm", .kind = "domain", .message_contains = "more than once" },
+        .{ .name = "duplicate definition", .source = "((1) `x def (2) `x def) `twice @defm", .kind = "domain", .message_contains = "more than once" },
         .{
             .name = "definition and import",
-            .source = "[] ((1) `x def) `src @defm [] ((1) `x def `src (x) import) `clash @defm",
+            .source = "((1) `x def) `src @defm ((1) `x def `src (x) import) `clash @defm",
             .kind = "domain",
             .message_contains = "more than once",
         },
         // Staged definitions cannot run before the module is sealed.
-        .{ .name = "staged", .source = "[] ((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
-        .{ .name = "failed seal publishes nothing", .source = "([] ((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
-        // A quotation injected into a replacement body was written in the
-        // session, so sealing validates its qualified name against the
-        // registered module, never the group being sealed under that name.
-        .{
-            .name = "injected qualified word validates against the registered module",
-            .source = "[] ((1) `x def) `m @defm [(m.z)] ((2) `z def `y def) `m @defm",
-            .kind = "undefined-word",
-            .word = "m.z",
-        },
+        .{ .name = "staged", .source = "((1) `x def x pop) `early @defm", .kind = "undefined-word", .word = "x" },
+        .{ .name = "failed seal publishes nothing", .source = "(((missing) `x def) `bad @defm) @attempt pop bad.x", .kind = "undefined-word" },
     });
 }
 
@@ -943,8 +928,8 @@ test "binding: a module validates as one group when it is sealed" {
 /// `a0` up to `a<depth>`, followed by a call through the last.
 fn aliasChain(comptime depth: usize) []const u8 {
     @setEvalBranchQuota(100_000);
-    comptime var source: []const u8 = "[] ((7) `x def) `a0 @defm ";
-    inline for (1..depth + 1) |i| source = source ++ std.fmt.comptimePrint("[] (`a{d} (x) import) `a{d} @defm ", .{ i - 1, i });
+    comptime var source: []const u8 = "((7) `x def) `a0 @defm ";
+    inline for (1..depth + 1) |i| source = source ++ std.fmt.comptimePrint("(`a{d} (x) import) `a{d} @defm ", .{ i - 1, i });
     return source ++ std.fmt.comptimePrint("a{d}.x", .{depth});
 }
 
@@ -966,7 +951,7 @@ test "shadowing: a top-level name that shadows a core word warns once when intro
     );
     // `set` and an import introduce names the same way.
     try expectDiagnostics(
-        "1 `dup set [] ((2) `swap def) `m @defm `m (swap) import",
+        "1 `dup set ((2) `swap def) `m @defm `m (swap) import",
         "warning: `dup` now shadows the core word for top-level code; `core.dup` still reaches it\n" ++
             "warning: module `m` defines `swap`, shadowing the core word within the module; `core.swap` still reaches it\n" ++
             "warning: `swap` now shadows the core word for top-level code; `core.swap` still reaches it\n",
@@ -976,7 +961,7 @@ test "shadowing: a top-level name that shadows a core word warns once when intro
 
 test "shadowing: a module that shadows a core word warns, naming the module" {
     try expectDiagnostics(
-        "( ((1 +) each) `f def (pop 42) `each defp ) `m @defm! [2 3] m.f pop pop",
+        "( ((1 +) each) `f def (pop 42) `each defp ) `m @defm [2 3] m.f pop pop",
         "warning: module `m` defines `each`, shadowing the core word within the module; `core.each` still reaches it\n",
     );
     // Standard-library modules shadow core words deliberately: `dict` defines

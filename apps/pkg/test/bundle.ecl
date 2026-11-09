@@ -1,5 +1,4 @@
 ### module pkg.test.bundle
-[]
 (
  ### defp equal
  (actual expected -- : "Compare archive policy results.")

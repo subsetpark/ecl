@@ -1,5 +1,4 @@
 ### module pkg.test.fetch
-[]
 (
  ### defp equal
  (actual expected -- : "Compare public application fetch results.")

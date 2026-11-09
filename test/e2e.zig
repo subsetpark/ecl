@@ -592,7 +592,7 @@ test "e2e: ecl test runs the default runner" {
         scratch.dir,
         &.{.{
             .path = "suite.ecl",
-            .source = "[] (" ++
+            .source = "(" ++
                 "(1 1 = {kind user} assert) `first test " ++
                 "(2 2 = {kind user} assert) `second test " ++
                 "(missing) `third-fails test " ++
@@ -625,10 +625,10 @@ test "e2e: tests retain file-private module visibility" {
     // A helper constructed inside a quotation is not a discoverable
     // declaration, so it is never exported: the file keeps it private.
     try writeTestProject(scratch.dir, &.{
-        .{ .path = "bar.ecl", .source = "([] ((42) `answer def) `baz @defm) call\n" ++
-            "[] ((baz.answer 42 = {kind user} assert) `local test) `app.bar @defm\n" ++
+        .{ .path = "bar.ecl", .source = "(((42) `answer def) `baz @defm) call\n" ++
+            "((baz.answer 42 = {kind user} assert) `local test) `app.bar @defm\n" ++
             "baz.answer 42 = {kind user} assert\n" },
-        .{ .path = "foo.ecl", .source = "[] (((baz.answer) @attempt `err at `kind at `undefined-word match? " ++
+        .{ .path = "foo.ecl", .source = "(((baz.answer) @attempt `err at `kind at `undefined-word match? " ++
             "{kind user} assert) `isolated test) `app.foo @defm\n" },
     });
     const exe = try absoluteExe();
@@ -640,7 +640,7 @@ test "e2e: tests retain file-private module visibility" {
     defer script.deinit();
     try script.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
     var loaded = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "\"bar.ecl\" @load! (baz.answer) @attempt `err at `kind at" },
+        .argv = &.{ exe, "-e", "\"bar.ecl\" @load (baz.answer) @attempt `err at `kind at" },
         .cwd = .{ .dir = scratch.dir },
     });
     defer loaded.deinit();
@@ -653,10 +653,10 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     try writeTestProject(scratch.dir, &.{
         // Both files construct inside quotations so nothing is discoverable:
         // each `helper` and `suite` stays private to its own source.
-        .{ .path = "private.ecl", .source = "([] ((42) `answer def) `helper @defm) call\n" ++
-            "([] ((helper.answer 42 = {kind user} assert) `answer test) `suite @defm) call\n" },
-        .{ .path = "other.ecl", .source = "([] ((7) `answer def) `helper @defm) call\n" ++
-            "([] ((helper.answer 7 = {kind user} assert) `answer test) `suite @defm) call\n" },
+        .{ .path = "private.ecl", .source = "(((42) `answer def) `helper @defm) call\n" ++
+            "(((helper.answer 42 = {kind user} assert) `answer test) `suite @defm) call\n" },
+        .{ .path = "other.ecl", .source = "(((7) `answer def) `helper @defm) call\n" ++
+            "(((helper.answer 7 = {kind user} assert) `answer test) `suite @defm) call\n" },
     });
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -668,10 +668,10 @@ test "e2e: ecl test discovers private-only sources and loads each artifact once"
     // reuse that committed artifact, including with overlapping source globs.
     try writeTestProject(scratch.dir, &.{
         .{ .path = "a-consumer.ecl", .source = "app.public.answer 42 = {kind user} assert\n" ++
-            "[] (((helper.answer) @attempt `err at `kind at `undefined-word match? " ++
+            "(((helper.answer) @attempt `err at `kind at `undefined-word match? " ++
             "{kind user} assert) `isolated test) `consumer @defm\n" },
         .{ .path = "z-public.ecl", .source = "\"loaded public\" io.print\n" ++
-            "[] ((42) `answer def) `app.public @defm\n" },
+            "((42) `answer def) `app.public @defm\n" },
     });
     var mixed = try cli.runOptions(.{ .argv = &.{ exe, "test" }, .cwd = .{ .dir = scratch.dir } });
     defer mixed.deinit();
@@ -686,11 +686,11 @@ test "e2e: ecl test accepts a userland runner" {
         &.{
             .{
                 .path = "suite.ecl",
-                .source = "[] ((42) `answer test) `app.suite @defm\n",
+                .source = "((42) `answer test) `app.suite @defm\n",
             },
             .{
                 .path = "custom.ecl",
-                .source = "[] ((args [\"chosen\"] match? {kind user} assert " ++
+                .source = "((args [\"chosen\"] match? {kind user} assert " ++
                     "tests dup len 1 = {kind user} assert " ++
                     "first @test `ok dict.has? {kind user} assert " ++
                     "\"custom\" io.print) `run def) `app.custom.runner @defm\n",
@@ -741,7 +741,7 @@ test "e2e: ecl test reports project and runner failures" {
     defer project.cleanup();
     try writeTestProject(
         project.dir,
-        &.{.{ .path = "suite.ecl", .source = "[] ((1) `one test) `app.suite @defm\n" }},
+        &.{.{ .path = "suite.ecl", .source = "((1) `one test) `app.suite @defm\n" }},
     );
     var unqualified = try cli.runOptions(.{
         .argv = &.{ exe, "test", "--runner", "run" },
@@ -1200,18 +1200,18 @@ test "e2e: hot reload all access paths acceptance" {
 test "e2e: module effect declaration acceptance" {
     // An omitted effect is legal and adds no inferred check: the word runs
     // across the home boundary exactly as written.
-    var missing = try run(&.{ build_options.ecl_exe, "-e", "[] ((dup +) `fine def) `m @defm 2 m.fine" });
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "((dup +) `fine def) `m @defm 2 m.fine" });
     defer missing.deinit();
     try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
-    var lying = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b c ) (dup +) `lies def) `m @defm 1 m.lies" });
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "(( a -- b c ) (dup +) `lies def) `m @defm 1 m.lies" });
     defer lying.deinit();
     try lying.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "kind contract", "word m.lies" },
     });
 
-    var visible = try run(&.{ build_options.ecl_exe, "-e", "[] (( a -- b ) (dup +) `dbl def) `m @defm `m.dbl see" });
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "(( a -- b ) (dup +) `dbl def) `m @defm `m.dbl see" });
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
@@ -1224,7 +1224,7 @@ test "e2e: explicit import replacement acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 `avg set 2 `count set [] (3 `avg set 4 `count set) `stats @defm " ++
+        "1 `avg set 2 `count set (3 `avg set 4 `count set) `stats @defm " ++
             "`stats (avg count) import avg count",
     });
     defer result.deinit();
@@ -1239,7 +1239,7 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] (40 `s setp ( -- n ) (s 2 +) `f def) `m @defm `m (f) import `m.f see `f which words",
+        "(40 `s setp ( -- n ) (s 2 +) `f def) `m @defm `m (f) import `m.f see `f which words",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1254,7 +1254,7 @@ test "e2e: reflection acceptance" {
 }
 
 test "e2e: a construction body already knows the name it is built under" {
-    var named = try run(&.{ build_options.ecl_exe, "-e", "[] (*module* io.pp) `named @defm" });
+    var named = try run(&.{ build_options.ecl_exe, "-e", "(*module* io.pp) `named @defm" });
     defer named.deinit();
     try named.expect(.{ .exit_code = 0, .stdout = "named\n", .stderr = "" });
 }
@@ -1280,7 +1280,7 @@ test "e2e: optional module annotation acceptance" {
 }
 
 test "e2e: direct load and ECL_PATH acceptance" {
-    var direct = try run(&.{ build_options.ecl_exe, "-e", "[41 1] \"test/acceptance/load-stack.ecl\" @load" });
+    var direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" @load" });
     defer direct.deinit();
     try direct.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
@@ -1357,7 +1357,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[] ((-- value) 40 wrap `k def) `m @defm m.k `m.k which",
+        "((-- value) 40 wrap `k def) `m @defm m.k `m.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -1366,7 +1366,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
         .stderr = "",
     });
 
-    const partial_module = "[] ((a b -- ...) (pop pop 7 8) `row def) `m @defm ";
+    const partial_module = "((a b -- ...) (pop pop 7 8) `row def) `m @defm ";
     var partial = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 2 m.row" });
     defer partial.deinit();
     try partial.expect(.{ .exit_code = 0, .stdout = "7 8\n", .stderr = "" });
@@ -1873,9 +1873,9 @@ test "e2e: the unit boundary error guides" {
         .stderr_contains = &.{ "isolation @spawn", "`values (q) cat @spawn`" },
     });
     // And the composition that fixes it: build the values into the body.
-    var seeded = try run(&.{ build_options.ecl_exe, "-e", "3 wrap (1 +) cat @attempt io.pp" });
-    defer seeded.deinit();
-    try seeded.expect(.{ .exit_code = 0, .stdout = "{ok [4]}\n", .stderr = "" });
+    var built = try run(&.{ build_options.ecl_exe, "-e", "3 wrap (1 +) cat @attempt io.pp" });
+    defer built.deinit();
+    try built.expect(.{ .exit_code = 0, .stdout = "{ok [4]}\n", .stderr = "" });
 
     var seeded_each = try run(&.{
         build_options.ecl_exe,
@@ -1885,7 +1885,7 @@ test "e2e: the unit boundary error guides" {
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });
 
-    var name_first = try run(&.{ build_options.ecl_exe, "-e", "`wrong [] ((1) `x def) @defm" });
+    var name_first = try run(&.{ build_options.ecl_exe, "-e", "`wrong ((1) `x def) @defm" });
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,

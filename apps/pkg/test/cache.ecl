@@ -1,5 +1,4 @@
 ### module pkg.test.cache
-[]
 (
  ### defp equal
  (actual expected -- : "Compare observable download-cache behavior.")

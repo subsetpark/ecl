@@ -7,7 +7,6 @@
     Every operation except `valid?` first validates the ordinary column dict as a table. See the
     environment's [table contract](ENVIRONMENT.md#tables) for the table convention and frozen error
     kinds.")
-[]
 (
  ### defp text?
  (value -- bool : "Return 1 when every item in a list is a character.")

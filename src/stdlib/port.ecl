@@ -66,7 +66,6 @@
     consuming the source. Abortive close discards queued messages and unclaimed results; a discarded
     successful result raises `` `io `` if claimed later. Completion observation remains repeatable.
     Existing capabilities in messages share use and retain their owner.")
-[]
 (
  `port.core [open begin endpoint send receive finish await result cancel shutdown close] import
 

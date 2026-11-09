@@ -14,6 +14,7 @@ const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const map_state = @import("module_snapshot.zig");
 const Value = value.Value;
+const Header = machine.Header;
 const Fiber = machine.Fiber;
 const MachineError = machine.MachineError;
 /// Removal is one directory edit; the retired generation's images release
@@ -21,8 +22,7 @@ const MachineError = machine.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@defm", .primitive = defmWord, .effect = "values body module-name --", .doc = "The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.\n\nThe name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``values (body) `name @defm``. See Modules." },
-        .{ .name = "@defm!", .primitive = defmSeedless, .effect = "body module-name --", .doc = "`@defm` with no values operand: the body runs on an empty stack, exactly as ``[] (body) `name @defm``. Module discovery and the formatter's `### module` header recognize this form too." },
+        .{ .name = "@defm", .primitive = defmWord, .effect = "body module-name --", .doc = "The one module constructor. Validate the name first: a non-symbol is `` `type ``; an invalid module path, the reserved name `core`, or a standard-library module name is `` `domain ``, and the body never runs. Then run the body on an empty stack and a fresh environment and publish the resulting image under the name. A body failure publishes nothing; a registry change during construction may still refuse publication after the body has run.\n\nThe name is last, matching `def` and `set`: the bound name sits nearest the defining word. Registration is therefore ``(body) `name @defm``. See Modules." },
         .{ .name = "*file*", .primitive = fileWord, .effect = "-- string", .doc = "Return the source name attached to the currently executing reader-authored occurrence. A definition reports the file that authored its body even when another file calls it. `` `domain `` in runtime-assembled code with no source provenance; there is no fallback to the caller's file." },
         .{ .name = "*module*", .primitive = moduleNameWord, .effect = "-- module-name", .doc = "Return the name of the module whose code is running: the name `@defm` published it under, which a call through an alias reports too. A construction body reports the name it is being built under. `` `domain `` at top level, or for a quotation that escaped its module." },
         .{ .name = "import", .primitive = importAs(.public), .effect = "module-name q --", .doc = "Import the public attributes named by the symbol list `q` under their own unqualified names: `` `str (upper lower) import `` binds `upper` and `lower`. Every requested name is validated against one module generation before any binding is published; a missing or private attribute is `` `undefined-word `` and publishes none of the request. A non-list `q` or a non-symbol item is `` `type ``; an invalid module or attribute name is `` `domain ``. Each imported name is an alias for the attribute: every dispatch and explicit lookup follows it to whatever the module's attribute names then, and reflection shows that definition. At top level an import may replace an existing name; in a module body a name is introduced once." },
@@ -33,8 +33,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "exports", .primitive = exportsWord, .effect = "module-name -- names", .doc = "Return the public words of a module as a list of symbols in codepoint order, loading an embedded or mapped module on first mention. `` `core exports `` lists core's builtins and prelude words. An invalid module name is `` `domain ``; an unknown one is `` `undefined-word ``." },
         .{ .name = "module-doc", .primitive = moduleDocWord, .effect = "module-name -- string", .doc = "Return the canonical documentation string of a module's current generation, loading an embedded or mapped module on first mention. A source module states it with a documentation-only annotation before its `@defm` operands; a native module, in its descriptor. An alias reports its target's documentation. An invalid module name, `` `core ``, or a module without documentation is `` `domain ``; an unknown one is `` `undefined-word ``." },
         .{ .name = "stdlib", .primitive = stdlibWord, .effect = "-- names", .doc = "Return the names of the embedded standard-library modules as a list of symbols in codepoint order." },
-        .{ .name = "@load", .primitive = loadSeeded, .effect = "values path --", .doc = "Read a source file and run it as one stack-isolated unit whose stack starts from the explicit values list. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive." },
-        .{ .name = "@load!", .primitive = loadSeedless, .effect = "path --", .doc = "`@load` with no values operand: the file runs on an empty stack, exactly as `[] path @load`." },
+        .{ .name = "@load", .primitive = load, .effect = "path --", .doc = "Read a source file and run it as one stack-isolated unit on an empty stack. The file keeps its caller's authority to define, so a file loaded at the root defines into the session. A file that leaves values on its stack is `` `domain ``: a loaded file defines words and keeps no state. Failure propagates to the enclosing unit; definitions and other effects made before it survive." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -42,23 +41,18 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// a name that could never be published costs no evaluation and no effect.
 /// Only a registry change during construction can still refuse publication.
 fn defmWord(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
-    const name = try evaluator.popSymbol();
-    try startDefm(evaluator, name, try evaluator.popUnitInput());
-}
-
-fn defmSeedless(evaluator: *Fiber) MachineError!void {
     try evaluator.require(2);
     const name = try evaluator.popSymbol();
-    try startDefm(evaluator, name, try evaluator.popSeedlessUnitInput());
+    var body = try evaluator.popQuotation();
+    try startDefm(evaluator, name, body.take().list);
 }
 
 /// The value beneath the operands documents the module only when it is exactly
 /// `(: "text")`. Anything else is the caller's data and stays where it is: a
 /// module declares no stack effect, so nothing else could be its annotation.
-fn startDefm(evaluator: *Fiber, name: u32, popped: machine.OwnedUnitInput) MachineError!void {
-    var input = popped;
-    errdefer input.deinit(evaluator.releases);
+fn startDefm(evaluator: *Fiber, name: u32, body_header: *Header) MachineError!void {
+    var body = heap.Owned(*Header).init(body_header);
+    errdefer body.deinit(evaluator.releases, evaluator.allocator);
     var doc: heap.Owned(Value) = .none;
     errdefer doc.deinit(evaluator.releases, evaluator.allocator);
     if (evaluator.available() != 0) {
@@ -72,7 +66,7 @@ fn startDefm(evaluator: *Fiber, name: u32, popped: machine.OwnedUnitInput) Machi
     const owned_doc = doc;
     doc = .none;
     try evaluator.startDriver(DefmDriver{
-        .input = .init(input.move()),
+        .body = .init(body.take()),
         .validation = .init(name),
         .doc = owned_doc,
     });
@@ -90,7 +84,7 @@ fn moduleDocumentation(candidate: Value) error{OutOfMemory}!?Value {
 
 const DefmDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    input: heap.Owned(machine.OwnedUnitInput),
+    body: heap.Owned(*Header),
     validation: intern.ModuleNameCursor,
     /// The module's documentation, consumed from beneath the operands.
     doc: heap.Owned(Value) = .none,
@@ -108,14 +102,14 @@ const DefmDriver = struct {
                 if (intern.isReservedRegistryBytes(intern.get(intern.moduleId(name))))
                     return evaluator.fail(.domain, "module name `core` is reserved for the core qualifier");
                 try evaluator.refuseReservedModule(name, evaluator.current.?.site.registration_provenance);
-                const input = self.input.take();
+                const body = self.body.take();
                 var doc = self.doc;
                 self.doc = .none;
                 defer doc.deinit(evaluator.releases, evaluator.allocator);
                 evaluator.retireDriver(self);
                 try evaluator.moduleOwned(
                     name,
-                    input,
+                    body,
                     if (doc.isPresent()) env.documentation(doc.borrow().list).? else null,
                 );
                 return .detached;
@@ -932,29 +926,14 @@ const WordsDriver = struct {
 fn writeFailure(evaluator: *Fiber) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }
-fn loadSeedless(evaluator: *Fiber) MachineError!void {
+fn load(evaluator: *Fiber) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
     const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, path_value.borrow());
-    try evaluator.startDriver(SeedlessLoadDriver{
+    try evaluator.startDriver(LoadDriver{
         .path_value = .init(path_value.take()),
         .encoder = .init(encoder),
     });
 }
-/// The seed list is validated here and then left on top of the caller's
-/// stack, where the source activation pops it once the file has been read.
-fn loadSeeded(evaluator: *Fiber) MachineError!void {
-    var path_value = try evaluator.popValue();
-    defer path_value.deinit();
-    if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
-    var seeds = try evaluator.popList();
-    evaluator.pushIntoFreed(seeds.take());
-    const encoder = kernel_storage.StringEncoder.init(evaluator.allocator, path_value.borrow());
-    try evaluator.startDriver(SeededLoadDriver{
-        .path_value = .init(path_value.take()),
-        .encoder = .init(encoder),
-    });
-}
-const SeedlessLoadDriver = machine.PathActionDriver(Fiber.loadFileSeedlessOwned);
-const SeededLoadDriver = machine.PathActionDriver(Fiber.loadFileSeededOwned);
+const LoadDriver = machine.PathActionDriver(Fiber.loadFileOwned);

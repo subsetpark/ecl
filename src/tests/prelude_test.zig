@@ -81,11 +81,11 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "5 symbol",
         },
         .{
-            .name = "seeded attempts tasks and modules",
+            .name = "attempts tasks and modules",
             .source = "(42) @attempt (2 3 +) @attempt " ++
                 "(2 3 +) @spawn task.await (0 0 /) @attempt result.ok? " ++
                 "(2 3 +) @attempt (2 3 +) @spawn task.await match? " ++
-                "[4 5] (+ `sum set) `seeded @defm seeded.sum",
+                "(4 5 + `sum set) `summed @defm summed.sum",
             .expected = "{ok [42]} {ok [5]} {ok [5]} 0 1 9",
         },
         .{ .name = "results", .source = "(2 3 +) @attempt result.ok? (2 3 +) @attempt result.or-raise (missing) @attempt 9 result.or-default", .expected = "1 [5] 9" },

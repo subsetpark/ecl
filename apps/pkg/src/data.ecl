@@ -1,6 +1,5 @@
 ### module pkg.data
 # Parse package metadata without evaluating it; a parsed form is only ever data.
-[]
 (
  ### def read-one
  (text -- form : "Parse text containing exactly one form and return it without evaluation.")

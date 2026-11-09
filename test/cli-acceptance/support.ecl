@@ -2,7 +2,6 @@
 # Shared helpers for CLI acceptance. Every test works beneath its own directory
 # inside the build-owned working directory and launches the binary under test
 # with an explicit, otherwise empty environment.
-[]
 (
  ### def fail-unless
  (condition values template -- : "Fail with a formatted message when condition is false.")

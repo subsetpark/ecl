@@ -27,11 +27,11 @@ pub const PendingSubmission = implementation.PendingSubmission;
 /// The module constructors whose operands end in a literal name.
 pub fn isRegistrationWord(bytes: []const u8) bool {
     const std = @import("std");
-    return std.mem.eql(u8, bytes, "@defm") or std.mem.eql(u8, bytes, "@defm!");
+    return std.mem.eql(u8, bytes, "@defm");
 }
 
 /// Inert inspection of already parsed top-level forms. Feed each form once,
-/// in source order. Only a literal symbol immediately preceding `@defm` or `@defm!` is
+/// in source order. Only a literal symbol immediately preceding `@defm` is
 /// discoverable; nested quotations and computed names are not declarations
 /// visible to discovery. Names are returned verbatim, including duplicates:
 /// namespace and export validation belong to the consumer's schema.

@@ -1,6 +1,5 @@
 ### module pkg.glob
 # Package source selection. Every dynamic-programming cell is ordinary ECL work.
-[]
 (
  ### defp initial-step
  (row token star? -- row : "Only leading wildcard tokens can match empty input.")

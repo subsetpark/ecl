@@ -76,7 +76,7 @@ test "fuzz: reader accepts arbitrary bounded input" {
         "\xff",
         "(1 2)",
         "\"unterminated",
-        "[] (1 `public set 2 `private setp) `m @defm",
+        "(1 `public set 2 `private setp) `m @defm",
     } });
 }
 
@@ -102,11 +102,11 @@ test "fuzz: formatter is idempotent for every accepted source" {
             "# comment\n(foo [bar] {baz})",
             "\"raw\n  string\" \\space",
             "(value -- value : \"documentation\") (dup) `same def",
-            // The `### module` header path: bare, seeded, and with a stale header
+            // The `### module` header path: bare, commented, and with a stale header
             // the formatter must rewrite from the registration itself.
-            "[] ((1) `x def) `stats @defm",
-            "[[0]] ((1 +) `tick def) `counter @defm",
-            "### module wrong\n# attached\n[] ((1) `x def) `stats @defm",
+            "((1) `x def) `stats @defm",
+            "# counter\n((1 +) `tick def) `counter @defm",
+            "### module wrong\n# attached\n((1) `x def) `stats @defm",
             "(a -- ...) (dup) `row def",
         },
     });
@@ -691,7 +691,7 @@ test "fuzz: pending submission accumulates lines and lexical state" {
         "1 2 +",
         "\"unterminated",
         "# comment",
-        "[] (1 `x set) `stats @defm",
+        "(1 `x set) `stats @defm",
     } });
 }
 
@@ -734,14 +734,14 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expectEqualStrings("sqrt", initial.items()[0]);
     try runOk(
         &runtime,
-        "[] (1 `alpha set 2 `private setp) `fuzzmod @defm " ++
+        "(1 `alpha set 2 `private setp) `fuzzmod @defm " ++
             "`fm `fuzzmod alias `fuzzmod (alpha) import 3 `fuzz-live set",
     );
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
         switch (smith.value(u3)) {
-            0 => try runOk(&runtime, "[] (4 `alpha set 5 `private setp) `fuzzmod @defm"),
-            1 => try runOk(&runtime, "[] (6 `beta set 7 `hidden setp) `fuzzmod @defm"),
+            0 => try runOk(&runtime, "(4 `alpha set 5 `private setp) `fuzzmod @defm"),
+            1 => try runOk(&runtime, "(6 `beta set 7 `hidden setp) `fuzzmod @defm"),
             2 => try runOk(&runtime, "8 `fuzz-live set"),
             3 => try runOk(&runtime, "9 `fuzz-second set"),
             4, 5, 6, 7 => |action| {

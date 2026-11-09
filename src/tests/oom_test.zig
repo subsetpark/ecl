@@ -89,13 +89,13 @@ const MapScratch = struct {
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "probe.ecl",
-            .data = "[] ((42) `answer def) `helper @defm [] ((helper.answer) `answer def) `mapprobe @defm",
+            .data = "((42) `answer def) `helper @defm ((helper.answer) `answer def) `mapprobe @defm",
         });
         // Imports from a module declared later in its own file, which the
         // load records and then validates before committing.
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "deferred.ecl",
-            .data = "[] (`deferlater (seven) importp (seven) `answer def) `deferprobe @defm [] ((7) `seven def) `deferlater @defm",
+            .data = "(`deferlater (seven) importp (seven) `answer def) `deferprobe @defm ((7) `seven def) `deferlater @defm",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -550,7 +550,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // This admitted reader body reaches ConstructionDriver allocation
             // after the re-scope cursor owns its source. Exhausting that exact
             // allocation proves cleanup remains with only one movable owner.
-            "[9 10] (+ `x set) `oom-seeded @defm oom-seeded.x pop",
+            "(9 10 + `x set) `oom-admitted @defm oom-admitted.x pop",
     );
     try runOk(
         &runtime,
@@ -605,10 +605,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-reflection.ecl",
-        "[] (( -- n ) (1) `f def) `reflection-module @defm " ++
+        "(( -- n ) (1) `f def) `reflection-module @defm " ++
             "`reflection-module (f) import words " ++
             "`f which `reflection-module.f see " ++
-            "(: \"D\") [] () `oom-documented @defm `oom-documented module-doc pop",
+            "(: \"D\") () `oom-documented @defm `oom-documented module-doc pop",
     );
     try runOk(&runtime, "oom-loader.ecl", "`stats (answer) import answer pop");
     try runOk(
@@ -626,26 +626,24 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-module.ecl",
         "*file* pop " ++
-            "[] (1 `x setp ( -- n ) (x) `get def) `allocation-module @defm " ++
+            "(1 `x setp ( -- n ) (x) `get def) `allocation-module @defm " ++
             "`allocation-module (get) import get pop `short `allocation-module alias short.get pop " ++
-            "[] (2 `x setp ( -- n ) (x) `get def) `allocation-module @defm get pop " ++
-            "([] ((dup) `f def) `bad @defm) @attempt pop " ++
-            // A seeded construction consumes its seeds; one that leaves a
-            // value behind is refused, and that refusal allocates its error.
-            "[11 12 13] (+ + pop) `oom-stateful @defm " ++
-            "[21 22] (+ pop) `oom-stateful @defm " ++
-            "([21] (1 +) `oom-leftover @defm) @attempt pop " ++
+            "(2 `x setp ( -- n ) (x) `get def) `allocation-module @defm get pop " ++
+            "(((dup) `f def) `bad @defm) @attempt pop " ++
+            // A construction that leaves a value behind is refused, and that
+            // refusal allocates its error.
+            "((21 1 +) `oom-leftover @defm) @attempt pop " ++
             // Calls, failures inside calls, and reloads each have their own
             // allocation-failure paths through registration. A body that names
             // an undefined word fails its group's seal; an explicit lookup
             // fails only when it runs.
-            "([] ((missing) `f def) `oom-unbound @defm) @attempt pop " ++
-            "[] ((1) `bump def (`missing execute) `boom def (7) `peek def) `oom-calls @defm " ++
+            "(((missing) `f def) `oom-unbound @defm) @attempt pop " ++
+            "((1) `bump def (`missing execute) `boom def (7) `peek def) `oom-calls @defm " ++
             "oom-calls.bump pop (oom-calls.boom) @attempt pop " ++
             "oom-calls.peek 7 match? pop " ++
             // Namespaced registration plus branded qualification and ordinary
             // late-bound execution each have Session-only allocation paths.
-            "[] ((33) `dynamic def) `oom.namespaced @defm " ++
+            "((33) `dynamic def) `oom.namespaced @defm " ++
             "`oom.namespaced `dynamic qualify execute pop " ++
             "3 (dup) first execute pop pop",
     );
@@ -656,8 +654,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         // their own ordinals. Two definitions and one reload reach both, and a
         // failed body releases its candidate; its failure propagates, so the
         // probe observes it as a result.
-        "[] ((1) `one def) `oom-left @defm [] ((1) `one def) `oom-right @defm " ++
-            "[] ((2) `one def) `oom-left @defm ([] (\"x\" fail) `oom-failed @defm) @attempt pop",
+        "((1) `one def) `oom-left @defm ((1) `one def) `oom-right @defm " ++
+            "((2) `one def) `oom-left @defm ((\"x\" fail) `oom-failed @defm) @attempt pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();
@@ -774,7 +772,7 @@ fn stdlibSessionAllocationProbe(
         });
         try scratch.directory.dir.writeFile(std.testing.io, .{
             .sub_path = "suite.ecl",
-            .data = "[] ((1) `answer test) `helper @defm\n",
+            .data = "((1) `answer test) `helper @defm\n",
         });
     }
     // Paths and source strings are borrowed test scaffolding outside Session
@@ -1156,7 +1154,7 @@ fn testSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-tests.ecl",
-        "[] ((1) `one test) `oom.tests @defm tests first @test pop",
+        "((1) `one test) `oom.tests @defm tests first @test pop",
     );
 }
 
@@ -1210,22 +1208,7 @@ test "oom: core: full-session surfaces propagate every allocation failure" {
     );
 }
 
-fn seededLoadAllocationProbe(allocator: std.mem.Allocator) !void {
-    var runtime_inputs = try runtime_fixture.Fixture.init();
-    defer runtime_inputs.deinit();
-    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .cooperative, .evaluate);
-    defer runtime.deinit();
-    // The seed list waits on the caller's stack while the file is read, then
-    // moves above the new boundary: every allocation between must unwind.
-    try runOk(&runtime, "oom-load.ecl", "[41 1] \"test/acceptance/load-seeded.ecl\" @load");
-}
-
-test "oom: core: seeded @load propagates every allocation failure" {
-    try requireSelectedOomTest(@src());
-    try checkAllAllocationFailuresParallel(std.heap.smp_allocator, seededLoadAllocationProbe);
-}
-
-const admitted_construction_source = "[] () `oom-driver @defm";
+const admitted_construction_source = "() `oom-driver @defm";
 
 fn admittedConstructionAllocationCount() !usize {
     var failing = FailingAllocator.init(std.testing.allocator, .{});
@@ -1266,7 +1249,7 @@ test "oom: core: admitted construction driver allocation failure transfers its c
     }
 }
 
-const batch_import_setup = "[] (1 `a set 2 `b set) `oom-import @defm";
+const batch_import_setup = "(1 `a set 2 `b set) `oom-import @defm";
 const batch_import_source = "`oom-import (a b) import";
 
 fn batchImportAllocationCount() !usize {

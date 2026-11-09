@@ -1,6 +1,5 @@
 ### module pkg.install
 # Resolution and publication policy for project-local immutable generations.
-[]
 (
  ### defp existing-lock
  (project manifest -- text :

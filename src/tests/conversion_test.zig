@@ -246,7 +246,7 @@ test "conversion: a symbol built from a string links to the root that built it" 
     // the session.
     try expectStack(
         &runtime,
-        "(pop 99) `dup def [] ((call) `apply def) `conv-link @defm " ++
+        "(pop 99) `dup def ((call) `apply def) `conv-link @defm " ++
             "\"dup\" symbol (execute) cons `q set 1 q call 1 q conv-link.apply",
         "99 99",
     );

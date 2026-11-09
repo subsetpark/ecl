@@ -1,6 +1,5 @@
 ### module pkg.gc
 # Cache collection is explicit and never reclaims project generations.
-[]
 (
  ### defp lock-file
  (path -- lock : "Read a portable retained-resolution input through an explicit directory.")

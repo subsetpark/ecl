@@ -1,5 +1,4 @@
 ### module pkg.test.map
-[]
 (
  ### defp equal
  (actual expected -- : "Compare public runtime-map data.")

@@ -1,5 +1,4 @@
 ### module pkg.report
-[]
 (
  ### defp edges
  (entry lock -- lines : "Render selected direct edges in canonical alias order.")

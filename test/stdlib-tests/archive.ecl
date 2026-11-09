@@ -1,5 +1,4 @@
 ### module stdlib.test.archive
-[]
 (
  `stdlib.test.support (equal raises-word documented) import
 

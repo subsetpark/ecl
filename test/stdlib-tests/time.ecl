@@ -1,5 +1,4 @@
 ### module stdlib.test.time
-[]
 (
  `stdlib.test.support
  (equal raises raises-word raises-containing documented)

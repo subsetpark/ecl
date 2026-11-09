@@ -1,6 +1,5 @@
 ### module pkg.map
 # Construct runtime metadata from an application-owned resolved graph.
-[]
 (
  ### defp direct
  (lock name -- visible : "Project only a consumer's direct dependency visibility.")

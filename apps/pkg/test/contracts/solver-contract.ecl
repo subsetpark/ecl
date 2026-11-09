@@ -1,5 +1,4 @@
 ### module pkg.test.mvs
-[]
 (
  `pkg.test.support
  (equal raises-containing raises-data documented)

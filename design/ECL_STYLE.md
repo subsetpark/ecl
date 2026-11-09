@@ -172,8 +172,8 @@ whatever it is: a symbol is pushed, not run, so a quotation that must run a
 symbol it was handed writes `execute`.
 
 An operator's declared input passes parameters across its boundary without
-capture. A unit constructor other than `@defm` and `@load` takes no values
-operand: build the values into its body with `cons` or `cat`.
+capture. A unit constructor's body carries its own inputs: build them in with
+`cons` or `cat`.
 
 ### Nested and sibling lookup
 

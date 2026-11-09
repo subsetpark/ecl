@@ -1,5 +1,4 @@
 ### module pkg.test.transaction
-[]
 (
  ### defp equal
  (actual expected -- : "Compare publication state through public file operations.")

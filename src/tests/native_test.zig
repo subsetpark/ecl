@@ -91,7 +91,7 @@ test "native: instance ECL acceptance runs through language tests" {
         .native_instances = &.{.{ .name = "instanceprobe", .bytes = "C", .port_limits = .{ .max_live_ports = 1 } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((" ++
+    try expectOk(&runtime, "((" ++
         "instanceprobe.next 67 = {kind user msg \"configured state\"} assert " ++
         "instanceprobe.allocate 42 = {kind user msg \"native allocation\"} assert " ++
         "instanceprobe.resource {configuration \"replacement\"} port.open (|p| " ++
@@ -1182,7 +1182,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "[] (100 `increment set) `sample @defm",
+        .data = "(100 `increment set) `sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -1223,7 +1223,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer later_source.cleanup();
     try later_source.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "[] (100 `increment set) `sample @defm",
+        .data = "(100 `increment set) `sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,
@@ -2210,7 +2210,7 @@ test "native: cooperative SDK resources build results and join cancellation thro
             .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 1 } }},
         }), configuration, .language_tests);
         defer runtime.deinit();
-        try expectOk(&runtime, "[] ((" ++
+        try expectOk(&runtime, "((" ++
             "instanceprobe.cooperative [] port.open (|p| " ++
             "p (instanceprobe.park [] port.call pop) cons @spawn " ++
             "(instanceprobe.started 0 =) (0 clock.sleep) while " ++
@@ -2231,7 +2231,7 @@ test "native: cooperative SDK failed initialization joins reserved cleanup" {
         .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 1 } }},
     }), .cooperative, .language_tests);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((" ++
+    try expectOk(&runtime, "((" ++
         "instanceprobe.started pop (instanceprobe.cooperative 1 port.open) @attempt `err at `kind at `io match? " ++
         "{kind user msg \"initialization failure\"} assert " ++
         "instanceprobe.next 10065 = {kind user msg \"failed construction cleanup\"} assert " ++
@@ -2272,7 +2272,7 @@ test "native: independent children consume initialization borrows before parent 
             .native_instances = &.{.{ .name = "instanceprobe", .bytes = "A", .port_limits = .{ .max_live_ports = 2, .ring_capacity = 4096 } }},
         }), configuration, .language_tests);
         defer runtime.deinit();
-        try expectOk(&runtime, "[] ((" ++
+        try expectOk(&runtime, "((" ++
             "instanceprobe.resource [] port.open (|p| " ++
             "p instanceprobe.child [] port.call p port.close " ++
             "dup instanceprobe.value [] port.call 75 = {kind user msg \"independent controller child\"} assert port.close) call " ++
@@ -2291,7 +2291,7 @@ test "native: cooperative builders preserve scalars aggregates copies and cleare
         .ecl_path = native_fixture.directory,
     }), .cooperative, .language_tests);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] ((" ++
+    try expectOk(&runtime, "((" ++
         "instanceprobe.cooperative [] port.open dup instanceprobe.message [7] port.call " ++
         "dup first `answer at first 0.5 = {kind user msg \"float\"} assert " ++
         "dup first `answer at 1 at int 955 = {kind user msg \"character\"} assert " ++
@@ -2301,7 +2301,7 @@ test "native: cooperative builders preserve scalars aggregates copies and cleare
 }
 
 fn expectCooperativeAcceptance(program: []const u8) !void {
-    const source = try std.fmt.allocPrint(std.testing.allocator, "[] (({s}) `scenario test) `native.acceptance @defm " ++
+    const source = try std.fmt.allocPrint(std.testing.allocator, "(({s}) `scenario test) `native.acceptance @defm " ++
         "tests first @test dup `ok dict.has? (pop) (`err at raise) if", .{program});
     defer std.testing.allocator.free(source);
     var inputs = try runtime_fixture.Fixture.init();

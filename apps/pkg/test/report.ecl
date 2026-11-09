@@ -1,5 +1,4 @@
 ### module pkg.test.report
-[]
 (
  ### defp equal
  (actual expected -- : "Compare user-visible dependency reports with explicit expected text.")

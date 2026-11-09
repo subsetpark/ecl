@@ -5,7 +5,6 @@
     Unicode-normalization rules. Normalization is lexical: it never proves that a path stays within
     a directory, which is why `fs` accepts only the canonical grammar and enforces containment at
     its directory handles.")
-[]
 (
  ### defp checked
  (value message -- string : "Validate a string argument or raise `type with the message.")

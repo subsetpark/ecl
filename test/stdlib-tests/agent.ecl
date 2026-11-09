@@ -1,5 +1,4 @@
 ### module stdlib.test.agent
-[]
 (
  `stdlib.test.support
  (equal raises documented)

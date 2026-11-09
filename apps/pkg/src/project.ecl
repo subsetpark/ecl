@@ -1,6 +1,5 @@
 ### module pkg.project
 # Application-owned project discovery and coordination over public directories.
-[]
 (
  ### defp missing-environment
  (error -- value : "Default only the documented absent-environment case.")

@@ -1,5 +1,4 @@
 ### module pkg.test.generation
-[]
 (
  ### defp equal
  (actual expected -- : "Compare immutable generation behavior through public resources.")
@@ -79,7 +78,7 @@
  ### defp rejected-map
  (project -- : "Reject a conflicting local declaration before publishing a candidate generation.")
  (|project|
-  project `directory at "collision.ecl" "[] () `sample.api @defm" fs.publish-text
+  project `directory at "collision.ecl" "() `sample.api @defm" fs.publish-text
   project started project pair (reject-work) cat call) `rejected-map defp
 
  ### defp reject-work

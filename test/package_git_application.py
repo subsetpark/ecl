@@ -51,7 +51,7 @@ def main():
                 + "{package \"sample\" version \"1.0.0\" source {kind archive url \"https://fixture.invalid/sample.tgz\"} hash "
                 + json.dumps(archive_hash) + "}}}"
             )
-            (repo / 'src/alpha.ecl').write_text("[] ((" + str(answer) + ") `answer def) `alpha @defm\n")
+            (repo / 'src/alpha.ecl').write_text("((" + str(answer) + ") `answer def) `alpha @defm\n")
             run(['git', 'add', '.'], repo)
             run(['git', 'commit', '-m', version], repo)
             return run(['git', 'rev-parse', 'HEAD'], repo).strip()

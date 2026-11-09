@@ -1,5 +1,4 @@
 ### module pkg.test.glob
-[]
 (
  ### defp check
  (pattern path expected -- : "Assert source-pattern selection independently of the matcher.")

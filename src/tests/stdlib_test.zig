@@ -44,19 +44,19 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
     try expectOk(&runtime, "(0) `inspection-side-effect def");
     try expectDisplay(&runtime,
         \\(99 `inspection-side-effect def
-        \\ [] () `sample.one @defm
-        \\ ([] () `nested @defm)
+        \\ () `sample.one @defm
+        \\ (() `nested @defm)
         \\ [@defm list-only @defm]
         \\ {code (`dict-only @defm)}
         \\ "'string-only @defm"
         \\ # 'comment-only @defm
-        \\ [] () "computed" symbol @defm
-        \\ [] () `sample.two @defm
-        \\ [] () `sample.one @defm) source.declarations
+        \\ () "computed" symbol @defm
+        \\ () `sample.two @defm
+        \\ () `sample.one @defm) source.declarations
     , "(`sample.one `sample.two `sample.one)");
     try expectDisplay(&runtime, "pop inspection-side-effect", "0");
     try expectDisplay(&runtime, "pop () source.declarations", "()");
-    try expectDisplay(&runtime, "pop \"[] () `parsed @defm\" parse source.declarations", "(`parsed)");
+    try expectDisplay(&runtime, "pop \"() `parsed @defm\" parse source.declarations", "(`parsed)");
     try expectDisplay(&runtime, "pop (" ++ support.repeated("`many @defm ", 4097) ++ ") source.declarations len", "4097");
     try support.expectError(.{
         .name = "source inspection rejects non-list input",
@@ -134,7 +134,7 @@ test "stdlib: an imported standard-library builtin is that builtin under its imp
         },
         .{
             .name = "a user module's effect is still a contract",
-            .source = "[] ((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
+            .source = "((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
                 "(checked.w) @attempt `err at dup `kind at swap `word at",
             .expected = "contract checked.w",
         },
@@ -182,7 +182,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a module naming a missing export still seals",
-            .source = "((result.nope) `f def) `m @defm! 7",
+            .source = "((result.nope) `f def) `m @defm 7",
             .expected = "7",
         },
         .{
@@ -192,7 +192,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a module word resolves its word at first call",
-            .source = "(([3] result.ok) `f def) `m @defm! m.f m.f",
+            .source = "(([3] result.ok) `f def) `m @defm m.f m.f",
             .expected = "{ok [3]} {ok [3]}",
         },
         .{
@@ -221,7 +221,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a module word's call reports the missing export",
-            .source = "((result.nope) `f def) `m @defm! m.f",
+            .source = "((result.nope) `f def) `m @defm m.f",
             .kind = "undefined-word",
             .word = "result.nope",
         },
@@ -300,15 +300,15 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     // A path module that would shadow a stdlib name, and one that would not.
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "result.ecl",
-        .data = "[] ((999) `ok def) `result @defm",
+        .data = "((999) `ok def) `result @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "site-local.ecl",
-        .data = "[] ((7) `answer def) `site-local @defm",
+        .data = "((7) `answer def) `site-local @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "cold-local.ecl",
-        .data = "[] ((8) `answer def (9) `also def) `cold-local @defm",
+        .data = "((8) `answer def (9) `also def) `cold-local @defm",
     });
     const search = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(search);

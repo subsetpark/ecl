@@ -1,6 +1,5 @@
 ### module pkg.generation
 # Immutable project installations built through ordinary directory resources.
-[]
 (
  ### defp active-value
  (project -- generation : "Read the optional active generation as inert application data.")

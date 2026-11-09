@@ -1,5 +1,4 @@
 ### module pkg.test.command
-[]
 (
  ### defp equal
  (actual expected -- : "Compare public command behavior.")

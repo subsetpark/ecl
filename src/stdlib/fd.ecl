@@ -5,7 +5,6 @@
     endpoint shares. Nothing in `fd` decodes or encodes text: that is `io`. A read of either kind
     may leave bytes read ahead with the endpoint value, so a program that reads lines keeps the
     value it reads them through. The host primitives are published as `fd.core`.")
-[]
 (
  `fd.core [in out err read read-line finish bytes?] import
 
