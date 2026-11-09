@@ -744,12 +744,11 @@ An activation needs two related but non-identical facts:
 - `scope`: the root its own definitions land in, and whether they may; and
 - `home`: the module image whose privacy it may use.
 
-Whether definitions may land is a flag on the site. Top-level code and module
-construction set it; isolated combinator applications, `@attempt`, and tasks
-clear it; everything else inherits it from its invoker, so a helper that
-defines works at top level and is refused inside an `each`. That flag, not a
-child scope, is what keeps those bodies from defining: they run in their
-invoker's root. `ExecutionSite` carries these together and exposes named
+Whether definitions may land is a flag on the site, set only where a root is
+entered: a root fiber and module construction set it, and a task clears it,
+because a task runs in its spawner's root without owning it. Everything else,
+every combinator application and `@attempt` included, inherits it unchanged,
+so whether a word may define never depends on which combinator reached it. `ExecutionSite` carries these together and exposes named
 constructors for root, image, inherited, and resumed execution; they cannot
 safely be reconstructed from one another. Where a word resolves is carried by
 the word.

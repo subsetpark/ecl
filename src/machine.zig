@@ -1573,11 +1573,11 @@ pub const ExecutionSite = struct {
     /// A named module constructed by that source moves it into the immutable
     /// registration; ordinary source always carries ordinary provenance.
     registration_provenance: modules.RegistrationProvenance = .ordinary,
-    /// Whether definitions may land in `scope`. True at root level: top-level
-    /// code, a module construction body, and anything they call inline.
-    /// Combinator applications, `@attempt` bodies, and tasks clear it, and
-    /// everything they call inherits that, so a helper that defines works at
-    /// top level and is refused inside an `each`.
+    /// Whether definitions may land in `scope`. Set where a root is entered:
+    /// true for a root fiber and a module construction body, false for a
+    /// task, which runs in its spawner's root without owning it. Everything
+    /// else, every combinator application and `@attempt` included, inherits
+    /// it unchanged.
     defining: bool,
 
     /// The base case: a fiber's root activation, built from nothing.
@@ -1647,8 +1647,7 @@ pub const ApplicationSite = struct {
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     registration_provenance: modules.RegistrationProvenance,
-    /// The launching activation's `defining`. Only an in-place launch passes
-    /// it through; an isolated or paging one clears it for the body.
+    /// The launching activation's `defining`, which the body inherits.
     defining: bool,
 };
 pub const IsolatedApplication = struct {
@@ -3130,12 +3129,12 @@ pub const Fiber = struct {
         return .{ .name = name, .slot = try linker.link(name) };
     }
     /// The root a definition, removal, or import writes. Refused inside a
-    /// combinator application, an `@attempt`, or a task, which are not roots.
+    /// task, which runs in its spawner's root without owning it.
     pub fn definitionScope(self: *Fiber) MachineError!*env.Scope {
         const scope = self.currentScope();
         if (!self.current.?.site.defining) return self.fail(
             .domain,
-            "definitions are legal only at root level, not inside a combinator application, @attempt, or task",
+            "definitions are not legal inside a task; a task runs in its spawner's root without owning it",
         );
         return scope;
     }
@@ -5995,14 +5994,11 @@ pub const Fiber = struct {
             .code = application.quotation,
             .program = .borrowed,
             .position = .{ .source = 0 },
-            // An isolated or paging body runs in its caller's scope but is
-            // not a root, so nothing it calls may define there; only a body
-            // applied in place on the caller's stack keeps that right.
             .site = .resumed(
                 application.site.parent_scope,
                 application.site.home,
                 application.site.registration_provenance,
-                launch == .in_place and application.site.defining,
+                application.site.defining,
             ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
@@ -6355,10 +6351,10 @@ pub const Fiber = struct {
             self.releases.releaseHeader(body);
             return error.OutOfMemory;
         }
-        // The body runs in its invoker's scope but is not a root: nothing it
-        // calls may define, so a failure has no definitions to discard.
-        var site = ExecutionSite.inheriting(invoker, invoker.scope());
-        site.defining = false;
+        // The body runs in its invoker's scope with its invoker's right to
+        // define. A failure restores the stack, not the environment: like IO,
+        // a definition the body made survives it.
+        const site = ExecutionSite.inheriting(invoker, invoker.scope());
         try self.openBoundary(
             .attempt,
             @intCast(self.stack.items.len),
