@@ -57,9 +57,6 @@
 ### 2dup
 `( x y -- x y x y )` — Copy the top two stack values onto the top, preserving their order.
 
-### 2keep
-`( x y (... -- ...) -- ... x y )` — Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top of the quotation's results.
-
 ### <
 `( x y -- bool )` — Ascending comparison, producing 0/1 masks.
 
@@ -153,6 +150,9 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 ### @test
 `( descriptor -- result )` — Test-Session-only protected invocation. Validate a pure descriptor returned by `tests`, late-bind its module/name and optional source identifier to the current catalog, and run the body as a fresh isolated Unit under that registration's private home and durable state. Return exactly `{ok (values)}` or `{err error}`; a missing current test is a reified error. Ordinary Sessions receive `` `domain ``.
 
+### above
+`( ... (q: ... -- ...) -- ... )` — Run a quotation, then restore the values it consumed above its results, in their original order. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) above` is `3 1 2`, and `1 (dup) above` is `1 1 1`. A `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual. `(q) above` leaves the quotation's results beneath the restored values; `below` leaves them on top.
+
 ### abs
 `( x -- y )` — Return the absolute value of `x`.
 
@@ -199,6 +199,12 @@ wrap [] (net.local-address `port at 0 >) @give task.await
 
 ### band
 `( x y -- z )` — Bitwise and over the two's-complement bit patterns of ints. Non-int leaves are `` `type ``.
+
+### below
+`( ... (q: ... -- ...) -- ... )` — Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual.
+
+### bi
+`( x p q -- ... )` — Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
 
 ### bi2
 `( x y p q -- ... )` — Apply each of two quotations to the same pair of operands.
@@ -350,7 +356,13 @@ Ex:
 `( collection selector -- collection )` — Functionally remove list positions through a pervasive selector, or one whole-value dictionary key. List selector leaves are nonnegative in-bounds integer positions in the original list; duplicates remove a position once, and the relative order of retained elements is unchanged. An empty selector returns the list unchanged. A missing dictionary key leaves the dictionary unchanged. Use `dict.del` to remove a list of whole dictionary keys.
 
 ### dip
-`( x (q: ... -- ...) -- ... x )` — Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results.
+`( x (q: ... -- ...) -- ... x )` — Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results. Inside `above` or `below`, a protected value taken from beneath their floor returns as the original it was, so protecting a value is not consuming it.
+
+### dip-n
+`( ... (q: ... -- ...) n -- ... )` — Run a quotation beneath the top `n` stack values: `q` runs with them removed, then they are pushed back in their original order after its results. `n` must be a nonnegative int, or the word fails with `` `type `` or `` `domain `` before anything is removed. `0 dip-n` is `call`, and `1 dip-n` is `dip`.
+
+### dip2
+`( x y (... -- ...) -- ... x y )` — Run a quotation beneath the top two stack values, then push them back in their original order after its results: `2 dip-n`.
 
 ### distinct
 `( list -- list )` — First occurrence of each distinct value, in input order. Equivalent to `group dict.keys`.
@@ -567,9 +579,6 @@ An empty list or a list containing no list items is unchanged. Mixing list rows 
 
 ### join
 `( strings separator -- string )` — Join a list of strings with a separator string.
-
-### keep
-`( x (... -- ...) -- ... x )` — Apply a quotation to a value, then restore the value on top of the quotation's results.
 
 ### last
 `( list -- value )` — Return the final element of a nonempty list.
@@ -859,6 +868,9 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ### times
 `( n quotation -- ... )` — Run the quotation `n` times; `n` must be a nonnegative int. Tail-call optimized.
 
+### tri
+`( x p q r -- ... )` — Apply three quotations to `x` in left-to-right order.
+
 ### tri2
 `( x y p q r -- ... )` — Apply each of three quotations to the same pair of operands in left-to-right order.
 
@@ -959,9 +971,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 ### append
 `( list value -- list )` — Push `value` to the end of `list`.
 
-### bi
-`( x p q -- ... )` — Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath `q`'s.
-
 ### chunk
 `( list size -- pieces )` — Split a list into consecutive pieces of a positive size; the last piece is shorter when the size does not divide the length.
 
@@ -1013,9 +1022,6 @@ Copy the operand stack into a bottom-to-top list while leaving every original va
 -7 [10 10] to-digits
 # => [9 3]
 ```
-
-### tri
-`( x p q r -- ... )` — Apply three quotations to `x` in left-to-right order.
 
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial elements and last element.

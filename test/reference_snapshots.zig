@@ -88,7 +88,7 @@ const cases = [_]Case{
     .{ .name = "print", .source = "\"hi\" io.print" },
     .{ .name = "io.inspect", .source = "7 io.inspect" },
     .{ .name = "io.stack", .source = "1 [2 3] io.stack" },
-    .{ .name = "keep", .source = "2 (1 +) keep" },
+    .{ .name = "above", .source = "2 (1 +) above" },
     .{ .name = "bi", .source = "2 (1 +) (3 *) bi" },
     .{ .name = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
     .{ .name = "fail", .source = "\"bad\" fail" },
@@ -737,8 +737,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\1 [2 3]
         \\stderr:
         \\<empty>
-        \\=== keep ===
-        \\source: 2 (1 +) keep
+        \\=== above ===
+        \\source: 2 (1 +) above
         \\exit: 0
         \\stdout:
         \\3 2

@@ -995,6 +995,22 @@ The window is a nominal value derived from a real stack depth. A callback
 cannot pair an arbitrary base with a count, and a nested application that
 suspends carries the exact continuation it must resume.
 
+A paging application is the third floor kind beside the caller's stack and
+the isolated substack. Its substack starts empty, and an operand check that
+comes up short pages the missing values across the floor: the frame retains
+a copy of each and the floor lowers to include it, so a quotation's
+consumption is the sum of what its words required, which is the stack effect
+it presents from outside. Every operand check compares against one guard
+depth. That depth is the floor unless `dip` has returned a paged original to
+the substack; those are recorded by position and consumed by the first check
+that reaches them, so protecting a value is not consuming it. A checkpointed
+guard that restores inside a paging application pushes back what its test
+paged and raises the floor again. Paging floors nest by chaining through the
+floor beneath, and the hard floor beneath them all is where underflow still
+happens. Every site that saves or restores the stack base also saves which
+paging floor is innermost, so a boundary or isolated application inside one
+blocks paging while it is open and restores it when it closes.
+
 ### Failure is a bounded machine transition
 
 Language errors are ordinary dictionary values at observation boundaries, but

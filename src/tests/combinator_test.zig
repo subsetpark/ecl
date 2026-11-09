@@ -222,6 +222,56 @@ test "combinators: contracts and conformability are structural errors" {
     });
 }
 
+test "paging: above and below restore what the quotation consumed" {
+    try support.expectStacks(&.{
+        .{ .name = "above restores consumed inputs above the results", .source = "1 2 (+) above 1 (dup) above", .expected = "3 1 2 1 1 1" },
+        .{ .name = "below restores them beneath", .source = "1 2 (+) below 1 2 (swap) below", .expected = "1 2 3 1 2 2 1" },
+        .{ .name = "every result survives", .source = "1 2 (+ 10 20) below 1 2 (+ 10 20) above", .expected = "1 2 3 10 20 3 10 20 1 2" },
+        .{ .name = "a quotation that consumes nothing", .source = "(7) above 1 (8) below", .expected = "7 1 8" },
+        .{ .name = "consumption is what the words required", .source = "1 2 (over pop) below 1 2 3 (2 (pop) times) above", .expected = "1 2 1 2 1 2 3" },
+        .{
+            .name = "dip protects without consuming",
+            .source = "1 2 3 ((+) dip) below 1 2 3 ((+) dip) above 0 1 2 3 (((+) dip) dip) below 1 2 3 ((+) dip pop) below",
+            .expected = "1 2 3 3 3 1 2 3 0 1 2 3 1 1 2 3 3",
+        },
+        .{ .name = "a returned original a later word requires is consumed", .source = "1 2 3 ((+) dip swap) below", .expected = "1 2 3 3 3" },
+        .{ .name = "dip-n returns originals as originals", .source = "1 2 3 ((+) dip 5 (2 *) 2 dip-n) below", .expected = "1 2 3 6 5" },
+        .{ .name = "nested paging floors account for the same values", .source = "5 ((1 +) below) below 1 2 ((+) above) above", .expected = "5 5 6 3 1 2 1 2" },
+        .{
+            .name = "checkpointed guards do not consume what a test paged",
+            .source = "5 ([(0 <) (pop 1) (pop 2)] cond) below 5 ((0 >) (1 -) while) below " ++
+                "1 2 3 ((dup 2 =) (pop 100) (1 -) (+) linrec) below",
+            .expected = "5 2 5 0 1 2 3 102",
+        },
+        .{ .name = "locals bind across the floor", .source = "1 2 3 (|a b| a b +) below 1 2 3 (|a b| a b +) above", .expected = "1 2 3 5 1 5 2 3" },
+        .{ .name = "a word's own substack is a hard floor", .source = "1 ([] (pop) @attempt) below result.ok?", .expected = "1 0" },
+        .{ .name = "paging and restoring are bounded work", .source = "20000 (1) times (10000 (pop) times) above 20000 pack len", .expected = "20000" },
+        .{ .name = "rotating beneath the region is bounded work", .source = "20000 (1) times (10000 (pop) times 5) below 20001 pack dup len swap last", .expected = "20001 5" },
+        .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((7) 10000 dip-n) below 20001 pack dup len swap last", .expected = "20001 7" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "an isolated application beneath does not page", .source = "3 [1 2] ((+) each) below", .kind = "underflow", .word = "+" },
+        .{ .name = "the stack bottom does not page", .source = "(pop) below", .kind = "underflow", .word = "pop" },
+        .{ .name = "above non-quotation", .source = "1 above", .kind = "type", .word = "above" },
+        .{ .name = "below non-quotation", .source = "1 below", .kind = "type", .word = "below" },
+    });
+}
+
+test "combinators: dip-n protects a counted prefix" {
+    try support.expectStacks(&.{
+        .{ .name = "counted dips", .source = "1 2 3 (10 +) 2 dip-n 1 2 3 (1 +) 0 dip-n 1 2 3 (7) 3 dip-n", .expected = "11 2 3 1 2 4 7 1 2 3" },
+        .{ .name = "beneath a paging floor", .source = "1 2 3 ((10 *) 2 dip-n) below 0 1 2 3 ((+) 2 dip-n) below", .expected = "1 2 3 10 0 1 2 3 1" },
+        .{ .name = "a symbol stays a value", .source = "0 `m 1 (2 +) 2 dip-n", .expected = "2 m 1" },
+        .{ .name = "a large count is bounded work", .source = "20000 (1) times (2) 20000 dip-n 20001 pack len", .expected = "20001" },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "dip-n non-int count", .source = "(+) `x dip-n", .kind = "type", .word = "dip-n" },
+        .{ .name = "dip-n negative count", .source = "(+) -1 dip-n", .kind = "domain", .word = "dip-n" },
+        .{ .name = "dip-n non-quotation", .source = "1 2 dip-n", .kind = "type", .word = "dip-n" },
+        .{ .name = "dip-n short stack", .source = "1 2 (+) 3 dip-n", .kind = "underflow", .word = "dip-n" },
+    });
+}
+
 test "combinators: dip fold1 and lex-cmp-with run any quotation" {
     // Quotations no recognizer takes: nested lists, a user word, and a
     // comparator that reads past its first difference only when told to.

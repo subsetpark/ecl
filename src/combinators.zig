@@ -24,7 +24,10 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "if", .primitive = ifWord, .effect = "bool then else -- ...", .doc = "Run `then` when the condition is 1, `else` when it is 0; any other condition value is `` `type ``." },
         .{ .name = "while", .primitive = whileWord, .effect = "cond body -- ...", .doc = "At the start of each iteration, retain an operand-stack checkpoint and run `cond` against it. The condition may inspect the stack destructively; its top result must be a 0/1 boolean, and its complete stack result is discarded. On 1, run `body` from the checkpoint and use the body's result as the next iteration's checkpoint. On 0, restore the checkpoint and exit. Environment and IO effects from the condition survive. Tail-call optimized." },
         .{ .name = "linrec", .primitive = linrec, .effect = "predicate base pre post -- ...", .doc = "Explicit linear recursion. At each descent, run `predicate` destructively against a retained checkpoint of the complete visible operand stack. Its top result must be a 0/1 boolean and its complete stack result is discarded. On 1, restore the checkpoint and run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting stack, then run `post`. Environment and IO effects from the predicate survive restoration. All four quotations run in the invoking application context and communicate through ambient stack state. Non-tail recursion retains one explicit continuation per descent rather than using the host stack; its live storage is proportional to recursion depth. An empty `post` quotation does not eliminate the retained recursion level." },
-        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results." },
+        .{ .name = "dip", .primitive = dip, .effect = "x (q: ... -- ...) -- ... x", .doc = "Run a quotation beneath a protected top stack value: `q` runs with `x` removed, then `x` is pushed after its results. Inside `above` or `below`, a protected value taken from beneath their floor returns as the original it was, so protecting a value is not consuming it." },
+        .{ .name = "dip-n", .primitive = dipN, .effect = "... (q: ... -- ...) n -- ...", .doc = "Run a quotation beneath the top `n` stack values: `q` runs with them removed, then they are pushed back in their original order after its results. `n` must be a nonnegative int, or the word fails with `` `type `` or `` `domain `` before anything is removed. `0 dip-n` is `call`, and `1 dip-n` is `dip`." },
+        .{ .name = "above", .primitive = above, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed above its results, in their original order. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) above` is `3 1 2`, and `1 (dup) above` is `1 1 1`. A `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual. `(q) above` leaves the quotation's results beneath the restored values; `below` leaves them on top." },
+        .{ .name = "below", .primitive = below, .effect = "... (q: ... -- ...) -- ...", .doc = "Run a quotation, then restore the values it consumed below its results, in their original order: the stack is as it was, with the results on top. The quotation runs on a substack that starts empty and takes operands from beneath as its words need them, so what it consumed is exactly what its words required: `1 2 (+) below` is `1 2 3`, and `1 2 3 ((+) dip) below` is `1 2 3 3`, since a `dip` inside returns a protected value as the original it was. The quotation cannot take values from beneath an enclosing `@attempt` or isolated application, which fail with `` `underflow `` as usual." },
         .{ .name = "cleave", .primitive = cleave, .effect = "x quotations -- ...", .doc = "Apply each quotation in `quotations` inline on the current stack, with a fresh copy of `x` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs. An empty list consumes the input and leaves nothing." },
         .{ .name = "cleave2", .primitive = cleave2, .effect = "x y quotations -- ...", .doc = "Binary cleave. Consume `x` and `y`. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of `x` and `y` on top. A later quotation can consume earlier results. The list and each of its elements must be quotations, or the word fails with `` `type `` before any quotation runs." },
         .{ .name = "cleave-n", .primitive = cleaveN, .effect = "... n quotations -- ...", .doc = "N-ary cleave. Consume the top `n` values from the stack. Apply each quotation in `quotations` inline on the current stack, in order, with fresh copies of the inputs on top. A later quotation can consume earlier results. `n` must be a nonnegative int, and the list and each of its elements must be quotations, or the word fails with `` `type `` or `` `domain `` before any quotation runs." },
@@ -98,9 +101,18 @@ fn whileWord(evaluator: *Fiber) MachineError!void {
 /// loop while it is deep enough; capture and restore advance as far as the
 /// turn's budget allows. The buffer is a heap list, so abandoning it retires
 /// one root through the release domain rather than walking the saved stack.
+/// How many values the innermost paging floor has paged: a checkpoint taken
+/// inside `above` or `below` records it, and restoring the checkpoint pushes
+/// back what the guarded quotation paged since, so a test's look beneath the
+/// floor is not a consumption of the word that runs the test.
+fn pagedNow(evaluator: *const Fiber) usize {
+    return if (evaluator.paging) |floor| floor.paged() else 0;
+}
+
 const WhileCheckpoint = struct {
     values: ?heap.ListBuilder(.generic_spine) = null,
     depth: usize = 0,
+    paged: usize = 0,
     index: usize = 0,
     phase: enum { idle, release, capture, discard, restore } = .idle,
 
@@ -133,6 +145,7 @@ const WhileCheckpoint = struct {
                 if (self.values == null)
                     self.values = try heap.ListBuilder(.generic_spine).init(evaluator.allocator, 0, depth);
                 self.depth = depth;
+                self.paged = pagedNow(evaluator);
                 self.phase = .capture;
             },
             .capture => if (self.index != self.depth) {
@@ -145,7 +158,9 @@ const WhileCheckpoint = struct {
                 self.phase = .idle;
                 return true;
             },
-            .discard => if (evaluator.available() != 0) evaluator.discard(1) else {
+            .discard => if (evaluator.available() != 0) evaluator.discard(1) else if (pagedNow(evaluator) > self.paged) {
+                evaluator.unpageOne();
+            } else {
                 _ = try evaluator.reserveStack(self.depth);
                 self.phase = .restore;
             },
@@ -327,11 +342,10 @@ fn times(evaluator: *Fiber) MachineError!void {
 /// The protected value rides in a continuation rather than in a capture
 /// quotation composed onto `q`.
 fn dip(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(2);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
-    var protected = try evaluator.popValue();
-    defer protected.deinit();
+    var protected = try evaluator.popProtected();
+    defer protected.item.deinit();
     try startDip(evaluator, &quotation, &protected);
 }
 
@@ -340,22 +354,22 @@ fn dip(evaluator: *Fiber) MachineError!void {
 /// of `(x quotation...)` would have pushed it. The `cons call` and `cons dip`
 /// phrases in `idioms.zig` reach this.
 pub fn dipBelowHead(evaluator: *Fiber) MachineError!void {
-    try evaluator.require(3);
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     var head = try evaluator.popValue();
     defer head.deinit();
-    var protected = try evaluator.popValue();
-    defer protected.deinit();
+    var protected = try evaluator.popProtected();
+    defer protected.item.deinit();
     try evaluator.pushOwned(head.take());
     try startDip(evaluator, &quotation, &protected);
 }
 
-fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *heap.OwnedValue) MachineError!void {
+fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *Fiber.Protected) MachineError!void {
     const state = try evaluator.allocator.create(DipState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .protected = .init(protected.take()),
+        .protected = .init(protected.item.take()),
+        .original = protected.original,
         .site = evaluator.applicationSite(),
         .word = evaluator.active_word,
     };
@@ -365,6 +379,8 @@ fn startDip(evaluator: *Fiber, quotation: *heap.OwnedValue, protected: *heap.Own
 const DipState = struct {
     quotation: heap.Owned(*Header),
     protected: heap.Owned(Value),
+    /// Whether the value came across a paging floor, so it returns as one.
+    original: bool,
     site: machine.ApplicationSite,
     word: intern.TraceWord,
 
@@ -383,10 +399,298 @@ const DipState = struct {
     ) MachineError!?ApplicationStep {
         evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
-        try evaluator.pushOwned(self.protected.take());
+        try evaluator.pushReturned(self.protected.take(), self.original);
         return null;
     }
 
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn dipN(evaluator: *Fiber) MachineError!void {
+    try evaluator.require(2);
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    if (count_value.borrow() != .int) return evaluator.typeError("an int count");
+    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "dip-n count must be nonnegative");
+    const count: usize = @intCast(count_value.borrow().int);
+    var control = heap.Owned(DipControl).init(.{
+        .quotation = .init(quotation.take().list),
+        .protected = .init(try .init(evaluator.releases, count)),
+        .originals = try .initEmpty(evaluator.allocator, count),
+        .count = count,
+        .site = evaluator.applicationSite(),
+        .word = evaluator.active_word,
+    });
+    defer control.deinit(evaluator.releases, evaluator.allocator);
+    switch (try control.borrowMut().advance(evaluator)) {
+        .finished => unreachable,
+        .launch => try launchDipN(evaluator, &control),
+        .pending => try evaluator.startDriver(DipDriver{ .control = .init(control.take()) }),
+    }
+}
+
+fn launchDipN(evaluator: *Fiber, control: *heap.Owned(DipControl)) MachineError!void {
+    const state = try evaluator.allocator.create(DipNState);
+    state.* = .{ .control = .init(control.take()) };
+    try evaluator.beginInlineApplication(state.application());
+}
+
+/// `dip-n` takes its `count` protected values off the stack one at a time,
+/// each as `dip` would, runs the quotation, and returns them in their
+/// original order. Both phases are user-sized and advance only as far as the
+/// turn's budget allows. The values are retained, so a symbol stays a value
+/// rather than becoming code.
+const DipControl = struct {
+    quotation: heap.Owned(*Header),
+    /// The protected values, the top of the stack first.
+    protected: heap.Owned(heap.OwnedValueBuffer),
+    /// Which of them are originals of a paging floor, by `protected` index.
+    originals: std.DynamicBitSetUnmanaged,
+    count: usize,
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    index: usize = 0,
+    phase: enum { take, run, restore } = .take,
+
+    const Progress = union(enum) { pending, launch, finished };
+
+    fn advance(self: *DipControl, evaluator: *Fiber) MachineError!Progress {
+        const work = evaluator.workBudget();
+        while (true) switch (self.phase) {
+            .take => {
+                const end = self.index + work.take(self.count - self.index);
+                while (self.index != end) : (self.index += 1) {
+                    var taken = try evaluator.popProtected();
+                    self.protected.borrowMut().appendOwned(taken.item.take());
+                    if (taken.original) self.originals.set(self.index);
+                }
+                if (self.index != self.count) return .pending;
+                self.phase = .run;
+                return .launch;
+            },
+            .run => {
+                self.index = self.count;
+                self.phase = .restore;
+            },
+            .restore => {
+                const end = self.index - work.take(self.index);
+                while (self.index != end) {
+                    self.index -= 1;
+                    const item = self.protected.borrow().values()[self.index];
+                    heap.retainValue(item);
+                    try evaluator.pushReturned(item, self.originals.isSet(self.index));
+                }
+                if (self.index != 0) return .pending;
+                return .finished;
+            },
+        };
+    }
+
+    pub fn retire(self: *DipControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.originals.deinit(allocator);
+        self.protected.deinit(releases, allocator);
+        self.quotation.deinit(releases, allocator);
+    }
+};
+
+const DipDriver = struct {
+    control: heap.Owned(DipControl),
+
+    pub fn advance(evaluator: *Fiber, self: *DipDriver) MachineError!machine.WorkProgress {
+        evaluator.active_word = self.control.borrow().word;
+        try evaluator.pollKernel();
+        const progress = try self.control.borrowMut().advance(evaluator);
+        if (progress == .pending) return .stepped;
+        var control = heap.Owned(DipControl).init(self.control.take());
+        defer control.deinit(evaluator.releases, evaluator.allocator);
+        evaluator.retireDriver(self);
+        switch (progress) {
+            .launch => try launchDipN(evaluator, &control),
+            .finished, .pending => {},
+        }
+        return .detached;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// The finished quotation returns the protected values from the same
+/// continuation; only a restore the turn cannot finish hands the control
+/// back to a driver.
+const DipNState = struct {
+    control: heap.Owned(DipControl),
+
+    fn application(self: *DipNState) Application {
+        const control = self.control.borrow();
+        return machine.typedApplication(self, control.quotation.borrow(), control.site, 0);
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Fiber,
+        self: *DipNState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        evaluator.active_word = self.control.borrow().word;
+        evaluator.chargeContinuationStep();
+        switch (try self.control.borrowMut().advance(evaluator)) {
+            .finished => return null,
+            .launch => unreachable,
+            .pending => {
+                try evaluator.startDriver(DipDriver{ .control = .init(self.control.take()) });
+                return null;
+            },
+        }
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn above(evaluator: *Fiber) MachineError!void {
+    return startPaged(evaluator, .above);
+}
+fn below(evaluator: *Fiber) MachineError!void {
+    return startPaged(evaluator, .below);
+}
+fn startPaged(evaluator: *Fiber, placement: PagedControl.Placement) MachineError!void {
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    const state = try evaluator.allocator.create(PagedState);
+    state.* = .{
+        .quotation = .init(quotation.take().list),
+        .control = .init(.{
+            .placement = placement,
+            .site = evaluator.applicationSite(),
+            .word = evaluator.active_word,
+        }),
+    };
+    try evaluator.beginPagingApplication(state.application(), &state.control.borrowMut().floor);
+}
+
+/// `above` and `below` run their quotation over a paging floor and then put
+/// the stack back together in place: the originals a `dip` returned are swept
+/// to the top of the region and dropped, the paged originals come back in
+/// their original order, and `below` rotates them beneath the region by
+/// three reversals. Each phase is user-sized and advances only as far as the
+/// turn's budget allows; no phase takes a live value off the stack except to
+/// release it.
+const PagedControl = struct {
+    const Placement = enum { above, below };
+
+    placement: Placement,
+    floor: machine.PagingFloor = .{ .floor = 0, .entry_beneath = 0, .beneath = .{ .hard = 0 } },
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    /// The region's base: the floor as the quotation left it.
+    base: usize = 0,
+    /// How many originals come back: the floor's count before they do.
+    restored: usize = 0,
+    sweep: machine.StackSweep = .from(0),
+    /// The reversals that rotate the restored originals beneath the region.
+    spans: [3]machine.StackReversal = @splat(.none),
+    reversed: usize = 0,
+    phase: enum { begin, sweep, drop, surface, rotate, finished } = .begin,
+
+    fn advance(self: *PagedControl, evaluator: *Fiber) MachineError!bool {
+        const work = evaluator.workBudget();
+        while (true) switch (self.phase) {
+            .begin => {
+                self.restored = self.floor.paged();
+                const returned = self.floor.returned.items;
+                if (returned.len == 0) {
+                    self.phase = .surface;
+                } else {
+                    // The region lies above the floor beneath, whose returned
+                    // originals all sit below it, so only this floor's records
+                    // name slots in it.
+                    self.sweep = .from(returned[0]);
+                    self.phase = .sweep;
+                }
+            },
+            .sweep => {
+                if (!evaluator.sweepStack(&self.sweep, self.floor.returned.items, work)) return false;
+                self.phase = .drop;
+            },
+            .drop => {
+                const returned = &self.floor.returned;
+                const granted = work.take(returned.items.len);
+                evaluator.discard(granted);
+                returned.shrinkRetainingCapacity(returned.items.len - granted);
+                if (returned.items.len != 0) return false;
+                self.phase = .surface;
+            },
+            .surface => {
+                const originals = &self.floor.originals;
+                const granted = work.take(originals.items.len);
+                for (0..granted) |_| try evaluator.pushOwned(originals.pop().?);
+                if (originals.items.len != 0) return false;
+                if (self.placement == .above) {
+                    self.phase = .finished;
+                    continue;
+                }
+                const top = evaluator.stack.items.len;
+                const split = top - self.restored;
+                self.spans = .{ .of(self.base, split), .of(split, top), .of(self.base, top) };
+                self.phase = .rotate;
+            },
+            .rotate => {
+                while (self.reversed != self.spans.len) : (self.reversed += 1) {
+                    if (!evaluator.reverseStack(&self.spans[self.reversed], work)) return false;
+                }
+                self.phase = .finished;
+            },
+            .finished => return true,
+        };
+    }
+
+    pub fn retire(self: *PagedControl, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.floor.retire(releases, allocator);
+    }
+};
+
+const PagedState = struct {
+    quotation: heap.Owned(*Header),
+    control: heap.Owned(PagedControl),
+
+    fn application(self: *PagedState) Application {
+        const control = self.control.borrow();
+        return machine.typedApplication(self, self.quotation.borrow(), control.site, 0);
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Fiber,
+        self: *PagedState,
+        window: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        const control = self.control.borrowMut();
+        evaluator.active_word = control.word;
+        evaluator.chargeContinuationStep();
+        control.base = window.base();
+        if (try control.advance(evaluator)) return null;
+        // The frame is gone and the floor beneath is active, so nothing
+        // names the floor's address any more and the control may move.
+        try evaluator.startDriver(PagedDriver{ .control = .init(self.control.take()) });
+        return null;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const PagedDriver = struct {
+    control: heap.Owned(PagedControl),
+
+    pub fn advance(evaluator: *Fiber, self: *PagedDriver) MachineError!machine.WorkProgress {
+        const control = self.control.borrowMut();
+        evaluator.active_word = control.word;
+        try evaluator.pollKernel();
+        if (!try control.advance(evaluator)) return .stepped;
+        var finished = heap.Owned(PagedControl).init(self.control.take());
+        defer finished.deinit(evaluator.releases, evaluator.allocator);
+        evaluator.retireDriver(self);
+        return .detached;
+    }
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
@@ -576,6 +880,7 @@ const GuardTarget = union(enum) {
 const GuardCheckpoint = struct {
     values: heap.OwnedValueBuffer,
     depth: usize,
+    paged: usize,
     index: usize = 0,
     phase: enum { capture, ready, discard, reserve, restore } = .capture,
 
@@ -584,12 +889,14 @@ const GuardCheckpoint = struct {
         return .init(.{
             .values = try .init(evaluator.releases, depth),
             .depth = depth,
+            .paged = pagedNow(evaluator),
         });
     }
     fn take(self: *GuardCheckpoint) GuardCheckpoint {
         return .{
             .values = self.values.take(),
             .depth = self.depth,
+            .paged = self.paged,
             .index = self.index,
             .phase = self.phase,
         };
@@ -616,6 +923,8 @@ const GuardCheckpoint = struct {
         while (work.spend()) switch (self.phase) {
             .discard => if (evaluator.available() != 0) {
                 evaluator.discard(1);
+            } else if (pagedNow(evaluator) > self.paged) {
+                evaluator.unpageOne();
             } else {
                 self.phase = .reserve;
             },

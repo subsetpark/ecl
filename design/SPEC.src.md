@@ -539,11 +539,19 @@ failing (see Concurrency).
 
 ### Application contexts
 
-Three quotation-application behaviors exist:
+Four quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
-  are `call`, `dip`, `keep`, `bi`, `tri`, `cleave`, `bi2`, `tri2`, `cleave2`,
-  `cleave-n`, `both`, `if`, `when`, `unless`, `case`, and `times`.
+  are `call`, `dip`, `dip2`, `dip-n`, `bi`, `tri`, `cleave`, `bi2`, `tri2`,
+  `cleave2`, `cleave-n`, `both`, `if`, `when`, `unless`, `case`, and `times`.
+- **Paging**: the quotation runs on a substack that starts empty and takes
+  operands from beneath as its words need them, so what it consumed is
+  exactly what its words required. `above` and `below` then restore those
+  values, in their original order, above or below the quotation's results.
+  A `dip` inside returns a value it protected as the original it was, and a
+  checkpointed guard inside restores what its test took from beneath. Paging
+  stops at the nearest isolated substack or unit beneath, whose underflow is
+  unchanged.
 - **Checkpointed inline guards**: `cond`, `while`, and `linrec` test quotations run
   inline against a retained operand-stack checkpoint. A test
   may consume, rearrange, or add values; its top value must be a 0/1 boolean,
@@ -842,7 +850,7 @@ minimum:
 ```ecl
 (result on-ok on-err -- ...) (body) `case def
 (... n -- list) (body) `pack def
-(x (... -- ...) -- ... x) (body) `keep def
+(x (... -- ...) -- ... x) (body) `peek def
 ```
 
 A row in the before portion declares that the word consumes at least its

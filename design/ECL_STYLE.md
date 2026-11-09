@@ -127,8 +127,9 @@ state ([root name] at-path) (`root at minimum-map) bi
 pair wrap
 ```
 
-Use `keep` when the original input must remain beneath one quotation's
-result. Use `both` for the same quotation over two inputs, and `bi2` for two
+Use `above` when the inputs a quotation consumed must come back on top of
+its results, and `below` when the results belong on top of an unchanged
+stack. Use `both` for the same quotation over two inputs, and `bi2` for two
 quotations over the same pair of inputs.
 
 ### Locals must change the flow

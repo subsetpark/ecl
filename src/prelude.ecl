@@ -1,9 +1,3 @@
-### def 2keep
-(x y (... -- ...) -- ... x y :
- "Binary `keep`: apply a quotation to a pair of values, then restore both values, in order, on top
-  of the quotation's results.")
-(|x y q| x y q call x y) `2keep def
-
 ### def all?
 (list (a -- bool) -- bool :
  "Return 1 when the predicate returns 1 for every element; otherwise return 0.")
@@ -61,10 +55,11 @@
   nonnegative int.")
 (over swap each where at) `filter def
 
-### def keep
-(x (... -- ...) -- ... x :
- "Apply a quotation to a value, then restore the value on top of the quotation's results.")
-(over (call) dip) `keep def
+### def dip2
+(x y (... -- ...) -- ... x y :
+ "Run a quotation beneath the top two stack values, then push them back in their original order
+  after its results: `2 dip-n`.")
+(2 dip-n) `dip2 def
 
 ### def last
 (list -- value : "Return the final element of a nonempty list.")
@@ -164,7 +159,7 @@
 (x p q -- ... :
  "Apply two quotations to the same input, first `p`, then `q`, leaving `p`'s results beneath
   `q`'s.")
-((keep) dip call) `bi def
+((over (call) dip) dip call) `bi def
 
 ### def chunk
 (list size -- pieces :
@@ -247,7 +242,7 @@ def
 
 ### def tri
 (x p q r -- ... : "Apply three quotations to `x` in left-to-right order.")
-(((keep) dip keep) dip call) `tri def
+(((over (call) dip) dip over (call) dip) dip call) `tri def
 
 ### def unappend
 (list -- initial last : "Split a nonempty list into its initial elements and last element.")
