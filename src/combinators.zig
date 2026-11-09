@@ -338,6 +338,9 @@ fn dipN(evaluator: *Fiber) MachineError!void {
     if (count_value.borrow() != .int) return evaluator.typeError("an int count");
     if (count_value.borrow().int < 0) return evaluator.fail(.domain, "dip-n count must be nonnegative");
     const count: usize = @intCast(count_value.borrow().int);
+    // Checked before the buffers are sized by it; `require` would page early
+    // and lose which values `popProtected` finds to be originals.
+    if (count > evaluator.reachable()) return evaluator.failShort(count);
     var control = heap.Owned(DipControl).init(.{
         .quotation = .init(quotation.take().list),
         .protected = .init(try .init(evaluator.releases, count)),
@@ -738,6 +741,7 @@ fn startCleave(
 fn launchCleave(evaluator: *Fiber, owned: *heap.Owned(*CleaveState)) MachineError!void {
     const state = owned.borrow();
     if (state.phase == .done) return owned.deinit(evaluator.releases, evaluator.allocator);
+    state.running = true;
     try evaluator.beginPagingApplication(
         owned.take().application(state.quotation()),
         &state.paged.borrowMut().floor,
@@ -823,6 +827,9 @@ const CleaveState = struct {
     next: usize = 0,
     index: usize = 0,
     pushed: usize = 0,
+    /// A quotation was launched and has not yet returned. A resume with none
+    /// outstanding is a suspended restore, drop, or push finishing.
+    running: bool = false,
     phase: enum { validate, run, restored, drop, push, done } = .validate,
 
     fn count(self: *const CleaveState) usize {
@@ -886,6 +893,7 @@ const CleaveState = struct {
     fn resumeAfter(self: *CleaveState, _: @FieldType(CleaveState, "phase")) ?ApplicationStep {
         if (self.phase == .done) return null;
         std.debug.assert(self.phase == .run);
+        self.running = true;
         const paged = self.paged.borrowMut();
         paged.reset();
         return .{ .apply = .{
@@ -903,11 +911,18 @@ const CleaveState = struct {
     ) MachineError!?ApplicationStep {
         evaluator.active_word = self.word;
         evaluator.chargeContinuationStep();
-        if (self.phase == .run) {
+        if (self.running) {
+            self.running = false;
             self.paged.borrowMut().base = window.base();
             self.phase = .restored;
+            // `work` leaves its own progress in `phase`; `finishWork` would
+            // reset it, so a suspension keeps it here.
+            if (try self.work(evaluator)) return self.resumeAfter(self.phase);
+            try evaluator.startDriver(SuspendedWork(CleaveState){ .state = self });
+            return evaluator.suspendInlineApplication();
         }
-        return finishWork(CleaveState, self, evaluator, self.phase);
+        // A suspended restore, drop, or push finished under its driver.
+        return self.resumeAfter(self.phase);
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

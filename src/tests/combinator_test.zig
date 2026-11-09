@@ -264,6 +264,8 @@ test "paging: above and below restore what the quotation consumed" {
         .{ .name = "sweeping returned originals is bounded work", .source = "20000 (1) times ((7) 10000 dip-n) below 20001 pack dup len swap last", .expected = "20001 7" },
         .{ .name = "a guard's restore is bounded work", .source = "20000 (1) times (10000 (pop) times 0) (pop) while 20000 pack len 20000 (1) times [(10000 (pop) times 0) (pop) (pop)] cond 19999 pack len", .expected = "20000 19999" },
         .{ .name = "originals and results outgrow their inline slots", .source = "1 2 3 4 5 6 [(+ + + + +) (1 2 3 4 5 6)] cleave 1 2 3 4 5 6 (+ + + + +) above", .expected = "21 1 2 3 4 5 6 21 1 2 3 4 5 6" },
+        .{ .name = "a cleave resumes after a suspended restore", .source = "70000 (1) times [(70000 (pop) times) (7)] cleave", .expected = "7" },
+        .{ .name = "a cleave resumes after a suspended drop and push", .source = "70000 (1) times [(70000 (pop) times 8)] cleave", .expected = "8" },
         .{ .name = "a cleave's collect and drop are bounded work", .source = "20000 (1) times [(10000 (pop) times 7) ()] cleave 10001 pack dup len swap last", .expected = "10001 7" },
         .{ .name = "linrec runs in constant space", .source = "100000 (dup 0 =) (pop) (1 -) () linrec 20000 (dup 0 =) (pop 0) (1 -) (1 +) linrec", .expected = "20000" },
     });
@@ -283,6 +285,8 @@ test "combinators: dip-n protects a counted prefix" {
         .{ .name = "a large count is bounded work", .source = "20000 (1) times (2) 20000 dip-n 20001 pack len", .expected = "20001" },
     });
     try support.expectErrors(&.{
+        .{ .name = "dip-n count beyond the stack underflows before allocating", .source = "() 9000000000 dip-n", .kind = "underflow", .word = "dip-n" },
+        .{ .name = "dip-n count beyond a short stack beneath a floor", .source = "1 (() 3 dip-n) below", .kind = "underflow", .word = "dip-n" },
         .{ .name = "dip-n non-int count", .source = "(+) `x dip-n", .kind = "type", .word = "dip-n" },
         .{ .name = "dip-n negative count", .source = "(+) -1 dip-n", .kind = "domain", .word = "dip-n" },
         .{ .name = "dip-n non-quotation", .source = "1 2 dip-n", .kind = "type", .word = "dip-n" },

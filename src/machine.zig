@@ -5264,6 +5264,14 @@ pub const Fiber = struct {
             .paging => |outer| floor = outer,
         };
     }
+    /// The values a paging application could reach: everything above the hard floor.
+    pub fn reachable(self: *const Fiber) usize {
+        return self.stack.items.len - self.hardFloor();
+    }
+    /// Fails as an operand check short by `count` values would.
+    pub fn failShort(self: *Fiber, count: usize) MachineError {
+        return self.failUnderflow(count);
+    }
     fn isolationGuidance(self: *Fiber, base: usize) ?IsolationGuidance {
         if (base > 0) {
             const boundary = self.boundary_index orelse return null;
