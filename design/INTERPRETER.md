@@ -1313,9 +1313,10 @@ int or a real.
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
-Every binary numeric word offered alone to `fold`, `fold1`, or `scan` runs as
-one typed sequential loop through the scalar authority, boolean words
-included, with validation of every operand. A scan of a word whose result is 0
+A binary numeric word offered alone to `fold`, `fold1`, or `scan` over an int
+seed and int or byte lanes, boolean words included, runs as one typed
+sequential loop. It gives the results and first fault of the scalar authority;
+any other shape runs the generic route. A scan of a word whose result is 0
 or 1 is a mask and is stored as one. Recognized `fold1` reductions retain the original input and
 start after its first element; they never materialize a tail. An empty fold
 preserves its seed and a singleton `fold1` preserves its sole value without

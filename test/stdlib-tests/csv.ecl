@@ -19,7 +19,6 @@
   "" csv.parse len 0 equal
   "a" csv.parse (("a")) equal
   "a\n" csv.parse (("a")) equal
-  "a\u{d}" csv.parse (("a")) equal
   "a\n\n" csv.parse (("a") ("")) equal
   "\n" csv.parse (("")) equal
   "name,age\nAda,36" csv.parse (("name" "age") ("Ada" "36")) equal
@@ -61,6 +60,7 @@
   ("a\"b" csv.parse) `parse "record 1, column 1" raises-containing
   ("x,y\n1,\"a\"b" csv.parse) `parse "record 2, column 2" raises-containing
   ("a\u{d}b" csv.parse) `parse "malformed quoting" raises-containing
+  ("a,b\u{d}" csv.parse) `parse "record 1, column 2" raises-containing
   ("a,b,c\nd" csv.parse) `shape "record 2 has 1 fields where record 1 has 3" raises-containing
   ("a,b\n\n" csv.parse) `shape "record 2" raises-containing
   (5 csv.parse) `type "chars expected" raises-containing

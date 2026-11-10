@@ -116,7 +116,8 @@
 
  ### defp tail
  (chunks count text -- chunks : "Lex a final record that no newline ends.")
- (|chunks count text| chunks text "\n" cat count lexed wrap cat) `tail defp
+ (|chunks count text|
+  chunks text text 13 char = last ("\u{d}\n") ("\n") if cat count lexed wrap cat) `tail defp
 
  ### defp finished
  (state -- rows : "Lex what follows the last record end and join the row chunks.")
