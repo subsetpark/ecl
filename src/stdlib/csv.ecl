@@ -3,9 +3,9 @@
     renders rows back; neither converts a field. A typed column is a `table.cast` over parsed
     rows.")
 (
- ### defp block
+ ### setp block
  (-- count : "Characters lexed at a time, which bounds the masks a parse holds.")
- (65536) `block defp
+ 65536 `block setp
 
  ### defp refuse
  (kind message -- : "Raise an error of a kind with a message.")
@@ -180,9 +180,9 @@
    widths lens flat flat \" = marked)
   call) `rendered defp
 
- ### defp batch
+ ### setp batch
  (-- count : "Records rendered at a time, which bounds the masks an emit holds.")
- (4096) `batch defp
+ 4096 `batch setp
 
  ### defp batched
  (rows -- text : "Render one batch of records whose shapes are validated.")
