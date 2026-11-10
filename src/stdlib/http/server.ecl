@@ -96,10 +96,10 @@
     `net.close` on the listener it was given, which stays the caller's to close explicitly or
     through its own scope and may be served again.")
 (
- ### defp crlf
+ ### setp crlf
  # String literals have no `\r` escape, so the line terminator is spelled out.
  (-- string : "Return the CR LF line terminator.")
- ("\u{D}\u{A}") `crlf defp
+ "\u{D}\u{A}" `crlf setp
 
  ### defp framing-error
  (status message -- : "Raise a `domain error whose data carries the response status.")
