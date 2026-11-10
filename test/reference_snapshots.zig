@@ -925,7 +925,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.malformed `csv.unclosed `csv.checked `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line <^\d+$> col <^\d+$>}}
+        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.misquoted `csv.unclosed `csv.checked `csv.fielded `csv.separated `csv.quoted `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line <^\d+$> col <^\d+$>}}
         \\=== json parse ===
         \\source: "{\"a\":[1,null,true]}" json.parse
         \\exit: 0

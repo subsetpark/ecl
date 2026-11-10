@@ -30,12 +30,15 @@
   s n and i take 0 (+) fold base + 1 +
   s i take s n and i take reverse 0 (or) scan reverse not and 0 (+) fold 1 +) `located defp
 
+ ### defp misquoted
+ (record column -- : "Raise the parse error naming a record and field.")
+ (|record column|
+  `parse "csv: malformed quoting at record " record str cat ", column " cat column str cat refuse)
+ `misquoted defp
+
  ### defp malformed
  (splits newlines index base -- : "Raise the parse error for the character at an index.")
- (located
-  (|record column|
-   `parse "csv: malformed quoting at record " record str cat ", column " cat column str cat refuse)
-  call) `malformed defp
+ (located misquoted) `malformed defp
 
  ### defp verify
  (splits newlines bad base -- : "Raise for the first set position of a mask, if any.")
@@ -65,20 +68,26 @@
   x 13 char = e not and n 1 followed not and or
   base verify) `checked defp
 
+ ### defp fielded
+ (text quote inside newlines splits kept base -- rows :
+  "Validate the quoting, then cut the fields and the rows.")
+ (|x q e n s kept base|
+  x q e n s q e and kept not and base checked
+  x s q kept not and or x 13 char = e not and or s n rows-of) `fielded defp
+
+ ### defp separated
+ (text quote inside newlines base -- rows :
+  "Find the field separators and the quotes that are text.")
+ (|x q e n base| x q e n x \, = n or e not and q e not and 0 shifted q and base fielded)
+ `separated defp
+
+ ### defp quoted
+ (text quote base -- rows : "Find the characters inside quotes, and the newlines.")
+ (|x q base| x q q 0 (<>) scan x "\n" first = base separated) `quoted defp
+
  ### defp lexed
  (text base -- rows : "Split whole newline-terminated records that follow `base` earlier ones.")
- (|x base|
-  x x \" = base
-  (|x q base|
-   x q q 0 (<>) scan x "\n" first = base
-   (|x q e n base|
-    x q e n x \, = n or e not and q e not and 0 shifted q and base
-    (|x q e n s kept base|
-     x q e n s q e and kept not and base checked
-     x s q kept not and or x 13 char = e not and or s n rows-of)
-    call)
-   call)
-  call) `lexed defp
+ (|x base| x x \" = base quoted) `lexed defp
 
  ### defp held
  (state block inside -- state : "Keep a block that ends no record.")
@@ -94,15 +103,16 @@
  (|state block e k| state block e k state 0 at raze block k take cat state 3 at lexed resumed)
  `divided defp
 
+ ### defp ended
+ (state block inside -- state : "Hold a block, or lex through its last record end.")
+ (|state block e|
+  state block e block "\n" first = e not and where dup len 0 = (pop held) (last 1 + divided) if)
+ `ended defp
+
  ### defp step
  (state block -- state :
   "Advance the held pieces, quote parity, row chunks, and record count by one block.")
- (|state block|
-  state block block \" = state 1 at (<>) scan
-  (|state block e|
-   state block e block "\n" first = e not and where
-   dup len 0 = (pop held) (last 1 + divided) if)
-  call) `step defp
+ (|state block| state block block \" = state 1 at (<>) scan ended) `step defp
 
  ### defp tail
  (chunks count text -- chunks : "Lex a final record that no newline ends.")
@@ -113,14 +123,15 @@
  (|state| state 2 at state 3 at state 0 at raze dup len 0 = (pop pop) (tail) if raze)
  `finished defp
 
+ ### defp uneven
+ (widths record -- : "Raise the shape error naming a record and both widths.")
+ (|widths at-record|
+  `shape "csv: record " at-record 1 + str cat " has " cat widths at-record at str cat
+  " fields where record 1 has " cat widths first str cat refuse) `uneven defp
+
  ### defp ragged
  (rows widths -- : "Raise for the first record whose width differs from the first record's.")
- (|rows widths|
-  widths widths widths first = not first-where
-  (|widths at-record|
-   `shape "csv: record " at-record 1 + str cat " has " cat widths at-record at str cat
-   " fields where record 1 has " cat widths first str cat refuse)
-  call) `ragged defp
+ (|rows widths| widths widths widths first = not first-where uneven) `ragged defp
 
  ### defp rectangular
  (rows -- rows : "Reject a record whose width differs from the first record's.")
@@ -171,14 +182,17 @@
   quote 0 (+) scan 0 swap cons
   lens 0 (+) scan dup 0 shifted joined) `marked defp
 
+ ### defp textual
+ (widths lengths text -- text : "Reject fields that are not text, then render them.")
+ (|widths lens flat|
+  flat str.str? `type "csv.emit expects every field to be a string" refuse-unless
+  widths lens flat flat \" = marked) `textual defp
+
  ### defp rendered
  (widths fields -- text : "Render validated fields, `widths` to a record, as canonical text.")
  (|widths fields|
-  widths fields "csv.emit expects every field to be a string" measured fields raze
-  (|widths lens flat|
-   flat str.str? `type "csv.emit expects every field to be a string" refuse-unless
-   widths lens flat flat \" = marked)
-  call) `rendered defp
+  widths fields "csv.emit expects every field to be a string" measured fields raze textual)
+ `rendered defp
 
  ### setp batch
  (-- count : "Records rendered at a time, which bounds the masks an emit holds.")
