@@ -1,5 +1,4 @@
 ### module stdlib.test.http-request
-[]
 (
  `stdlib.test.support (equal raises raises-containing documented) import
 

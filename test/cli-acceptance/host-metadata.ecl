@@ -2,7 +2,6 @@
 # Host metadata is independent of environment spelling. Independence from the
 # argument-vector spelling of the executable lives in test/e2e.zig, because a
 # process specification always passes the executable path as argv[0].
-[]
 (
  `cli.test.support (expect install invocation succeeds write) import
 

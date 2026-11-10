@@ -1,5 +1,4 @@
 ### module stdlib.test.error
-[]
 (
  `stdlib.test.support
  (equal raises-containing documented)
@@ -17,7 +16,7 @@
   {kind io msg 7} error.valid? 0 equal
   {msg "missing kind"} error.valid? 0 equal
   7 error.valid? 0 equal
-  [] (missing) @attempt `err at error.valid? 1 equal
+  (missing) @attempt `err at error.valid? 1 equal
   {kind custom extra 1} error.valid? 1 equal)
  `construction-and-validation test
 

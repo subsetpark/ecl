@@ -1,6 +1,5 @@
 ### module pkg.resolution
 # Portable project locks. Generations retain these same resolution bytes.
-[]
 (
  ### defp require
  (condition -- : "Reject inconsistent portable resolution data.")

@@ -1,6 +1,5 @@
 ### module pkg.layout
 # Closed generation locations belong to the application, never the interpreter.
-[]
 (
  ### defp require
  (condition -- : "Reject an invalid application generation reference.")

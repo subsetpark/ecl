@@ -1,5 +1,4 @@
 ### module stdlib.test.http-server
-[]
 (
  `stdlib.test.support
  (equal raises raises-containing raises-data documented)

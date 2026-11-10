@@ -1,5 +1,4 @@
 ### module pkg.test.name
-[]
 (
  `pkg.test.support (equal raises-containing documented) import
 

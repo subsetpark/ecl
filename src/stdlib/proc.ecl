@@ -55,7 +55,6 @@
     decode Unicode. A port is an opaque identity capability that prints `<port:N>` and has type ``
     `port ``; it exposes no PID and cannot be passed through JSON. Native words can view and forward
     its opaque identity.")
-[]
 (
  ### def spawn
  (spec -- resource :
@@ -202,12 +201,12 @@
   "Concurrently feed, drain, and observe process exit.")
  (|spec process stdout-limit stderr-limit|
   process stdin spec `stdin [] dict.get pair
-  (dup len 0 > (over swap fd.write) (pop) if fd.finish {}) @spawn
+  (dup len 0 > (over swap fd.write) (pop) if fd.finish {}) cat @spawn
   process stdout stdout-limit pair
-  (capture `stdout swap pair dict.from-flat) @spawn
+  (capture `stdout swap pair dict.from-flat) cat @spawn
   process stderr stderr-limit pair
-  (capture `stderr swap pair dict.from-flat) @spawn
-  process wrap (wait `term swap pair dict.from-flat) @spawn
+  (capture `stderr swap pair dict.from-flat) cat @spawn
+  process (wait `term swap pair dict.from-flat) cons @spawn
   4 pack await-all run-result process port.close) `run-streams defp
 
  ### defp checked-limit
@@ -271,7 +270,7 @@
   error.with-message assert
   fd.bytes? `domain error.new "expected stdin bytes in 0...255" error.with-message assert
   dup `timeout-ms 0 dict.get nonnegative pop
-  dup wrap (run-body) @spawn dup rolldown pair (run-wait) @attempt
+  dup (run-body) cons @spawn dup rolldown pair (run-wait) cat @attempt
   swap dup task.cancel task.await pop
   result.or-raise first
   dup `err dict.has?

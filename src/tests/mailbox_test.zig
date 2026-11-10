@@ -62,16 +62,16 @@ test "mailbox: addresses name a task mailbox and are opaque" {
     var runtime = try openSession(&inputs);
     defer runtime.deinit();
     // Two addresses of one task name one mailbox; two tasks' addresses never do.
-    try expectStack(&runtime, "[] (1) @spawn dup task.address swap task.address match?", "1");
-    try expectStack(&runtime, "[] (1) @spawn task.address [] (1) @spawn task.address match?", "0");
-    try expectStack(&runtime, "[] (1) @spawn task.address type", "address");
+    try expectStack(&runtime, "(1) @spawn dup task.address swap task.address match?", "1");
+    try expectStack(&runtime, "(1) @spawn task.address (1) @spawn task.address match?", "0");
+    try expectStack(&runtime, "(1) @spawn task.address type", "address");
     // The address survives the task: it is derived after the result is in.
-    try expectStack(&runtime, "[] (1) @spawn dup task.await pop task.address type", "address");
+    try expectStack(&runtime, "(1) @spawn dup task.await pop task.address type", "address");
     // An address prints as an unreadable marker carrying the task's number.
-    try expectStack(&runtime, "[] (1) @spawn dup task.address str 9 take swap str 6 take", "\"<address:\" \"<task:\"");
-    try expectStack(&runtime, "[] (1) @spawn dup task.address str 9 drop swap str 6 drop match?", "1");
+    try expectStack(&runtime, "(1) @spawn dup task.address str 9 take swap str 6 take", "\"<address:\" \"<task:\"");
+    try expectStack(&runtime, "(1) @spawn dup task.address str 9 drop swap str 6 drop match?", "1");
     try expectError(&runtime, "\"<address:1>\" parse", .{ .name = "address marker", .source = "", .kind = "parse" });
-    try expectError(&runtime, "[] (1) @spawn task.address json.emit", .{ .name = "address json", .source = "", .kind = "type" });
+    try expectError(&runtime, "(1) @spawn task.address json.emit", .{ .name = "address json", .source = "", .kind = "type" });
     try expectError(&runtime, "1 task.address", .{ .name = "address of int", .source = "", .kind = "type" });
 }
 
@@ -81,12 +81,12 @@ test "mailbox: task.self is the executing task and is refused at the root" {
     var runtime = try openSession(&inputs);
     defer runtime.deinit();
     try expectError(&runtime, "task.self", .{ .name = "self at root", .source = "", .kind = "domain" });
-    try expectStack(&runtime, "[] (task.self) @spawn task.await `ok at first type", "address");
+    try expectStack(&runtime, "(task.self) @spawn task.await `ok at first type", "address");
     // A task's self is its own address, not its parent's or its child's.
-    try expectStack(&runtime, "[] (task.self) @spawn dup task.address swap task.await `ok at first match?", "1");
+    try expectStack(&runtime, "(task.self) @spawn dup task.address swap task.await `ok at first match?", "1");
     try expectStack(
         &runtime,
-        "[] ([] (task.self) @spawn task.await `ok at first) @spawn dup task.address swap task.await `ok at first match?",
+        "((task.self) @spawn task.await `ok at first) @spawn dup task.address swap task.await `ok at first match?",
         "0",
     );
 }
@@ -98,20 +98,20 @@ test "mailbox: send and receive round trip in order" {
     defer runtime.deinit();
     try expectStack(
         &runtime,
-        "[] (3 (task.receive) times 3 pack) @spawn dup task.address dup 1 task.send dup 2 task.send 3 task.send task.await `ok at first",
+        "(3 (task.receive) times 3 pack) @spawn dup task.address dup 1 task.send dup 2 task.send 3 task.send task.await `ok at first",
         "[1 2 3]",
     );
     // A flat list of any length is checked in one step and arrives whole.
     try expectStack(
         &runtime,
-        "[] (task.receive len) @spawn dup task.address 1000000 range task.send task.await",
+        "(task.receive len) @spawn dup task.address 1000000 range task.send task.await",
         "{ok [1000000]}",
     );
     // An address is an ordinary value to send, including inside a dict.
-    try expectStack(&runtime, "[] (task.receive type) @spawn dup task.address dup task.send task.await", "{ok (`address)}");
+    try expectStack(&runtime, "(task.receive type) @spawn dup task.address dup task.send task.await", "{ok (`address)}");
     try expectStack(
         &runtime,
-        "[] (task.receive `reply at type) @spawn dup task.address dup {} `reply rolldown put task.send task.await",
+        "(task.receive `reply at type) @spawn dup task.address dup {} `reply rolldown put task.send task.await",
         "{ok (`address)}",
     );
 }
@@ -121,12 +121,12 @@ test "mailbox: send refuses handles, non-addresses, and closed mailboxes" {
     defer inputs.deinit();
     var runtime = try openSession(&inputs);
     defer runtime.deinit();
-    try expectError(&runtime, "[] (task.receive) @spawn `receiver set receiver task.address receiver task.send", .{ .name = "handle", .source = "", .kind = "type" });
+    try expectError(&runtime, "(task.receive) @spawn `receiver set receiver task.address receiver task.send", .{ .name = "handle", .source = "", .kind = "type" });
     try expectError(&runtime, "receiver task.address {} `h receiver put task.send", .{ .name = "nested handle", .source = "", .kind = "type" });
     try expectError(&runtime, "receiver task.address receiver 1 pack task.send", .{ .name = "handle in a list", .source = "", .kind = "type" });
     try expectStack(&runtime, "receiver task.cancel receiver task.await `err at `kind at", "cancelled");
     try expectError(&runtime, "receiver 1 task.send", .{ .name = "not an address", .source = "", .kind = "type" });
-    try expectError(&runtime, "[] (1) @spawn dup task.await pop task.address 1 task.send", .{
+    try expectError(&runtime, "(1) @spawn dup task.await pop task.address 1 task.send", .{
         .name = "closed",
         .source = "",
         .kind = "io",
@@ -145,14 +145,14 @@ fn pressureCase(workers: usize) !void {
     // parks at the sixteenth and resumes as the receiver drains.
     try expectStack(
         &runtime,
-        "[] (20 clock.sleep 40 (task.receive) times 40 pack) @spawn dup task.address `box set " ++
+        "(20 clock.sleep 40 (task.receive) times 40 pack) @spawn dup task.address `box set " ++
             "0 40 (box over task.send 1 +) times pop task.await `ok at first 40 range match?",
         "1",
     );
     // A sender parked on a full mailbox fails once its receiver is cancelled.
     try expectStack(
         &runtime,
-        "[] (100000 clock.sleep) @spawn dup task.address `sink set [] (17 (sink 0 task.send) times) @spawn " ++
+        "(100000 clock.sleep) @spawn dup task.address `sink set (17 (sink 0 task.send) times) @spawn " ++
             "5 clock.sleep swap task.cancel task.await `err at `kind at",
         "io",
     );
@@ -168,10 +168,10 @@ test "mailbox: receive-for returns the message or a timeout value" {
     defer inputs.deinit();
     var runtime = try openSession(&inputs);
     defer runtime.deinit();
-    try expectStack(&runtime, "[] (20 task.receive-for) @spawn task.await `ok at first `err at `kind at", "timeout");
-    try expectStack(&runtime, "[] (1000 task.receive-for) @spawn dup task.address 7 task.send task.await `ok at first", "{ok 7}");
-    try expectStack(&runtime, "[] (-1 task.receive-for) @spawn task.await `err at `kind at", "domain");
-    try expectStack(&runtime, "[] (`x task.receive-for) @spawn task.await `err at `kind at", "type");
+    try expectStack(&runtime, "(20 task.receive-for) @spawn task.await `ok at first `err at `kind at", "timeout");
+    try expectStack(&runtime, "(1000 task.receive-for) @spawn dup task.address 7 task.send task.await `ok at first", "{ok 7}");
+    try expectStack(&runtime, "(-1 task.receive-for) @spawn task.await `err at `kind at", "domain");
+    try expectStack(&runtime, "(`x task.receive-for) @spawn task.await `err at `kind at", "type");
 }
 
 test "mailbox: a composed request and reply round trip through a helper task" {
@@ -183,14 +183,14 @@ test "mailbox: a composed request and reply round trip through a helper task" {
     // result is the reply; the only bound is task.await-for.
     try expectStack(
         &runtime,
-        "(|a v| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def " ++
-            "[] (task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask",
+        "(|a v| (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send task.await `ok at first) `ask def " ++
+            "(task.receive dup `from at swap `value at 1 + task.send) @spawn task.address 41 ask",
         "42",
     );
     try expectStack(
         &runtime,
-        "(|a v ms| [] (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send dup ms task.await-for swap task.cancel) `ask-for def " ++
-            "[] (task.receive pop 100000 clock.sleep) @spawn dup task.address 41 20 ask-for `err at `kind at swap task.cancel",
+        "(|a v ms| (task.receive) @spawn dup task.address {} `value v put `from rolldown put a swap task.send dup ms task.await-for swap task.cancel) `ask-for def " ++
+            "(task.receive pop 100000 clock.sleep) @spawn dup task.address 41 20 ask-for `err at `kind at swap task.cancel",
         "timeout",
     );
 }

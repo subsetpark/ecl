@@ -1,5 +1,4 @@
 ### module pkg.test.resolution
-[]
 (
  ### defp equal
  (actual expected -- : "Compare observable resolution data.")
@@ -7,7 +6,7 @@
 
  ### defp rejected
  (quotation -- : "Require malformed or incompatible metadata to fail.")
- ([] swap @attempt result.err? 1 equal) `rejected defp
+ (@attempt result.err? 1 equal) `rejected defp
 
  ### setp empty-lock
  {format 3 root "project" root-requires {} packages {} requires {"project" {}}}

@@ -72,27 +72,27 @@ test "module registration: @defm validates its name before running the body" {
 
     // Each name that can never be published is refused before the body runs:
     // the body's own failure, which would be `'user`, never appears.
-    try expectErrorContains(&runtime, "[] (\"ran\" fail) `core @defm", &.{
+    try expectErrorContains(&runtime, "(\"ran\" fail) `core @defm", &.{
         "kind domain",
         "reserved for the core qualifier",
         "word @defm",
     });
-    try expectErrorContains(&runtime, "[] (\"ran\" fail) `-- @defm", &.{
+    try expectErrorContains(&runtime, "(\"ran\" fail) `-- @defm", &.{
         "kind domain",
         "valid module name",
     });
-    try expectErrorContains(&runtime, "[] (\"ran\" fail) `dict @defm", &.{
+    try expectErrorContains(&runtime, "(\"ran\" fail) `dict @defm", &.{
         "kind domain",
         "reserved for the standard library",
     });
-    try expectErrorContains(&runtime, "`wrong [] (\"ran\" fail) @defm", &.{
+    try expectErrorContains(&runtime, "`wrong (\"ran\" fail) @defm", &.{
         "kind type",
         "word @defm",
     });
     try expectEmptyStack(&runtime);
 
     // With a valid name the body runs, and its failure is the construction's.
-    try expectErrorContains(&runtime, "[] (\"ran\" fail ((2) `v def)) `ghost @defm", &.{
+    try expectErrorContains(&runtime, "(\"ran\" fail ((2) `v def)) `ghost @defm", &.{
         "kind user",
         "\"ran\"",
     });
@@ -101,8 +101,8 @@ test "module registration: @defm validates its name before running the body" {
 
     // A registry change during construction can still refuse publication after
     // the body ran; the previous registration is untouched.
-    try expectOk(&runtime, "[] ((1) `v def) `aliased @defm `short `aliased alias");
-    try expectErrorContains(&runtime, "[] ((2) `v def) `short @defm", &.{
+    try expectOk(&runtime, "((1) `v def) `aliased @defm `short `aliased alias");
+    try expectErrorContains(&runtime, "((2) `v def) `short @defm", &.{
         "kind domain",
         "collides with an alias",
     });
@@ -117,14 +117,11 @@ test "module registration: nested definitions and reloads publish through the re
     defer runtime.deinit();
 
     // A body may define another module; both are registrations, not values.
-    try expectStack(&runtime, "[] ([] ((2) `x def) `inner @defm (inner.x) `get def) `outer @defm outer.get", "2");
+    try expectStack(&runtime, "(((2) `x def) `inner @defm (inner.x) `get def) `outer @defm outer.get", "2");
     try expectStack(&runtime, "inner.x", "2");
 
     // Re-definition publishes new code under the same name.
-    try expectStack(&runtime, "[] ((1) `x def) `m @defm [] ((2) `x def) `m @defm m.x", "2");
-
-    // Seeded values are the body's entry stack, which the body consumes.
-    try expectStack(&runtime, "[4 5] (+ `sum set) `seeded @defm seeded.sum", "9");
+    try expectStack(&runtime, "((1) `x def) `m @defm ((2) `x def) `m @defm m.x", "2");
 }
 
 test "module registration: a documentation annotation documents the generation it publishes" {
@@ -135,25 +132,25 @@ test "module registration: a documentation annotation documents the generation i
 
     // The annotation beneath the operands is consumed, and its documentation is
     // returned in canonical form, as `doc` returns a word's.
-    try expectStack(&runtime, "(: \"Small\n    helpers.\") [] ((wrap) `one def) `doc.m @defm `doc.m module-doc", "\"Small helpers.\"");
-    try expectStack(&runtime, "(: \"Seedless.\") ((wrap) `one def) `doc.s @defm! `doc.s module-doc", "\"Seedless.\"");
+    try expectStack(&runtime, "(: \"Small\n    helpers.\") ((wrap) `one def) `doc.m @defm `doc.m module-doc", "\"Small helpers.\"");
+    try expectStack(&runtime, "(: \"Single.\") ((wrap) `one def) `doc.s @defm `doc.s module-doc", "\"Single.\"");
 
     // Documentation belongs to a generation: a reload states its own, and a
     // reload without an annotation leaves the module undocumented.
-    try expectStack(&runtime, "(: \"Second.\") [] () `doc.m @defm `doc.m module-doc", "\"Second.\"");
-    try expectOk(&runtime, "[] () `doc.m @defm");
+    try expectStack(&runtime, "(: \"Second.\") () `doc.m @defm `doc.m module-doc", "\"Second.\"");
+    try expectOk(&runtime, "() `doc.m @defm");
     try expectErrorContains(&runtime, "`doc.m module-doc", &.{ "kind domain", "no documentation" });
 
     // An alias reports its target's documentation.
-    try expectStack(&runtime, "`doc-short `doc.s alias `doc-short module-doc", "\"Seedless.\"");
+    try expectStack(&runtime, "`doc-short `doc.s alias `doc-short module-doc", "\"Single.\"");
 
     // Only an annotation is consumed: any other list beneath the operands
     // stays on the caller's stack.
-    try expectStack(&runtime, "7 [1 2] [] () `doc.plain @defm", "7 [1 2]");
+    try expectStack(&runtime, "7 [1 2] () `doc.plain @defm", "7 [1 2]");
 
     // A module declares no stack effect, so only an exact `(: "text")` is its
     // annotation; any other list, annotation-shaped or not, is caller data.
-    try expectStack(&runtime, "(-- :) (x -- y) (: 5) [] ((1) `v def) `doc.data @defm doc.data.v", "(-- :) (x -- y) (: 5) 1");
+    try expectStack(&runtime, "(-- :) (x -- y) (: 5) ((1) `v def) `doc.data @defm doc.data.v", "(-- :) (x -- y) (: 5) 1");
     try expectErrorContains(&runtime, "`doc.data module-doc", &.{ "kind domain", "no documentation" });
 
     try expectErrorContains(&runtime, "`core module-doc", &.{ "kind domain", "word module-doc" });
@@ -169,13 +166,13 @@ test "module registration: a construction body must leave its stack empty" {
 
     // A module body defines words and keeps no state: anything left on its
     // stack is refused at completion and nothing is registered.
-    try expectErrorContains(&runtime, "[] (1 (2) `x def) `m @defm", &.{ "kind domain", "word @defm", "left 1 value" });
+    try expectErrorContains(&runtime, "(1 (2) `x def) `m @defm", &.{ "kind domain", "word @defm", "left 1 value" });
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "m.x", &.{"kind undefined-word"});
-    try expectErrorContains(&runtime, "[] (7) `left @defm", &.{ "kind domain", "left 1 value" });
-    try expectErrorContains(&runtime, "[1 2] () `two @defm", &.{ "kind domain", "left 2 values" });
-    // A body that consumes its seeds publishes as before.
-    try expectStack(&runtime, "[4 5] (+ pop (1) `one def) `ok @defm ok.one", "1");
+    try expectErrorContains(&runtime, "(7) `left @defm", &.{ "kind domain", "left 1 value" });
+    try expectErrorContains(&runtime, "(1 2) `two @defm", &.{ "kind domain", "left 2 values" });
+    // A body that consumes what it pushed publishes as before.
+    try expectStack(&runtime, "(4 5 + pop (1) `one def) `ok @defm ok.one", "1");
 }
 
 test "module registration: invocation context comes from the called module" {
@@ -188,7 +185,7 @@ test "module registration: invocation context comes from the called module" {
 
     // Two modules with identical bodies: the module the call entered supplies
     // the reported spelling.
-    const body = "[] (" ++
+    const body = "(" ++
         "(1) `tick defp " ++
         "(tick) `bump def " ++
         "(`bump which) `report def " ++
@@ -234,7 +231,7 @@ test "module registration: a diagnostic spells the same word its failure reports
     // which one failed. A name long enough to exhaust the scratch is
     // the case that used to substitute it.
     const long = &@as([330]u8, @splat('m'));
-    const source = "[] (( -- n ) (1 2) `two def) `" ++ long ++ " @defm " ++ long ++ ".two";
+    const source = "(( -- n ) (1 2) `two def) `" ++ long ++ " @defm " ++ long ++ ".two";
     const failure = switch (try runtime.runUnit("module-registration-test.ecl", source)) {
         .err => |item| item,
         .ok, .incomplete => return error.ExpectedLanguageError,
@@ -256,16 +253,16 @@ test "module registration: failures leave prior registrations atomic" {
     defer runtime.deinit();
 
     // A failing construction body publishes no name.
-    try expectErrorContains(&runtime, "[] ((1 0 div) call ((2) `v def)) `broken @defm", &.{"kind domain"});
+    try expectErrorContains(&runtime, "((1 0 div) call ((2) `v def)) `broken @defm", &.{"kind domain"});
     try expectEmptyStack(&runtime);
     try expectErrorContains(&runtime, "broken.v", &.{"kind undefined-word"});
 
     // A refused publication leaves the prior directory entry, generation, and
     // durable state exactly as they were.
-    try expectOk(&runtime, "[] ((1) `bump def) `kept @defm");
+    try expectOk(&runtime, "((1) `bump def) `kept @defm");
     try expectStack(&runtime, "kept.bump", "1");
     try expectOk(&runtime, "`kept-alias `kept alias");
-    try expectErrorContains(&runtime, "[] ((2) `bump def) `kept-alias @defm", &.{
+    try expectErrorContains(&runtime, "((2) `bump def) `kept-alias @defm", &.{
         "kind domain",
         "collides with an alias",
     });
@@ -328,11 +325,11 @@ test "module registration: reload history grows no faster than registrations" {
         // repetition lives inside one fiber, so the measurement sees image and
         // registration retention rather than the per-fiber source provenance
         // every session accumulates.
-        const cycle = "[] ((1) `bump def) `reuse-left @defm " ++
-            "[] ((1) `bump def) `reuse-right @defm " ++
-            "[] (reuse-left.bump) @spawn " ++
-            "[] ((1) `bump def) `reuse-left @defm " ++
-            "task.await pop [] (reuse-right.bump) @spawn task.await pop";
+        const cycle = "((1) `bump def) `reuse-left @defm " ++
+            "((1) `bump def) `reuse-right @defm " ++
+            "(reuse-left.bump) @spawn " ++
+            "((1) `bump def) `reuse-left @defm " ++
+            "task.await pop (reuse-right.bump) @spawn task.await pop";
         // Both batches are one fiber each and differ only in the cycle count,
         // so their fixed per-fiber costs cancel and the only variable is how
         // many define/reload cycles ran. Ten times the cycles may cost ten
@@ -362,20 +359,11 @@ test "module registration: reload history grows no faster than registrations" {
 // requires the terminal one to be the word `@defm`.
 test "module sources: formatter and standard modules use @defm" {
     // A registration earns a navigation header.
-    const registration = try formatter.format(std.testing.allocator, "[] ((1) `x def) `stats @defm\n");
+    const registration = try formatter.format(std.testing.allocator, "((1) `x def) `stats @defm\n");
     defer std.testing.allocator.free(registration);
     try std.testing.expectEqualStrings(
-        "### module stats\n[] (\n    ### def x\n    (1) `x def) `stats @defm\n",
+        "### module stats\n(\n ### def x\n (1) `x def) `stats @defm\n",
         registration,
-    );
-    const seeded = try formatter.format(
-        std.testing.allocator,
-        "[[0]] ((1 +) `tick def) `counter @defm\n",
-    );
-    defer std.testing.allocator.free(seeded);
-    try std.testing.expectEqualStrings(
-        "### module counter\n[[0]] (\n       ### def tick\n       (1 +) `tick def) `counter @defm\n",
-        seeded,
     );
 
     // Every embedded standard module is registration-driven, enumerated from
@@ -414,7 +402,7 @@ test "module values: a pushed quotation resolves in the image it was written in"
     // `(k)` is written inside the module, so it resolves in that image's chain
     // rather than wherever the caller applies it. The session has no `k` at
     // all, which is what makes the label load-bearing here.
-    try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `holding @defm holding.q `held set");
+    try expectOk(&runtime, "((1) `k def ((k)) `q def) `holding @defm holding.q `held set");
     try expectStack(&runtime, "held call", "1");
 }
 
@@ -427,12 +415,12 @@ test "module values: an escaped quotation names the image it was written in" {
     // escaped it goes on meaning what it meant, for as long as anything still
     // holds the image -- redefinition reaches only future calls; existing code
     // retains its meaning.
-    try expectOk(&runtime, "[] ((1) `k def ((k)) `q def) `held-name @defm held-name.q `held set");
+    try expectOk(&runtime, "((1) `k def ((k)) `q def) `held-name @defm held-name.q `held set");
     try expectStack(&runtime, "held call", "1");
 
     // Replacing the name publishes a new image. Fresh calls through the name
     // get the new code, which is the whole of what the REPL needs.
-    try expectOk(&runtime, "[] ((2) `k def ((k)) `q def) `held-name @defm");
+    try expectOk(&runtime, "((2) `k def ((k)) `q def) `held-name @defm");
     try expectStack(&runtime, "held-name.q call", "2");
 
     // The quotation held from the replaced generation is not re-pointed to the
@@ -447,10 +435,10 @@ test "module values: an escaped locals body keeps its replaced image" {
     var runtime = try session.Session.init(std.testing.allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
 
-    try expectOk(&runtime, "[] ((1 +) `inc def ((|x| x inc)) `q def ((|x| x)) `r def) `lowered-owner @defm " ++
+    try expectOk(&runtime, "((1 +) `inc def ((|x| x inc)) `q def ((|x| x)) `r def) `lowered-owner @defm " ++
         "lowered-owner.q `held set lowered-owner.r `plain set");
     try expectStack(&runtime, "7 held call", "8");
-    try expectOk(&runtime, "[] ((0) `q def) `lowered-owner @defm");
+    try expectOk(&runtime, "((0) `q def) `lowered-owner @defm");
     // The body's own word names the replaced image, which the Session keeps.
     try expectStack(&runtime, "7 held call", "8");
     // Locals alone name nothing in the image.

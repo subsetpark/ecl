@@ -1,5 +1,4 @@
 ### module pkg.test.manifest
-[]
 (
  `pkg.test.support
  (equal raises raises-containing raises-data documented)

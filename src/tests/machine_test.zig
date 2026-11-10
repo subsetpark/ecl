@@ -95,7 +95,7 @@ test "machine: boundary truncation is exact through nested attempts" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    const source = "7 [] (8 [] (pop) @attempt pop pop missing) @attempt";
+    const source = "7 (8 (pop) @attempt pop pop missing) @attempt";
     try std.testing.expect((try runtime.runUnit("boundaries.ecl", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 2), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -116,7 +116,7 @@ test "errors: contract depths are relative to the isolated substack" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    const source = "7 8 [] ([0] (pop 1 2) each) @attempt";
+    const source = "7 8 ([0] (pop 1 2) each) @attempt";
     try std.testing.expect((try runtime.runUnit("contract.ecl", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     const contract_error = try field(
@@ -198,7 +198,7 @@ test "errors: source effect contract identifies the deepest tail-selected quotat
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        \\[] (
+        \\(
         \\ (x -- y)
         \\ (
         \\  dup
@@ -225,7 +225,7 @@ test "errors: source effect contract locates an empty selected quotation" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        \\[] (
+        \\(
         \\ (x -- )
         \\ (
         \\  [0
@@ -251,12 +251,12 @@ test "errors: nested effect checks restore outer tail provenance" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        \\[] (
+        \\(
         \\ (x -- x)
         \\ ()
         \\ `ok def)
         \\`inner @defm
-        \\[] (
+        \\(
         \\ (x -- y)
         \\ (
         \\  inner.ok
@@ -284,7 +284,7 @@ test "errors: source effect contract preserves absence for runtime-built code" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        \\[] (
+        \\(
         \\ (-- )
         \\ (1 wrap call)
         \\ `run def)
@@ -306,7 +306,7 @@ test "errors: iterative applications do not replace source effect provenance" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        \\[] (
+        \\(
         \\ (-- )
         \\ ([1 2] (1 +) each pop 1)
         \\ `run def)
@@ -319,7 +319,7 @@ test "errors: iterative applications do not replace source effect provenance" {
     try expectLocation(allocator, data, "\"fixture.ecl\"", 3, 2);
 
     const application_source =
-        \\[] (
+        \\(
         \\ (-- )
         \\ ([0] 0
         \\  (dup
@@ -366,7 +366,7 @@ test "errors: guard restoration preserves the enclosing application selection" {
         .{
             .source_name = "guard-cond.ecl",
             .source =
-            \\[] (
+            \\(
             \\(-- )
             \\([0] 0
             \\ (dup [((1) call) (pop pop 1 2) ()] cond)
@@ -380,7 +380,7 @@ test "errors: guard restoration preserves the enclosing application selection" {
         .{
             .source_name = "guard-while.ecl",
             .source =
-            \\[] (
+            \\(
             \\(-- )
             \\([0] 0
             \\ (dup ((dup 0 =) call) (pop pop 1 2) while)
@@ -417,7 +417,7 @@ test "errors: archived contract locations remain attached after later sources" {
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
     const source =
-        \\[] (
+        \\(
         \\ (x -- y)
         \\ (dup [0
         \\  (pop 1 2)
@@ -517,7 +517,7 @@ test "dynamic context: *file* follows authored source provenance" {
     // provenance, so qualified dispatch observes the module source too.
     try std.testing.expect((try runtime.runUnit(
         "module-definition.ecl",
-        "pop [] ((*file*) `where-defined def) `located @defm",
+        "pop ((*file*) `where-defined def) `located @defm",
     )) == .ok);
     try std.testing.expect((try runtime.runUnit("module-caller.ecl", "located.where-defined")) == .ok);
     {
@@ -576,7 +576,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
     defer runtime_inputs.deinit();
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
     defer runtime.deinit();
-    try std.testing.expect((try execute(&runtime, "7 [] (1 0 div) @attempt")) == null);
+    try std.testing.expect((try execute(&runtime, "7 (1 0 div) @attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     const err_key = try intern.intern("err");
     try std.testing.expect((try dict.testing.symbolField(
@@ -584,7 +584,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
         runtime.stackItems()[1],
         err_key,
     )) != null);
-    try std.testing.expect((try execute(&runtime, "pop [] (pop) @attempt")) == null);
+    try std.testing.expect((try execute(&runtime, "pop (pop) @attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     const isolated_error = (try dict.testing.symbolField(
         allocator,
@@ -592,7 +592,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
         err_key,
     )).?;
     try std.testing.expectEqualStrings("underflow", try errorKind(allocator, isolated_error));
-    try std.testing.expect((try execute(&runtime, "[] (2 3 +) @attempt")) == null);
+    try std.testing.expect((try execute(&runtime, "(2 3 +) @attempt")) == null);
     const ok_key = try intern.intern("ok");
     const ok_results = (try dict.testing.symbolField(
         allocator,

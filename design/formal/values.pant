@@ -87,7 +87,7 @@ where
 > `matches?` is the equivalence exposed by `match?` and used for dictionary-key
 > identity. Lists match recursively by position. Dictionaries match by their
 > key-value pairs regardless of insertion order. Task and port values match
-> only themselves. Resolution context, reader lineage, provenance, and
+> only themselves. Resolution context, source spans, provenance, and
 > storage identity are absent from these rules and therefore cannot affect
 > matching or hashing.
 NumericMagnitude.

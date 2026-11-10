@@ -1,6 +1,5 @@
 ### module pkg.gc
 # Cache collection is explicit and never reclaims project generations.
-[]
 (
  ### defp lock-file
  (path -- lock : "Read a portable retained-resolution input through an explicit directory.")
@@ -30,7 +29,8 @@
  ### defp remove
  (state name -- state : "Remove an unretained regular cache file without following links.")
  (|state name|
-  state `directory at name pair (fs.remove-file) @attempt removed state count-removed) `remove defp
+  state `directory at name pair (fs.remove-file) cat @attempt removed state count-removed) `remove
+ defp
 
  ### defp count-removed
  (count state -- state : "Accumulate successful namespace removals.")
@@ -61,7 +61,7 @@
  ### defp collect
  (path hashes -- count : "Join the cache directory after incremental collection.")
  (|path hashes|
-  path wrap (fs.open-dir) @attempt hashes collect-result) `collect defp
+  path (fs.open-dir) cons @attempt hashes collect-result) `collect defp
 
  ### defp collect-result
  (result hashes -- count : "An absent cache is empty; other host failures remain visible.")

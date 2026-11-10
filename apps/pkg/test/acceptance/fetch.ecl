@@ -1,5 +1,4 @@
 ### module pkg.test.fetch
-[]
 (
  ### defp equal
  (actual expected -- : "Compare public application fetch results.")
@@ -18,8 +17,8 @@
   snapshot first args 1 at equal
   snapshot pin pkg.fetch.requirement snapshot 1 at equal
   snapshot pin `hash "sha256-0000000000000000000000000000000000000000000000000000000000000000" put
-  wrap (pkg.fetch.requirement) @attempt `err at `kind at `domain equal
-  snapshot 1 at wrap (pkg.bundle.inspect) @attempt result.err? 1 equal) `check-snapshot defp
+  (pkg.fetch.requirement) cons @attempt `err at `kind at `domain equal
+  snapshot 1 at (pkg.bundle.inspect) cons @attempt result.err? 1 equal) `check-snapshot defp
 
  ### test exact-fetch
  (-- : "Use a tag only for explicit selection, then fetch and hash-check the pinned commit.")

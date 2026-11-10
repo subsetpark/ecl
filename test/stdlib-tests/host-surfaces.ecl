@@ -1,5 +1,4 @@
 ### module stdlib.test.host-surfaces
-[]
 (
  `stdlib.test.support (documented) import
 

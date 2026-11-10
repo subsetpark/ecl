@@ -724,7 +724,7 @@ pub const Session = enum(usize) {
         var transaction = try RootTransaction.begin(core);
         defer transaction.finish();
         const fiber = &transaction.fiber;
-        try machine.initialize(fiber, root.borrow().list, .empty);
+        machine.initialize(fiber, root.borrow().list);
         const started = switch (target) {
             .module => |name| fiber.loadModuleOnly(name),
             .source => |source| fiber.loadSourceOnly(source),
@@ -1430,7 +1430,7 @@ test "invocation effects: completion owns immediate deferred nested and failing 
         try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "\"invocation.ecl\"") != null);
         try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
     }
-    try Probe.runOk(&runtime, "[] (probe.forever) @spawn dup 0 task.await-for pop dup task.cancel task.await");
+    try Probe.runOk(&runtime, "(probe.forever) @spawn dup 0 task.await-for pop dup task.cancel task.await");
     var cancelled = try runtime.stackDisplay();
     defer cancelled.deinit();
     try std.testing.expect(std.mem.indexOf(u8, cancelled.bytes(), "kind cancelled") != null);

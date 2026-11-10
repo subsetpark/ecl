@@ -8,7 +8,6 @@
     `dict.split` consume a list of whole keys: strings and composite keys remain atomic. The public
     `dict` module is ECL over the host kernels exported by `dict.core`, so a failure inside a kernel
     reports its `dict.core` name.")
-[]
 (
  `dict.core
  [at-or size keys vals get has? at merge associate from-flat from-lists put update take del

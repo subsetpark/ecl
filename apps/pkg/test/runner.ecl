@@ -1,5 +1,4 @@
 ### module pkg.test.runner
-[]
 (
  ### def run
  (-- : "Run one explicitly selected application test module through the public test interface.")

@@ -81,14 +81,14 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "5 symbol",
         },
         .{
-            .name = "seeded attempts tasks and modules",
-            .source = "[] (42) @attempt [2 3] (+) @attempt " ++
-                "[2 3] (+) @spawn task.await [0 0] (/) @attempt result.ok? " ++
-                "[2 3] (+) @attempt [2 3] (+) @spawn task.await match? " ++
-                "[4 5] (+ `sum set) `seeded @defm seeded.sum",
+            .name = "attempts tasks and modules",
+            .source = "(42) @attempt (2 3 +) @attempt " ++
+                "(2 3 +) @spawn task.await (0 0 /) @attempt result.ok? " ++
+                "(2 3 +) @attempt (2 3 +) @spawn task.await match? " ++
+                "(4 5 + `sum set) `summed @defm summed.sum",
             .expected = "{ok [42]} {ok [5]} {ok [5]} 0 1 9",
         },
-        .{ .name = "results", .source = "[] (2 3 +) @attempt result.ok? [] (2 3 +) @attempt result.or-raise [] (missing) @attempt 9 result.or-default", .expected = "1 [5] 9" },
+        .{ .name = "results", .source = "(2 3 +) @attempt result.ok? (2 3 +) @attempt result.or-raise (missing) @attempt 9 result.or-default", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) above 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
@@ -280,7 +280,7 @@ test "embedded definitions retain provenance and deferred words stay absent" {
             .kind = "undefined-word",
             .word = "stdin",
         },
-        .{ .name = "result.or-raise identity", .source = "[] (missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
+        .{ .name = "result.or-raise identity", .source = "(missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
         .{
             .name = "execute runs a symbol a quotation pushes",
             .source = "(foo) first (execute 7) cons call",

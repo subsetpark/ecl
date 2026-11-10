@@ -12,7 +12,6 @@
     `-292275055-05-16T16:47:04.192` through `292278994-08-17T07:12:55.807`. Nothing in this module
     reads a clock. Every failure is raised against the public word the program called, so an
     overflow inside the arithmetic is reported as that word's own `` `overflow ``.")
-[]
 (
  ### defp fail
  (kind message word -- : "Raise an error attributed to a public time word.")
@@ -47,7 +46,7 @@
  (|values quotation word|
   word
   word chars " left the millisecond range" cat
-  values quotation @attempt
+  values quotation cat @attempt
   dup `ok dict.has?
   (`ok at first nip nip)
   (`err at dup `kind at `overflow match? (pop swap `overflow rollup fail) (nip nip raise) if)

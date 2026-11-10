@@ -229,14 +229,14 @@ value to the calling stack. The simplest way to construct a unit is with
 `@attempt`:
 
 ```
-ecl> [] (7 0 div) @attempt
+ecl> (7 0 div) @attempt
 {
   `err {
     `kind `domain
     `msg "kernel arithmetic is outside its domain"
     `word `div
     `trace [div]
-    `data {source "<repl>" line 1 col 9}
+    `data {source "<repl>" line 1 col 6}
   }
 }
 ecl> type
@@ -249,32 +249,30 @@ contains either the final result of the computation, or the first error that
 was raised.
 
 We note two differences from the REPL case: first, the resulting error is left
-on the stack (we consume it by evaluating `type`). Second, `@attempt` consumes
-two operands. Before the quotation it expects a _seed list_. Because units
-construct a new, isolated stack, the stack must be explicitly seeded with any
-required values from the current stack.[^repl] In the slightly artificial
-example above, the attempted program is entirely isolated from the surrounding
-environment. A slightly more realistic example will seed the unit stack with
-values from the environment and then attempt to execute the quotation on the
-seeded stack:
+on the stack (we consume it by evaluating `type`). Second, the unit starts on
+a new, isolated stack, so any values it needs from the current stack must be
+built into its quotation.[^repl] In the slightly artificial example above, the
+attempted program is entirely isolated from the surrounding environment. A
+slightly more realistic example takes a value from the stack with `cons`, which
+builds a quotation that pushes it, and then attempts that quotation:
 
 ```
 7
-ecl> wrap (0 div) @attempt
+ecl> (0 div) cons @attempt
 {
   `err {
     `kind `domain
     `msg "kernel arithmetic is outside its domain"
     `word `div
     `trace [div]
-    `data {source "<repl>" line 1 col 9}
+    `data {source "<repl>" line 1 col 4}
   }
 }
 ```
 
 [^repl]: The REPL is a slightly special case: because repl execution is
-    strictly sequential, each execution unit can be deterministically seeded
-    with the contents of the session stack.
+    strictly sequential, each execution unit can deterministically start on
+    the contents of the session stack.
 
 All unit constructors are marked with a `@`.
 
@@ -287,10 +285,10 @@ body defines, and _module registrations_, the names they are published under.
 Modules are ECL's core primitive for encapsulation, distribution, and
 application structure. There's no special syntax for module construction;
 module image bodies are quotations, and @defm (as its name suggests) is a unit
-constructor that consumes a seed and a quotation:
+constructor that consumes a quotation and a name:
 
 ```
-ecl> [] ( 10 `scale setp
+ecl> ( 10 `scale setp
 ..        (scale *) `scale-up def
 ..        (scale /) `scale-down def ) `scaling @defm
 ecl> 5 scaling.scale-up
@@ -315,7 +313,7 @@ The execution unit is also the basic unit of concurrency. The unit constructor
 which can be evaluated with `task.await`:
 
 ```
-ecl> [] (1 2 /) @spawn
+ecl> (1 2 /) @spawn
 <task:7>
 ecl> task.await
 {ok [0.5]}

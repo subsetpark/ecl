@@ -1,6 +1,5 @@
 ### module pkg.command
 # The installed application's command-line interface uses only public ECL APIs.
-[]
 (
  ### defp require
  (condition -- : "Reject unsupported package command arguments.")

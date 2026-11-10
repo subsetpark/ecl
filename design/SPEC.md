@@ -306,7 +306,7 @@ locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ##### Domains
 
-> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and port values match only themselves. Resolution context, reader lineage, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
+> Scalar payloads and aggregate contents determine value identity within their respective kinds. Numeric magnitude separately determines mathematical matching across int and float, so distinct float payloads such as positive and negative zero may still match. A list's contents are finite and ordered. A dictionary's entries are finite and insertion-ordered, while its keys are unique under whole-value matching.  `matches?` is the equivalence exposed by `match?` and used for dictionary-key identity. Lists match recursively by position. Dictionaries match by their key-value pairs regardless of insertion order. Task and port values match only themselves. Resolution context, source spans, provenance, and storage identity are absent from these rules and therefore cannot affect matching or hashing.
 
 `NumericMagnitude`.
 
@@ -527,7 +527,7 @@ identifier, or implementation pointer from one.
 A **diagnostic display** is human-facing text without a read-back guarantee.
 An operation may produce display text for every value, but any print/read
 guarantee applies only to the formally defined readable subset. Reader
-provenance, resolution metadata, and reader lineage need not be reproduced by
+provenance, resolution metadata, and source spans need not be reproduced by
 that round trip.
 
 Printing never exposes storage specialization. A non-string list uses `[...]`
@@ -724,14 +724,13 @@ rather than where it is later called. A symbol the implementation builds for
 itself (an error-dict key, a trace entry) carries no link and means core's
 binding wherever it runs.
 
-A reader-produced aggregate may separately retain **reader lineage**, which
-records that the aggregate and its reader-built descendants came from a
-particular source construction. Reader lineage supports attribution and the
-module-body re-scoping rule; it is not an AST, a captured environment, or a
-quotation-wide resolution root. Runtime aggregate reconstruction does not
-acquire reader lineage. Resolution context, reader lineage, and provenance are
-semantic metadata on stored occurrences and aggregates, but none is part of
-value identity.
+A reader-produced aggregate may separately retain **source spans**, which
+record where the aggregate and its reader-built descendants were read. Spans
+support diagnostics and reflection; they are not an AST, a captured
+environment, or a quotation-wide resolution root. Runtime aggregate
+reconstruction does not acquire spans. Resolution context, spans, and
+provenance are semantic metadata on stored occurrences and aggregates, but
+none is part of value identity.
 
 ECL therefore has syntactic closure without value capture: reader-authored
 identifiers retain their lookup scopes, while quotation values capture no
@@ -1223,7 +1222,7 @@ Three quotation-application behaviors exist:
   word that restored it. Paging stops at the nearest isolated substack or
   unit beneath, whose underflow is unchanged.
 - **Isolated**: the quotation runs on a fresh substack per application,
-  seeded with its declared inputs, and its result count is checked
+  starting on its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
   `fold`, `fold1`, `scan`, `lex-cmp-with`, `update`, `stencil`, `unfold`,
   `infra`, `@attempt`, `@spawn`, `@each`, and `@defm`.
@@ -1265,14 +1264,8 @@ and value retirement remain bounded scheduler work.
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
 — one unit per application for `@each` — and `@load`, which runs a file's
-source the same way. The seeded constructors, `@attempt`, `@spawn`, `@give`,
-`@each`, `@defm`, and `@load`, take an explicit seed-values list and a body
-quotation, or for `@load` a path, as separate operands. An empty seed list is written `[]`, or the
-operand is omitted by the constructor's seedless twin, spelled with a trailing
-`!`: `(q) @attempt!` is `[] (q) @attempt`. No constructor reads the ambient stack
-across its unit boundary. `@each` also
-places the iterated element deepest in each child stack, beneath the shared
-seed values.
+source the same way. No constructor reads the ambient stack across its unit
+boundary; see A unit's initial stack.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -1303,40 +1296,26 @@ no module and it is `` `domain ``. The stars are ordinary word characters with
 no reader meaning, and the convention applies to shipped vocabulary without
 reserving the spelling from user definitions.
 
-#### Seeding a unit
+#### A unit's initial stack
 
-Every unit constructor receives its seed values and exact body separately:
+A unit started by `@attempt`, `@spawn`, `@defm`, or `@load` begins on an empty
+stack, and one started by `@give` begins on the ports it was given, in list
+order. A caller that wants a unit to begin on values builds them into its body:
 
 ```ecl
-values (q) @attempt
-values (q) @spawn
-list values (q) @each          ( element deepest in each child )
-values (body) `name @defm
-values path @load
+values (q) cat @attempt
+x (q) cons @spawn
 ```
 
-Both `values` and the body must be lists. The new unit's operand stack is
-initialized from the values list in list order, and then the body runs. `[]` is
-the explicit no-seed operand, and each `!` twin (`(q) @attempt!`, ``(body)
-`name @defm!``, and so on) is exactly its constructor applied to `[]`. Seeds
-are inert stack values and contribute no code to the body: even when a seed is
-itself a reader-built quotation, none of its contents is part of the
-construction body's text. `@each` puts the iterated element deepest in each
-child stack, beneath the shared seeds.
-
-Keeping the two operands separate is what makes seeding compatible with module
-text: `@defm` knows exactly which list is the construction body.
-Generic quotation-building operations such as `cat` may still produce a body,
-but a runtime-built body has no reader lineage and therefore takes no module
-attribution; see Modules.
+A value stored into a list at run time enters as data, so the built body
+pushes each value and then runs `q`. A module or loaded file is a
+self-contained unit of source: its body takes nothing from the caller.
 
 Underflow against the floor of a constructed unit is reported specially:
-the message names the isolation and the constructor's values operand, and the
-error dict carries `` `isolation `` naming the constructor. It does not prescribe
-`cons` or `cat`: those construct a different, reusable quotation rather
-than pass arguments through this boundary. It is the one underflow
-whose cause is invisible — the values the caller meant to pass are on
-screen and out of reach.
+the message names the isolation and, for a body that runs plain code, how to
+build initial values into it; the error dict carries `` `isolation `` naming
+the constructor. It is the one underflow whose cause is invisible — the values
+the caller meant to pass are on screen and out of reach.
 
 ## Bindings and scope
 
@@ -1713,11 +1692,8 @@ that name.
   nothing. A registry change during construction, such as an alias now
   occupying the name, can still refuse publication after the body has run;
   the body's external effects then survive under ordinary unit semantics.
-- ``values (body) `name @defm`` initializes the construction. The values form the
-  body unit's initial stack, in list order; the body may consume, reorder, or
-  extend them. The separate operands let attribution below name the body
-  exactly. The body runs stack-isolated: it never sees or disturbs the
-  caller's stack.
+- ``(body) `name @defm`` runs the body as a unit on an empty stack. It runs
+  stack-isolated: it never sees or disturbs the caller's stack.
 - **A module documents itself with a documentation-only annotation.** A
   module declares no stack effect, so the value beneath the operands is its
   annotation exactly when it is `(: "text")`: a colon and one string. Any
@@ -1980,8 +1956,8 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   runs as a task under that generation's private home, spawned in the current
   scope and awaited, so it observes bindings and owns tasks as any task does. It
   returns exactly `{ok (values)}` or `{err error}`; a removed or
-  replaced-away test is a reified missing-test error. The runner's operand
-  stack never seeds the test, registry changes persist between invocations in
+  replaced-away test is a reified missing-test error. The test starts on an
+  empty stack, registry changes persist between invocations in
   the Session, and Session teardown destroys them. External effects are
   not transactional or rolled back.
 - **`ecl test` delegates framework policy to ECL.** The command requires a
@@ -2044,22 +2020,11 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   root and resolves in core. Re-registering a module publishes a new image
   under the module name, so a qualified word reached afterwards runs the new
   code, in code defined earlier too. Words written in the old image go on
-  resolving there. Seed values passed to unit constructors are not part
-  of the construction body. Runtime-built captures retain their existing
-  word scopes.
-- `@defm` is parameterized by the seed operand — ``values (body) `name @defm`` —
-  and nothing else crosses the boundary. There is no ambient environment
-  between a module's own definitions and core.
-  A quotation parameter carries the scope it was written in, so it preserves
-  its references on injection into a module. Given:
-
-  ```ecl
-  10 `k set
-  [(k *)] (
-           `scale def
-           ( -- n ) (4 scale) `go def) `m @defm
-  m.go                                          -- 40
-  ```
+  resolving there. Runtime-built captures retain their existing word
+  scopes.
+- `@defm` takes a body and a name — ``(body) `name @defm`` — and nothing
+  crosses the boundary. There is no ambient environment between a module's
+  own definitions and core.
 
 - **A word resolves in the scope its text was written in.** The word itself
   carries the scope, so it
@@ -2069,29 +2034,17 @@ initially ∃ *invoker*: `InvocationContext` · ¬**call-invocation?** *invoker*
   private still resolves, because the literal was written inside the module;
   a module word may accept `(bump)` from its caller and that `bump` resolves in
   the caller, because the caller wrote it; and both hold when the stdlib passes
-  the caller's quotation as ordinary data.
-- **Only a reader-authored body becomes module text.** The constructor accepts
-  any list in the body operand position; the values operand never participates.
-  A body carrying lineage from either the reader or construction's own
-  scope-only copy of reader text is copied, and every word in its reader-built
-  subtree receives the new image's scope, including words nested in quotation,
-  list, and dict literals. The copy retains its lineage, so a construction
-  nested inside it can scope its own body to its own image.
-
-  Generic runtime list operations do not create lineage. A body produced by
-  `cat`, `cons`, `append`, `raze`, slicing, reversal, or a
-  similar operation keeps the scopes already carried by its parts, and a stack
-  value that such an operation stores enters as data: a symbol becomes a quoted
-  occurrence, so the body pushes it rather than running it (see Lexical
-  structure). Module
-  construction accepts it without traversing or re-scoping it. Reader-authored
-  fragments do not make their runtime-built container reader-authored. For
-  example, ``7 `k set [] ((k) `geta) (def) cat `m @defm`` builds the module body
-  at runtime. The `k` inside `(k)` keeps its session scope, so `m.geta` resolves
-  the session's `k` and returns `7`.
-
-  Seed values only initialize the construction stack. They are never traversed
-  or re-scoped, and they cannot affect whether the body is module text.
+  the caller's quotation as ordinary data. A module body is the one place a
+  word changes scope: `@defm` re-homes it.
+- **Every word in a module body is module text.** `@defm` copies its body
+  and gives every word in it the new image's scope, including words nested in
+  quotation, list, and dict values, however the body was built. A body
+  produced by `cat`, `cons`, or any other list operation is re-homed exactly
+  as a literal is; a stack value such an operation stored entered as data, so
+  a symbol among them is a quoted occurrence and the body pushes it (see
+  Lexical structure). For example, ``7 `k set ((k) `geta) (def) cat `m @defm``
+  builds the body at runtime, and `k` inside it is a module word: `m.geta`
+  fails with `` `undefined-word `` because the module defines no `k`.
 - **A module holds no state.** A registration publishes an image and nothing
   else: there is no per-registration operand stack, no transaction against
   one, and no operation that reads or writes a module's storage. A construction

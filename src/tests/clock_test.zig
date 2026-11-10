@@ -172,7 +172,7 @@ test "clock: a deadline the clock cannot reach is refused before parking" {
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     // At reading zero the maximum duration is exactly reachable: the sleep
     // registers a timer entry and is then cancelled.
-    try runOk(runtime, "[] (9223372036854775807 clock.sleep) @spawn `sleeper set");
+    try runOk(runtime, "(9223372036854775807 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
     try advance(runtime, 1);
@@ -182,7 +182,7 @@ test "clock: a deadline the clock cannot reach is refused before parking" {
         .kind = "overflow",
         .word = "clock.sleep",
     });
-    try expectError(runtime, "[] ((1) () while) @spawn dup 9223372036854775807 task.await-for swap task.cancel", .{
+    try expectError(runtime, "((1) () while) @spawn dup 9223372036854775807 task.await-for swap task.cancel", .{
         .name = "unreachable task.await-for",
         .source = "task.await-for",
         .kind = "overflow",
@@ -200,7 +200,7 @@ test "clock: a host clock refuses manual advancement and counts from Session sta
     try expectDisplay(runtime, "clock.now clock.elapsed 0 >=", "1");
     // A host timestamp is i96 nanoseconds, so the maximum millisecond
     // duration is a reachable deadline: it registers before it is cancelled.
-    try runOk(runtime, "[] (9223372036854775807 clock.sleep) @spawn `sleeper set");
+    try runOk(runtime, "(9223372036854775807 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
@@ -210,8 +210,8 @@ test "clock: wall time is inherited by spawned tasks and loaded modules" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .clock = .{ .monotonic = .manual, .wall = .{ .fixed = 42 } } });
-    try expectDisplay(runtime, "[] (clock.unix) @spawn task.await", "{ok ({unix 42})}");
-    try expectDisplay(runtime, "[] ((clock.unix) `read def) `wall @defm wall.read", "{unix 42}");
+    try expectDisplay(runtime, "(clock.unix) @spawn task.await", "{ok ({unix 42})}");
+    try expectDisplay(runtime, "((clock.unix) `read def) `wall @defm wall.read", "{unix 42}");
 }
 
 test "clock: a fixed wall clock returns the configured timestamp on every read" {
@@ -240,7 +240,7 @@ test "clock: sleep completes exactly when the manual clock reaches its deadline"
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] (100 clock.sleep clock.now) @spawn `sleeper set");
+    try runOk(runtime, "(100 clock.sleep clock.now) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
     try advance(runtime, 99);
@@ -258,7 +258,7 @@ test "clock: a zero sleep parks and resumes without starting the timer thread" {
     defer fixture.close();
     const runtime = try fixture.open(.{});
     try expectDisplay(runtime, "0 clock.sleep `awake", "awake");
-    try expectDisplay(runtime, "[] (0 clock.sleep 1) @spawn task.await", "{ok [1]}");
+    try expectDisplay(runtime, "(0 clock.sleep 1) @spawn task.await", "{ok [1]}");
     try expectDisplay(runtime, "clock.now", "{monotonic 0}");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
@@ -297,7 +297,7 @@ test "clock: cancellation before registration wakes the sleeper as cancelled" {
     // child a head start on registering its timer.
     const runtime = try fixture.open(.{});
     try runOk(runtime, "task.pending pop");
-    try expectDisplay(runtime, "[] (1000000 clock.sleep) @spawn dup task.cancel task.await `err at `kind at", "cancelled");
+    try expectDisplay(runtime, "(1000000 clock.sleep) @spawn dup task.cancel task.await `err at `kind at", "cancelled");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
 }
@@ -306,7 +306,7 @@ test "clock: cancellation after registration retires the timer entry" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] (1000000 clock.sleep) @spawn `sleeper set");
+    try runOk(runtime, "(1000000 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
     try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `msg at", "\"unit cancelled while sleeping\"");
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
@@ -319,7 +319,7 @@ test "clock: many sleepers wake by deadline across one advance" {
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
     // Seventy sleepers span more than one timer-heap chunk. Durations 1..70.
-    try runOk(runtime, "70 range (1 +) each (wrap (clock.sleep clock.now) @spawn) each `sleepers set");
+    try runOk(runtime, "70 range (1 +) each ((clock.sleep clock.now) cons @spawn) each `sleepers set");
     awaitTimerEntries(runtime, 70);
     try advance(runtime, 35);
     try expectDisplay(runtime, "sleepers 35 take (task.await) each ({ok [{monotonic 35}]} match?) all?", "1");
@@ -334,10 +334,10 @@ test "clock: a parked sleeper does not occupy the only worker" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] (1000000 clock.sleep) @spawn `sleeper set");
+    try runOk(runtime, "(1000000 clock.sleep) @spawn `sleeper set");
     awaitTimerEntries(runtime, 1);
-    try expectDisplay(runtime, "[] (1 2 +) @spawn task.await", "{ok [3]}");
-    try expectDisplay(runtime, "[] ((1) () while) @spawn dup 0 task.await-for `err at `kind at swap task.cancel", "timeout");
+    try expectDisplay(runtime, "(1 2 +) @spawn task.await", "{ok [3]}");
+    try expectDisplay(runtime, "((1) () while) @spawn dup 0 task.await-for `err at `kind at swap task.cancel", "timeout");
     try expectDisplay(runtime, "sleeper dup task.cancel task.await `err at `kind at", "cancelled");
 }
 
@@ -345,7 +345,7 @@ test "clock: await-for deadlines follow the same manual clock as sleep" {
     var fixture: Fixture = .{};
     defer fixture.close();
     const runtime = try fixture.open(.{ .config = .{ .worker_pool = 1 } });
-    try runOk(runtime, "[] ((1) () while) @spawn `spinner set");
+    try runOk(runtime, "((1) () while) @spawn `spinner set");
     // The root parks on the deadline; a helper advances the clock once the
     // timer entry exists, so the timeout fires at exactly 50 and never sooner.
     const Advancer = struct {
@@ -385,7 +385,7 @@ test "clock: session shutdown retires pending sleeps and their timers without le
     {
         var fixture: Fixture = .{};
         const runtime = try fixture.openWith(counting.allocator(), .{ .config = .{ .worker_pool = 1 } });
-        try runOk(runtime, "3 range (wrap (1000000 + clock.sleep) @spawn) each pop");
+        try runOk(runtime, "3 range ((1000000 + clock.sleep) cons @spawn) each pop");
         awaitTimerEntries(runtime, 3);
         fixture.closeSession();
     }
@@ -395,7 +395,7 @@ test "clock: session shutdown retires pending sleeps and their timers without le
         var fixture: Fixture = .{};
         const runtime = try fixture.openWith(cooperative.allocator(), .{});
         // Never dispatched: shutdown cancels it before any timer exists.
-        try runOk(runtime, "[] (1000000 clock.sleep) @spawn pop");
+        try runOk(runtime, "(1000000 clock.sleep) @spawn pop");
         fixture.closeSession();
     }
     try std.testing.expectEqual(.ok, cooperative.deinit());

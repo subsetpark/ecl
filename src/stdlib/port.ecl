@@ -66,7 +66,6 @@
     consuming the source. Abortive close discards queued messages and unclaimed results; a discarded
     successful result raises `` `io `` if claimed later. Completion observation remains repeatable.
     Existing capabilities in messages share use and retain their owner.")
-[]
 (
  `port.core [open begin endpoint send receive finish await result cancel shutdown close] import
 
@@ -75,5 +74,5 @@
   "Begin an operation, claim its result, and close the exchange. Use only when no additional
    streaming input or output is required. Close the exchange before returning or re-raising its
    error.")
- (begin dup wrap (result) @attempt swap close result.or-raise first) `call def
+ (begin dup (result) cons @attempt swap close result.or-raise first) `call def
 ) `port @defm

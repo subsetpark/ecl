@@ -1534,16 +1534,17 @@ pub const SpawnRequest = struct {
     parent_fiber: *machine.Fiber,
     site: SpawnSite,
     quotation: *ListHandle,
-    initial_stack: machine.InitialStack = .empty,
     /// Which constructor made this child, so an underflow against its floor
     /// can name the word the caller actually wrote.
     constructor: machine.FiberConstructor = .spawn,
     /// Moves external resources from the spawning scope into the child's
     /// scope as part of constructing the child, so a resource is never
     /// unowned and never visible to the child before the child's scope owns
-    /// it: prepare attaches to the new scope leaving the originals in place,
-    /// commit swaps them in and releases the originals, and abort undoes a
-    /// prepare when a later step of the spawn fails.
+    /// it: prepare attaches to the new scope leaving the originals in place
+    /// and reserves room on the child's stack, commit swaps them in, releases
+    /// the originals, and puts the ports on that stack, and abort undoes a
+    /// prepare when a later step of the spawn fails. It is the only way a new
+    /// unit starts on a non-empty stack.
     transfer: ?*task_prims.GiveCursor = null,
 };
 
@@ -1987,18 +1988,18 @@ pub const WorkerScheduler = enum(usize) {
                 fiber.executeRootAtModule(generation);
             },
         }
-        try machine.initialize(fiber, request.quotation, request.initial_stack);
+        machine.initialize(fiber, request.quotation);
         // Attach the moved resources to the child's scope while the scope is
         // still private: nothing can reach it, so a failure here unwinds by
         // dropping the new memberships and the originals never moved.
-        if (request.transfer) |transfer| try transfer.prepareScopeTransfer(&cell.scope);
+        if (request.transfer) |transfer| try transfer.prepareScopeTransfer(&cell.scope, fiber);
         errdefer if (request.transfer) |transfer| transfer.abortScopeTransfer();
         const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);
         cell.header_state = .{ .published = header };
         cell.publication = .{ .active = execution };
         // Past this point the spawn cannot fail, so the swap is safe to make
-        // permanent: the child's scope owns the resources and the spawning
-        // scope no longer does.
+        // permanent: the child's scope owns the resources, the spawning scope
+        // no longer does, and the child's stack starts on them.
         if (request.transfer) |transfer| transfer.commitScopeTransfer();
 
         std.Io.Threaded.mutexLockUncancelable(&state_.tree_mutex);

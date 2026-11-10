@@ -1,6 +1,5 @@
 ### module pkg.map
 # Construct runtime metadata from an application-owned resolved graph.
-[]
 (
  ### defp direct
  (lock name -- visible : "Project only a consumer's direct dependency visibility.")
@@ -44,7 +43,7 @@
   "Recover the kind and message of the error dict `check-map` printed, so the reason is raised
    directly with this caller's trace rather than nested as text. Output that is not one error dict
    is kept verbatim as the message.")
- (dup wrap (parse-one) @attempt (first) (pop 0) result.either
+ (dup (parse-one) cons @attempt (first) (pop 0) result.either
   dup error.valid?
   ([kind msg] dict.take nip) (pop `io error.new swap str.trim error.with-message) if)
  `rejection defp

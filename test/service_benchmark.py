@@ -34,7 +34,7 @@ workloads = {
     'filesystem-read': (64 * 65536, "64 (`cwd \"data\" fs.read-bytes len 65536 = assert) times 4194304"),
     'filesystem-staging-cleanup': (1024, "8 (`cwd \"published\" fs.stage-dir `s set 128 range (str s swap fs.mkdirs 0) each pop s port.close) times 1024"),
     'network-connections': (32, "{address \"127.0.0.1\" port 0} net.listen `l set l net.local-address `port at str io.print 32 range (pop l net.accept) each `clients set l net.close clients (dup 1 net.read [65] match? assert net.close 0) each pop 32"),
-    'process-duplex': (32, "4096 range 256 mod `payload set 32 range (pop [] ({executable \"/bin/cat\"} `stdin payload dict.put proc.run `stdout at len) @spawn) each (task.await `ok at first) each sum 131072 = assert 32"),
+    'process-duplex': (32, "4096 range 256 mod `payload set 32 range (pop ({executable \"/bin/cat\"} `stdin payload dict.put proc.run `stdout at len) @spawn) each (task.await `ok at first) each sum 131072 = assert 32"),
 }
 
 def run(name, units, source, directory):

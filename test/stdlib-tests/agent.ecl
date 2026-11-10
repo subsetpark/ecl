@@ -1,5 +1,4 @@
 ### module stdlib.test.agent
-[]
 (
  `stdlib.test.support
  (equal raises documented)
@@ -48,7 +47,7 @@
 
  ### test dead-agent
  (-- : "Refuse a call to an ended agent as `io rather than waiting.")
- ([[7 0]] (agent.serve) @spawn
+ (([7 0] agent.serve) @spawn
   (|server|
    server task.cancel server task.await pop
    server task.address
@@ -68,11 +67,11 @@
 
  ### test direct-serve
  (-- : "Spawn agent.serve directly to keep a handle; any entry stack is the state.")
- ([[7 0]] (agent.serve) @spawn
+ (([7 0] agent.serve) @spawn
   (|server|
    server task.address (dup) agent.call [7 0] equal
    server task.cancel server task.await `err at `kind at `cancelled equal) call
-  [1 2 3] (agent.serve) @spawn task.address
+  (1 2 3 agent.serve) @spawn task.address
   (|sum| sum (+ + dup) agent.call 6 equal sum (dup) agent.call 6 equal) call)
  `direct-serve test
 

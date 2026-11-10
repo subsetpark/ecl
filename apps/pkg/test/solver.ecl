@@ -1,5 +1,4 @@
 ### module pkg.test.solver
-[]
 (
  ### defp equal
  (actual expected -- : "Compare deterministic selected graphs against independent expectations.")

@@ -194,8 +194,8 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     // Measured window: delays from one to two quanta cancel mid-interning;
     // three let the target finish.
     const source =
-        "wrap (execute) @spawn dup `target set " ++
-        "wrap (1536 () times task.cancel) @spawn task.await pop target task.await";
+        "(execute) cons @spawn dup `target set " ++
+        "(1536 () times task.cancel) cons @spawn task.await pop target task.await";
 
     var runtime_inputs = try runtime_fixture.Fixture.init();
     defer runtime_inputs.deinit();
@@ -248,7 +248,7 @@ test "reflection: words is sorted unique and private-safe" {
         .ecl_path = null,
     }), .default, .evaluate);
     defer runtime.deinit();
-    try expectOk(&runtime, "[] (1 `hidden setp 2 `zebra set 3 `alpha set) `m @defm " ++
+    try expectOk(&runtime, "(1 `hidden setp 2 `zebra set 3 `alpha set) `m @defm " ++
         "`m (alpha zebra) import 4 `zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
@@ -328,7 +328,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_runtime.deinit();
     const module_source = try std.fmt.allocPrint(
         allocator,
-        "[] (1 `{s} set) `poll-module @defm",
+        "(1 `{s} set) `poll-module @defm",
         .{first_bytes},
     );
     defer allocator.free(module_source);
@@ -451,7 +451,7 @@ test "session: mutation settlement is independent of a busy sole worker" {
         defer runtime_inputs.deinit();
         var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .{ .worker_pool = 1 }, .evaluate);
         defer runtime.deinit();
-        try expectOk(&runtime, "[] ((1) () while) @spawn");
+        try expectOk(&runtime, "((1) () while) @spawn");
         try expectChurnBounded(&runtime, &counting, 4096);
         try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup task.cancel task.await pop");
@@ -553,8 +553,8 @@ test "loader: failures and cycles are total" {
         "registered nothing under that name",
         "path \"test/acceptance/modules/orphan.ecl\"",
     });
-    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" @load!", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
-    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" @load!", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" @load", &.{ "kind parse", "source \"test/acceptance/load-parse-error.ecl\"" });
+    try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" @load", &.{ "kind io", "path \"test/acceptance/does-not-exist.ecl\"" });
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -563,7 +563,7 @@ test "loader: failures and cycles are total" {
     inline for (.{ "invalid.ecl", "incomplete.ecl" }) |filename| {
         const path = try temporary.dir.realPathFileAlloc(std.testing.io, filename, std.testing.allocator);
         defer std.testing.allocator.free(path);
-        const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" @load!", .{path});
+        const source = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\" @load", .{path});
         defer std.testing.allocator.free(source);
         try expectErrorContains(&runtime, source, &.{ "kind parse", path });
     }
@@ -646,20 +646,20 @@ test "stdlib: embedded module names are reserved whether or not they have loaded
 
     const reserved = "module name `dict` is reserved for the standard library";
     // `dict` has not loaded yet: the refusal cannot depend on that.
-    try expectErrorContains(&runtime, "[] ((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
+    try expectErrorContains(&runtime, "((a b -- c) (pop pop 0) `has? def) `dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
     try expectOk(&runtime, "{a 1} `a dict.has? {kind user msg \"dict did not load\"} assert");
     // Loaded, it is refused the same way, and an alias cannot claim the name.
-    try expectErrorContains(&runtime, "[] () `dict @defm", &.{reserved});
+    try expectErrorContains(&runtime, "() `dict @defm", &.{reserved});
     try expectErrorContains(&runtime, "`d `dict alias", &.{reserved});
-    try expectErrorContains(&runtime, "[] () `m @defm `dict `m alias", &.{reserved});
-    try expectErrorContains(&runtime, "[] ((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
+    try expectErrorContains(&runtime, "() `m @defm `dict `m alias", &.{reserved});
+    try expectErrorContains(&runtime, "((a -- b) (pop \"bogus\") `new def) `error @defm", &.{"module name `error` is reserved"});
     // So the prelude and the other embedded modules keep their meaning.
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
-    try expectOk(&runtime, "[] (\"abc\" \"z\" str.index-of) @attempt `err at `kind at `domain match? " ++
+    try expectOk(&runtime, "(\"abc\" \"z\" str.index-of) @attempt `err at `kind at `domain match? " ++
         "{kind user msg \"str lost error\"} assert");
     // A dotted name under a stdlib prefix is an ordinary module.
-    try expectOk(&runtime, "[] ((1) `one def) `dict.extra @defm dict.extra.one 1 = {kind user} assert");
+    try expectOk(&runtime, "((1) `one def) `dict.extra @defm dict.extra.one 1 = {kind user} assert");
 }
 
 test "stdlib: a quotation a stdlib word applies does not inherit its reservation exemption" {
@@ -675,6 +675,6 @@ test "stdlib: a quotation a stdlib word applies does not inherit its reservation
     // inline; neither runs it as standard-library code.
     try expectOk(&runtime, "[] result.ok (`d `dict alias []) result.map `err at `kind at `domain match? " ++
         "{kind user msg \"alias escaped\"} assert");
-    try expectErrorContains(&runtime, "[] result.ok ([] () `dict @defm) () result.either", &.{reserved});
+    try expectErrorContains(&runtime, "[] result.ok (() `dict @defm) () result.either", &.{reserved});
     try expectOk(&runtime, "{a 1} `a 7 dict.get 1 = {kind user msg \"dict.get lost dict\"} assert");
 }

@@ -1,6 +1,5 @@
 ### module pkg.manifest
 # Validate and read package manifests.
-[]
 (
  ### setp manifest-keys
  # Required manifest keys.

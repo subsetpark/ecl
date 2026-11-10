@@ -1,5 +1,4 @@
 ### module pkg.test.support
-[]
 (
  ### defp assert-true
  (condition -- : "Fail a userland stdlib assertion when condition is false.")
@@ -12,14 +11,14 @@
  ### def raises
  (quotation kind -- : "Assert that a quotation fails with the expected kind.")
  (|quotation kind|
-  [] quotation @attempt
+  quotation @attempt
   dup result.err? assert-true
   `err at `kind at kind equal) `raises def
 
  ### def raises-containing
  (quotation kind text -- : "Assert a failure kind and message fragment.")
  (|quotation kind text|
-  [] quotation @attempt
+  quotation @attempt
   dup result.err? assert-true
   `err at
   dup `kind at kind equal
@@ -28,7 +27,7 @@
  ### def raises-word
  (quotation kind word -- : "Assert a failure kind and responsible word.")
  (|quotation kind word|
-  [] quotation @attempt
+  quotation @attempt
   dup result.err? assert-true
   `err at
   dup `kind at kind equal
@@ -37,7 +36,7 @@
  ### def raises-data
  (quotation kind key expected -- : "Assert a failure kind and one data field.")
  (|quotation kind key expected|
-  [] quotation @attempt
+  quotation @attempt
   dup result.err? assert-true
   `err at
   dup `kind at kind equal

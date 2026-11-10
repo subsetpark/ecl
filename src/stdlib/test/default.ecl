@@ -2,7 +2,6 @@
 (: "The bundled runner is ordinary ECL policy over the closed `tests` / `@test` substrate. Projects
     may replace it with any public qualified runner word. The host supplies only catalog discovery,
     protected invocation, and root dispatch.")
-[]
 (
  ### defp report
  (descriptor -- failed :

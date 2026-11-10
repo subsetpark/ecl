@@ -1,5 +1,4 @@
 ### module pkg.test.transaction
-[]
 (
  ### defp equal
  (actual expected -- : "Compare publication state through public file operations.")
@@ -90,7 +89,7 @@
    project prepare
    project path "unrelated edit" fs.publish-text
    project "ecl.lock" fs.read-text project "ecl.modules" fs.read-text pair
-   project wrap (recover) @attempt result.err? 1 equal
+   project (recover) cons @attempt result.err? 1 equal
    project "ecl.lock" fs.read-text project "ecl.modules" fs.read-text pair equal
    project path fs.read-text "unrelated edit" equal
    project ".ecl/publication.ecl" fs.exists? 1 equal

@@ -1,5 +1,4 @@
 ### module pkg.test.bundle
-[]
 (
  ### defp equal
  (actual expected -- : "Compare archive policy results.")
@@ -13,7 +12,7 @@
 
  ### defp rejected
  (name -- : "Require archive layout or source validation to fail through the public API.")
- (fixture wrap (pkg.bundle.inspect) @attempt result.err? 1 equal) `rejected defp
+ (fixture (pkg.bundle.inspect) cons @attempt result.err? 1 equal) `rejected defp
 
  ### test source-inspection
  (-- : "Inspect literal exports without executing package source, retaining data files.")

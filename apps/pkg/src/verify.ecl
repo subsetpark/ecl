@@ -1,6 +1,5 @@
 ### module pkg.verify
 # Read-only verification against each generation's own resolution snapshot.
-[]
 (
  ### defp require
  (condition -- : "Reject a modified or incomplete immutable generation.")

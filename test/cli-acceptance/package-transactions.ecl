@@ -2,7 +2,6 @@
 # Separate processes observe immutable generations across publication
 # boundaries. Policy and conflict assertions belong to
 # apps/pkg/test/transaction.ecl.
-[]
 (
  `cli.test.support (expect absolute invocation succeeds write) import
 
@@ -56,7 +55,7 @@
    entry 1 at over "ecl.lock" pair path.join write
    "{format 1 local \"local\" scopes {\"local\" {root \".\" visible [] sources [\"*.ecl\"] artifacts []}}}\n"
    over "ecl.modules" pair path.join write
-   entry 2 at wrap "[] (({}) `value def) `fixture @defm" str.format
+   entry 2 at wrap "(({}) `value def) `fixture @defm" str.format
    swap "fixture.ecl" pair path.join write 0) cons each pop
   "{format 2 name \"project\" version \"0.1.0\" requires {}}\n" directory "ecl.pkg" pair path.join
   write

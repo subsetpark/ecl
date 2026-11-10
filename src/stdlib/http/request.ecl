@@ -7,7 +7,6 @@
     complete request, read absent headers/query/body using empty defaults, and return updated
     copies; the original is never changed. A word given a malformed request dictionary, or a name
     that is not a string, is `` `type ``.")
-[]
 (
  ### defp type-error
  (message -- error : "Build a `type error with the message.")

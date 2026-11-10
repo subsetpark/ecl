@@ -1,5 +1,4 @@
 ### module pkg.test.layout
-[]
 (
  ### defp equal
  (actual expected -- : "Compare closed application generation locations.")

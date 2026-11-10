@@ -16,10 +16,8 @@ const MachineError = machine.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]env.BuiltinWord{
-        .{ .name = "@spawn", .primitive = spawn, .effect = "values quotation -- task", .doc = "Initialize a child stack from the explicit values list and run the quotation concurrently. Use `[]` for no initial values; the ambient stack never crosses the boundary. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency)." },
-        .{ .name = "@spawn!", .primitive = spawnSeedless, .effect = "quotation -- task", .doc = "`@spawn` with no seeded values." },
-        .{ .name = "@give", .primitive = give, .effect = "ports values quotation -- task", .doc = "Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The ports are seeded onto the resulting stack followed by `values`. \n\nIncluding a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.\n\nOwnership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency)." },
-        .{ .name = "@give!", .primitive = giveSeedless, .effect = "ports quotation -- task", .doc = "`@give` with no values operand: the child stack contains only the given ports." },
+        .{ .name = "@spawn", .primitive = spawn, .effect = "quotation -- task", .doc = "Run the quotation concurrently on an empty child stack; the ambient stack never crosses the boundary. To start the child on values, build them into the quotation: `values (q) cat @spawn`. Inside a module construction body, at any depth, this constructor is `` `domain ``: a module body defines words and starts no tasks (see Modules). See [Concurrency](SPEC.md#concurrency)." },
+        .{ .name = "@give", .primitive = give, .effect = "ports quotation -- task", .doc = "Like `@spawn`, with the additional behaviour of reassigning every port in `ports` to the new unit. The child stack starts with the ports, in list order. \n\nIncluding a port in `ports` which isn't owned by the calling unit is `` `domain ``, as is giving a closed port or the same port twice. At most 16 ports may be given at once; more is `` `domain ``. The transfer is all-or-nothing: on any refusal, no port changes owner.\n\nOwnership doesn't determine what unit(s) a port is accessible from, but which unit controls its lifetime. See [Concurrency](SPEC.md#concurrency)." },
     };
     try core.installBuiltins(&definitions);
 }
@@ -53,8 +51,6 @@ pub const words = [_]env.BuiltinWord{
 fn spawnTask(
     evaluator: *Fiber,
     quotation: *value.ListHandle,
-    initial_stack: machine.InitialStack,
-    constructor: machine.FiberConstructor,
 ) MachineError!Value {
     return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
         .parent_fiber = evaluator,
@@ -63,8 +59,7 @@ fn spawnTask(
             .home = evaluator.currentHome(),
         } },
         .quotation = quotation,
-        .initial_stack = initial_stack,
-        .constructor = constructor,
+        .constructor = .spawn,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -86,23 +81,9 @@ fn refuseDuringConstruction(evaluator: *Fiber, comptime constructor: []const u8)
 
 fn spawn(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@spawn");
-    try spawnInput(evaluator, try evaluator.popUnitInput());
-}
-
-fn spawnSeedless(evaluator: *Fiber) MachineError!void {
-    try refuseDuringConstruction(evaluator, "@spawn!");
-    try spawnInput(evaluator, try evaluator.popSeedlessUnitInput());
-}
-
-fn spawnInput(evaluator: *Fiber, popped: machine.OwnedUnitInput) MachineError!void {
-    var input = popped;
-    defer input.deinit(evaluator.releases);
-    const task = try spawnTask(
-        evaluator,
-        input.quotation(),
-        input.initialStack(null),
-        .spawn,
-    );
+    var body = try evaluator.popQuotation();
+    defer body.deinit();
+    const task = try spawnTask(evaluator, body.borrow().list);
     try evaluator.pushOwned(task);
 }
 
@@ -132,6 +113,9 @@ pub const GiveCursor = struct {
     ports: [max_given_ports]?Value = @splat(null),
     prepared: [max_given_ports]?heap.PortTransfer = @splat(null),
     destination: ?*scheduler_api.TaskScope = null,
+    /// Room on the child's stack for every port, reserved by prepare and
+    /// filled by commit, so the child holds a port only once it owns it.
+    child_stack: ?machine.StackReservation = null,
     phase: Phase = .validating,
     index: usize = 0,
     ready: usize = 0,
@@ -207,12 +191,15 @@ pub const GiveCursor = struct {
         self.phase = .done;
     }
 
-    /// `SpawnRequest.transfer` hooks. Preparation leaves every origin membership in
+    /// `SpawnRequest.transfer` hooks. Preparation reserves the child's stack
+    /// before it touches a membership, and leaves every origin membership in
     /// place, so a refusal rolls back to exactly the state before the give.
     pub fn prepareScopeTransfer(
         self: *GiveCursor,
         destination: *scheduler_api.TaskScope,
+        child: *machine.Fiber,
     ) scheduler_api.ScopeTransferError!void {
+        self.child_stack = try child.reserveStack(self.count);
         self.destination = destination;
         self.ready = 0;
         self.run(.preparing);
@@ -220,6 +207,7 @@ pub const GiveCursor = struct {
             .none => {},
             .not_a_port => unreachable,
             .transfer => |err| {
+                self.child_stack = null;
                 self.run(.rolling_back);
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -231,19 +219,21 @@ pub const GiveCursor = struct {
 
     pub fn commitScopeTransfer(self: *GiveCursor) void {
         self.run(.committing);
+        var stack = self.child_stack.?;
+        self.child_stack = null;
+        for (self.ports[0..self.count]) |port| stack.pushBorrowed(port.?);
+        std.debug.assert(stack.complete());
     }
 
+    /// The reservation needs no undo: the spawn that failed discards the
+    /// child, and its stack is still empty.
     pub fn abortScopeTransfer(self: *GiveCursor) void {
+        self.child_stack = null;
         self.run(.rolling_back);
     }
 };
 
-/// A `@give` moves at most this many ports. Validation is resumable, but
-/// preparation and commit run inside `spawn` and cannot yield, so the count is
-/// capped rather than unbounded: that is what keeps the phases which must be
-/// atomic inside one scheduler step, and what lets the cursor hold its ports
-/// in fixed storage. Realistic calls move one port.
-pub const max_given_ports: usize = 16;
+const max_given_ports = machine.max_given_ports;
 
 /// Validates the port list in bounded slices and then performs the spawn that
 /// moves them, so an oversized list cannot occupy a scheduler step.
@@ -251,15 +241,12 @@ const GiveDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     moved: Value,
-    /// Null for `@give!`, which takes no values operand.
-    seeds: ?Value,
     body: Value,
     cursor: GiveCursor,
 
     pub fn deinit(self: *GiveDriver, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         _ = allocator;
         releases.releaseValue(self.body);
-        if (self.seeds) |seeds| releases.releaseValue(seeds);
         releases.releaseValue(self.moved);
     }
 
@@ -276,20 +263,6 @@ const GiveDriver = struct {
     }
 
     fn spawn(self: *GiveDriver, evaluator: *Fiber) MachineError!Value {
-        const moved_count = self.cursor.count;
-        const seed_count: usize = if (self.seeds) |seeds| @intCast(seeds.list.length()) else 0;
-        // The child starts on the given ports, deepest, then the ordinary
-        // values. Both lists are seeded in bounded slices by the child's seed
-        // driver, so no concatenated copy is built here.
-        const stack: machine.InitialStack = if (moved_count == 0 and seed_count == 0)
-            .empty
-        else if (moved_count == 0)
-            .{ .borrowed_seeds = self.seeds.?.list }
-        else if (seed_count == 0)
-            // Ports alone seed exactly as an explicit values list would.
-            .{ .borrowed_seeds = self.moved.list }
-        else
-            .{ .borrowed_pair = .{ .deep = self.moved.list, .seeds = self.seeds.?.list } };
         return evaluator.scheduler.?.spawn(evaluator.task_scope.?, .{
             .parent_fiber = evaluator,
             .site = .{ .inherited = .{
@@ -297,7 +270,6 @@ const GiveDriver = struct {
                 .home = evaluator.currentHome(),
             } },
             .quotation = self.body.list,
-            .initial_stack = stack,
             .constructor = .spawn,
             .transfer = &self.cursor,
         }) catch |err| switch (err) {
@@ -317,27 +289,13 @@ const GiveDriver = struct {
     }
 };
 
+/// Takes the body only once the driver owns it; on failure its owner here
+/// still releases it.
 fn give(evaluator: *Fiber) MachineError!void {
     try refuseDuringConstruction(evaluator, "@give");
-    try evaluator.require(3);
-    var body = try evaluator.popQuotation();
-    defer body.deinit();
-    var seeds = try evaluator.popList();
-    defer seeds.deinit();
-    try giveInput(evaluator, &body, &seeds);
-}
-
-fn giveSeedless(evaluator: *Fiber) MachineError!void {
-    try refuseDuringConstruction(evaluator, "@give!");
     try evaluator.require(2);
     var body = try evaluator.popQuotation();
     defer body.deinit();
-    try giveInput(evaluator, &body, null);
-}
-
-/// Takes the body and seeds only once the driver owns them; on failure the
-/// callers' owners still release them.
-fn giveInput(evaluator: *Fiber, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue) MachineError!void {
     var moved = try evaluator.popList();
     errdefer moved.deinit();
 
@@ -351,7 +309,6 @@ fn giveInput(evaluator: *Fiber, body: *heap.OwnedValue, seeds: ?*heap.OwnedValue
     const moved_list = moved.take();
     driver.* = .{
         .moved = moved_list,
-        .seeds = if (seeds) |owned| owned.take() else null,
         .body = body.take(),
         .cursor = .{
             .origin = evaluator.task_scope.?.identity(),

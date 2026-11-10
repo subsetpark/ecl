@@ -6,7 +6,6 @@
     reserved header names, no CR or LF) belong to `http.server.render-response`. A word given a
     value that is not a response dictionary, a status outside `100...599`, or a name that is not a
     string is `` `type ``.")
-[]
 (
  ### defp type-error
  (message -- error : "Build a `type error with the message.")

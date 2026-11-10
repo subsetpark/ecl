@@ -1,7 +1,6 @@
 ### All four annotation forms are legal in a module root.
 
 ### module forms
-[]
 (
  ### def bare
  (1 +) `bare def
@@ -65,17 +64,14 @@ answer spelled match? io.pp
 ### A declared effect that the body violates is still 'contract.
 
 ### module liar
-[]
 (
  ### def two
  (-- n)
  (1 2) `two def) `liar @defm
-[] (liar.two) @attempt `err at `kind at io.pp
+(liar.two) @attempt `err at `kind at io.pp
 
 ### A malformed recognized annotation is still 'domain.
-[]
 (
- []
  (
   ### def bad
   (:)
@@ -90,14 +86,12 @@ at
 io.pp
 
 ### An undocumented word has no documentation to report.
-[] (`forms.bare doc) @attempt `err at `kind at io.pp
+(`forms.bare doc) @attempt `err at `kind at io.pp
 
 ### A list beneath the body that recognizes no marker is not consumed as an
 ### annotation. It stays on the construction stack, and a module body that
 ### leaves anything there is 'domain.
-[]
 (
- []
  (### def f
   (a b)
 

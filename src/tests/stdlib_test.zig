@@ -44,19 +44,19 @@ test "stdlib: source inspection is inert and reports only literal top-level decl
     try expectOk(&runtime, "(0) `inspection-side-effect def");
     try expectDisplay(&runtime,
         \\(99 `inspection-side-effect def
-        \\ [] () `sample.one @defm
-        \\ ([] () `nested @defm)
+        \\ () `sample.one @defm
+        \\ (() `nested @defm)
         \\ [@defm list-only @defm]
         \\ {code (`dict-only @defm)}
         \\ "'string-only @defm"
         \\ # 'comment-only @defm
-        \\ [] () "computed" symbol @defm
-        \\ [] () `sample.two @defm
-        \\ [] () `sample.one @defm) source.declarations
+        \\ () "computed" symbol @defm
+        \\ () `sample.two @defm
+        \\ () `sample.one @defm) source.declarations
     , "(`sample.one `sample.two `sample.one)");
     try expectDisplay(&runtime, "pop inspection-side-effect", "0");
     try expectDisplay(&runtime, "pop () source.declarations", "()");
-    try expectDisplay(&runtime, "pop \"[] () `parsed @defm\" parse source.declarations", "(`parsed)");
+    try expectDisplay(&runtime, "pop \"() `parsed @defm\" parse source.declarations", "(`parsed)");
     try expectDisplay(&runtime, "pop (" ++ support.repeated("`many @defm ", 4097) ++ ") source.declarations len", "4097");
     try support.expectError(.{
         .name = "source inspection rejects non-list input",
@@ -118,24 +118,24 @@ test "stdlib: an imported standard-library builtin is that builtin under its imp
     try support.expectStacks(&.{
         .{
             .name = "a kernel failure names the kernel",
-            .source = "[] ([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
+            .source = "([1 2] 0 9 dict.get) @attempt `err at dup `word at swap `trace at",
             .expected = "dict.core.get (`dict.core.get)",
         },
         .{
             .name = "a session import binds the same way",
-            .source = "`dict.core [get] import [] ([1 2] 0 9 get) @attempt `err at dup `word at swap `trace at " ++
+            .source = "`dict.core [get] import ([1 2] 0 9 get) @attempt `err at dup `word at swap `trace at " ++
                 "{a 5} `a 0 get",
             .expected = "dict.core.get (`dict.core.get) 5",
         },
         .{
             .name = "too few values are the kernel's underflow",
-            .source = "[] ({a 1} dict.get) @attempt `err at dup `kind at swap `word at",
+            .source = "({a 1} dict.get) @attempt `err at dup `kind at swap `word at",
             .expected = "underflow dict.core.get",
         },
         .{
             .name = "a user module's effect is still a contract",
-            .source = "[] ((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
-                "[] (checked.w) @attempt `err at dup `kind at swap `word at",
+            .source = "((a -- b : \"B.\") (pop pop) `w def) `checked @defm " ++
+                "(checked.w) @attempt `err at dup `kind at swap `word at",
             .expected = "contract checked.w",
         },
     });
@@ -182,7 +182,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a module naming a missing export still seals",
-            .source = "((result.nope) `f def) `m @defm! 7",
+            .source = "((result.nope) `f def) `m @defm 7",
             .expected = "7",
         },
         .{
@@ -192,7 +192,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a module word resolves its word at first call",
-            .source = "(([3] result.ok) `f def) `m @defm! m.f m.f",
+            .source = "(([3] result.ok) `f def) `m @defm m.f m.f",
             .expected = "{ok [3]} {ok [3]}",
         },
         .{
@@ -221,7 +221,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a module word's call reports the missing export",
-            .source = "((result.nope) `f def) `m @defm! m.f",
+            .source = "((result.nope) `f def) `m @defm m.f",
             .kind = "undefined-word",
             .word = "result.nope",
         },
@@ -245,7 +245,7 @@ test "stdlib: concurrent first calls of a body's unloaded standard-library word 
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "(wrap result.ok) `f def [1 2 3 4 5 6 7 8] [] (f) @each",
+            "(wrap result.ok) `f def [1 2 3 4 5 6 7 8] (f) @each",
             "({ok [1]} {ok [2]} {ok [3]} {ok [4]} " ++
                 "{ok [5]} {ok [6]} {ok [7]} {ok [8]})",
         );
@@ -300,15 +300,15 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     // A path module that would shadow a stdlib name, and one that would not.
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "result.ecl",
-        .data = "[] ((999) `ok def) `result @defm",
+        .data = "((999) `ok def) `result @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "site-local.ecl",
-        .data = "[] ((7) `answer def) `site-local @defm",
+        .data = "((7) `answer def) `site-local @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "cold-local.ecl",
-        .data = "[] ((8) `answer def (9) `also def) `cold-local @defm",
+        .data = "((8) `answer def (9) `also def) `cold-local @defm",
     });
     const search = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(search);
@@ -377,8 +377,8 @@ test "stdlib: concurrent first references converge on one published module" {
         defer runtime.deinit();
         try expectDisplay(
             &runtime,
-            "([1] result.ok) ([2] `result `ok qualify execute) pair ([] swap @spawn) each (task.await) each " ++
-                "[[1] [2] [3] [4] [5] [6] [7] [8]] [] (result.ok) @each",
+            "([1] result.ok) ([2] `result `ok qualify execute) pair (@spawn) each (task.await) each " ++
+                "[[1] [2] [3] [4] [5] [6] [7] [8]] (result.ok) @each",
             "({ok ({ok [1]})} {ok ({ok [2]})}) " ++
                 "({ok [1]} {ok [2]} {ok [3]} {ok [4]} " ++
                 "{ok [5]} {ok [6]} {ok [7]} {ok [8]})",

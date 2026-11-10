@@ -20,7 +20,6 @@
     or, on failure, the fallback value as given.
 
     `raise`, `fail`, and `assert` operate on errors directly and remain core words.")
-[]
 (
  ### defp checked
  (result -- result : "Validate and return a result.")
@@ -79,7 +78,7 @@
   "For a success, use its payload as the explicit values list for `@attempt`, running the quotation
    on an isolated stack seeded with the success values. Return a failure unchanged.")
  (swap checked swap over `ok dict.has?
-  (swap `ok at swap @attempt)
+  (swap `ok at swap cat @attempt)
   (pop)
   if) `map def
 
@@ -88,7 +87,7 @@
   "Replace a failure's error dict with the one its isolated quotation returns. Return a success
    unchanged.")
  (swap checked swap over `err dict.has?
-  (swap `err at wrap swap @attempt
+  (swap `err at swap cons @attempt
    dup `ok dict.has?
    (`ok at dup len 1 =
     `contract error.new "result.map-err expects ( error -- error )" error.with-message assert
@@ -101,10 +100,10 @@
 
  ### def recover
  (result quotation -- result :
-  "For a failure, run the recovery quotation under `@attempt` on an isolated stack seeded with the
-   stored error dict. Return a success unchanged.")
+  "For a failure, run the recovery quotation under `@attempt` with the stored error dict as its only
+   input. Return a success unchanged.")
  (swap checked swap over `err dict.has?
-  (swap `err at wrap swap @attempt)
+  (swap `err at swap cons @attempt)
   (pop)
   if) `recover def
 

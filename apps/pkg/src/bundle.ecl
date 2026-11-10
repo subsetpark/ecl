@@ -1,6 +1,5 @@
 ### module pkg.bundle
 # Source-only package policy over the shared hostile-input archive parser.
-[]
 (
  ### defp require
  (condition -- : "Reject malformed or oversized source packages.")

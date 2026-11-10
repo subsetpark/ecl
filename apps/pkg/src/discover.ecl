@@ -1,6 +1,5 @@
 ### module pkg.discover
 # Discovery is used only for an absent lock or an explicit dependency update.
-[]
 (
  ### defp require
  (condition -- : "Reject a mismatched or oversized discovered dependency graph.")

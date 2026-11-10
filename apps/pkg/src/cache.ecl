@@ -1,6 +1,5 @@
 ### module pkg.cache
 # A disposable shared download cache. Project generations never depend on it.
-[]
 (
  ### def filename
  (hash -- filename : "Name one exact archive in the flat download cache.")
@@ -27,7 +26,7 @@
  (directory hash -- bytes :
   "Read and hash-check a cache entry through an explicit directory resource.")
  (|directory hash|
-  directory hash pair (read-known) @attempt optional
+  directory hash pair (read-known) cat @attempt optional
   dup empty? (pop []) (first) if hash checked-read) `read-at def
 
  ### defp checked-read
@@ -39,7 +38,7 @@
  (path hash -- bytes :
   "Read a cache entry without making cache availability a synchronization requirement.")
  (|path hash|
-  path hash pair (read-file) @attempt optional
+  path hash pair (read-file) cat @attempt optional
   dup empty? (pop []) (first) if) `read-present defp
 
  ### def read
@@ -64,5 +63,5 @@
  (path hash bytes -- : "Populate the cache opportunistically; cancellation still propagates.")
  (|path hash bytes|
   path hash bytes 3 pack path empty?
-  (pop) ((write-file) @attempt optional pop) if) `write def
+  (pop) ((write-file) cat @attempt optional pop) if) `write def
 ) `pkg.cache @defm

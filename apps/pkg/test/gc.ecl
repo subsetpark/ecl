@@ -1,5 +1,4 @@
 ### module pkg.test.gc
-[]
 (
  ### defp equal
  (actual expected -- : "Compare cache collection through public directory operations.")

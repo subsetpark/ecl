@@ -1,5 +1,4 @@
 ### module pkg.test.shadow
-[]
 (
  `pkg.test.support (equal) import
  `table (where) import

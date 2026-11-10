@@ -1,5 +1,4 @@
 ### module pkg.test.project
-[]
 (
  ### defp equal
  (actual expected -- : "Assert application project discovery behavior.")

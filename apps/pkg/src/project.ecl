@@ -1,6 +1,5 @@
 ### module pkg.project
 # Application-owned project discovery and coordination over public directories.
-[]
 (
  ### defp missing-environment
  (error -- value : "Default only the documented absent-environment case.")
@@ -9,7 +8,7 @@
 
  ### def environment
  (name -- value : "Read an optional startup environment setting; empty means absent.")
- (wrap (getenv) @attempt dup result.ok?
+ ((getenv) cons @attempt dup result.ok?
   (`ok at first) (`err at missing-environment) if) `environment def
 
  ### def absolute

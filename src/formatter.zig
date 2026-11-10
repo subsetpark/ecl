@@ -131,9 +131,6 @@ const Doc = union(enum) {
     /// A fill decision scoped to one separator and the term after it. Unlike
     /// a structural group, this does not reserve width for later siblings.
     local_group: *const Doc,
-    /// A separator whose choice depends only on the following physical line.
-    /// The child retains its own grouping decisions after the separator.
-    line_pair: *const Doc,
     aligned: *const Doc,
     fill_sep: Fill,
     docline: usize,
@@ -177,9 +174,6 @@ const DocBuilder = struct {
     }
     fn localGroup(self: *DocBuilder, item: *const Doc) Error!*const Doc {
         return self.node(.{ .local_group = item });
-    }
-    fn linePair(self: *DocBuilder, item: *const Doc) Error!*const Doc {
-        return self.node(.{ .line_pair = item });
     }
     fn aligned(self: *DocBuilder, item: *const Doc) Error!*const Doc {
         return self.node(.{ .aligned = item });
@@ -261,20 +255,6 @@ const Renderer = struct {
                     .mode = mode,
                 });
             },
-            .line_pair => |item| {
-                if (self.column < max_width and
-                    self.fits(max_width - self.column - 1, item, .first_line))
-                {
-                    try self.writeSpace();
-                } else {
-                    try self.lineBreak(frame.indent);
-                }
-                try self.stack.append(self.allocator, .{
-                    .doc = item,
-                    .indent = frame.indent,
-                    .mode = frame.mode,
-                });
-            },
             .fill_sep => |fill| try self.renderFill(fill, frame),
             .docline => |count| if (frame.mode == .flat) {
                 for (0..count) |_| try self.writeText("\\n");
@@ -352,15 +332,6 @@ const Renderer = struct {
                         .indent = 0,
                         .mode = if (frame.mode == .flat) .flat else .broken,
                     } })) return false,
-                    .line_pair => |item| {
-                        if (remaining == 0) return false;
-                        remaining -= 1;
-                        if (!commands.push(.{ .frame = .{
-                            .doc = item,
-                            .indent = 0,
-                            .mode = if (frame.mode == .flat) .flat else .broken,
-                        } })) return false;
-                    },
                     .fill_sep => |fill| {
                         if (frame.mode == .broken) return true;
                         if (!commands.push(.{ .fill = .{ .words = fill.words, .index = 0 } })) return false;
@@ -679,22 +650,9 @@ const Formatter = struct {
             try body.append(self.allocator(), try self.docs.hardline());
         try body.append(self.allocator(), try self.docs.concat(closing.items));
         const registered_body = try self.docs.group(try self.docs.aligned(try self.docs.concat(body.items)));
-        const registered = if (registration.seed == registration.body)
-            registered_body
-        else seeded: {
-            const seed = try self.form(sequence, registration.seed);
-            const breaks = formBreakCount(sequence, registration.seed, registration.body);
-            if (breaks == 0) break :seeded try self.docs.concat(&.{ seed, try self.docs.linePair(registered_body) });
-            var seeded: std.ArrayList(*const Doc) = .empty;
-            defer seeded.deinit(self.allocator());
-            try seeded.append(self.allocator(), seed);
-            for (0..breaks) |_| try seeded.append(self.allocator(), try self.docs.hardline());
-            try seeded.append(self.allocator(), registered_body);
-            break :seeded try self.docs.concat(seeded.items);
-        };
         // A module's documentation stands on its own line above the operands.
-        if (start == registration.seed) return registered;
-        return self.docs.concat(&.{ try self.form(sequence, start), try self.docs.hardline(), registered });
+        if (start == registration.body) return registered_body;
+        return self.docs.concat(&.{ try self.form(sequence, start), try self.docs.hardline(), registered_body });
     }
     fn nested(self: *Formatter, sequence: Sequence) Error!NestedDoc {
         var output: std.ArrayList(*const Doc) = .empty;
@@ -1143,8 +1101,8 @@ fn isLiteralValueForm(form_item: *const Form) bool {
         },
     };
 }
-/// `values (body) 'name @defm` and `(body) 'name @defm!`: the fixed-arity
-/// registration shapes that earn a navigation header, mirroring definition navigation. A computed name gets
+/// `(body) 'name @defm`: the fixed-arity registration shape that earns a
+/// navigation header, mirroring definition navigation. A computed name gets
 /// no header, exactly as a definition does. A phrase using ordinary `cat`
 /// composition is not constructor metadata and therefore earns no registration
 /// header.
@@ -1153,8 +1111,6 @@ fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
 }
 const ModuleRegistration = struct {
     name: []const u8,
-    /// The values list, or the body of a seedless registration.
-    seed: usize,
     body: usize,
     terminator: usize,
 };
@@ -1173,29 +1129,17 @@ fn moduleRegistrationShape(sequence: Sequence, start: usize) ?ModuleRegistration
     if (!sequence.definitions) return null;
     const head = sequence.parts[start].form;
     if (!isListForm(head) or isAnnotationCandidate(head)) return null;
-    // The header belongs to the whole phrase, so a seeded registration is
-    // claimed by its values list rather than by the body that follows it; a
-    // seedless one is claimed by its body.
-    var body_seen = false;
-    var body = start;
     var named: ?[]const u8 = null;
     for (sequence.parts[start + 1 ..], start + 1..) |part, part_index| switch (part) {
         .trivia => {},
         .form => |form_item| {
             const bytes = switch (form_item.kind) {
                 .atom => |atom| atom,
-                else => {
-                    if (body_seen or named != null or !isListForm(form_item)) return null;
-                    body_seen = true;
-                    body = part_index;
-                    continue;
-                },
+                else => return null,
             };
             if (named) |name| {
-                const seeded = std.mem.eql(u8, bytes, "@defm");
-                if (!seeded and !std.mem.eql(u8, bytes, "@defm!")) return null;
-                if (seeded != body_seen) return null;
-                return .{ .name = name, .seed = start, .body = body, .terminator = part_index };
+                if (!std.mem.eql(u8, bytes, "@defm")) return null;
+                return .{ .name = name, .body = start, .terminator = part_index };
             }
             if (bytes.len < 2 or bytes[0] != '`' or !lexer.validSymbolSource(bytes[1..])) return null;
             named = bytes[1..];

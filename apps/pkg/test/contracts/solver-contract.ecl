@@ -1,5 +1,4 @@
 ### module pkg.test.mvs
-[]
 (
  `pkg.test.support
  (equal raises-containing raises-data documented)
@@ -183,7 +182,7 @@
   "b" "1.0.0"
   {} "a" "a" "1.0.0" "https://e.com/a.tgz" hash-a requirement put
   manifest put put
-  pair (pkg.solver.resolve) @attempt
+  pair (pkg.solver.resolve) cat @attempt
   `err at
   dup `kind at `domain equal
   `data at `packages at ("a" "b") equal)
