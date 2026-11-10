@@ -10,6 +10,49 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## CSV in ECL — 2026-11-09
+
+`csv` at `87c55648` is an ECL module over the vector primitives; the native
+parser it replaces is gone, so the comparison is with array-language CSV
+splitters doing the same job: CBQN (`o3n-singeli`) running `bqn-libs`
+`csv.bqn` `Split`, and ngn/k running `ngnk-libs` `csv.k` `csvorig`, both built
+from source on the day. macOS arm64, `ECL_WORKERS=1`, three runs each,
+medians, millisecond clocks. Inputs are synthetic: 100,000 rows × 8 integers
+(8.3 MB); 100,000 rows × 3 quoted Unicode fields with embedded newlines and
+CRLF (7.0 MB); 613,295 rows × 12 mixed fields (70 MiB).
+
+| Split to rows of strings, ms | 8.3 MB | 7.0 MB | 70 MiB |
+|---|---:|---:|---:|
+| CBQN `Split` | 62 | 36 | 462 |
+| `csv.parse`, ReleaseFast | 100 | 66 | 931 |
+| `csv.parse`, ReleaseSafe | 183 | 122 | 1772 |
+| ngn/k `csvorig` | 186 | 162 | 1678 |
+
+`csv.parse` also validates quoting and record widths and strips CRLF, which
+neither library does. Peak RSS on the 70 MiB input is 1022 MiB in ReleaseFast
+and 1087 MiB in ReleaseSafe, against 1311 MiB for CBQN and 1285 MiB for ngn/k.
+
+ReleaseSafe is about 1.8× ReleaseFast here. A ReleaseSafe CLI allocates through
+`std.heap.SafeAllocator`, whose per-allocation footers and checksums were about
+11% of samples in a profile of `csv.parse`, with freed-memory fills and
+`munmap` of the per-block masks beside them. A cross-language comparison is a
+ReleaseFast one; the ReleaseSafe row is for comparison with the rest of this
+file.
+
+| `csv.emit` of the parsed rows, ms | 8.3 MB | 7.0 MB | 70 MiB |
+|---|---:|---:|---:|
+| ReleaseFast | 184 | 96 | 1963 |
+| ReleaseSafe | 488 | 174 | 3782 |
+| native `csv.emit` at `b4dc1f0b`, ReleaseSafe | 502 | 303 | 4272 |
+
+`csv.emit` renders 4096 records at a time. Unbatched it was 10–25% faster and
+peaked at 5.2 GiB on the 70 MiB input, against 1.0 GiB batched.
+
+Converting 800,000 string fields with `(int) each` or `(float) each` takes
+about 290 ms through the per-element route and 80 ms through the recognized
+conversion in ReleaseSafe (66 ms in ReleaseFast); `table.cast` over eight
+columns of 100,000 goes from 290 ms to 85.
+
 ## Byte masks through chains and scans, and typed copies — 2026-11-09
 
 Baseline is `a69cb130`; updated keeps a mask's byte class through a fused
