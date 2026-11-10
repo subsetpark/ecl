@@ -2648,14 +2648,13 @@ const CutDriver = struct {
     starts: heap.Owned(Value),
     validated: usize = 0,
     previous: usize = 0,
-    longest: usize = 0,
     pieces: ?heap.Owned(heap.OwnedValueBuffer) = null,
-    cells: ?heap.Owned([]Value) = null,
     piece: usize = 0,
-    filled: usize = 0,
     typed: ?heap.Owned(list.LeafRangeMaterializer) = null,
     inner: ?heap.Owned(list.ValueMaterializer) = null,
     outer: ?heap.Owned(list.ValueMaterializer) = null,
+    /// The empty list every empty piece shares, once one is needed.
+    empty: ?heap.Owned(Value) = null,
 
     fn start(self: *const CutDriver, index: usize) usize {
         return @intCast(list.atUnchecked(self.starts.borrow(), index).int);
@@ -2688,18 +2687,13 @@ const CutDriver = struct {
                     "cut starts must be nondecreasing",
                     self.validated,
                 );
-                if (self.validated != 0) self.longest = @max(self.longest, position - self.previous);
                 self.previous = position;
             }
-            if (self.validated == count and count != 0)
-                self.longest = @max(self.longest, length - self.previous);
             return .stepped;
         }
         const header = self.collection.borrow().list;
         if (self.pieces == null) {
             self.pieces = .init(try .init(evaluator.releases, count));
-            if (header.kind() == .generic_spine)
-                self.cells = .init(try evaluator.allocator.alloc(Value, self.longest));
             if (count == 0) self.outer = .init(.init(evaluator.allocator, self.pieces.?.borrow().values()));
             return .stepped;
         }
@@ -2707,46 +2701,53 @@ const CutDriver = struct {
             .pending => .stepped,
             .complete => |result| .{ .output = result },
         };
-        if (self.typed) |*typed| switch (try typed.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .stepped,
-            .complete => |piece_value| {
-                typed.deinit(evaluator.releases, evaluator.allocator);
-                self.typed = null;
-                self.finishPiece(evaluator, piece_value);
-                return .stepped;
-            },
-        };
-        if (self.inner) |*inner| switch (try inner.borrowMut().advance(evaluator.workBudget())) {
-            .pending => return .stepped,
-            .complete => |piece_value| {
-                inner.deinit(evaluator.releases, evaluator.allocator);
-                self.inner = null;
-                self.finishPiece(evaluator, piece_value);
-                return .stepped;
-            },
-        };
-        const first = self.start(self.piece);
-        const size = self.end(self.piece) - first;
-        if (size == 0) {
-            self.finishPiece(evaluator, try emptyLike(evaluator.allocator, self.collection.borrow()));
-            return .stepped;
+        // Pieces follow one another within the turn until its budget is
+        // spent: a copy charges its elements, an empty piece one unit.
+        const work = evaluator.workBudget();
+        while (self.outer == null) {
+            if (self.typed) |*typed| switch (try typed.borrowMut().advance(work)) {
+                .pending => return .stepped,
+                .complete => |piece_value| {
+                    typed.deinit(evaluator.releases, evaluator.allocator);
+                    self.typed = null;
+                    self.finishPiece(evaluator, piece_value);
+                    continue;
+                },
+            };
+            if (self.inner) |*inner| switch (try inner.borrowMut().advance(work)) {
+                .pending => return .stepped,
+                .complete => |piece_value| {
+                    inner.deinit(evaluator.releases, evaluator.allocator);
+                    self.inner = null;
+                    self.finishPiece(evaluator, piece_value);
+                    continue;
+                },
+            };
+            if (work.exhausted()) return .stepped;
+            const first = self.start(self.piece);
+            const size = self.end(self.piece) - first;
+            if (size == 0) {
+                // Every empty piece is the one empty list.
+                _ = work.spend();
+                if (self.empty == null) self.empty = .init(try emptyLike(evaluator.allocator, self.collection.borrow()));
+                heap.retainValue(self.empty.?.borrow());
+                self.finishPiece(evaluator, self.empty.?.borrow());
+                continue;
+            }
+            if (list.LeafRangeMaterializer.init(evaluator.allocator, header, first, first + size)) |copy| {
+                self.typed = .init(copy);
+                continue;
+            }
+            // A generic piece is profiled from the source's own cells, which
+            // the driver holds.
+            self.inner = .init(.init(evaluator.allocator, heap.valuesConst(header)[first..][0..size]));
         }
-        if (list.LeafRangeMaterializer.init(evaluator.allocator, header, first, first + size)) |copy| {
-            self.typed = .init(copy);
-            return .stepped;
-        }
-        const cells = self.cells.?.borrow();
-        while (self.filled != size and evaluator.workBudget().spend()) : (self.filled += 1) {
-            cells[self.filled] = list.atUnchecked(self.collection.borrow(), first + self.filled);
-        }
-        if (self.filled == size) self.inner = .init(.init(evaluator.allocator, cells[0..size]));
         return .stepped;
     }
 
     fn finishPiece(self: *CutDriver, evaluator: *Fiber, piece_value: Value) void {
         self.pieces.?.borrowMut().appendOwned(piece_value);
         self.piece += 1;
-        self.filled = 0;
         if (self.piece == @as(usize, @intCast(self.starts.borrow().list.length())))
             self.outer = .init(.init(evaluator.allocator, self.pieces.?.borrow().values()));
     }

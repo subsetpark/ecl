@@ -48,6 +48,13 @@ file.
 `csv.emit` renders 4096 records at a time. Unbatched it was 10–25% faster and
 peaked at 5.2 GiB on the 70 MiB input, against 1.0 GiB batched.
 
+`cut` afterwards cuts consecutive pieces within one turn, shares one empty
+list among empty pieces, and profiles a generic piece from the source's own
+cells. In ReleaseFast over the 23.9 MB input, cutting 23.9M characters into
+2.4M fields goes from 80 ms to 57 (CBQN's group: 98), cutting those fields
+into 200,000 rows from 22 ms to 17 (CBQN: 2), and `csv.parse` on the three
+inputs from 95, 63, and 875 ms to 86, 59, and 790.
+
 Converting 800,000 string fields with `(int) each` or `(float) each` takes
 about 290 ms through the per-element route and 80 ms through the recognized
 conversion in ReleaseSafe (66 ms in ReleaseFast); `table.cast` over eight
