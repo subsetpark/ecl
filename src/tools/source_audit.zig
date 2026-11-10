@@ -63,12 +63,6 @@ const source_groups = [_]SourceGroup{
     embeddedGroup(true, &.{
         "prelude.zig", "stdlib.zig",
     }),
-    // First-party native stdlib modules are authored against the public SDK
-    // and hold no host authority; they are user-sized traversal files whose
-    // resumable state is the SDK's own continuation record.
-    embeddedGroup(true, &.{
-        "stdlib/csv.zig",
-    }),
     // Builtin-backed stdlib modules hold host authority the SDK withholds, so
     // they are ordinary production sources under the bounded-traversal rules.
     embeddedGroup(true, &.{
@@ -622,7 +616,6 @@ fn auditSourceBodies() bool {
         .{ .name = "reflection", .text = @embedFile("../reflection.zig") },
         .{ .name = "definition primitives", .text = @embedFile("../definition_prims.zig") },
         .{ .name = "documentation", .text = @embedFile("../doc.zig") },
-        .{ .name = "csv module", .text = @embedFile("../stdlib/csv.zig") },
         .{ .name = "random kernels", .text = @embedFile("../kernel_random.zig") },
     };
     const traversal_forbidden = [_][]const []const u8{

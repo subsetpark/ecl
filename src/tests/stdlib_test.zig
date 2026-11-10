@@ -197,7 +197,7 @@ test "stdlib: a body names a word of an unregistered module without loading it" 
         },
         .{
             .name = "a prefix not yet interned names a module that has not loaded",
-            .source = "(\"a,b\" [] csv.parse) `f def f flip",
+            .source = "(\"a,b\" csv.parse) `f def f",
             .expected = "((\"a\" \"b\"))",
         },
         .{
@@ -265,8 +265,8 @@ test "stdlib: dynamic qualified execution auto-loads every embedded transport" {
             .expected = "[1]",
         },
         .{
-            .name = "embedded native descriptor",
-            .source = "\"a,b\" [] `csv `parse qualify execute flip",
+            .name = "an embedded source module by qualified name",
+            .source = "\"a,b\" `csv `parse qualify execute",
             .expected = "((\"a\" \"b\"))",
         },
     });

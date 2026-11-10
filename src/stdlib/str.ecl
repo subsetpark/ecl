@@ -4,9 +4,9 @@
 (
  `str.core [format] import
 
- ### defp blanks
+ ### setp blanks
  (-- string : "Return the ASCII whitespace characters recognized by trimming operations.")
- (" \t\n\u{B}\u{C}\u{D}") `blanks defp
+ " \t\n\u{B}\u{C}\u{D}" `blanks setp
 
  ### defp type-error
  (message -- error : "Build a type error with the given message.")

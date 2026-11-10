@@ -106,56 +106,6 @@ fn textSpan(call: *ecl.Call("input decoded width -- result"), build: *ecl.BuildV
     };
 }
 
-const ForwardProbe = struct {
-    pub const State = struct { staged: u64 = 0, read: u64 = 0, phase: enum { stage, read, finish } = .stage };
-    pub fn init() State {
-        return .{};
-    }
-    pub fn deinit(state: *State) void {
-        state.* = undefined;
-    }
-};
-const ForwardSchedule = ecl.Reschedule(ForwardProbe);
-fn forwardStage(call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *ForwardSchedule) ecl.CallbackResult {
-    const state = schedule.state();
-    while (true) switch (state.phase) {
-        .stage => {
-            if (state.staged == 600) {
-                state.phase = .read;
-                continue;
-            }
-            var words: [3]u64 = .{ state.staged, state.staged + 1, state.staged + 2 };
-            switch (try build.stage(0, &words)) {
-                .yield_required => return schedule.yield(),
-                .invalid => return call.fail(.user, "stage rejected"),
-                .appended => state.staged += 3,
-            }
-        },
-        .read => {
-            if (state.read == 600) {
-                state.phase = .finish;
-                continue;
-            }
-            var words: [3]u64 = undefined;
-            switch (try build.readStagedForward(0, &words)) {
-                .yield_required => return schedule.yield(),
-                .invalid => return call.fail(.user, "forward read rejected"),
-                .appended => {},
-            }
-            if (!std.mem.eql(u64, &words, &.{ state.read, state.read + 1, state.read + 2 })) return call.fail(.user, "forward order changed");
-            state.read += 3;
-        },
-        .finish => {
-            var word: [1]u64 = undefined;
-            if (try build.stage(0, &.{1}) == .yield_required) return schedule.yield();
-            if (try build.stage(0, &.{1}) != .invalid) return call.fail(.user, "sealed staging accepted append");
-            if (try build.readStaged(0, &word) == .yield_required) return schedule.yield();
-            if (try build.readStaged(0, &word) != .invalid) return call.fail(.user, "staging changed direction");
-            return call.complete(.{ecl.Scalar.int(@intCast(state.read))});
-        },
-    };
-}
-
 fn bulkValuesBudget(call: *ecl.Call("-- result"), build: *ecl.BuildValues, schedule: *BulkValuesSchedule) ecl.CallbackResult {
     return bulkValuesBudgetImpl(true, call, build, schedule);
 }
@@ -194,9 +144,7 @@ fn bulkValuesBudgetImpl(comptime reverse: bool, call: *ecl.Call("-- result"), bu
 fn bulkImmediate(call: *ecl.Call("input -- result"), build: *ecl.BuildValues) ecl.CallbackResult {
     var units: [3]u32 = undefined;
     if (try call.readUnits(0, 0, &units) != .invalid) return call.fail(.user, "read without reschedule must be invalid");
-    if (try build.stage(0, &.{ 11, 22, 33 }) != .appended) return call.fail(.user, "immediate stage failed");
-    var words: [3]u64 = undefined;
-    if (try build.readStaged(0, &words) != .appended) return call.fail(.user, "immediate staged read failed");
+    const words = [3]u64{ 11, 22, 33 };
     if (try build.appendBulk(1, .integers, 3, false, &words) != .appended) return call.fail(.user, "immediate append failed");
     return switch (try build.finishBulk(1, .integers, 3, false)) {
         .candidate => |result| call.complete(.{result}),
@@ -239,22 +187,6 @@ fn bulkBudget(call: *ecl.Call("input -- result"), build: *ecl.BuildValues, sched
             var units: [3]u32 = undefined;
             const read = try call.readUnits(0, 0, &units);
             if (read != .units or read.units.count != 3 or !read.units.bytes or !std.mem.eql(u32, &units, &.{ 65, 66, 67 })) return call.fail(.user, "bulk read lost input");
-            if (try build.stage(0, &.{ 11, 22, 33 }) != .appended) return call.fail(.user, "stage rejected input");
-            state.phase = 2;
-        },
-        2 => {
-            _ = schedule.consume(65_536);
-            var words: [2]u64 = undefined;
-            if (try build.readStaged(0, &words) != .yield_required) return call.fail(.user, "staged read ignored budget");
-            state.phase = 3;
-            return schedule.yield();
-        },
-        3 => {
-            var words: [2]u64 = undefined;
-            if (try build.readStaged(0, &words) != .appended or !std.mem.eql(u64, &words, &.{ 22, 33 })) return call.fail(.user, "staged retry lost values");
-            if (try build.readStaged(0, &words) != .invalid) return call.fail(.user, "staged read exceeded available values");
-            if (try build.stage(0, &.{44}) != .invalid) return call.fail(.user, "staged reader accepted a write");
-            if (try build.readStaged(0, words[0..1]) != .appended or words[0] != 11) return call.fail(.user, "failed read consumed a value");
             state.phase = 4;
         },
         4 => {
@@ -608,7 +540,6 @@ pub const Extension = ecl.module(.{
         ecl.word("builder-budget", "Prove aggregate builders charge the native budget.", builderBudget),
         ecl.word("forward-values-budget", "Prove forward generic construction publishes only initialized values.", forwardValuesBudget),
         ecl.word("text-span", "Copy and validate a host-owned text span.", textSpan),
-        ecl.word("forward-stage", "Exercise forward staging across chunk boundaries.", forwardStage),
         ecl.word("bulk-budget", "Prove bulk reads and builders preserve values across budget exhaustion.", bulkBudget),
         ecl.word("bulk-immediate", "Build bulk values without rescheduling and reject unavailable unit reads.", bulkImmediate),
         ecl.word("bulk-values-budget", "Prove generic bulk initialization and reverse writes yield without exposing unwritten cells.", bulkValuesBudget),

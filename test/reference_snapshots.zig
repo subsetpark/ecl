@@ -114,9 +114,9 @@ const cases = [_]Case{
     .{ .name = "result malformed", .source = "{ok 5} (missing) result.map" },
     .{ .name = "str upper", .source = "\"héllo\" str.upper" },
     .{ .name = "str index-of missing", .source = "\"abc\" \"z\" str.index-of" },
-    .{ .name = "csv parse", .source = "\"a,,c\nd,,f\" [] csv.parse" },
-    .{ .name = "csv emit", .source = "\"a,b\" [] csv.parse flip csv.emit" },
-    .{ .name = "csv malformed", .source = "\"\\\"x\" [] csv.parse" },
+    .{ .name = "csv parse", .source = "\"a,,c\nd,,f\" csv.parse" },
+    .{ .name = "csv emit", .source = "\"a,b\" csv.parse csv.emit" },
+    .{ .name = "csv malformed", .source = "\"\\\"x\" csv.parse" },
     .{ .name = "json parse", .source = "\"{\\\"a\\\":[1,null,true]}\" json.parse" },
     .{ .name = "json emit", .source = "{a 1} json.emit" },
     .{ .name = "json emit key", .source = "{1 2} json.emit" },
@@ -906,26 +906,26 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\{kind domain msg "str.index-of found no occurrence of the needle" word raise trace (`raise `assert `str.index-of) data {source "prelude.ecl" line <^\d+$> col <^\d+$>}}
         \\=== csv parse ===
         \\source: "a,,c
-        \\d,,f" [] csv.parse
+        \\d,,f" csv.parse
         \\exit: 0
         \\stdout:
-        \\(("a" "d") ("" "") ("c" "f"))
+        \\(("a" "" "c") ("d" "" "f"))
         \\stderr:
         \\<empty>
         \\=== csv emit ===
-        \\source: "a,b" [] csv.parse flip csv.emit
+        \\source: "a,b" csv.parse csv.emit
         \\exit: 0
         \\stdout:
         \\"a,b\u{d}\n"
         \\stderr:
         \\<empty>
         \\=== csv malformed ===
-        \\source: "\"x" [] csv.parse
+        \\source: "\"x" csv.parse
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{kind parse msg "csv: malformed quoting or UTF-8 at record 1, column 1" word csv.parse trace (`csv.parse) data {source "<command>" line 1 col 10}}
+        \\{kind parse msg "csv: malformed quoting at record 1, column 1" word raise trace (`raise `csv.refuse `csv.misquoted `csv.unclosed `csv.checked `csv.fielded `csv.separated `csv.quoted `csv.lexed `csv.tail `csv.finished `csv.parse) data {source "<stdlib:csv>" line <^\d+$> col <^\d+$>}}
         \\=== json parse ===
         \\source: "{\"a\":[1,null,true]}" json.parse
         \\exit: 0

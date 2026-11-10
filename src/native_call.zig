@@ -15,83 +15,6 @@ const value = @import("value.zig");
 const Value = value.Value;
 const BuilderKind = enum { list, dict };
 
-/// The transaction owns the entire chain. Cursor and backward links borrow
-/// from that owner; retirement detaches one chunk per scheduler step.
-const ScalarStage = struct {
-    const Chunk = struct {
-        retirement: heap.ReleaseDomain.Retirement = .{},
-        next: ?*Chunk = null,
-        previous: ?*Chunk = null,
-        words: [256]u64,
-        len: usize = 0,
-
-        pub fn advanceRetirement(domain: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *Chunk) bool {
-            if (self.next) |next| domain.retire(next, &next.retirement);
-            allocator.destroy(self);
-            return true;
-        }
-    };
-    const Cursor = struct { chunk: *Chunk, index: usize };
-    first: *Chunk,
-    state: union(enum) { writing: *Chunk, forward: Cursor, reverse: Cursor },
-
-    fn init(call: *Transaction) error{OutOfMemory}!ScalarStage {
-        const first = try call.allocator.create(Chunk);
-        // SAFETY: len exposes only words initialized by append.
-        first.* = .{ .words = undefined };
-        return .{ .first = first, .state = .{ .writing = first } };
-    }
-    fn append(self: *ScalarStage, call: *Transaction, words: []const u64) error{OutOfMemory}!bool {
-        if (self.state != .writing) return false;
-        for (words) |word| {
-            if (self.state.writing.len == 256) {
-                const next = try call.allocator.create(Chunk);
-                // SAFETY: len exposes only words initialized by append.
-                next.* = .{ .previous = self.state.writing, .words = undefined };
-                self.state.writing.next = next;
-                self.state.writing = next;
-            }
-            const chunk = self.state.writing;
-            chunk.words[chunk.len] = word;
-            chunk.len += 1;
-        }
-        return true;
-    }
-    fn read(self: *ScalarStage, words: []u64, forward: bool) bool {
-        if (self.state == .writing) {
-            const tail = self.state.writing;
-            self.state = if (forward)
-                .{ .forward = .{ .chunk = self.first, .index = 0 } }
-            else
-                .{ .reverse = .{ .chunk = tail, .index = tail.len } };
-        }
-        if (forward != (self.state == .forward)) return false;
-        var cursor = if (forward) self.state.forward else self.state.reverse;
-        for (0..words.len) |i| {
-            if (forward) {
-                if (cursor.index == cursor.chunk.len) {
-                    cursor.chunk = cursor.chunk.next orelse return false;
-                    cursor.index = 0;
-                }
-                words[i] = cursor.chunk.words[cursor.index];
-                cursor.index += 1;
-            } else {
-                if (cursor.index == 0) {
-                    cursor.chunk = cursor.chunk.previous orelse return false;
-                    cursor.index = cursor.chunk.len;
-                }
-                cursor.index -= 1;
-                words[words.len - i - 1] = cursor.chunk.words[cursor.index];
-            }
-        }
-        self.state = if (forward) .{ .forward = cursor } else .{ .reverse = cursor };
-        return true;
-    }
-    fn retire(self: *ScalarStage, releases: *heap.ReleaseDomain) void {
-        releases.retire(self.first, &self.first.retirement);
-    }
-};
-
 const BulkList = struct {
     kind: abi.BulkKind,
     expected: usize,
@@ -442,7 +365,6 @@ const AggregateBuilder = struct {
     value: union(enum) {
         list: ListBuild,
         dict: DictBuild,
-        stage: ScalarStage,
         bulk: BulkList,
     },
 
@@ -605,7 +527,7 @@ const Transaction = struct {
             const matches = switch (existing.value) {
                 .list => |builder_value| kind == .list and builder_value.expected == expected,
                 .dict => |builder_value| kind == .dict and builder_value.expected == expected,
-                .stage, .bulk => false,
+                .bulk => false,
             };
             if (!matches) return error.Invalid;
             return existing;
@@ -854,36 +776,21 @@ fn hostBulkBuild(context: *anyopaque, slot: u32, action: abi.BulkAction, kind: a
         else => return .invalid,
     }
     switch (action) {
-        .stage, .read_staged, .read_staged_forward, .append_text_span, .append, .append_candidate, .finish => {},
+        .append_text_span, .append, .append_candidate, .finish => {},
         else => return .invalid,
     }
     if (charge(call, @max(n, 1)) != .ok) return .yield_required;
-    const staged = action == .stage or action == .read_staged or action == .read_staged_forward;
     if (call.builders[slot] == null) {
         const aggregate = call.allocator.create(AggregateBuilder) catch return .out_of_memory;
-        aggregate.* = .{ .serial = call.next_builder_serial, .value = if (staged)
-            .{ .stage = ScalarStage.init(call) catch {
-                call.allocator.destroy(aggregate);
-                return .out_of_memory;
-            } }
-        else
-            .{ .bulk = BulkList.init(call.allocator, kind, count, reverse_wire != 0) catch {
-                call.allocator.destroy(aggregate);
-                return .out_of_memory;
-            } } };
+        aggregate.* = .{ .serial = call.next_builder_serial, .value = .{ .bulk = BulkList.init(call.allocator, kind, count, reverse_wire != 0) catch {
+            call.allocator.destroy(aggregate);
+            return .out_of_memory;
+        } } };
         call.next_builder_serial +%= 1;
         if (call.next_builder_serial == 0) call.next_builder_serial = 1;
         call.builders[slot] = aggregate;
     }
     const aggregate = call.builders[slot].?;
-    if (staged) {
-        if (aggregate.value != .stage) return .invalid;
-        const success = if (action == .stage)
-            aggregate.value.stage.append(call, words[0..n]) catch return .out_of_memory
-        else
-            aggregate.value.stage.read(words[0..n], action == .read_staged_forward);
-        return if (success) .ok else .invalid;
-    }
     if (aggregate.value != .bulk) return .invalid;
     const builder = &aggregate.value.bulk;
     if (builder.kind != kind or builder.expected != count or builder.reverse != (reverse_wire != 0)) return .invalid;

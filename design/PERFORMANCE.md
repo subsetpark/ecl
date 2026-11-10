@@ -10,6 +10,105 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## CSV in ECL — 2026-11-09
+
+`csv` at `87c55648` is an ECL module over the vector primitives; the native
+parser it replaces is gone, so the comparison is with array-language CSV
+splitters doing the same job: CBQN (`o3n-singeli`) running `bqn-libs`
+`csv.bqn` `Split`, and ngn/k running `ngnk-libs` `csv.k` `csvorig`, both built
+from source on the day. macOS arm64, `ECL_WORKERS=1`, three runs each,
+medians, millisecond clocks. Inputs are synthetic: 100,000 rows × 8 integers
+(8.3 MB); 100,000 rows × 3 quoted Unicode fields with embedded newlines and
+CRLF (7.0 MB); 613,295 rows × 12 mixed fields (70 MiB).
+
+| Split to rows of strings, ms | 8.3 MB | 7.0 MB | 70 MiB |
+|---|---:|---:|---:|
+| CBQN `Split` | 62 | 36 | 462 |
+| `csv.parse`, ReleaseFast | 100 | 66 | 931 |
+| `csv.parse`, ReleaseSafe | 183 | 122 | 1772 |
+| ngn/k `csvorig` | 186 | 162 | 1678 |
+
+`csv.parse` also validates quoting and record widths and strips CRLF, which
+neither library does. Peak RSS on the 70 MiB input is 1022 MiB in ReleaseFast
+and 1087 MiB in ReleaseSafe, against 1311 MiB for CBQN and 1285 MiB for ngn/k.
+
+ReleaseSafe is about 1.8× ReleaseFast here. A ReleaseSafe CLI allocates through
+`std.heap.SafeAllocator`, whose per-allocation footers and checksums were about
+11% of samples in a profile of `csv.parse`, with freed-memory fills and
+`munmap` of the per-block masks beside them. A cross-language comparison is a
+ReleaseFast one; the ReleaseSafe row is for comparison with the rest of this
+file.
+
+| `csv.emit` of the parsed rows, ms | 8.3 MB | 7.0 MB | 70 MiB |
+|---|---:|---:|---:|
+| ReleaseFast | 184 | 96 | 1963 |
+| ReleaseSafe | 488 | 174 | 3782 |
+| native `csv.emit` at `b4dc1f0b`, ReleaseSafe | 502 | 303 | 4272 |
+
+`csv.emit` renders 4096 records at a time. Unbatched it was 10–25% faster and
+peaked at 5.2 GiB on the 70 MiB input, against 1.0 GiB batched.
+
+`cut` afterwards cuts consecutive pieces within one turn, shares one empty
+list among empty pieces, and profiles a generic piece from the source's own
+cells. In ReleaseFast over the 23.9 MB input, cutting 23.9M characters into
+2.4M fields goes from 80 ms to 57 (CBQN's group: 98), cutting those fields
+into 200,000 rows from 22 ms to 17 (CBQN: 2), and `csv.parse` on the three
+inputs from 95, 63, and 875 ms to 86, 59, and 790.
+
+Converting 800,000 string fields with `(int) each` or `(float) each` takes
+about 290 ms through the per-element route and 80 ms through the recognized
+conversion in ReleaseSafe (66 ms in ReleaseFast); `table.cast` over eight
+columns of 100,000 goes from 290 ms to 85.
+
+## Byte masks through chains and scans, and typed copies — 2026-11-09
+
+Baseline is `a69cb130`; updated keeps a mask's byte class through a fused
+chain, stores a 0/1 scan as a mask, offers every binary word's reduction to
+the typed loop, and moves typed list copies with `memmove`. Both are Zig
+0.17.1 ReleaseSafe on macOS arm64 with `ECL_WORKERS=1`, measured in one
+session. The input is a 23.9 MB ASCII text of 200,000 comma-separated
+records; masks are its 23,861,520-element character comparisons. Values are
+milliseconds, medians of two or three runs; the clock has millisecond
+resolution.
+
+| Operation over 23.9M elements | Baseline | Updated |
+|---|---:|---:|
+| `a b or` (one word, unchanged path) | 4 | 3 |
+| `a b or not` | 47 | 7 |
+| `a b or c d or and` | 57 | 8 |
+| `mask 0 (<>) scan` | 389 | 15 |
+| `mask 0 (bxor) scan` | 210 | 43 |
+| `mask 0 (or) scan` | 38 | 22 |
+| `mask 0 (+) scan 2 mod` (prior parity spelling) | 52 | 53 |
+| `[0] mask cat` | 9 | 3 |
+| `mask -1 drop` | 8 | 3 |
+| `mask 1 rotate` | 8 | 3 |
+| `text text cat` | 17 | 6 |
+
+A baseline chain widened each byte operand to ints a block at a time and wrote
+an int result, eight bytes per position. `<>` and `bxor` were not recognized
+reductions and ran as boxed scalar programs. A typed copy of one
+representation was an element-by-element forward loop.
+
+Chains of boolean words over those masks cost 3, 6, 7, and 8 ms at one, two,
+three, and five words: the cost is the memory each pass reads and writes, and
+a further word in a chain adds about 0.5 ms.
+
+An array-style RFC 4180 split written in ECL (quote parity by scan, separator
+and drop masks, `where`, `cut`; validation of quoting; 64K-character blocks)
+over three inputs, three runs each. The updated run spells parity
+`0 (<>) scan`; the baseline spells it `0 (+) scan 2 mod`.
+
+| Input | Baseline ms | Updated ms |
+|---|---:|---:|
+| 100,000 rows × 8 integers, 8.3 MB | 365 | 214 |
+| 100,000 rows × 3 quoted Unicode fields, 7.0 MB | 232 | 126 |
+| 613,295 rows × 12 mixed fields, 70 MiB | 3422 | 2105 |
+
+Peak RSS is unchanged, since the blocks bound mask storage either way. The
+split's result matches `csv.parse` with a text schema on all three inputs. The
+stripped CLI grows from 6,797,664 to 6,945,408 bytes (2.2%).
+
 ## Complete bundled SDK cutover — 2026-09-13
 
 Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).

@@ -260,7 +260,17 @@ const ParseDriver = struct {
     }
 };
 
-const NumericParseTarget = enum { integer, float };
+pub const NumericParseTarget = enum {
+    integer,
+    float,
+
+    pub fn spelling(self: NumericParseTarget) []const u8 {
+        return switch (self) {
+            .integer => "int",
+            .float => "float",
+        };
+    }
+};
 
 // ── Kind conversions ────────────────────────────────────────────────────────
 //
@@ -716,23 +726,122 @@ const NumericParseDriver = struct {
         evaluator: *Fiber,
         classification: lexer.Classification,
     ) MachineError!machine.WorkProgress {
-        return switch (classification) {
-            .int => |number| switch (self.target) {
-                .integer => .{ .output = .{ .int = number } },
-                .float => .{ .output = .{ .float = @floatFromInt(number) } },
-            },
-            .float => |number| switch (self.target) {
-                .integer => invalidNumericText(evaluator, self.target),
-                .float => .{ .output = .{ .float = number } },
-            },
-            .symbol => invalidNumericText(evaluator, self.target),
-            .out_of_range => switch (self.target) {
-                .integer => evaluator.fail(.overflow, "int result is outside int64"),
-                .float => evaluator.fail(.overflow, "float input is outside the ECL numeric range"),
-            },
-        };
+        return .{ .output = try numericParseResult(evaluator, classification, self.target) };
     }
 };
+
+/// What a classified string converts to for `target`, or the word's fault.
+fn numericParseResult(evaluator: *Fiber, classification: lexer.Classification, target: NumericParseTarget) MachineError!Value {
+    return switch (classification) {
+        .int => |number| switch (target) {
+            .integer => .{ .int = number },
+            .float => .{ .float = @floatFromInt(number) },
+        },
+        .float => |number| switch (target) {
+            .integer => invalidNumericText(evaluator, target),
+            .float => .{ .float = number },
+        },
+        .symbol => invalidNumericText(evaluator, target),
+        .out_of_range => switch (target) {
+            .integer => evaluator.fail(.overflow, "int result is outside int64"),
+            .float => evaluator.fail(.overflow, "float input is outside the ECL numeric range"),
+        },
+    };
+}
+/// `(int) each` and `(float) each`: the conversion of every element of the
+/// list beneath the quotation, written straight into the typed result. Each
+/// element converts exactly as its word converts it alone, and a fault is
+/// that word's, with no list position, as the quotation applied per element
+/// reports it. The caller's stack holds the list and quotation until the
+/// result is published.
+pub fn startConversionEach(evaluator: *Fiber, target: NumericParseTarget) MachineError!void {
+    const items = evaluator.stack.items;
+    const input = items[items.len - 2];
+    const count: usize = @intCast(input.list.length());
+    switch (target) {
+        inline else => |selected| {
+            const Driver = ConversionEachDriver(selected);
+            const writer = try heap.LeafWriter(Driver.kind).init(evaluator.allocator, count);
+            try evaluator.startDriver(Driver{ .input = input, .writer = .init(writer) });
+        },
+    }
+}
+
+fn ConversionEachDriver(comptime target: NumericParseTarget) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+        const kind: value.HeapKind = switch (target) {
+            .integer => .leaf_i64,
+            .float => .leaf_f64,
+        };
+
+        input: Value,
+        writer: heap.Owned(heap.LeafWriter(kind)),
+        index: usize = 0,
+        /// The string element being read, across turns.
+        classifier: ?lexer.ClassifyCursor = null,
+
+        pub fn advance(evaluator: *Fiber, self: *Self) MachineError!machine.WorkProgress {
+            try evaluator.pollKernel();
+            const work = evaluator.workBudget();
+            const count: usize = @intCast(self.input.list.length());
+            while (self.index != count) {
+                if (self.classifier == null) {
+                    if (!work.spend()) return .stepped;
+                    const item = list.atUnchecked(self.input, self.index);
+                    if (try atom(evaluator, item)) |converted| {
+                        self.store(converted);
+                        continue;
+                    }
+                    if (item.list.kind() != .leaf_char1) return invalidNumericText(evaluator, target);
+                    self.classifier = .init(heap.chars8(item.list)[0..@intCast(item.list.length())]);
+                }
+                const classification = while (work.spend()) switch (self.classifier.?.advance()) {
+                    .pending => {},
+                    .complete => |classification| break classification,
+                } else return .stepped;
+                self.classifier = null;
+                self.store(try parsed(evaluator, classification));
+            }
+            evaluator.discard(2);
+            return .{ .output = self.writer.borrowMut().finish() };
+        }
+
+        fn store(self: *Self, converted: heap.LeafElement(kind)) void {
+            self.writer.borrowMut().fillRange(self.index, 1, converted);
+            self.index += 1;
+        }
+
+        /// A non-string element's conversion, null for a string, or the
+        /// word's own type error.
+        fn atom(evaluator: *Fiber, item: Value) MachineError!?heap.LeafElement(kind) {
+            return switch (target) {
+                .integer => switch (item) {
+                    .int => |number| number,
+                    .char => |codepoint| codepoint,
+                    .list => if (item.isString()) null else evaluator.typeError(int_expected),
+                    else => evaluator.typeError(int_expected),
+                },
+                .float => switch (item) {
+                    .float => |number| number,
+                    .int => |number| @floatFromInt(number),
+                    .list => if (item.isString()) null else evaluator.typeError(float_expected),
+                    else => evaluator.typeError(float_expected),
+                },
+            };
+        }
+
+        fn parsed(evaluator: *Fiber, classification: lexer.Classification) MachineError!heap.LeafElement(kind) {
+            return switch (try numericParseResult(evaluator, classification, target)) {
+                .int => |number| if (target == .integer) number else unreachable,
+                .float => |number| if (target == .float) number else unreachable,
+                else => unreachable,
+            };
+        }
+    };
+}
+
 fn attempt(evaluator: *Fiber) MachineError!void {
     var body = try evaluator.popQuotation();
     try evaluator.attemptOwned(body.take().list);

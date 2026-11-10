@@ -152,7 +152,7 @@ test "conversion: data-facing words never intern their input" {
     try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"kind domain"});
     try expectStack(&runtime, "\"{\\\"conv-json-key-91\\\": 1}\" json.parse dict.keys first", "\"conv-json-key-91\"");
     try expectError(&runtime, "\"conv-json-key-91\" symbol", &.{"kind domain"});
-    try expectStack(&runtime, "\"conv-csv-h1\\n1\" [] csv.parse first first", "\"conv-csv-h1\"");
+    try expectStack(&runtime, "\"conv-csv-h1\\n1\" csv.parse first first", "\"conv-csv-h1\"");
     try expectError(&runtime, "\"conv-csv-h1\" symbol", &.{"kind domain"});
     try expectStack(&runtime, "\"conv-str-92\" str.upper str.lower \"-\" split len", "3");
     try expectError(&runtime, "\"conv-str-92\" symbol", &.{"kind domain"});
@@ -196,6 +196,31 @@ test "conversion: float accepts floats, ints, and numeric literals only" {
     try expectError(&runtime, "\"\" float", &.{"kind parse"});
     try expectError(&runtime, "\\a float", &.{"kind type"});
     try expectError(&runtime, "`x float", &.{"kind type"});
+}
+
+test "conversion: int and float convert each element as they convert it alone" {
+    var runtime_inputs = try runtime_fixture.Fixture.init();
+    defer runtime_inputs.deinit();
+    var runtime = try session.Session.init(allocator, &.{}, runtime_inputs.inputs(.{}), .default, .evaluate);
+    defer runtime.deinit();
+    try expectStack(&runtime, "(\"1\" \"20\" \"-3\" \"0x10\") (int) each", "[1 20 -3 16]");
+    try expectStack(&runtime, "(\"1\" \"2.5\" \"1e3\") (float) each", "[1.0 2.5 1000.0]");
+    // Every kind the word converts, in one list, and a string as a list.
+    try expectStack(&runtime, "(\"7\" 2 \\a) (int) each (\"7\" 2 2.5) (float) each", "[7 2 97] [7.0 2.0 2.5]");
+    try expectStack(&runtime, "\"12\" (int) each [1 2] (float) each", "[49 50] [1.0 2.0]");
+    try expectStack(&runtime, "{a \"1\"} (int) each", "{a 1}");
+    // Lists and digit strings long enough to span turns.
+    try expectStack(&runtime, "5000 range (str) each (int) each 5000 range match?", "1");
+    try expectStack(&runtime, "5000 range (str) each (float) each 0.0 (+) fold", "12497500.0");
+    try expectStack(&runtime, "\"0\" 3000 str.repeat \"7\" cat wrap (int) each", "[7]");
+    try expectError(&runtime, "(\"1\" \"x\") (int) each", &.{ "kind parse", "integer literal", "word int" });
+    try expectError(&runtime, "(\"1\" \"2.5\") (int) each", &.{"kind parse"});
+    try expectError(&runtime, "(\"1\" \"\") (int) each", &.{"kind parse"});
+    try expectError(&runtime, "(\"1\" \"λ\") (float) each", &.{ "kind parse", "numeric literal", "word float" });
+    try expectError(&runtime, "(\"1\" 2.5) (int) each", &.{ "kind type", "floor, round, or ceil" });
+    try expectError(&runtime, "(\"1\" [1 2]) (int) each", &.{"kind type"});
+    try expectError(&runtime, "(\"1\" `a) (float) each", &.{"kind type"});
+    try expectError(&runtime, "(\"9223372036854775808\") (int) each", &.{"kind overflow"});
 }
 
 test "conversion: char accepts chars, ints, strings, and lists of codepoints" {

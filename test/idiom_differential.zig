@@ -179,6 +179,17 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             "{s} ({s}) each",
             .{ matchInput(variant), phrase },
         ),
+        .conversion => |target| std.fmt.allocPrint(allocator, "{s} ({s}) each", .{
+            switch (variant) {
+                .atom => "(\"1\" \"20\" \"-3\")",
+                .empty => "[]",
+                // Atoms of every kind the word converts, beside a string.
+                .spine => if (target == .integer) "(\"7\" 2 \\a)" else "(\"7\" 2 2.5)",
+                .float => "(\"1.5\" \"2e3\")",
+                .failure => "(\"1\" \"x\")",
+            },
+            phrase,
+        }),
         .cmp => std.fmt.allocPrint(allocator, "{s} ({s}) lex-cmp-with", .{ lexInput(variant), phrase }),
         .phrase => unreachable,
     };
@@ -320,7 +331,8 @@ fn reductionInitial(operation: ecl.kernels.numeric.BinaryOp) []const u8 {
         .max => "0",
         .and_word => "1",
         .or_word => "0",
-        else => unreachable,
+        // Any seed inside every other word's domain over the inputs.
+        else => "1",
     };
 }
 

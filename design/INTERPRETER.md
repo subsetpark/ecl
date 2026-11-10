@@ -1304,13 +1304,20 @@ element's first fault before the next element starts. Words run one at a time
 pervade the whole list before the next word starts, so a chain's first fault is
 the earliest instruction to fault at any position, reported at that position;
 once a block faults, the executor searches the rest of the list for an earlier
-instruction's fault before reporting.
+instruction's fault before reporting. A register that varies along the list
+has the class its operation gives outside a program, so a mask stays one byte
+per position through a chain and a program's result has the representation its
+words would have produced one at a time. A register that does not vary is an
+int or a real.
 
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
-Boolean reductions share the numeric reduction machinery, including validation
-of every operand. Recognized `fold1` reductions retain the original input and
+A binary numeric word offered alone to `fold`, `fold1`, or `scan` over an int
+seed and int or byte lanes, boolean words included, runs as one typed
+sequential loop. It gives the results and first fault of the scalar authority;
+any other shape runs the generic route. A scan of a word whose result is 0
+or 1 is a mask and is stored as one. Recognized `fold1` reductions retain the original input and
 start after its first element; they never materialize a tail. An empty fold
 preserves its seed and a singleton `fold1` preserves its sole value without
 invoking the reducer. A reduction over rows applies a whole row in one charged
@@ -2666,12 +2673,8 @@ destruction is a cursor or bounded chunk. Exact-size output and fixed chunks are
 preferred to relocation in cancellable paths. Reaching the final reference or
 holding a publication lock never grants permission to do an unbounded walk.
 
-Registered native parsers access input through bounded scalar copies and stage
-unknown-length metadata in transaction-owned fixed-chunk chains. Choosing a
-forward or reverse read mode seals the chain; cursors borrow from the transaction
-until retirement detaches one chunk per step. Neither direction requires a
-whole-stream preparation pass. Exact-size bulk builders write directly into
-typed leaves. Forward generic builders expose only their initialized prefix;
+Registered native parsers access input through bounded scalar copies.
+Exact-size bulk builders write directly into typed leaves. Forward generic builders expose only their initialized prefix;
 reverse builders initialize placeholders under the work budget before writes.
 Contiguous text construction retains its decoding state in the output builder,
 validates input bounds and hints, and commits exactly one append on completion. Publication and abandonment share the
@@ -2679,16 +2682,9 @@ transaction's normal bounded retirement protocol. An append that yields has
 not consumed its input; allocation failure terminates the call and leaves all
 partial storage owned by that transaction. Native continuation records contain
 only scalar state, tagged scalar unions, and fixed buffers, with an 8 KiB ceiling to accommodate bulk
-decoding and per-column inference without granting guest allocation authority.
-CSV charges both bulk input copies and numeric conversions to that budget.
-Staged descriptors preserve original spans alongside successful conversions
-until column inference settles, so text fallback preserves spelling. Numeric
-output reuses cached conversions and is appended in bounded batches.
-Numeric normalization retains a bounded significant-digit prefix and sticky
-tail information, so even arbitrarily long decimal fields never enter an
-unbounded library conversion. Scanner cache carry is at most one bulk chunk;
-staged traversal, generic initialization, typed writes, and retirement all
-remain bounded separately from the initial input scan.
+decoding without granting guest allocation authority. Generic
+initialization, typed writes, and retirement all remain bounded separately
+from the initial input scan.
 
 Grouping owns a fixed-capacity hash index sized from the row count. Index
 initialization, structural hashing, collision comparison, stable index scatter,

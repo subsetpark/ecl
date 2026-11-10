@@ -51,4 +51,4 @@ sales "flag" [1 0 1] with-column io.pp
 sales [1 0 1] table.where io.pp
 
 # CSV emission takes text fields; parsing with a text schema preserves them.
-sales {"id" (str)} cast header-rows csv.emit [text text] csv.parse flip from-header-rows io.pp
+sales {"id" (str)} cast header-rows csv.emit csv.parse from-header-rows io.pp

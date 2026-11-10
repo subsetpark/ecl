@@ -456,3 +456,93 @@ test "numeric: derived comparisons, negation, remainder, and totals" {
         .{ .name = "sum of an incompatible row", .source = "[[1 2] [3 bad]] sum", .kind = "type", .word = "sum" },
     });
 }
+
+test "numeric: masks keep their values through chains across blocks" {
+    // 300 elements span two 256-element blocks. Each chain mixes words that
+    // give masks with words that read them, in one run of straight-line code.
+    try helper.expectStacks(&.{
+        .{
+            .name = "boolean words over masks",
+            .source = "300 range 2 mod 0 = 300 range 3 mod 0 = or not 300 range 5 mod 0 = and 0 (+) fold",
+            .expected = "20",
+        },
+        .{
+            .name = "one mask read by a boolean word and by arithmetic",
+            .source = "300 range 2 mod 0 = dup not swap 3 * + 0 (+) fold",
+            .expected = "600",
+        },
+        .{
+            .name = "comparisons of ints feed a boolean word",
+            .source = "300 range 100 > 300 range 200 < and 0 (+) fold",
+            .expected = "99",
+        },
+        .{
+            .name = "selection between masks stays a mask",
+            .source = "300 range 2 mod 0 = 300 range 3 mod 0 = min 300 range 5 mod 0 = max 0 (+) fold",
+            .expected = "100",
+        },
+        .{
+            .name = "a mask against a scalar, then arithmetic on the result",
+            .source = "300 range 2 mod 0 = 1 = not 7 * 299 at [1.5 2.5] [1 3] < not",
+            .expected = "7 [1 0]",
+        },
+    });
+    try helper.expectErrors(&.{
+        .{
+            .name = "a boolean word mid-chain faults in its second block",
+            .source = "300 range 2 mod 0 = 300 range 256 = 2 * and not",
+            .kind = "type",
+            .word = "and",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 256 } }},
+        },
+        .{
+            .name = "the earliest word to fault is the one reported",
+            .source = "[1 0 1] [1 1 0] = [1 5 1] and [1 1 7] or",
+            .kind = "type",
+            .word = "and",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+    });
+}
+
+test "numeric: every binary word reduces and scans in order" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "inequality scans a mask to its running parity",
+            .source = "300 range 7 mod 0 = 0 (<>) scan 0 (+) fold " ++
+                "[1 0 1 1 0] 0 (<>) scan [1 0 1 1 0] 1 (<>) scan " ++
+                "[1 0 1 1 0] 0 (<>) fold [1 0 1 1 0] (<>) fold1",
+            .expected = "153 [1 1 0 1 1] [0 0 1 0 0] 1 1",
+        },
+        .{
+            .name = "inequality compares the accumulator, whatever the operands",
+            .source = "[5 5 0 7] 5 (<>) scan [1.5 0 1] 0 (<>) scan \"ab\\\"c\\\"d\" \\\" = 0 (<>) scan",
+            .expected = "[0 1 1 1] [1 1 0] [0 0 1 1 0 0]",
+        },
+        .{
+            .name = "a parity scan feeds a chain of boolean words",
+            .source = "[1 0 1 1 0] 0 (<>) scan [1 1 1 1 1] and not",
+            .expected = "[0 0 1 0 0]",
+        },
+        .{
+            .name = "bitwise and arithmetic words keep their accumulator",
+            .source = "[300 7 1] 0 (bxor) scan [300 7 1] (bxor) fold1 [10 3 2] 100 (-) fold " ++
+                "[7 2] 100 (mod) scan [1 2 3] 0 (<) scan [2 4] 8 (/) scan",
+            .expected = "[300 299 298] 298 85 [2 0] [1 1 1] [4.0 1.0]",
+        },
+    });
+    try helper.expectErrors(&.{
+        .{
+            .name = "an int-only word faults on a real element",
+            .source = "[1 2.5] 0 (bxor) scan",
+            .kind = "type",
+            .word = "bxor",
+        },
+        .{
+            .name = "a reduction faults where its step does",
+            .source = "[2 0] 8 (div) fold",
+            .kind = "domain",
+            .word = "div",
+        },
+    });
+}
