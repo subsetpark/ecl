@@ -4,8 +4,8 @@
 # an escaped quote.
 `cwd "test/acceptance/csv-corpus.csv" fs.read-text `corpus set
 
-# An explicit schema preserves text; transpose parsed columns for row emission.
-corpus [text text text] csv.parse flip `rows set
+# Every record is a row of text fields; nothing is converted.
+corpus csv.parse `rows set
 rows io.pp
 rows len io.pp
 rows (len) each io.pp
@@ -16,20 +16,21 @@ rows 4 at first io.pp
 rows csv.emit io.pp
 
 # Emission is the inverse of parsing on its own canonical output.
-rows csv.emit [text text text] csv.parse flip rows match? io.pp
+rows csv.emit csv.parse rows match? io.pp
 
-# Empty input maps to an empty record list, and back to the empty string.
-"" [] csv.parse len io.pp
-"" [] csv.parse flip csv.emit len io.pp
+# Empty input maps to no rows, and back to the empty string.
+"" csv.parse len io.pp
+"" csv.parse csv.emit len io.pp
 
 # Malformed quoting is `parse; invalid rows are `type or `shape.
-("\"unclosed" [] csv.parse) @attempt `err at `kind at io.pp
-("a\"b" [] csv.parse) @attempt `err at `kind at io.pp
-(5 [] csv.parse) @attempt `err at `kind at io.pp
+("\"unclosed" csv.parse) @attempt `err at `kind at io.pp
+("a\"b" csv.parse) @attempt `err at `kind at io.pp
+(5 csv.parse) @attempt `err at `kind at io.pp
 ((5) wrap csv.emit) @attempt `err at `kind at io.pp
 (5 wrap csv.emit) @attempt `err at `kind at io.pp
 ([] wrap csv.emit) @attempt `err at `kind at io.pp
 
-# Ragged and blank records cannot fit a multi-column result.
-("a,b\nc" [] csv.parse) @attempt `err at `kind at io.pp
-("a,b\n\n" [] csv.parse) @attempt `err at `kind at io.pp
+# Ragged records are `shape; a blank record is one empty field.
+("a,b\nc" csv.parse) @attempt `err at `kind at io.pp
+("a,b\n\n" csv.parse) @attempt `err at `kind at io.pp
+"a\n\n" csv.parse io.pp

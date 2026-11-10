@@ -281,14 +281,14 @@ test "native runtime: diagnostics are opt-in and never change results" {
     });
 }
 
-test "native runtime: forward staging and partial text spans retain ownership" {
+test "native runtime: partial text spans and bulk builders retain ownership" {
     var result = try run(
-        "sample.forward-stage \"λ😀\" 1000 str.repeat dup bytes 2000 4 sample.text-span first match? " ++ "sample.bulk-values-budget len sample.forward-values-budget 7 = sum [65 66 67] sample.bulk-budget",
+        "\"λ😀\" 1000 str.repeat dup bytes 2000 4 sample.text-span first match? " ++ "sample.bulk-values-budget len sample.forward-values-budget 7 = sum [65 66 67] sample.bulk-budget",
         "1",
         false,
     );
     defer result.deinit();
-    try result.expect(.{ .exit_code = 0, .stdout = "600 1 70000 70000 [11 22 33]\n", .stderr = "" });
+    try result.expect(.{ .exit_code = 0, .stdout = "1 70000 70000 [11 22 33]\n", .stderr = "" });
     for ([_][]const u8{
         "[195] 1 2 sample.text-span",
         "[237 160 128] 1 4 sample.text-span",

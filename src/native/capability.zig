@@ -304,27 +304,6 @@ pub const BuildValues = opaque {
         return self.invocation().makeCandidate(item);
     }
 
-    /// Fixed-chunk staging of scalar words. Once either read mode starts, no
-    /// more words may be appended. The host owns storage through call teardown.
-    /// Each operation is atomic on yield; allocation failure terminates the call.
-    pub fn stage(self: *BuildValues, slot: u32, words: []const u64) error{OutOfMemory}!BuildAppendResult {
-        var unused: abi.Candidate = 0;
-        return self.bulk(slot, .stage, .integers, 0, false, @constCast(words), &unused);
-    }
-
-    /// Reads the last unread group, preserving order within the group.
-    pub fn readStaged(self: *BuildValues, slot: u32, words: []u64) error{OutOfMemory}!BuildAppendResult {
-        var unused: abi.Candidate = 0;
-        return self.bulk(slot, .read_staged, .integers, 0, false, words, &unused);
-    }
-
-    /// Reads the next group in input order. Choosing a read mode seals the
-    /// stream, and subsequent reads must use that same mode.
-    pub fn readStagedForward(self: *BuildValues, slot: u32, words: []u64) error{OutOfMemory}!BuildAppendResult {
-        var unused: abi.Candidate = 0;
-        return self.bulk(slot, .read_staged_forward, .integers, 0, false, words, &unused);
-    }
-
     pub fn appendBulk(self: *BuildValues, slot: u32, kind: abi.BulkKind, count: u64, reverse: bool, words: []const u64) error{OutOfMemory}!BuildAppendResult {
         var unused: abi.Candidate = 0;
         return self.bulk(slot, .append, kind, count, reverse, @constCast(words), &unused);

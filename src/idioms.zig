@@ -11,6 +11,7 @@ const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
 const combinators = @import("combinators.zig");
+const prims = @import("prims.zig");
 
 const Value = value.Value;
 const Fiber = machine.Fiber;
@@ -56,6 +57,8 @@ pub const Operation = union(enum) {
     binary: numeric.BinaryOp,
     match,
     length,
+    /// `int` or `float` converting each element.
+    conversion: prims.NumericParseTarget,
     /// `cmp` as a lexicographic comparator.
     cmp,
     phrase: PhraseOp,
@@ -66,6 +69,7 @@ pub const Operation = union(enum) {
             .binary => |operation| operation.spelling(),
             .match => "match?",
             .length => "len",
+            .conversion => |target| target.spelling(),
             .cmp => "cmp",
             .phrase => |operation| operation.spelling(),
         };
@@ -102,11 +106,13 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 6 + 4 + 5]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 6 + 6 + 5]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
-    index += 2;
+    entries[index + 2] = .{ .context = .each, .pattern = &operation_pattern, .operation = .{ .conversion = .integer } };
+    entries[index + 3] = .{ .context = .each, .pattern = &operation_pattern, .operation = .{ .conversion = .float } };
+    index += 4;
     for (std.meta.tags(numeric.UnaryOp)) |operation| {
         entries[index] = .{
             .context = .each,
@@ -907,7 +913,7 @@ fn canApplyEntry(evaluator: *Fiber, entry: RegistryEntry) bool {
             .fold1 => stack[stack.len - 2] == .list and stack[stack.len - 2].list.length() != 0,
             .phrase, .lex_cmp => false,
         },
-        .length, .match => entry.context == .each and stack[stack.len - 2] == .list,
+        .length, .match, .conversion => entry.context == .each and stack[stack.len - 2] == .list,
         .cmp => order.lexCompareCandidate(stack[stack.len - 3], stack[stack.len - 2]),
         .phrase => unreachable, // See `applyPhrase`.
     };
@@ -930,6 +936,10 @@ fn applyEntry(evaluator: *Fiber, entry: RegistryEntry, capture: Capture) Machine
         },
         .match => applyMatchEach(evaluator, capture.constant.?),
         .length => applyLengthEach(evaluator),
+        .conversion => |target| if (evaluator.stack.items[evaluator.stack.items.len - 2].list.length() == 0)
+            finishCollected(evaluator, &.{}, 2)
+        else
+            prims.startConversionEach(evaluator, target),
         .cmp => applyLexCompare(evaluator),
         .phrase => unreachable, // See `applyPhrase`.
     };
@@ -1235,7 +1245,7 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
-        .match, .length, .cmp, .phrase => null,
+        .match, .length, .conversion, .cmp, .phrase => null,
     };
 }
 

@@ -1,17 +1,22 @@
 ## csv
 
-### parse-header
+### parse
 
 #### Examples
 
 ```ecl
-"1,a\n2,b" [] csv.parse
-# => ([1 2] ("a" "b"))
+"1,a\n2,\"b,c\"" csv.parse
+# => (("1" "a") ("2" "b,c"))
 
-"id,name\n1,Ada\n2,Bob" [] csv.parse-header
-dict.from-lists table.from-columns
+"id,name\n1,Ada\n2,Bob" csv.parse table.from-header-rows {"id" (int)} table.cast
 # => {"id" [1 2] "name" ("Ada" "Bob")}
+```
 
-"01,2\n03,4" [text int] csv.parse
-# => (("01" "03") [2 4])
+### emit
+
+#### Examples
+
+```ecl
+(("a,b" "c") ("say \"hi\"" "")) csv.emit
+# => "\"a,b\",c\u{d}\n\"say \"\"hi\"\"\",\u{d}\n"
 ```

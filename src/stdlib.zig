@@ -11,7 +11,6 @@
 const std = @import("std");
 const abi = @import("native-abi");
 const env = @import("env.zig");
-const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
 const archive_module = @import("stdlib/archive.zig");
@@ -90,7 +89,10 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/fd.ecl"),
     } } },
     .{ .name = "fd.core", .entry = .{ .builtin = .{ .words = &fd_core.words, .doc = fd_core.doc } } },
-    .{ .name = "csv", .entry = .{ .native = Csv.descriptor() } },
+    .{ .name = "csv", .entry = .{ .source = .{
+        .name = "<stdlib:csv>",
+        .text = @embedFile("stdlib/csv.ecl"),
+    } } },
     .{ .name = "json", .entry = .{ .builtin = .{ .words = &json_module.words, .doc = json_module.doc } } },
     .{ .name = "host", .entry = .{ .builtin = .{ .words = &host_module.words, .doc = host_module.doc } } },
     .{ .name = "source", .entry = .{ .builtin = .{ .words = &source_module.words, .doc = source_module.doc } } },
