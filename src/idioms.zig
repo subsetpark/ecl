@@ -102,7 +102,7 @@ const constant_swap_operation_pattern = [_]PatternAtom{
 const unary_count = @typeInfo(numeric.UnaryOp).@"enum".field_names.len;
 const binary_count = @typeInfo(numeric.BinaryOp).@"enum".field_names.len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 4 + 18 + 5]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 6 + 4 + 5]RegistryEntry = undefined;
     var index: usize = 0;
     entries[index] = .{ .context = .each, .pattern = &operation_pattern, .operation = .length };
     entries[index + 1] = .{ .context = .lex_cmp, .pattern = &operation_pattern, .operation = .cmp };
@@ -146,7 +146,7 @@ pub const registry = blk: {
         };
         index += 1;
     }
-    for ([_]numeric.BinaryOp{ .add, .mul, .min, .max, .and_word, .or_word }) |operation| {
+    for (std.meta.tags(numeric.BinaryOp)) |operation| {
         entries[index] = .{
             .context = .fold,
             .pattern = &operation_pattern,

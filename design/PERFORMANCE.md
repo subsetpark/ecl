@@ -10,6 +10,55 @@ compare the restored direct runtime with both the pre-SDK baseline and the
 optimized SDK predecessor. The cutover measurements below remain historical
 evidence of the regression that motivated that change.
 
+## Byte masks through chains and scans, and typed copies — 2026-11-09
+
+Baseline is `a69cb130`; updated keeps a mask's byte class through a fused
+chain, stores a 0/1 scan as a mask, offers every binary word's reduction to
+the typed loop, and moves typed list copies with `memmove`. Both are Zig
+0.17.1 ReleaseSafe on macOS arm64 with `ECL_WORKERS=1`, measured in one
+session. The input is a 23.9 MB ASCII text of 200,000 comma-separated
+records; masks are its 23,861,520-element character comparisons. Values are
+milliseconds, medians of two or three runs; the clock has millisecond
+resolution.
+
+| Operation over 23.9M elements | Baseline | Updated |
+|---|---:|---:|
+| `a b or` (one word, unchanged path) | 4 | 3 |
+| `a b or not` | 47 | 7 |
+| `a b or c d or and` | 57 | 8 |
+| `mask 0 (<>) scan` | 389 | 15 |
+| `mask 0 (bxor) scan` | 210 | 43 |
+| `mask 0 (or) scan` | 38 | 22 |
+| `mask 0 (+) scan 2 mod` (prior parity spelling) | 52 | 53 |
+| `[0] mask cat` | 9 | 3 |
+| `mask -1 drop` | 8 | 3 |
+| `mask 1 rotate` | 8 | 3 |
+| `text text cat` | 17 | 6 |
+
+A baseline chain widened each byte operand to ints a block at a time and wrote
+an int result, eight bytes per position. `<>` and `bxor` were not recognized
+reductions and ran as boxed scalar programs. A typed copy of one
+representation was an element-by-element forward loop.
+
+Chains of boolean words over those masks cost 3, 6, 7, and 8 ms at one, two,
+three, and five words: the cost is the memory each pass reads and writes, and
+a further word in a chain adds about 0.5 ms.
+
+An array-style RFC 4180 split written in ECL (quote parity by scan, separator
+and drop masks, `where`, `cut`; validation of quoting; 64K-character blocks)
+over three inputs, three runs each. The updated run spells parity
+`0 (<>) scan`; the baseline spells it `0 (+) scan 2 mod`.
+
+| Input | Baseline ms | Updated ms |
+|---|---:|---:|
+| 100,000 rows × 8 integers, 8.3 MB | 365 | 214 |
+| 100,000 rows × 3 quoted Unicode fields, 7.0 MB | 232 | 126 |
+| 613,295 rows × 12 mixed fields, 70 MiB | 3422 | 2105 |
+
+Peak RSS is unchanged, since the blocks bound mask storage either way. The
+split's result matches `csv.parse` with a text schema on all three inputs. The
+stripped CLI grows from 6,797,664 to 6,945,408 bytes (2.2%).
+
 ## Complete bundled SDK cutover — 2026-09-13
 
 Zig 0.16.0, ReleaseSafe, native x86_64 Linux (kernel 7.1.9-1-MANJARO).

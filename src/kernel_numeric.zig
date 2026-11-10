@@ -1499,17 +1499,6 @@ fn Narrowest(comptime A: type, comptime B: type) type {
     return if (@sizeOf(A) <= @sizeOf(B)) A else B;
 }
 
-/// A binary typed operation: one range loop (runPieces) and its replay, run
-/// by its result class's `BinaryKernel` at top level or inside pervasion.
-fn binaryKernel(
-    comptime operation: BinaryOp,
-    comptime left_class: Number,
-    comptime right_class: Number,
-    comptime shape: Shape,
-) type {
-    return binaryKernelInto(operation, left_class, right_class, shape, comptime binaryResult(operation, left_class, right_class).?);
-}
-
 /// The operation that computes `operation(a, b)` as `twin(b, a)`, or null when
 /// the order matters. A real `min` or `max` is order-dependent: the selection
 /// between `-0.0` and `0.0` keeps whichever operand came first. Every twin
@@ -1563,17 +1552,17 @@ fn mirroredBinaryKernel(comptime operation: BinaryOp, comptime left_class: Numbe
     };
 }
 
-/// `binaryKernel` with the result class chosen by the caller: a scalar program
-/// keeps a 0/1 result in its int registers where a standalone operation would
-/// publish bytes.
-fn binaryKernelInto(
+/// A binary typed operation: one range loop and its replay, run by its
+/// result class's `BinaryKernel` at top level or inside pervasion, and a
+/// block at a time by a scalar program.
+fn binaryKernel(
     comptime operation: BinaryOp,
     comptime left_class: Number,
     comptime right_class: Number,
     comptime shape: Shape,
-    comptime out: Number,
 ) type {
     @setEvalBranchQuota(10_000);
+    const out = comptime binaryResult(operation, left_class, right_class).?;
     const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
     const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
     const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
@@ -1876,12 +1865,8 @@ fn binaryKernelInto(
 
 /// A unary typed operation; see `binaryKernel`.
 fn unaryKernel(comptime operation: UnaryOp, comptime operand_class: Number) type {
-    return unaryKernelInto(operation, operand_class, comptime unaryResult(operation, operand_class));
-}
-
-/// `unaryKernel` with the result class chosen by the caller; see `binaryKernelInto`.
-fn unaryKernelInto(comptime operation: UnaryOp, comptime operand_class: Number, comptime out: Number) type {
     @setEvalBranchQuota(10_000);
+    const out = comptime unaryResult(operation, operand_class);
     const policy = comptime unaryLoopPolicy(operation, operand_class);
     const Checked = flat.CheckedFamily(operand_class.Element(), void, out.Element());
     const lanes = std.simd.suggestVectorLength(operand_class.Element()) orelse 1;
@@ -2616,7 +2601,8 @@ fn startProgram(
     return switch (classes[program.result]) {
         .integer => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_i64)).run(evaluator, owners, program, length),
         .real => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_f64)).run(evaluator, owners, program, length),
-        .byte, .char1, .char2, .char4 => unreachable, // Registers are widened.
+        .byte => support.Kernel(ProgramLeafKernel(inputs, mode, .leaf_u8)).run(evaluator, owners, program, length),
+        .char1, .char2, .char4 => unreachable, // A program reads numeric leaves only.
     };
 }
 
@@ -2648,15 +2634,17 @@ pub fn programResultVaries(program: *const ScalarProgram, operands: []const Valu
 /// representations and each operation's result class, or null when a result
 /// class depends on the values (mixed `min` or `max`).
 fn programClasses(program: *const ScalarProgram, operands: []const Value) ?[ScalarProgram.max_registers]Number {
+    const scalar = programScalars(program, operands);
     // SAFETY: as in `programScalars`.
     var classes: [ScalarProgram.max_registers]Number = undefined;
     for (operands, 0..) |operand, input| classes[input] = blockNumber(operand);
     for (program.constants[0..program.constant_count]) |constant| classes[constant.register] = blockNumber(constant.value);
     for (program.instructions[0..program.len]) |instruction| {
-        classes[instruction.destination] = switch (instruction.operation) {
+        const class = switch (instruction.operation) {
             .unary => |operation| blockUnaryResult(operation, classes[instruction.left]),
             .binary => |operation| blockBinaryResult(operation, classes[instruction.left], classes[instruction.right]) orelse return null,
         };
+        classes[instruction.destination] = if (scalar[instruction.destination]) widened(class) else class;
     }
     return classes;
 }
@@ -2676,6 +2664,7 @@ fn programElement(operand: Value, index: usize) Value {
 const BlockValue = union(enum) {
     int_scalar: i64,
     real_scalar: f64,
+    bytes: []const u8,
     ints: []const i64,
     reals: []const f64,
 
@@ -2695,34 +2684,42 @@ const BlockValue = union(enum) {
         return switch (self) {
             .int_scalar => |integer| .{ .int = integer },
             .real_scalar => |number| .{ .float = number },
-            .ints, .reals => unreachable,
+            .bytes, .ints, .reals => unreachable,
+        };
+    }
+
+    fn class(comptime tag: std.meta.Tag(BlockValue)) Number {
+        return switch (tag) {
+            .bytes => .byte,
+            .int_scalar, .ints => .integer,
+            .real_scalar, .reals => .real,
         };
     }
 };
 
-/// A program operand's class in a block: its leaf or scalar class, with bytes
-/// widened to ints, which the program's operations read with the same values.
+/// A program operand's class in a block: its leaf's, or its scalar class.
 fn blockNumber(item: Value) Number {
-    const class = (leafNumber(item) orelse scalarNumber(item)).?;
-    return if (class == .byte) .integer else class;
+    return (leafNumber(item) orelse scalarNumber(item)).?;
 }
 
-/// A program's registers hold ints and reals, so a 0/1 result that would be
-/// bytes outside a program is an int inside one; the program narrows its
-/// final result to bytes itself when every value fits.
+/// A scalar register holds an int or a real: a 0/1 result that is a byte in
+/// a run is an int scalar, as `scalarBinary` returns it.
 fn widened(class: Number) Number {
     return if (class == .byte) .integer else class;
 }
 
+/// A run's class is the class the same operation gives outside a program, so
+/// a mask stays one byte per position through a chain. Only a byte result
+/// reads byte operands as bytes; any other reads them widened (`BlockPlan`).
 fn blockBinaryResult(operation: BinaryOp, left: Number, right: Number) ?Number {
     @setEvalBranchQuota(100_000);
     return switch (operation) {
         inline else => |selected| switch (left) {
-            inline .integer, .real => |left_class| switch (right) {
-                inline .integer, .real => |right_class| if (comptime binaryResult(selected, left_class, right_class)) |class| widened(class) else null,
-                .byte, .char1, .char2, .char4 => unreachable,
+            inline .byte, .integer, .real => |left_class| switch (right) {
+                inline .byte, .integer, .real => |right_class| comptime binaryResult(selected, left_class, right_class),
+                .char1, .char2, .char4 => unreachable,
             },
-            .byte, .char1, .char2, .char4 => unreachable,
+            .char1, .char2, .char4 => unreachable,
         },
     };
 }
@@ -2730,35 +2727,49 @@ fn blockBinaryResult(operation: BinaryOp, left: Number, right: Number) ?Number {
 fn blockUnaryResult(operation: UnaryOp, operand: Number) Number {
     return switch (operation) {
         inline else => |selected| switch (operand) {
-            inline .integer, .real => |operand_class| widened(comptime unaryResult(selected, operand_class)),
-            .byte, .char1, .char2, .char4 => unreachable,
+            inline .byte, .integer, .real => |operand_class| comptime unaryResult(selected, operand_class),
+            .char1, .char2, .char4 => unreachable,
         },
     };
 }
 
-/// Runs one binary instruction over a block into `ints` or `reals`, whichever
-/// its result class writes, with the kernel the operation and operand classes
-/// select. True when a position faulted. At least one operand is a run.
-fn binaryBlock(operation: BinaryOp, left: BlockValue, right: BlockValue, ints: []i64, reals: []f64) bool {
-    @setEvalBranchQuota(100_000);
+/// Where one instruction's run is written: the destination register's slot
+/// of each class. The instruction's result class selects one.
+const BlockRuns = struct {
+    bytes: []u8,
+    ints: []i64,
+    reals: []f64,
+
+    fn of(self: BlockRuns, comptime class: Number) []class.Element() {
+        return switch (class) {
+            .byte => self.bytes,
+            .integer => self.ints,
+            .real => self.reals,
+            .char1, .char2, .char4 => unreachable,
+        };
+    }
+};
+
+/// Runs one binary instruction over a block into the run its result class
+/// writes, with the kernel the operation and operand classes select. True
+/// when a position faulted. At least one operand is a run, and a byte run is
+/// an operand only of a byte result.
+fn binaryBlock(operation: BinaryOp, left: BlockValue, right: BlockValue, runs: BlockRuns) bool {
+    @setEvalBranchQuota(200_000);
     switch (operation) {
         inline else => |selected| switch (left) {
             inline else => |left_items, left_tag| switch (right) {
                 inline else => |right_items, right_tag| {
                     const left_scalar = comptime left_tag == .int_scalar or left_tag == .real_scalar;
                     const right_scalar = comptime right_tag == .int_scalar or right_tag == .real_scalar;
-                    const left_class: Number = comptime if (left_tag == .int_scalar or left_tag == .ints) .integer else .real;
-                    const right_class: Number = comptime if (right_tag == .int_scalar or right_tag == .ints) .integer else .real;
+                    const left_class = comptime BlockValue.class(left_tag);
+                    const right_class = comptime BlockValue.class(right_tag);
                     const result = comptime binaryResult(selected, left_class, right_class);
-                    if (comptime (left_scalar and right_scalar) or result == null) unreachable else {
+                    const reads_bytes = comptime left_class == .byte or right_class == .byte;
+                    if (comptime (left_scalar and right_scalar) or result == null or (reads_bytes and result.? != .byte)) unreachable else {
                         const shape: Shape = comptime if (left_scalar) .scalar_leaf else if (right_scalar) .leaf_scalar else .leaf_leaf;
-                        const out = comptime widened(result.?);
-                        const Kernel = binaryKernelInto(selected, left_class, right_class, shape, out);
-                        return switch (out) {
-                            .integer => Kernel.runBlock(left_items, right_items, ints),
-                            .real => Kernel.runBlock(left_items, right_items, reals),
-                            .byte, .char1, .char2, .char4 => unreachable,
-                        };
+                        const Kernel = binaryKernel(selected, left_class, right_class, shape);
+                        return Kernel.runBlock(left_items, right_items, runs.of(result.?));
                     }
                 },
             },
@@ -2767,19 +2778,17 @@ fn binaryBlock(operation: BinaryOp, left: BlockValue, right: BlockValue, ints: [
 }
 
 /// Runs one unary instruction over a block; see `binaryBlock`.
-fn unaryBlock(operation: UnaryOp, operand: BlockValue, ints: []i64, reals: []f64) bool {
+fn unaryBlock(operation: UnaryOp, operand: BlockValue, runs: BlockRuns) bool {
     @setEvalBranchQuota(100_000);
     switch (operation) {
         inline else => |selected| switch (operand) {
-            inline .ints, .reals => |items, tag| {
-                const operand_class: Number = comptime if (tag == .ints) .integer else .real;
-                const out = comptime widened(unaryResult(selected, operand_class));
-                const Kernel = unaryKernelInto(selected, operand_class, out);
-                return switch (out) {
-                    .integer => Kernel.runBlock(items, ints),
-                    .real => Kernel.runBlock(items, reals),
-                    .byte, .char1, .char2, .char4 => unreachable,
-                };
+            inline .bytes, .ints, .reals => |items, tag| {
+                const operand_class = comptime BlockValue.class(tag);
+                const out = comptime unaryResult(selected, operand_class);
+                if (comptime operand_class == .byte and out != .byte) unreachable else {
+                    const Kernel = unaryKernel(selected, operand_class);
+                    return Kernel.runBlock(items, runs.of(out));
+                }
             },
             .int_scalar, .real_scalar => unreachable,
         },
@@ -2796,6 +2805,9 @@ const BlockPlan = struct {
     classes: [ScalarProgram.max_registers]Number,
     scalar: [ScalarProgram.max_registers]bool,
     /// Storage for each register's run: register `r` uses `[r * block ..]`.
+    /// A byte register's int slot holds its run widened, for an instruction
+    /// whose result is not a byte.
+    bytes: []u8,
     ints: []i64,
     reals: []f64,
 
@@ -2804,6 +2816,8 @@ const BlockPlan = struct {
         const registers: usize = program.registers;
         const plan = try allocator.create(BlockPlan);
         errdefer allocator.destroy(plan);
+        const bytes = try allocator.alloc(u8, registers * block);
+        errdefer allocator.free(bytes);
         const ints = try allocator.alloc(i64, registers * block);
         errdefer allocator.free(ints);
         plan.* = .{
@@ -2811,6 +2825,7 @@ const BlockPlan = struct {
             .block = block,
             .classes = programClasses(program, operands).?,
             .scalar = programScalars(program, operands),
+            .bytes = bytes,
             .ints = ints,
             .reals = try allocator.alloc(f64, registers * block),
         };
@@ -2818,6 +2833,7 @@ const BlockPlan = struct {
     }
 
     fn destroy(self: *BlockPlan) void {
+        self.allocator.free(self.bytes);
         self.allocator.free(self.ints);
         self.allocator.free(self.reals);
         self.allocator.destroy(self);
@@ -2831,6 +2847,24 @@ const BlockPlan = struct {
         return self.reals[register * self.block ..][0..length];
     }
 
+    fn runBytes(self: *const BlockPlan, register: usize, length: usize) []u8 {
+        return self.bytes[register * self.block ..][0..length];
+    }
+
+    /// Register `register` as an instruction with result class `result`
+    /// reads it: a byte run as it is for a byte result, and widened into the
+    /// register's int slot, once a block, for any other.
+    fn reading(self: *const BlockPlan, views: []const BlockValue, wide: []bool, register: usize, result: Number) BlockValue {
+        const view = views[register];
+        if (view != .bytes or result == .byte) return view;
+        const run = self.runInts(register, view.bytes.len);
+        if (!wide[register]) {
+            for (run, view.bytes) |*slot, item| slot.* = item;
+            wide[register] = true;
+        }
+        return .{ .ints = run };
+    }
+
     /// Computes positions `start..start + length` into `out`, the result's
     /// positions for the block. False when an instruction faulted somewhere in
     /// the block; nothing is written to `out` then, so an operand `out`
@@ -2839,15 +2873,12 @@ const BlockPlan = struct {
         // SAFETY: inputs and constants are set below, and every
         // instruction sets its destination before a later one reads it.
         var views: [ScalarProgram.max_registers]BlockValue = undefined;
+        var wide: [ScalarProgram.max_registers]bool = @splat(false);
         for (operands, 0..) |operand, input| {
             views[input] = if (operand != .list) BlockValue.of(operand) else switch (operand.list.kind()) {
                 .leaf_i64 => .{ .ints = heap.leafElements(.leaf_i64, operand.list)[start..][0..length] },
                 .leaf_f64 => .{ .reals = heap.leafElements(.leaf_f64, operand.list)[start..][0..length] },
-                .leaf_u8 => widened: {
-                    const run = self.runInts(input, length);
-                    for (run, heap.leafElements(.leaf_u8, operand.list)[start..][0..length]) |*slot, item| slot.* = item;
-                    break :widened .{ .ints = run };
-                },
+                .leaf_u8 => .{ .bytes = heap.leafElements(.leaf_u8, operand.list)[start..][0..length] },
                 else => unreachable, // `programCandidate` admits numeric leaves only.
             };
         }
@@ -2866,16 +2897,31 @@ const BlockPlan = struct {
                 views[destination] = BlockValue.of(item);
                 continue;
             }
-            const ints = self.runInts(destination, length);
-            const reals = self.runReals(destination, length);
+            const class = self.classes[destination];
+            const runs: BlockRuns = .{
+                .bytes = self.runBytes(destination, length),
+                .ints = self.runInts(destination, length),
+                .reals = self.runReals(destination, length),
+            };
             const faulted = switch (instruction.operation) {
-                .unary => |operation| unaryBlock(operation, views[instruction.left], ints, reals),
-                .binary => |operation| binaryBlock(operation, views[instruction.left], views[instruction.right], ints, reals),
+                .unary => |operation| unaryBlock(operation, self.reading(&views, &wide, instruction.left, class), runs),
+                .binary => |operation| binaryBlock(
+                    operation,
+                    self.reading(&views, &wide, instruction.left, class),
+                    self.reading(&views, &wide, instruction.right, class),
+                    runs,
+                ),
             };
             if (faulted) return false;
-            views[destination] = if (self.classes[destination] == .real) .{ .reals = reals } else .{ .ints = ints };
+            views[destination] = switch (class) {
+                .byte => .{ .bytes = runs.bytes },
+                .integer => .{ .ints = runs.ints },
+                .real => .{ .reals = runs.reals },
+                .char1, .char2, .char4 => unreachable,
+            };
         }
         switch (views[program.result]) {
+            .bytes => |items| if (Element == u8) @memcpy(out, items) else unreachable,
             .ints => |items| if (Element == i64) @memcpy(out, items) else unreachable,
             .reals => |items| if (Element == f64) @memcpy(out, items) else unreachable,
             .int_scalar => |integer| if (Element == i64) @memset(out, integer) else unreachable,
@@ -3033,7 +3079,12 @@ fn ProgramLeafKernel(comptime inputs: usize, comptime mode: ProgramMode, comptim
                     for (out, start..) |*slot, index| {
                         const item = try output.faults.runAt(program, &registers, operands, index, evaluator) orelse
                             return output.faults.search(program, operands, index + 1, range.end, evaluator);
-                        slot.* = if (Element == i64) item.int else item.float;
+                        slot.* = switch (Element) {
+                            u8 => @intCast(item.int),
+                            i64 => item.int,
+                            f64 => item.float,
+                            else => unreachable,
+                        };
                     }
                 }
                 start += length;
@@ -3377,13 +3428,34 @@ const ReduceOutput = struct {
 
 const RunReduce = *const fn (*Fiber, [1]*heap.OwnedValue, ReduceKernelParams, usize) MachineError!void;
 
+fn integralComparison(comptime operation: BinaryOp, a: i64, b: i64) i64 {
+    return @intFromBool(switch (operation) {
+        .eq => a == b,
+        .ne => a != b,
+        .lt => a < b,
+        .gt => a > b,
+        .le => a <= b,
+        .ge => a >= b,
+        else => unreachable,
+    });
+}
+
+/// The class a scan stores its accumulators in. A scalar accumulator is an
+/// int or a real, but every accumulator of an operation whose result is 0 or
+/// 1 is that result, so its scan is a mask and is stored as one: a byte per
+/// position, as the operation's own result over a list is.
+fn scanClass(comptime operation: BinaryOp, comptime accumulator_class: Number, comptime element_class: Number) Number {
+    return if (binaryResult(operation, accumulator_class, element_class).? == .byte) .byte else accumulator_class;
+}
+
 fn reduceKernel(
     comptime operation: BinaryOp,
     comptime accumulator_class: Number,
     comptime element_class: Number,
     comptime scan: bool,
 ) type {
-    const Staging = flat.Block(accumulator_class.Element());
+    const stored_class = comptime scanClass(operation, accumulator_class, element_class);
+    const Staging = flat.Block(stored_class.Element());
     return struct {
         fn accumulated(output: *const ReduceOutput) accumulator_class.Element() {
             return switch (accumulator_class) {
@@ -3408,6 +3480,14 @@ fn reduceKernel(
         /// the checked scalar to report the fault where it happened.
         const unchecked = accumulator_class == .real and
             (operation == .add or operation == .sub or operation == .mul);
+
+        /// A comparison of two ints cannot fault and is the machine's own,
+        /// which the typed comparison loops already rely on; the scalar
+        /// authority's ordering is a call per element.
+        const compares_ints = accumulator_class == .integer and element_class != .real and switch (operation) {
+            .eq, .ne, .lt, .gt, .le, .ge => true,
+            else => false,
+        };
 
         fn uncheckedBlock(output: *ReduceOutput, elements: []const element_class.Element(), piece: flat.Chunk, block: *Staging) bool {
             var accumulator = accumulated(output);
@@ -3438,7 +3518,7 @@ fn reduceKernel(
                 const piece = flat.blockRange(range, offset);
                 block.reset();
                 if (unchecked and uncheckedBlock(output, elements, piece, &block)) {
-                    if (scan) output.scan.?.leaf(accumulator_class).store(piece.start, block.written());
+                    if (scan) output.scan.?.leaf(stored_class).store(piece.start, block.written());
                     offset += piece.len();
                     continue;
                 }
@@ -3447,7 +3527,12 @@ fn reduceKernel(
                 // from `elements`, so updating it there would store and reload
                 // it on every element.
                 var accumulator = accumulated(output);
-                for (piece.start..piece.end) |index| {
+                if (compares_ints) {
+                    for (piece.start..piece.end) |index| {
+                        accumulator = integralComparison(operation, accumulator, elements[index]);
+                        if (scan) block.items[index - piece.start] = @intCast(accumulator);
+                    }
+                } else for (piece.start..piece.end) |index| {
                     // Both operand tags are comptime-known here, so inlining
                     // the scalar authority lets its type dispatch fold away and
                     // leaves the checked arithmetic itself in the loop. An
@@ -3467,12 +3552,12 @@ fn reduceKernel(
                         return evaluator.fail(diagnostic.kind, diagnostic.message);
                     };
                     accumulator = accumulator_class.unboxed(next);
-                    if (scan) block.items[index - piece.start] = accumulator;
+                    if (scan) block.items[index - piece.start] = if (stored_class == .byte) @intCast(accumulator) else accumulator;
                 }
                 store(output, accumulator);
                 if (scan) {
                     block.len = piece.len();
-                    output.scan.?.leaf(accumulator_class).store(piece.start, block.written());
+                    output.scan.?.leaf(stored_class).store(piece.start, block.written());
                 }
                 offset += piece.len();
             }
@@ -3507,7 +3592,10 @@ const ReduceKernelParams = struct {
 /// The `support.Kernel` of every sequential reduction with this accumulator
 /// class and form; see `BinaryKernel`. A seed that changes class takes one
 /// scalar step from the first remaining element before the loop.
-fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptime seeded: bool) type {
+fn ReduceKernel(comptime accumulator_class: Number, comptime stored_class: Number, comptime scan: bool, comptime seeded: bool) type {
+    // A seed that changes class has an int or real result, which is stored
+    // as the accumulator's class.
+    comptime std.debug.assert(!seeded or stored_class == accumulator_class);
     return struct {
         const Spec = struct {
             pub const arity = 1;
@@ -3516,21 +3604,21 @@ fn ReduceKernel(comptime accumulator_class: Number, comptime scan: bool, comptim
 
             /// A scan's result is the input's length, and each position is
             /// stored only after the element at it is read.
-            pub const result: ?support.ResultShape = if (scan) .{ .kind = accumulator_class.kind(), .overwritable = &.{0} } else null;
+            pub const result: ?support.ResultShape = if (scan) .{ .kind = stored_class.kind(), .overwritable = &.{0} } else null;
 
             pub fn resultLength(_: ReduceKernelParams, operands: [1]Value, _: usize) usize {
                 return @intCast(operands[0].list.length());
             }
 
-            pub fn leafResult(output: *Output) *support.LeafResult(accumulator_class.kind()) {
-                return output.scan.?.leaf(accumulator_class);
+            pub fn leafResult(output: *Output) *support.LeafResult(stored_class.kind()) {
+                return output.scan.?.leaf(stored_class);
             }
 
             pub const prepare = if (scan) prepareScan else prepareFold;
 
-            fn prepareScan(evaluator: *Fiber, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(accumulator_class.kind())) MachineError!Output {
+            fn prepareScan(evaluator: *Fiber, operands: [1]Value, params: ReduceKernelParams, length: usize, prepared: support.LeafResult(stored_class.kind())) MachineError!Output {
                 var output = try prepareFold(evaluator, operands, params, length);
-                output.scan = .wrap(accumulator_class, prepared);
+                output.scan = .wrap(stored_class, prepared);
                 if (seeded) output.scan.?.leaf(accumulator_class).store(params.reduce.cursor_start, &.{switch (output.accumulator) {
                     .integer => |number| if (accumulator_class == .integer) number else unreachable,
                     .real => |number| if (accumulator_class == .real) number else unreachable,
@@ -3622,7 +3710,8 @@ const NumericReducePlan = opaque {
             inline else => |selected| blk: {
                 // Scalar accumulators have no byte storage class: a 0/1 result
                 // that is a byte in a leaf is an int scalar, as `scalarBinary`
-                // returns it, so the accumulator and a scan's output widen.
+                // returns it, so the accumulator widens. A scan stores its
+                // accumulators as `scanClass` gives.
                 inline for ([_]Number{ .integer, .real }) |candidate_accumulator| {
                     inline for (number_classes) |candidate_element| {
                         const raw = comptime binaryResult(selected, candidate_accumulator, candidate_element);
@@ -3645,7 +3734,7 @@ const NumericReducePlan = opaque {
                                     .element = candidate_element,
                                     .scan = candidate_scan,
                                     .seeded = seeded,
-                                    .run = ReduceKernel(out.?, candidate_scan, seeded).run,
+                                    .run = ReduceKernel(out.?, if (candidate_scan) scanClass(selected, out.?, candidate_element) else out.?, candidate_scan, seeded).run,
                                     .step = selectScalar(selected),
                                     .chunk = reduceKernel(selected, out.?, candidate_element, candidate_scan).chunk,
                                 };

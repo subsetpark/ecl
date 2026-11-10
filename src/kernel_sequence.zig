@@ -2792,9 +2792,8 @@ const CopyShape = union(enum) {
 /// representation, which `list.ListProfile` chose, is wider; a plain copy when
 /// they match. Every typed list move widens through this.
 fn copyWidened(comptime Out: type, out: []Out, items: anytype) void {
-    // A result moving within its own source starts no later than it, so a
-    // forward copy is exact where `@memcpy` would forbid the overlap.
-    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return std.mem.copyForwards(Out, out, items);
+    // A result may move within its own source, which `@memcpy` forbids.
+    if (comptime std.meta.Elem(@TypeOf(items)) == Out) return @memmove(out, items);
     for (out, items) |*slot, item| slot.* = item;
 }
 

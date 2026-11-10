@@ -1304,13 +1304,19 @@ element's first fault before the next element starts. Words run one at a time
 pervade the whole list before the next word starts, so a chain's first fault is
 the earliest instruction to fault at any position, reported at that position;
 once a block faults, the executor searches the rest of the list for an earlier
-instruction's fault before reporting.
+instruction's fault before reporting. A register that varies along the list
+has the class its operation gives outside a program, so a mask stays one byte
+per position through a chain and a program's result has the representation its
+words would have produced one at a time. A register that does not vary is an
+int or a real.
 
 The `(len) each` list idiom reads stored child lengths into a typed result
 under the normal work budget; dictionary inputs retain generic `each`
 semantics, and invalid elements retain the source word's failure site.
-Boolean reductions share the numeric reduction machinery, including validation
-of every operand. Recognized `fold1` reductions retain the original input and
+Every binary numeric word offered alone to `fold`, `fold1`, or `scan` runs as
+one typed sequential loop through the scalar authority, boolean words
+included, with validation of every operand. A scan of a word whose result is 0
+or 1 is a mask and is stored as one. Recognized `fold1` reductions retain the original input and
 start after its first element; they never materialize a tail. An empty fold
 preserves its seed and a singleton `fold1` preserves its sole value without
 invoking the reducer. A reduction over rows applies a whole row in one charged

@@ -320,7 +320,8 @@ fn reductionInitial(operation: ecl.kernels.numeric.BinaryOp) []const u8 {
         .max => "0",
         .and_word => "1",
         .or_word => "0",
-        else => unreachable,
+        // Any seed inside every other word's domain over the inputs.
+        else => "1",
     };
 }
 
