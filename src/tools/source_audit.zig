@@ -717,9 +717,15 @@ fn auditSourceBodies() bool {
     for (source_groups) |component| {
         if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
-            for (machine_views) |entry| {
-                if (std.mem.eql(u8, file, entry.holder)) continue;
-                failed = auditTokens(file, source, &.{&.{ "machine", ".", entry.view }}) or failed;
+            inline for (machine_views) |entry| {
+                // Independent of the import alias (`const m = @import(..)`),
+                // and of reflective access through a string name.
+                if (!std.mem.eql(u8, file, entry.holder)) {
+                    failed = auditTokens(file, source, &.{
+                        &.{ ".", entry.view },
+                        &.{"\"" ++ entry.view ++ "\""},
+                    }) or failed;
+                }
             }
         }
     }
