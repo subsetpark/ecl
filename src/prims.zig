@@ -1148,7 +1148,7 @@ const GetenvDriver = struct {
 };
 
 fn args(fiber: *Fiber) MachineError!void {
-    try fiber.pushBorrowed(fiber.arguments);
+    try fiber.pushBorrowed(fiber.inherited.runtime().arguments);
 }
 fn exit(fiber: *Fiber) MachineError!void {
     var status = try fiber.popValue();

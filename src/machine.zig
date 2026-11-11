@@ -913,6 +913,9 @@ const RuntimeContext = struct {
     wall_clock: WallClock,
     environ: Environ,
     standard_streams: *standard_streams.Devices,
+    /// The process arguments following the script, borrowed from the
+    /// Session.
+    arguments: Value,
 };
 
 /// Wall time is always available at runtime. Overrides are deterministic
@@ -1408,7 +1411,6 @@ pub const Fiber = struct {
     inherited: InheritedContext,
     lifetime: LifetimeGuard,
     archive: *spans.SpanArchive,
-    arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
     /// The fiber's one allowance for logical kernel work in a turn. Cursors
@@ -1462,7 +1464,6 @@ pub const Fiber = struct {
         environment: *env.Env,
         archive: *spans.SpanArchive,
         inherited: InheritedContext,
-        arguments: Value,
         cancelled: *const std.atomic.Value(bool),
         role: Role,
         root_entry: RootEntry,
@@ -1476,7 +1477,6 @@ pub const Fiber = struct {
             .lifetime = .init(allocator, environment),
             .archive = archive,
             .inherited = inherited,
-            .arguments = arguments,
             .cancelled = cancelled,
             .role = role,
             .root_entry = root_entry,

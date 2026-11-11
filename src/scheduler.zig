@@ -1962,7 +1962,6 @@ pub const WorkerScheduler = enum(usize) {
                 request.parent_fiber.environment,
                 request.parent_fiber.archive,
                 request.parent_fiber.inherited,
-                request.parent_fiber.arguments,
                 &cell.cancelled,
                 .{ .task = .{ .scheduler = self, .scope = &cell.scope } },
                 // A task runs in its spawner's scope, which is always a root: the
