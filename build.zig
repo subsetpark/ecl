@@ -1229,12 +1229,11 @@ pub fn build(b: *std.Build) void {
     // SPEC.md is a checked-in rendering assembled by ECL. The build graph
     // supplies paths and generated fragments; language-level ordering and
     // inclusion remain ordinary ECL behavior in assemble.ecl.
-    const rendered_module_spec = renderFormalModel(b, "modules");
-    const rendered_value_spec = renderFormalModel(b, "values");
-    const rendered_printing_spec = renderFormalModel(b, "printing");
-    const rendered_error_spec = renderFormalModel(b, "errors");
-    const rendered_unit_spec = renderFormalModel(b, "units");
-    const rendered_concurrency_spec = renderFormalModel(b, "concurrency");
+    const formal_models = discoverFormalModels(b);
+    const rendered_models = b.allocator.alloc(std.Build.LazyPath, formal_models.len) catch @panic("OOM");
+    for (formal_models, rendered_models) |model, *rendered| {
+        rendered.* = renderFormalModel(b, formal_models, model);
+    }
 
     // The assembler reads and writes through the `'cwd` filesystem root the
     // command line supplies, so it receives the build root and relativizes the
@@ -1243,21 +1242,7 @@ pub fn build(b: *std.Build) void {
     assemble_spec.addFileArg(b.path("design/spec/assemble.ecl"));
     assemble_spec.addDirectoryArg(b.path("."));
     const assembled_spec = assemble_spec.addOutputFileArg("SPEC.md");
-    assemble_spec.addFileArg(b.path("design/SPEC.src.md"));
-    assemble_spec.addArg("generated-preamble");
-    assemble_spec.addFileArg(b.path("design/spec/generated-preamble.md"));
-    assemble_spec.addArg("value-model");
-    assemble_spec.addFileArg(rendered_value_spec);
-    assemble_spec.addArg("printing-model");
-    assemble_spec.addFileArg(rendered_printing_spec);
-    assemble_spec.addArg("error-model");
-    assemble_spec.addFileArg(rendered_error_spec);
-    assemble_spec.addArg("unit-model");
-    assemble_spec.addFileArg(rendered_unit_spec);
-    assemble_spec.addArg("concurrency-model");
-    assemble_spec.addFileArg(rendered_concurrency_spec);
-    assemble_spec.addArg("module-model");
-    assemble_spec.addFileArg(rendered_module_spec);
+    addSpecSources(b, assemble_spec, formal_models, rendered_models);
     const update_spec = b.addUpdateSourceFiles();
     update_spec.addCopyFileToSource(assembled_spec, "design/SPEC.md");
     const spec_step = b.step("spec", "Assemble design/SPEC.md from its authored sources");
@@ -1269,21 +1254,7 @@ pub fn build(b: *std.Build) void {
     check_spec_run.addDirectoryArg(b.path("."));
     check_spec_run.addArg("--check");
     check_spec_run.addFileArg(b.path("design/SPEC.md"));
-    check_spec_run.addFileArg(b.path("design/SPEC.src.md"));
-    check_spec_run.addArg("generated-preamble");
-    check_spec_run.addFileArg(b.path("design/spec/generated-preamble.md"));
-    check_spec_run.addArg("value-model");
-    check_spec_run.addFileArg(rendered_value_spec);
-    check_spec_run.addArg("printing-model");
-    check_spec_run.addFileArg(rendered_printing_spec);
-    check_spec_run.addArg("error-model");
-    check_spec_run.addFileArg(rendered_error_spec);
-    check_spec_run.addArg("unit-model");
-    check_spec_run.addFileArg(rendered_unit_spec);
-    check_spec_run.addArg("concurrency-model");
-    check_spec_run.addFileArg(rendered_concurrency_spec);
-    check_spec_run.addArg("module-model");
-    check_spec_run.addFileArg(rendered_module_spec);
+    addSpecSources(b, check_spec_run, formal_models, rendered_models);
     const check_spec_step = b.step(
         "check-spec",
         "Check that design/SPEC.md matches its authored sources",
@@ -1319,22 +1290,16 @@ pub fn build(b: *std.Build) void {
     );
     // Each check is a pure function of the formal sources, so it reruns only
     // when one of them changes. Upgrading pant does not invalidate a pass.
-    const formal_checks = [_]struct { model: []const u8, steps: []const u8, timeout: []const u8 }{
-        .{ .model = "modules", .steps = "2", .timeout = "8" },
-        .{ .model = "units", .steps = "2", .timeout = "8" },
-        .{ .model = "values", .steps = "0", .timeout = "8" },
-        .{ .model = "printing", .steps = "0", .timeout = "8" },
-        .{ .model = "errors", .steps = "0", .timeout = "8" },
-        .{ .model = "concurrency", .steps = "2", .timeout = "12" },
-    };
-    for (formal_checks) |check| {
-        const run = addCheckCommand(b, b.fmt("pant check {s}", .{check.model}), .on_input_change);
+    // Every model takes the same bounds: a model without actions passes its
+    // step bound trivially, and the timeout is only a ceiling.
+    for (formal_models) |model| {
+        const run = addCheckCommand(b, b.fmt("pant check {s}", .{model}), .on_input_change);
         run.addArgs(&.{
-            "pant",      "--check",   "--bound",     "2",             "--steps",
-            check.steps, "--timeout", check.timeout, "--module-path", "design/formal",
+            "pant", "--check",   "--bound", "2",             "--steps",
+            "2",    "--timeout", "12",      "--module-path", formal_dir,
         });
-        run.addFileArg(b.path(b.fmt("design/formal/{s}.pant", .{check.model})));
-        addFormalInputs(b, run);
+        run.addFileArg(formalModelPath(b, model));
+        addFormalInputs(b, run, formal_models);
         check_formal_step.dependOn(&run.step);
     }
 
@@ -1397,20 +1362,63 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(git_extension_step);
 }
 
-/// Every Pantagruel model. A model imports others through `--module-path`,
-/// which the build cannot hash, so each render and check declares them all.
-const formal_models = [_][]const u8{ "modules", "units", "values", "printing", "errors", "concurrency" };
+const formal_dir = "design/formal";
 
-fn addFormalInputs(b: *std.Build, run: *std.Build.Step.Run) void {
-    for (formal_models) |model| run.addFileInput(b.path(b.fmt("design/formal/{s}.pant", .{model})));
+fn formalModelPath(b: *std.Build, model: []const u8) std.Build.LazyPath {
+    return b.path(b.fmt(formal_dir ++ "/{s}.pant", .{model}));
+}
+
+/// Every Pantagruel model under `design/formal`, by file stem in name order.
+/// The directory is the list: adding or removing a `.pant` file reconfigures
+/// the build, and each model is rendered into SPEC.md and checked.
+fn discoverFormalModels(b: *std.Build) []const []const u8 {
+    const io = b.graph.io;
+    b.dependOnDirectoryContents(b.path(formal_dir));
+    var dir = b.root.openDir(io, formal_dir, .{ .iterate = true }) catch |err|
+        std.debug.panic("cannot open {s}: {t}", .{ formal_dir, err });
+    defer dir.close(io);
+    var models: std.ArrayList([]const u8) = .empty;
+    var entries = dir.iterate();
+    while (entries.next(io) catch |err| std.debug.panic("cannot list {s}: {t}", .{ formal_dir, err })) |entry| {
+        if (entry.kind != .file) continue;
+        const stem = std.mem.cutSuffix(u8, entry.name, ".pant") orelse continue;
+        models.append(b.allocator, b.dupe(stem)) catch @panic("OOM");
+    }
+    std.mem.sort([]const u8, models.items, {}, struct {
+        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.order(u8, left, right) == .lt;
+        }
+    }.lessThan);
+    return models.items;
+}
+
+/// A model imports others through `--module-path`, which the build cannot
+/// hash, so each render and check declares every model as an input.
+fn addFormalInputs(b: *std.Build, run: *std.Build.Step.Run, models: []const []const u8) void {
+    for (models) |model| run.addFileInput(formalModelPath(b, model));
 }
 
 /// Renders one model to Markdown for SPEC.md assembly.
-fn renderFormalModel(b: *std.Build, model: []const u8) std.Build.LazyPath {
-    const run = b.addSystemCommand(&.{ "pant", "--markdown", "--module-path", "design/formal" });
-    run.addFileArg(b.path(b.fmt("design/formal/{s}.pant", .{model})));
-    addFormalInputs(b, run);
+fn renderFormalModel(b: *std.Build, models: []const []const u8, model: []const u8) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{ "pant", "--markdown", "--module-path", formal_dir });
+    run.addFileArg(formalModelPath(b, model));
+    addFormalInputs(b, run, models);
     return run.captureStdOut(.{ .basename = b.fmt("{s}.md", .{model}) });
+}
+
+/// Appends the template and one `NAME FRAGMENT` pair per model to an assembler
+/// invocation. The template includes `NAME.pant` as `<!-- include:NAME-model -->`.
+fn addSpecSources(
+    b: *std.Build,
+    run: *std.Build.Step.Run,
+    models: []const []const u8,
+    rendered: []const std.Build.LazyPath,
+) void {
+    run.addFileArg(b.path("design/SPEC.src.md"));
+    for (models, rendered) |model, fragment| {
+        run.addArg(b.fmt("{s}-model", .{model}));
+        run.addFileArg(fragment);
+    }
 }
 
 const NativeModules = struct {

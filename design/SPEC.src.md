@@ -1,4 +1,4 @@
-<!-- include:generated-preamble -->
+<!-- Generated from design/SPEC.src.md; make changes in the source fragments. -->
 # ecl — language specification
 
 ## Status, scope, and conformance
@@ -7,9 +7,7 @@ This document defines the syntax and semantics of the ECL language. The
 language is defined independently of any implementation representation,
 interpreter architecture, host interface, or distribution. This document
 defines the language; the shipped ECL interpreter is its reference
-implementation. The shipped interpreter is a CLI with a Zig extension SDK: ECL
-calls registered Zig extensions, while embedding the interpreter in Zig
-applications is outside the supported distribution interface.
+implementation. 
 
 ECL has three distinct fields of conformance:
 
@@ -26,50 +24,13 @@ ECL has three distinct fields of conformance:
   facilities. Those facilities are not language semantics unless this
   document explicitly says otherwise.
 
-[`INTERPRETER.md`](INTERPRETER.md) describes one implementation of these
-semantics, and [`PERFORMANCE.md`](PERFORMANCE.md) states implementation and
-distribution guarantees. Neither document may alter language behavior defined
-here.
-
-The key words **must**, **must not**, **should**, **should not**, and **may**
-are normative. An implementation limit is a documented finite bound permitted
-by this specification. Unspecified behavior is behavior for which this
-specification deliberately imposes no choice; it is not permission to violate
-any otherwise applicable rule. Examples and the language overview are
-non-normative unless explicitly identified as normative.
-
-### Formal models
-
-A linked Pantagruel model is normative only within the abstraction boundary
-declared by that model. Its domains, rules, actions, invariants, and initial
-state are normative within that boundary; behavior it deliberately omits is
-governed by this prose. A finite model-checking bound serves only the
-verification machinery and imposes no ECL implementation limit. A contradiction
-between prose and a formal model is a specification defect and must not be
-resolved by silently preferring either account.
-
-Formal actions use guards to define the states and inputs for which their
-transitions are valid. Models do not enumerate every invalid invocation as an
-error-labelled no-op; error kinds and unchanged-state requirements outside an
-action's guard remain specified in prose. A failure is modeled as an explicit
-action when failure itself changes modeled state.
-
-Action parameters identify either inputs supplied by ECL execution or existing
-semantic entities whose transition the action records; they need not denote
-first-class ECL values. A fact derived from modeled state is expressed as the
-product of a rule rather than repeated as an independent parameter. Fresh
-runtime identities such as generations, calls, and transactions are
-selected existentially from unused domain atoms by the transition that creates
-them. A later action that changes one of those existing entities takes that
-entity as a parameter.
-
 ## Language overview
 
 ECL is a homoiconic concatenative array language. A program is a sequence of
-values evaluated from left to right against an operand stack. Evaluating a
-word resolves and invokes its binding; evaluating any other value pushes that
-value. Words consume operands from the right-hand, top end of the stack and
-append their results there.
+values evaluated from left to right against an operand stack. Evaluating a word
+resolves and invokes its binding; evaluating any other value pushes that value.
+Words consume operands from the top of the stack and push their results
+there.
 
 A quotation is a list used as a program. Lists are also ECL's general ordered
 aggregate, so code and data have the same value representation and can be
@@ -84,51 +45,27 @@ name. Word occurrences retain the root their names are resolved in. Each word
 is resolved in its own root when it is reached, so a replacement reaches every
 later call, including calls from code defined before it.
 
-A unit is the boundary of failure and operand-stack rollback. Modules separate
-immutable code images from named registrations; a registration publishes an
-image under a name and owns no operand stack. Tasks execute isolated units
-under structured concurrency, and a task's mailbox is the only state outside
-a unit's own stack.
+A unit is the boundary of failure and operand-stack rollback. Modules register
+immutable code images under global names. Tasks execute isolated units under
+structured concurrency, and a task's mailbox is the only state outside a unit's
+own stack.
 
 ## Notation and terminology
 
 In a stack effect `( before -- after )`, the top of the operand stack is at the
 right. Names in an effect describe positions and introduce no runtime
-variables. `S` denotes an operand-stack sequence, `P` and `Q` denote program
-sequences, and σ denotes the execution state other than the operand stack.
-
-The primary evaluation judgment is big-step:
-
-```text
-⟨P, S, σ⟩ ⇓ success(S′, σ′)
-⟨P, S, σ⟩ ⇓ failure(error, S_partial, σ′)
-```
-
-Evaluation therefore takes a program, an operand stack, and execution state
-and produces either a new stack and state or an error with the partial stack
-and surviving state at the point of failure. A unit applies the separate
-rollback rule in [Units and the transactional stack](#units-and-the-transactional-stack).
-Small-step rules may use the term *configuration* for a tuple containing
-remaining control and execution state, but configuration is not an additional
-ECL value or source-language concept.
-
-If `P Q` denotes sequence concatenation, sequential evaluation obeys the Joy
-composition law wherever the left side succeeds:
-
-```text
-⟦P Q⟧ = ⟦Q⟧ ∘ ⟦P⟧
-```
+variables. 
 
 A **form** is a grammatical source construct. Reading a form produces an ECL
 **value**, possibly with semantic metadata. A **word** is an executable value
 whose identity is its kind and spelling. A **word occurrence** is a stored word
 together with any resolution and provenance metadata assigned to that
 occurrence. A **quotation** is a list applied as a program. A **binding**
-associates a name with an executable body and metadata; it is not a value. A
-**scope** is a binding map with a fixed parent. An **activation** is one
-invocation of a binding. A **module image** is the immutable code and
-definitions `@defm` constructs; a **registration** is the named slot through
-which an image is published and invoked.
+associates a name with an executable body and metadata. A **scope** is a
+binding map with a fixed parent. An **activation** is one invocation of a
+binding. A **module image** is the immutable code and definitions `@defm`
+constructs; a **registration** is the named slot through which an image is
+published and invoked.
 
 ## Source language
 
@@ -138,7 +75,7 @@ grammar.
 
 ### Source text
 
-- Source is UTF-8, mandatorily. Invalid UTF-8 is a `` `parse `` error.
+- Source is UTF-8. Invalid UTF-8 is a `` `parse `` error.
 - `#` begins a comment that runs to end of line, outside strings. Shebang
   lines are therefore comments.
 - Tokens are separated by whitespace: Unicode whitespace, plus comma —
@@ -171,50 +108,30 @@ characters. An atom is classified whole-token, in this order:
    - The whole tokens `inf`, `+inf`, and `-inf` are float literals (they
      are numbers, so the names leave the word namespace). NaN has no
      literal; NaN values do not exist (see Numbers).
-2. **Char** — `\` followed by exactly one character (\a), one of the
+2. **Char** — `\` followed by one character (\a), one of the
    names `\space`, `\tab`, `\newline`, or `\u{...}` with one to six hex
    digits naming a Unicode scalar value (surrogate halves and values above
    U+10FFFF are parse errors).
 3. **Quote** — `` ` `` followed by a symbol. It reads as one quoted occurrence
    of that symbol, which run pushes the symbol: `` `foo `` and `(foo) first`
-   push the same value. As data the occurrence is the symbol itself, so
-   `` [`a `b] `` is a two-element list equal to `[a b]`; the quote is
-   occurrence metadata, like a symbol's link, and travels with the occurrence
-   when lists are copied or spliced. The reader is the only way a
-   symbol enters a list as a word. A symbol that enters a list any other way,
-   stored from the stack by `cons` or a collecting combinator, held as a dict
-   entry, or listed by a reflective word such as `exports`, `dict.keys`, or an
-   error's `trace`, is stored as a quoted occurrence: a runtime value is data
-   wherever it lands, and `` `w (dup) cons call `` pushes `w` twice. A list
-   that runs a symbol it was handed as a value says so with `execute`. `{ }`
-   rejects a quote, since dict entries are data and never run; `effect`
-   returns its annotation as written.
+   push the same value. 
    `` ` `` is reserved token-initially and banned inside symbols.
 4. **Symbol** — anything else. A symbol pushes nothing by itself: when the
    list it occurs in is run, it is resolved by lookup and executed.
 
-**Symbols** are one or more segments joined by `.`; the dot is the module
-qualification separator and nothing else (`stats.mean`, quotable as
-`` `stats.mean ``). Leading, trailing, or doubled dots are parse errors. A
-bare segment's characters are anything except whitespace, the six
-delimiters, `"`, `#`, `'`, `` ` ``, `\`, `.`, `,`, `;`, and `|`; Unicode
-letters are legal. A segment may instead be delimited as `'...'`, which
-admits every character except `'` and control characters (`'foo bar'`,
-`stats.'my mean'`). The delimiters are not part of the spelling: `'foo'`
-and `foo` are the same symbol, and `.` keeps its separator meaning inside
-them, so `'stats.my mean'` is `stats.'my mean'`. A delimited segment fills
-its whole segment; `'ab'c` is a parse error.
+**Symbols** are one or more segments joined by `.`. The last `.` in a symbol
+separates a module name on the left from the word on the right; module names
+can include more dots, which have no additional meaning. 
 
-**Strings** are `"..."` and may span newlines. Raw newlines, indentation,
-and blank lines inside the quotes are literal; there is no triple-quoted,
-dedented, or margin-stripped form. The escapes are exactly `\\`, `\"`,
-`\n`, `\t`, and `\u{...}` (one to six hex digits, Unicode scalar values
-only); any other escape is a parse error. A string uses the rank-1 char-vector
-role of a list.
+Symbols with spaces in them can be constructed by wrapping the whole spelling
+in single quotes.
 
-The exact form `<...>` is reserved as an unparseable runtime display marker
-wherever an atom may occur. The same bytes inside a string literal are ordinary
-character data.
+**Strings** constructed with double quotes, and may span newlines. Raw
+newlines, indentation, and blank lines inside the quotes are literal; there is
+no triple-quoted, dedented, or margin-stripped form. The escapes are `\\`
+for backslash, `\"` for double quote, `\n` for newline, `\t` for tab, and
+`\u{...}` for a Unicode scalar value given by one to six hex digits. Any other
+escape, or a malformed Unicode escape, is a parse error.
 
 ### Forms
 
@@ -226,81 +143,51 @@ dict     :=  "{" (form form)* "}"
 locals   :=  "|" name+ "|"           # names: distinct unqualified symbols
 ```
 
-- `( )` and `[ ]` construct the same kind of value — a list of the
-  enclosed forms, unevaluated. Brackets quote; nothing inside runs at read
-  time. The pair choice is free per pair, and **pairs must match**:
+- `( )` and `[ ]` construct the same kind of value---a list of the
+  enclosed forms. Symbols inside of list literals are *never evaluated*;  the
+  forms `(foo)`, `` (`foo) ``, `[foo]` and `` [`foo] `` all produce
+  values that evaluate as equal: one-element lists containing the symbol `foo`. 
+  (Critically, however, the semantics of `call` on the resulting lists are
+  different: unquoting `` (`foo) `` merely pushes the symbol to the stack,
+  while unquoting `(foo)` executes the symbol.) 
+  The pair choice is free per pair, and **pairs must match**:
   `[1 2 3)` is a parse error. (Printing chooses brackets by
   canonical value shape; see Printing.)
-- `{ k v ... }` constructs one dict value at read time. Adjacent top-level
-  forms are paired as key and value; neither is evaluated, so a bare
-  symbol is stored as itself — `{foo bar}` stores the symbol `bar` under the
-  key `foo` without resolving either name. A quote directly inside `{ }` is
-  a parse error, since its two forms would pair as separate entries. An odd
-  form count and a duplicate key are parse errors. `{}` is the empty dict. When entries
-  require computation, build a flat entry list and use `dict.from-flat`.
-- Locals name a quotation's inputs: `(|lo hi| hi lo - rand lo +)`,
-  `(|x| x x *) each`. A locals declaration is legal only immediately after
-  `(` or `[` and is desugared to point-free code before the list value
-  exists — the stored list contains no locals declaration or local names.
-  Bind order: the leftmost
-  name takes the deepest value, so `10 20 (|lo hi| …)` gives `lo` = 10 and
-  `hi` = 20 — names read in argument order. Names must be distinct
-  unqualified symbols; an empty locals declaration `(||)` is a parse error;
-  the exact names `--` and `:` are parse errors as local names. A local is not
-  visible inside a nested quotation within the declaring body; a reference
-  there is an ordinary word lookup, so it resolves to a binding of that name or
-  fails as an undefined word. `cons` constructs a reusable capturing
-  quotation. The sugar does not involve `set`; locals and
-  environment assignment are unrelated mechanisms. A declaration that finds
-  fewer values than it names is an underflow. Opening a word's body, it is
-  that word's arity check: the word is the failing word, as a primitive would
-  be. Opening any other quotation, the local binding fails and no word is
-  blamed.
+- `{ k v ... }` constructs a dict value. Adjacent top-level forms are paired as
+  key and value. As with lists, symbols inside of dict literals are not
+  evaluated. An odd form count or a duplicate key is a parse error.
+- Locals create temporary, quotation-internal bindings. Any word bound in the
+  locals declaration can be used any number of times within the quotation.
+  The first name receives the deepest consumed stack value and the last name
+  the top value, so `1 2 (|x y| x y -) call` is `-1`.
+  Locals do **not** exhibit lexical scoping: a local is not visible inside a
+  nested quotation within the declaring body. 
 
 ## Values and external representations
 
-<!-- include:value-model -->
+<!-- include:values-model -->
 
-### Representation and language roles
-
-A conforming implementation may choose any representation for values but must
-not expose an additional kind through `type`, matching, hashing, ordering,
-printing, or an ECL-facing native interface. Adding a first-class kind is a
-language extension. Bindings are not values.
-
-Operations on lists and dictionaries produce values; storage reuse is not
-observable language behavior. `def` and `set` replace bindings rather than
-mutating values. Storage specialization, copy-on-write strategies, and
-amortized bounds are implementation or performance concerns.
+### Representation 
 
 Float values use IEEE 754 binary64, excluding NaN; `inf` and `-inf` are
 ordinary values. Integer overflow is an error, never wrapping or promotion.
 See Numbers.
 
-A symbol is one kind of value whether it was written bare or built at
-runtime: `(dup) first` and `` `dup `` yield the same symbol, and `{dup 1}`
-stores it as a key. The position of a symbol in a list, not its value,
-decides what running the list does with it: `(dup) call` executes `dup`,
-while `` (`dup) call `` runs a quoted occurrence and pushes the symbol. Symbols
-print bare, delimited as `'...'` only when the bare spelling would not read
-back as the same symbol, and a quoted occurrence prints with its quote, so
-`` (`dup) `` prints as `` (`dup) ``. Resolution, provenance, and quotation
-belong to stored symbol occurrences rather than their values and never
-distinguish two symbols.
+Symbol quotedness is execution metadata on a symbol value; quoted and unquoted
+symbols are the same kind.
 
-A quotation, vector, and matrix row are list roles. A homogeneous list of
-atoms *is* a vector—`(1 2 3)` and `[1 2 3]` are the same value. There is no
-rank-carrying array type: a matrix is a list of equal-length lists, rank is
-depth rather than intrinsic data, and ragged lists remain legal.
+A quotation, vector, or matrix row are all represented with a list. While the
+interpreter may specialize implementation and operations over homogeneous typed
+lists, printing uses canonical value shape rather than storage specialization
+(see Readable representations and display). Lists don't have any rank or axis
+metadata.
 
-Dictionary insertion order is preserved by storage, iteration, and printing.
-A task is a runtime capability bound to its session and prints as `<task:N>`.
-A module is an opaque immutable image and prints as `<module>`. A port is an
-opaque, identity-bearing capability for a host endpoint and prints as
-`<port:N>`. Task, module, and port displays are rejected by the reader. Port
-identity is observable only through ordinary whole-value matching and hashing;
-no conforming operation may recover an operating-system descriptor, process
-identifier, or implementation pointer from one.
+A task is an opaque capability bound to its session and prints as `<task:N>`. A
+port is an opaque capability for a host endpoint and prints as `<port:N>`. Task
+and port displays are rejected by the reader. Port identity is observable only
+through ordinary whole-value matching and hashing; no conforming operation may
+recover an operating-system descriptor, process identifier, or implementation
+pointer from one.
 
 ### Readable representations and display
 
@@ -320,30 +207,6 @@ as `[1 2 3]`, `[dup swap]` prints as `(dup swap)`, and the ragged result of
 `[[1 2] [3]] 10 *` prints as `([10 20] [30])`. Strings use quoted string
 syntax.
 
-<!-- include:printing-model -->
-
-`io.pp` and the REPL use a best-effort display layout with canonical atom
-spellings and delimiters. Rows of rectangular matrices, plus one enclosing
-group axis, are separated by newline and indentation. A displayed non-string
-list longer than 256 elements becomes `[<N-values-elided>]` or
-`(<N-values-elided>)` according to its delimiter. A displayed string longer
-than 256 characters becomes `"<N-characters-elided>"`. Elision occurs before
-matrix-shape scanning or child rendering. Canonical `str` output never elides.
-
-A displayed dictionary remains compact when it has at most three pairs and
-contains no nested dictionary or matrix-valued key or value. Every other
-dictionary uses one pair per indented line, applying the same choice
-recursively. Flat vector fields remain compact. Canonical `str` output is
-always compact.
-
-`io.stack` applies the same per-value display layout and emits each visible
-operand slot as a bottom-up indexed block. `[0]` is the bottom of the visible
-window and the largest index is its top; continuation lines align after the
-index prefix. The denser REPL layout instead keeps stack order from left to
-right and places each value's rectangle beside its neighbors on a shared
-bottom row. Padding is measured in bytes and ends with each row's last value.
-Neither layout wraps to terminal width.
-
 ### Equality and ordering
 
 `match?` exposes the model's whole-value equivalence. Numeric magnitude maps
@@ -360,7 +223,7 @@ produces a scalar boolean or boolean mask (see Pervasion). For example,
   codepoint), and lists, which order lexicographically by their elements' `cmp`
   and then by length; strings are lists of chars. Anything else, including
   cross-kind pairs, is a `` `type `` error, but two lists compare only through
-  their first unequal element pair. `grade` orders by exactly this ordering.
+  their first unequal element pair. `grade` orders by this ordering.
 - Words that require a boolean reject every value outside the formally defined
   Boolean role, including other ints.
 
@@ -382,60 +245,60 @@ Resolution does not produce a binding or callable value on the operand stack.
 Bindings are not first-class, and ordinary word reference always invokes.
 Reflection operations inspect binding metadata through separate mechanisms.
 
-**Resolution.** Every word is resolved when it is reached, in the root that
-occurrence was written in (see Bindings and scope), against the current
-definitions and module registrations. This holds alike for top-level source,
-for definition bodies, and for every quotation applied at run time, by
-`call`, a combinator, `@attempt`, or as a task's body. A quotation applied at
-run time is not checked before it runs: an unresolved word fails at that
-word, after the forms before it have run. Nested quotations and quoted words
-are data and resolve only when they are themselves applied.
+### Resolution
 
-**Definitions are validated when they are defined.** A top-level definition
-checks its body as `def` runs. Its own name, written in the root it is
-published into, calls the definition itself; every other top-level word of
-the body must already resolve, or name a module not yet registered, so a
-top-level body cannot refer forward to a later definition and a misspelled
-word fails the definition. Validation records nothing: the body resolves each
-word again whenever it runs. A module's definitions and imports are staged by
-its construction body and validated together when the module is sealed, so
-words in one module may refer forward and recurse mutually. A staged
-definition is not visible to runtime lookup before its module is sealed, so
-a construction body that names one finds nothing by that name, or resolves a
-core word of the same name instead. Validation never loads a module: a
-qualified word naming a module that is not registered passes, and resolves
-when it is first reached, loading the module then, so an unknown module or a
-name it does not export fails there, as an undefined word.
+Every word is resolved when it is reached, in the root that occurrence was
+written in (see Bindings and scope), against the current definitions and module
+registrations. This holds alike for top-level source, for definition bodies,
+and for every quotation applied at run time, by `call`, a combinator,
+`@attempt`, or as a task's body. A quotation applied at run time is not checked
+before it runs: an unresolved word fails at that word, after the forms before
+it have run. Nested quotations and quoted words are data and resolve only when
+they are themselves applied.
 
-**Top-level source is incremental.** A file, a REPL line, or the prelude is
-evaluated form by form, and each top-level word is resolved when it is
-reached, so ``(1) `foo def foo`` defines `foo` and then calls it.
+### Definition 
 
-**Replacements reach running code.** Replacing a definition or a module
-registration reaches every word dispatched afterwards: in definitions made
-earlier, in the remaining forms of a quotation already running, and in the
-later elements of an iteration already under way. A body running when a word
-it calls is replaced may run the old definition for earlier calls and the new
-one for later ones. There is no historical view: a unit, a task, and an
-`@attempt` see the definitions current as each word is reached.
-Explicit operations on names — `execute`, `doc`, `effect`, `which`,
+Definitions are introduced with the word `def`, and a definition validates its
+body when it is published. Validation records nothing: the body resolves each
+word again whenever it runs.
+
+A definition written to the session is published as `def` runs. Every word of
+its body outside a nested quotation must already resolve, so the body cannot
+refer forward to a later definition, and a misspelled word fails the
+definition. A qualified word whose module is not registered yet is the other
+exception: its lookup is deferred until the word is reached. The definition's own name, written in the root it is published
+into, is the exception: it calls the definition itself.
+
+A definition written to a module image is staged by the module's construction
+body and published when the module is sealed. A module's definitions and
+imports are validated together then, so words in one module may refer forward
+and recurse mutually. A staged definition is not visible to runtime lookup
+before its module is sealed.
+
+A body running when a word it calls is replaced may run the old definition for
+earlier calls and the new one for later ones. There is no historical view: a
+unit, a task, and an `@attempt` see the definitions current as each word is
+reached. Explicit operations on names — `execute`, `doc`, `effect`, `which`,
 and `see` — resolve the supplied symbol in its own root against the current
-definitions each time they run. A word written in a module image resolves in
-that image, so code written in an image keeps reaching that image's
-definitions after its registration is replaced, while a qualified name
-reaches the registration current when it runs. Executing a word written in an image that was never published and
-has since been discarded is a `` `domain `` error.
+definitions each time they run. 
+
+A word written in a module image resolves in that image, so code written in an
+image keeps reaching that image's definitions after its registration is
+replaced, while a qualified name reaches the registration current when it runs.
+Executing a word written in an image that was never published and has since
+been discarded is a `` `domain `` error.
 
 The reader links each symbol occurrence to the root the source is read into:
-the session, the module image under construction, or core for the prelude.
-Moving, copying, concatenating, or splicing values preserves each occurrence's
-own root, so one quotation may contain symbols from several roots, and a
-quotation has no single resolution root. A symbol that `qualify`, `symbol`,
+the session, or core for the prelude. Moving, copying, concatenating, or
+splicing values preserves each occurrence's own root, so one quotation may
+contain symbols from several roots, and a quotation has no single resolution
+root. A module body is the one exception: `@defm` re-homes every occurrence in
+its body to the new image, whatever root each carried and however the body was
+built, so session code placed in a module body no longer reaches the session
+(see Modules). A symbol that `qualify`, `symbol`,
 `intern`, or native code builds links to the root of the activation that built
 it, so a quotation assembled from strings resolves where it was assembled
-rather than where it is later called. A symbol the implementation builds for
-itself (an error-dict key, a trace entry) carries no link and means core's
-binding wherever it runs.
+rather than where it is later called. 
 
 A reader-produced aggregate may separately retain **source spans**, which
 record where the aggregate and its reader-built descendants were read. Spans
@@ -450,54 +313,30 @@ identifiers retain their lookup scopes, while quotation values capture no
 bindings or ordinary values. An unannotated runtime-created word retains the
 dynamic behavior described above.
 
-Tail calls are guaranteed: through word calls, `if`, and every combinator's
-documented tail position, iteration and tail recursion run in constant space
-and never exhaust a host call stack. General `linrec` runs in constant space
-too: every level applies the same quotations, so the descents whose `post` is
-pending are a count rather than retained continuations.
-
 ### Errors
 
 Errors are crash-only. There is no try/catch or handler quotation: an error
-propagates outward through every unit it reaches until a boundary that reifies
-failure. Units nest strictly inside the task or root that opened them, so a
-unit cannot end while a unit nested in it is still running. `raise` initiates that propagation
-from an error value, and `fail` is sugar for raising an error whose kind is
-`` `user `` and whose message is the supplied string.
+propagates outward through every unit it reaches until a boundary that
+constructs a value from the error. Units nest strictly inside the task or root
+that opened them, so a unit cannot end while a unit nested in it is still
+running. `raise` initiates that propagation from an error value, and `fail` is
+sugar for raising an error whose kind is `` `user `` and whose message is the
+supplied string.
 
 Failure is observed as data only outside an explicit boundary: `@attempt`, or
-the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after success or
-`{err error}` after failure. Each envelope is an ordinary dictionary and is
-the boundary's only result value. The REPL is the implicit top-level boundary;
-a script's boundary is the process. Cancellation propagates the same way but
-is never data: no boundary inside the cancelled task reifies a cancellation error, so cancelling a task
-or the root fails every unit it has open, innermost first.
+the concurrent `@spawn`/`task.await` path, returns `{ok (values)}` after
+success or `{err error}` after failure. Each envelope is an ordinary dictionary
+and is the boundary's only result value. The REPL is the implicit top-level
+boundary; a script's boundary is the process. Cancellation propagates the same
+way but no boundary inside the cancelled task reifies a cancellation error, so
+cancelling a task or the root fails every unit it has open, innermost first.
 
 Source-position and other diagnostic fields appear when known. Absence is
 represented by an absent field, never by a nil value. Runtime-assembled code
 has no source position by construction, and no host exception or host stack
 frame is exposed as ECL error data.
 
-A completion-time source-word effect violation identifies the opening
-delimiter of the deepest reader-built quotation selected by ordinary tail
-control in that checked activation. The checked body supplies the initial
-location. An empty selected quotation identifies its opening `(`.
-
-Non-tail helper calls and isolated or inline application iterations preserve
-that location. An application's own contract failure retains its separate
-application boundary; dynamically applied tail-control quotations within the
-application may replace that boundary's selected location. Guard predicates
-are disposable observations. After guard restoration, the selected `cond`
-action or true `while` body replaces the enclosing selection, and tail control
-inside that action may refine it. Each iteration starts with a fresh boundary.
-
-The error reports the deepest selected quotation's opening delimiter and
-preserves its element index, falling back to the application quotation when
-no dynamic selection occurred. When that quotation was assembled at runtime,
-all source fields are absent; attribution never falls back to a less-specific
-location or invents one.
-
-<!-- include:error-model -->
+<!-- include:errors-model -->
 
 ### Units and the transactional stack
 
@@ -505,25 +344,31 @@ Ordinary evaluation may consume operands and perform effects before it fails;
 its failure outcome therefore includes the partial operand stack and the
 surviving execution state at the point of failure.
 
-<!-- include:unit-model -->
+<!-- include:units-model -->
+
+A failed unit exposes no stack. A failed submission leaves the session's
+operand stack as it was before the submission began, and the partial stack of
+any other failed unit is discarded with it.
 
 Environment writes, I/O, and other permitted non-stack effects performed
 before unit failure survive. A unit boundary may additionally cancel child
 tasks as specified by the concurrency semantics. A unit is not a transaction
 over the whole execution state.
 
-#### Where units begin
+#### Starting a unit
 
-A *submission* is the source text a host hands the session at once. The reader
-delimits it, and each submission runs as one unit:
+A *submission* is the source text that is used to start a new top-level unit. 
 
 - **REPL**: one logical line is one submission. The reader continues the line
   (continuation prompt) while a delimiter or string is open, so a submission
   is the complete forms of one possibly-continued line.
-- **Script file, `-e`, stdin**: the whole source is a single submission. A
-  failing script dies whole — error dict to stderr, nonzero exit.
+  As an important consequence: an error in the REPL rolls back to the state
+  before the line.
+- **Script file, `-e`, stdin**: the whole source is a single submission. An
+  error propagated upward will cause the process to exit.
 
-Running code begins further units through semantic unit constructors:
+Inside of running code, unit constructors are the primary way to create bounded
+execution contexts:
 
 - **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
@@ -531,10 +376,6 @@ Running code begins further units through semantic unit constructors:
   file keeps its caller's authority to define, so a file loaded at the root
   defines into the session, and like a module body it must leave its stack
   empty. Its failure propagates to the enclosing unit.
-
-`@attempt` is a stack transaction, not a task scope: a task spawned inside it
-belongs to the enclosing scope and is unaffected by the `@attempt` succeeding or
-failing (see Concurrency).
 
 ### Application contexts
 
@@ -552,24 +393,17 @@ Three quotation-application behaviors exist:
   inputs, hold its results aside, and finally drop the inputs any quotation
   consumed. The test quotations of `cond`, `while`, and `linrec` run this
   way too: a test may consume, rearrange, or add values; its top value must
-  be a 0/1 boolean, and its complete result is discarded and what it took
-  restored before control continues. Definitions, IO, and other non-stack
-  effects survive. Restoring is not producing: a value a `dip`
-  protected, a test looked at, or an inner `above` or `below` restored is
-  the original it was to every enclosing paging floor, not a result of the
-  word that restored it. Paging stops at the nearest isolated substack or
-  unit beneath, whose underflow is unchanged.
+  be a 0/1 boolean, and its complete result is discarded and the previous stack
+  state is restored before control continues. 
 - **Isolated**: the quotation runs on a fresh substack per application,
   starting on its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
   `fold`, `fold1`, `scan`, `lex-cmp-with`, `update`, `stencil`, `unfold`,
   `infra`, `@attempt`, `@spawn`, `@each`, and `@defm`.
 
-Every isolated combinator states the stack effect it requires of its
-quotation argument as that argument's nested effect (see
-[Quotation slots](#quotation-slots)). The contract is
-checked dynamically at each application; a violation is an immediate
-`` `contract `` error naming the element and the observed effect.
+Tail calls are guaranteed: through word calls, `if`, and every combinator's
+documented tail position, iteration and tail recursion run in constant space
+and never exhaust a host call stack.
 
 ### Explicit linear recursion
 
@@ -583,42 +417,25 @@ predicate false -> pre; linrec; post
 ```
 
 At every descent, `predicate` runs over a paging floor as the application
-contexts above describe. The predicate runs destructively in the invoking
-scope, its top result must be exactly 0 or 1, and its complete result is
-discarded and what it took restored before either branch begins. On 1, `base` runs from that restored state. On 0, `pre`
-runs from it, the recursive descent begins from `pre`'s resulting stack, and
-`post` runs after that descent returns. Consequently the four applications
-share ambient stack state intentionally; none has an isolated quotation
-contract. Fewer than four operands is `` `underflow ``, a non-quotation parameter
-is `` `type ``, and a missing or non-boolean predicate result follows the ordinary
-guard `` `underflow ``/`` `type `` behavior.
-
-Every descent applies the same four quotations, so the descents whose `post`
-is pending are a count and `linrec` runs in constant space; it does not
-recurse on the host stack. Predicate restore, cancellation, failure unwind,
-and value retirement remain bounded scheduler work.
+contexts above describe. Its top result must be 0 or 1. On 1, `base` runs from
+the restored state. On 0, `pre` runs from the restored state, the recursive
+descent begins from `pre`'s resulting stack, and `post` runs after that descent
+returns. Consequently the four applications share ambient stack state
+intentionally; none has an isolated quotation contract. Fewer than four
+operands is `` `underflow ``, a non-quotation parameter is `` `type ``, and a
+missing or non-boolean predicate result follows the ordinary guard ``
+`underflow ``/`` `type `` behavior.
 
 #### The `@` spelling convention
 
 A leading `@` marks those words that apply their quotation **in a fresh unit**
 — one unit per application for `@each` — and `@load`, which runs a file's
 source the same way. No constructor reads the ambient stack across its unit
-boundary; see A unit's initial stack.
+boundary.
 
-Words that are isolated but *not* marked, with their reasons:
-
-- `each`, `zip-with`, `fold`, `fold1`, `scan`, `lex-cmp-with`, `stencil`,
-  `unfold`, `for` — they apply in the **same** unit, on a substack, and are implicitly fed their
-  elements, windows, or states.
-- `infra` — it applies on an explicitly supplied *other* stack.
-- `import`, `importp` — they publish without taking a quotation.
-- `task.await`, `task.await-any`, `task.await-for`, `task.cancel`, `task.pending` —
-  they consume tasks rather than making them.
-
-`@` is an ordinary word character that the reader does not reserve: a user's
-`@retry` lexes and defines normally. First-party vocabulary follows the
-convention, and it is the recommended spelling for any user-defined word that
-wraps its quotation in a unit.
+`@` is an ordinary word character that the reader does not reserve. First-party
+vocabulary follows the convention, and it is the recommended spelling for any
+user-defined word that wraps its quotation in a unit.
 
 #### The `*name*` spelling convention
 
@@ -629,37 +446,23 @@ a definition therefore keeps reporting the file that authored its body when
 another file calls it. Runtime-assembled code has no source provenance, so
 `*file*` is `` `domain `` there rather than falling back to its caller.
 `*module*` returns the name of the module whose code is running, the name
-`@defm` published it under even when the call came through an alias, including a construction body that has not yet published; at the root there is
-no module and it is `` `domain ``. The stars are ordinary word characters with
-no reader meaning, and the convention applies to shipped vocabulary without
-reserving the spelling from user definitions.
+`@defm` published it under even when the call came through an alias, including
+a construction body that has not yet published; at the root there is no module
+and it is `` `domain ``. The stars are ordinary word characters with no reader
+meaning, and the convention applies to shipped vocabulary without reserving the
+spelling from user definitions.
 
 #### A unit's initial stack
 
 A unit started by `@attempt`, `@spawn`, `@defm`, or `@load` begins on an empty
 stack, and one started by `@give` begins on the ports it was given, in list
-order. A caller that wants a unit to begin on values builds them into its body:
-
-```ecl
-values (q) cat @attempt
-x (q) cons @spawn
-```
-
-A value stored into a list at run time enters as data, so the built body
-pushes each value and then runs `q`. A module or loaded file is a
-self-contained unit of source: its body takes nothing from the caller.
-
-Underflow against the floor of a constructed unit is reported specially:
-the message names the isolation and, for a body that runs plain code, how to
-build initial values into it; the error dict carries `` `isolation `` naming
-the constructor. It is the one underflow whose cause is invisible — the values
-the caller meant to pass are on screen and out of reach.
+order. 
 
 ## Bindings and scope
 
 ### Roots and names
 
-Definitions live in *roots*. There are exactly three kinds:
+Definitions live in *roots*. There are three kinds:
 
 ```text
 core           frozen; primitives and the prelude
@@ -667,37 +470,30 @@ session        → core
 module image   → core; sealed at the end of construction
 ```
 
-A word resolves in the root it was written in: the root's own definition for
-its name when there is one, and otherwise core's; with neither it is an
-`` `undefined-word `` error when the word is reached, or when a definition
-naming it is validated (see Core evaluation). Names are introduced and
-replaced, never removed. Which definition a name selects is decided each time
-the word runs, so a word read before its name is defined finds that
-definition once it exists.
+Thus: depending on where it was written, a user-defined word is resolved first
+either in the top-level session or in a module, and then in both cases in the
+core if it's not found. If resolution fails it produces an `` `undefined-word `` 
+error (see Core evaluation). Names are introduced and replaced, never
+removed. 
 
 Session-authored code may therefore shadow core definitions. A module image
 sees its own public and private bindings followed by core and never sees the
 invoking session. Core and prelude definitions resolve in core. There are no
-other scopes: combinator applications, `@attempt`, and tasks introduce no
-namespace of their own.
+other scopes.
 
-Shadowing a core name is allowed but reported. When a `def`, `set`, or
-`import` at top level introduces a session name that is also a public core
-name, a warning naming it is written to the diagnostic stream; replacing that
-session name later writes nothing more. Sealing a module whose definitions or
-imports include a public core name writes one warning per such name, naming the
-module, since every word written in the module then means the module's binding.
-Standard-library modules shadow core names deliberately and are not reported.
-The binding takes effect either way, and `core.` still reaches the core word.
-
-`core` is a reserved qualifier, not a registration. A qualified word whose
-module segment is exactly `core` resolves its binding segment in core alone,
+`core` is a reserved qualifier. A qualified word whose
+module segment is `core` resolves its binding segment in core alone,
 skipping the session and every module image, so a shadowed core definition
-remains reachable: after ``(2 *) `dup def``, `core.dup` is still the primitive.
-Only public core bindings resolve this way; a missing or private name is ``
-`undefined-word `` with `` `scope `core ``. `` `core `dup qualify `` constructs
-the same word. `import` and `alias` observe registrations only and do not
-accept `core`.
+remains reachable: after ``(2 *) `dup def``, `core.dup` still refers to the
+stdlib definition.
+
+Shadowing a core name is allowed but reported. When a `def`, `set`, or `import`
+at top level introduces a session name that is also a public core name, a
+warning is written to the diagnostic stream. Sealing a module whose definitions
+or imports include a public core name writes one warning per such name, naming
+the module. Standard-library modules shadow core names deliberately and are not
+reported. The binding takes effect either way, and `core.` still reaches the
+core word.
 
 Standard-library module names are reserved too. Only the standard library
 registers them, so a qualified name under one means the embedded module in
@@ -706,12 +502,15 @@ first use. `@defm` with a standard-library module name is `` `domain ``, as is
 `alias` with one as either the alias or its target. A dotted name below one,
 such as `dict.extra`, is an ordinary module name.
 
-Resolution and module home are independent parts of an activation. A word's
-root determines where its spelling is looked up. Module home
-determines privacy and registration-owned authority. Homeless helpers preserve
-their caller's module home; dispatch into a module changes home according to
-the module rules without changing the roots carried by caller-supplied
-words.
+Every activation has a **current root**. A word belonging to a module runs with
+that module's image as its current root; every other word, whether a session
+definition, a core primitive, or a prelude word, runs in its caller's root.
+Outside any module word the current root is the session, or the image under
+construction in a module's construction body. The current root decides where
+definition words write, what `*module*` reports, and the root a symbol built at
+run time links to. A core word such as `*module*` written in an escaped
+quotation runs in its caller's root, so it reports the caller's module, or is
+`` `domain `` at the session root.
 
 ### Binding model
 
@@ -727,7 +526,7 @@ representations but expose the same binding model.
 - ``annotation? value `name set`` binds a constant. It is sugar, defined in ecl
   as `swap wrap swap def`: the value is wrapped, so the published body is
   `(value)`, or ``(`value)`` when the value is a word.
-  Reference applies that body and pushes exactly the captured value, quotations included — the capture is
+  Reference applies that body and pushes the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. ``v `name set`` is therefore
   observationally ``v wrap `name def``: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
@@ -755,10 +554,11 @@ representations but expose the same binding model.
   stays reachable as `core.name`, and a new Session starts with no top-level
   definitions.
 - `def`, `defp`, `set`, `setp`, `import`, and `importp` write the current
-  root, which is the session for top-level code, the image for a module's
-  construction body, and the module's own image inside a module word. A word
-  body without a module home writes the root of the activation that called
-  it. Every quotation a unit runs, under any combinator or `@attempt`, may
+  root, which is the session for top-level code and the image for a module's
+  construction body. An image accepts them only while it is under
+  construction: inside a word of a sealed module, where the current root is
+  that module's image, every one of these is `` `domain ``. A word that
+  belongs to no module writes its caller's current root. Every quotation a unit runs, under any combinator or `@attempt`, may
   define; a definition is an environment effect, and like IO it survives the
   failure of the `@attempt` that made it. A task runs in its spawner's root
   without owning it, so inside a task every one of these is `` `domain ``.
@@ -785,7 +585,7 @@ recognized only when it contains a top-level word `--` or `:`. Nested
 markers and the quoted symbols `` `-- ``/`` `: `` are inert. A recognized
 annotation is validated as a whole before the binding publishes: at most
 one marker of each kind, `--` before `:`, only slots (see
-[Quotation slots](#quotation-slots)) around `--`, and exactly one string
+[Quotation slots](#quotation-slots)) around `--`, and one string
 after `:`. A malformed recognized annotation is a
 `` `domain `` error. The quotation adjacent to the name is unconditionally the
 body; only the value beneath it is considered for annotation recognition.
@@ -1059,7 +859,7 @@ that name.
   are interned as syntax only and cannot be minted as binding names through a
   privileged validation mode.
 
-<!-- include:module-model -->
+<!-- include:modules-model -->
 
 ### Construction and definitions
 
@@ -1071,7 +871,7 @@ that name.
   construction is in progress, at any depth, including inside a helper word the
   body calls and inside an `@attempt` nested in the body. Registration commits atomically
   only after an image exists. A failed registration leaves the previous
-  directory entry and current generation exactly as they were.
+  directory entry and current generation as they were.
 - The registry is flat. A module body may define another module with `@defm`,
   but that registration creates an independent module with its own name and
   lifetime; it does not establish lexical nesting or parent ownership.
@@ -1082,9 +882,7 @@ that name.
   carry the same optional annotations as top-level ones, so a module word may
   be unannotated, documentation-only, effect-only, or both; `set`/`setp`
   publish the bare literal capture. Privacy is subtractive: private definitions
-  are omitted entirely from the module's public face. A definition attempted
-  inside a combinator application, an `@attempt`, or a task is `` `domain ``,
-  as it is everywhere.
+  are omitted entirely from the module's public face.
 - **Tests are a distinct module-owned namespace.**
   ``annotation? (body) `name test`` accepts the same optional effect and
   documentation forms as `def`, but only while the exact direct construction
@@ -1112,9 +910,9 @@ that name.
   handle, or executable capability.
 - `descriptor @test` validates and looks up the descriptor against the
   module's current generation and its source when specified. A present test
-  runs as a task under that generation's private home, spawned in the current
+  runs as a task whose current root is that generation's image, spawned in the current
   scope and awaited, so it observes bindings and owns tasks as any task does. It
-  returns exactly `{ok (values)}` or `{err error}`; a removed or
+  returns `{ok (values)}` or `{err error}`; a removed or
   replaced-away test is a reified missing-test error. The test starts on an
   empty stack, registry changes persist between invocations in
   the Session, and Session teardown destroys them. External effects are
@@ -1129,14 +927,15 @@ that name.
   result, continues after ordinary failures, and exits 1 when any test failed.
 - Module code always runs under the name of the image that defined it:
   dispatch through a registered name, a construction body, an escaped
-  quotation, and a private call all report the same `*module*` and spell
+  quotation, and a private call all run module-authored words under the same
+  module, so those words report the same `*module*` and spell
   their trace words `name.word`. An application through escaped
   module-authored code still crosses a module boundary for effect checking. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is not reachable as a value: no operation extracts a
-  published body, so a module's code cannot be lifted out of the home it
+  published body, so a module's code cannot be lifted out of the image it
   resolves against.
   The rule has no exceptions, and the chain is the one each binding was
   actually defined in. A primitive or an embedded prelude definition was
@@ -1198,7 +997,7 @@ that name.
 - **Every word in a module body is module text.** `@defm` copies its body
   and gives every word in it the new image's scope, including words nested in
   quotation, list, and dict values, however the body was built. A body
-  produced by `cat`, `cons`, or any other list operation is re-homed exactly
+  produced by `cat`, `cons`, or any other list operation is re-homed
   as a literal is; a stack value such an operation stored entered as data, so
   a symbol among them is a quoted occurrence and the body pushes it (see
   Lexical structure). For example, ``7 `k set ((k) `geta) (def) cat `m @defm``
@@ -1221,7 +1020,7 @@ that name.
 - A registration is never removed during a Session; reload replaces it.
 - Modules are process-local: there is no persistence across process restart,
   and the native ABI exposes no module capability, so an `.eclmod` word
-  cannot observe an internal module home.
+  cannot observe a module's internals.
 - **Surface**: `import` consumes a module-name symbol and a list of attribute
   symbols, then publishes those attributes under their own names in the current
   environment — which inside a module body means the image, publicly, on the
@@ -1255,8 +1054,8 @@ that name.
   import. `qualify` validates a module-name symbol, which may be `` `core ``,
   and an unqualified binding-name symbol and constructs the corresponding
   executable word; `execute` resolves that word when it runs, in the root the
-  symbol carries, and invokes it as dispatch would, preserving its module
-  home, private lookup, annotations, tracing, native/builtin path, and
+  symbol carries, and invokes it as dispatch would, preserving its current
+  root, private lookup, annotations, tracing, native/builtin path, and
   cancellation. `alias` registers a short registry name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
@@ -1278,7 +1077,7 @@ that name.
 
 ### Task scopes and observation
 
-Task scopes exist at exactly two places: the session root and each spawned
+Task scopes exist at two places: the session root and each spawned
 task. Code runs either in a task, its *current task*, or at the session root,
 and the words that park, own, or observe bindings act on that one. A spawn is
 owned by the current task, or by the session root when no task is executing.
@@ -1323,7 +1122,7 @@ address is an opaque value that names a mailbox and nothing else.
 executing task's own address and raises `` `domain `` at the session root, which
 owns tasks but is not one and has no mailbox. Addresses match by mailbox
 identity, print as an unreadable marker, and are rejected by JSON, native
-views, and port messages exactly as task handles are.
+views, and port messages as task handles are.
 
 A handle reaches a task's result; an address does not. That is why a handle can
 never travel through a mailbox while an address can be sent, stored, and

@@ -703,7 +703,7 @@ test "loader: @load is one isolated unit and preserves file provenance" {
     // neither visible to it nor disturbed.
     try expectOk(&runtime, "\"test/acceptance/load-stack.ecl\" @load");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
-    try expectErrorContains(&runtime, "\"test/acceptance/load-underflow.ecl\" @load", &.{ "kind underflow", "isolation @load" });
+    try expectErrorContains(&runtime, "\"test/acceptance/load-underflow.ecl\" @load", &.{ "kind underflow", "found 0\"" });
     // A definition that cannot bind fails where it is defined, at its source.
     try expectErrorContains(&runtime, "\"test/acceptance/load-provenance.ecl\" @load", &.{ "word missing", "source \"test/acceptance/load-provenance.ecl\"" });
     // A file that keeps stack state is refused, as a module body is.

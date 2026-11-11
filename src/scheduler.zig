@@ -1534,9 +1534,6 @@ pub const SpawnRequest = struct {
     parent_fiber: *machine.Fiber,
     site: SpawnSite,
     quotation: *ListHandle,
-    /// Which constructor made this child, so an underflow against its floor
-    /// can name the word the caller actually wrote.
-    constructor: machine.FiberConstructor = .spawn,
     /// Moves external resources from the spawning scope into the child's
     /// scope as part of constructing the child, so a resource is never
     /// unowned and never visible to the child before the child's scope owns
@@ -1978,7 +1975,7 @@ pub const WorkerScheduler = enum(usize) {
         // session, which outlives every task in it, or a module image, which
         // the generation pin below keeps alive. It may not define there.
         fiber.execution_scope = parent_scope;
-        fiber.role = .{ .task = .{ .constructor = request.constructor } };
+        fiber.role = .task;
         fiber.scheduler = self;
         fiber.task_scope = &cell.scope;
         switch (request.site) {
